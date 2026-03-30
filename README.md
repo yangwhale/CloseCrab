@@ -133,11 +133,20 @@ cd CloseCrab
 cp .env.example .env
 vim .env   # 填写 FIRESTORE_PROJECT 和 FIRESTORE_DATABASE
 
-# 3. 一键部署（安装 Claude Code + Skills + Bot 依赖）
-./deploy.sh
+# 3. 一键部署
+./deploy.sh              # 完整安装: Claude Code 环境 + Skills + Bot 依赖
+# 或
+./deploy.sh --cc-only    # 只装 Claude Code 环境 + Skills（不装 Bot）
+./deploy.sh --bot        # 补装 Bot 依赖（已有 CC 环境后追加）
+./deploy.sh --npm        # 用 npm 安装 Claude Code（官方脚本被区域限制时）
 
-# 4. 添加 bot 配置
-python3 scripts/config-manage.py add mybot
+# 4. 创建 bot 配置（Token/Secret 存入 Firestore，按平台选择）
+# Discord:
+python3 scripts/config-manage.py create mybot --channel discord --token "BOT_TOKEN"
+# 飞书:
+python3 scripts/config-manage.py create mybot --channel feishu --app-id "cli_xxx" --app-secret "SECRET"
+# 钉钉:
+python3 scripts/config-manage.py create mybot --channel dingtalk --client-id "ID" --client-secret "SECRET"
 
 # 5. 启动
 python3 -m closecrab --bot mybot           # 前台（调试）
@@ -145,7 +154,21 @@ python3 -m closecrab --bot mybot --daemon  # 后台
 bash scripts/launcher.sh start mybot       # 带自动重启
 ```
 
-`deploy.sh` 自动完成：安装 Claude Code CLI → GCP 认证 → 从 Firestore 拉取 API keys → 生成 `~/.claude/settings.json` → 部署 Skills → 同步 Memory → 安装 MCP Server 和 Python 依赖。
+`deploy.sh` 自动完成 11 个步骤：
+
+1. 检查基础工具（git、Node.js 20+，版本不足自动升级）
+2. 安装 Claude Code CLI（官方脚本优先，失败自动 fallback 到 npm）
+3. GCP 认证（gcloud + ADC，GCE VM 自动检测 metadata server）
+4. 生成 `~/.claude/settings.json`（交互式收集 API keys，带描述提示）
+5. 部署 Skills（增量拷贝到 `~/.claude/skills/`，不删除用户自行添加的 skill）
+6. 部署 Helper Scripts
+7. 同步 Auto Memory
+8. 恢复 Plugins
+9. 设置 gcsfuse（自动安装 + 挂载 GCS 桶 + CC Pages 目录 + 共享 Memory）
+10. 安装 Gemini CLI
+11. 配置 MCP Server
+
+首次部署时会交互式提示输入环境变量（Vertex AI 项目 ID、GCS 桶名、API keys 等），输入后自动保存到 `~/.zshenv` 和 Firestore，下次在其他机器部署自动拉取。
 
 ## 命令参考
 
@@ -266,7 +289,7 @@ FIRESTORE_DATABASE=closecrab
 |------|------|------|
 | `active_channel` | ✅ | `discord` / `feishu` / `lark` / `dingtalk` |
 | `model` | — | Claude 模型，默认 `claude-opus-4-6@default` |
-| `claude_bin` | — | Claude CLI 路径，默认 `~/.local/bin/claude` |
+| `claude_bin` | — | Claude CLI 路径，默认自动检测（`which claude`） |
 | `work_dir` | — | 工作目录，默认 `~/` |
 | `timeout` | — | 单次对话超时（秒），默认 600 |
 | `stt_engine` | — | 语音引擎：`gemini` / `chirp2` / `whisper:medium` |
@@ -280,19 +303,19 @@ FIRESTORE_DATABASE=closecrab
 
 `config/settings.json` 是模板，`deploy.sh` 用 `envsubst` 替换占位符后写入 `~/.claude/settings.json`。
 
-需要的环境变量（首次部署时交互输入，自动保存到 Firestore）：
+需要的环境变量（首次部署时交互输入并显示描述提示，自动保存到 `~/.zshenv` 和 Firestore，下次部署其他机器自动拉取）：
 
-| 变量 | 用途 |
-|------|------|
-| `ANTHROPIC_VERTEX_PROJECT_ID` | Vertex AI 项目 ID |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub MCP Server |
-| `CONTEXT7_API_KEY` | Context7 MCP Server |
-| `JINA_API_KEY` | Jina AI MCP Server |
-| `TAVILY_API_KEY` | Tavily MCP Server |
-| `GEMINI_API_KEY` | Gemini CLI |
-| `GCS_BUCKET` | GCS 存储桶 |
-| `CC_PAGES_URL_PREFIX` | CC Pages 公网 URL |
-| `CC_PAGES_WEB_ROOT` | CC Pages 本地写入路径（动态） |
+| 变量 | 必填 | 用途 |
+|------|------|------|
+| `ANTHROPIC_VERTEX_PROJECT_ID` | ✅ | Vertex AI 项目 ID（用于调用 Claude 模型） |
+| `GCS_BUCKET` | — | GCS 桶名（CC Pages 和共享 Memory 需要，如 `my-bucket`） |
+| `CC_PAGES_URL_PREFIX` | — | CC Pages 公网 URL（如 `https://cc.example.com`） |
+| `CC_PAGES_WEB_ROOT` | 自动 | CC Pages 本地写入路径（gcsfuse 挂载后自动设置） |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | — | GitHub MCP Server |
+| `GEMINI_API_KEY` | — | Gemini CLI |
+| `CONTEXT7_API_KEY` | — | Context7 MCP Server |
+| `JINA_API_KEY` | — | Jina AI MCP Server |
+| `TAVILY_API_KEY` | — | Tavily MCP Server |
 
 ## 会话管理
 
@@ -581,19 +604,22 @@ gcloud compute forwarding-rules describe cc-https-rule \
 
 #### 5. 客户端配置
 
+Bot 所在的机器需要挂载 GCS 桶才能写入 CC Pages。`deploy.sh` 会自动完成 gcsfuse 安装和挂载，无需手动配置。
+
+如需手动配置：
+
 ```bash
 cd infra/cc-pages
 GCS_BUCKET=YOUR_BUCKET bash setup-client.sh
-
-export CC_PAGES_WEB_ROOT=~/gcs-mount/cc-pages
-export CC_PAGES_URL_PREFIX=https://YOUR_DOMAIN
 ```
+
+`deploy.sh` 部署时交互式提示输入 `GCS_BUCKET` 和 `CC_PAGES_URL_PREFIX`，自动挂载到 `/gcs`（有 sudo）或 `~/gcs-mount`（无 sudo），并设置 `CC_PAGES_WEB_ROOT` 环境变量。
 
 ### 目录约定
 
 | 路径 | 用途 | 访问控制 |
 |------|------|----------|
-| `/pages/*.html` | 报告、文档、Dashboard | IAP 保护 |
+| `/pages/*.html` | 报告、文档、Dashboard | 可配置 IAP 保护或公开 |
 | `/assets/*` | 图片、OG 预览、公共资源 | 公开访问 |
 
 ## 部署运维
