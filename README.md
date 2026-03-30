@@ -566,18 +566,9 @@ python3 skills/feishu-mail/setup_mailbox.py delete --mailbox-id "MAILBOX_ID"
 
 ### 两层架构
 
-```
-Bot A (gLinux)                    Bot B (TPU VM)                   Bot C (B200 VM)
-     │                                 │                                │
-     ▼                                 ▼                                ▼
-~/.claude/projects/<proj>/memory/  ~/.claude/projects/<proj>/memory/  ~/.claude/projects/<proj>/memory/
-├── MEMORY.md    ← 本机身份         ├── MEMORY.md    ← 本机身份         ├── MEMORY.md    ← 本机身份
-├── feedback_*.md                   ├── feedback_*.md                   ├── feedback_*.md
-└── shared/      ← gcsfuse ──────► └── shared/      ← gcsfuse ──────► └── shared/      ← gcsfuse
-         │                                  │                                  │
-         └──────────── 同一个 GCS 桶 ───────────────────────────────────────────┘
-                    gs://BUCKET/memory/shared/
-```
+<p align="center">
+  <img src="assets/auto-memory.svg" alt="Auto Memory Architecture" width="900"/>
+</p>
 
 | 层 | 文件 | 范围 | 注入方式 |
 |---|------|------|---------|

@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 480" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="memGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="sharedGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="gcsBarGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="50%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <filter id="sh3">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <marker id="arrowUp3" markerWidth="8" markerHeight="8" refX="4" refY="0" orient="auto">
+      <path d="M1,7 L4,1 L7,7" fill="none" stroke="#38bdf8" stroke-width="1.5"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="920" height="480" fill="url(#bg3)" rx="12"/>
+
+  <!-- Title -->
+  <text x="460" y="34" text-anchor="middle" fill="#e6edf3" font-size="17" font-weight="600">Auto Memory — Two-Layer Architecture</text>
+
+  <!-- ==================== 3 Bot columns ==================== -->
+
+  <!-- Bot A: Jarvis -->
+  <rect x="40" y="55" width="260" height="240" rx="12" fill="#161b22" stroke="#a855f7" stroke-width="1.2" filter="url(#sh3)"/>
+  <rect x="40" y="55" width="260" height="28" rx="12" fill="url(#memGrad)" opacity="0.15"/>
+  <text x="170" y="74" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="600">Bot A — Jarvis (gLinux)</text>
+  <text x="60" y="100" fill="#6e7681" font-size="10">~/.claude/projects/&lt;proj&gt;/memory/</text>
+
+  <!-- MEMORY.md (local) -->
+  <rect x="60" y="112" width="220" height="50" rx="6" fill="#0d1117" stroke="#a855f7" stroke-width="1"/>
+  <text x="72" y="131" fill="#d2a8ff" font-size="11" font-weight="600">MEMORY.md</text>
+  <text x="230" y="131" text-anchor="end" fill="#484f58" font-size="9">local identity</text>
+  <text x="72" y="150" fill="#8b949e" font-size="10">user preferences, role, feedback</text>
+
+  <!-- feedback/project files -->
+  <rect x="60" y="170" width="220" height="30" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
+  <text x="72" y="190" fill="#8b949e" font-size="10">feedback_*.md, project_*.md</text>
+  <text x="230" y="190" text-anchor="end" fill="#484f58" font-size="9">local only</text>
+
+  <!-- shared/ (symlink) -->
+  <rect x="60" y="210" width="220" height="65" rx="6" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="72" y="230" fill="#58a6ff" font-size="11" font-weight="600">shared/</text>
+  <text x="230" y="230" text-anchor="end" fill="#38bdf8" font-size="9">symlink → gcsfuse</text>
+  <text x="72" y="248" fill="#8b949e" font-size="10">architecture.md</text>
+  <text x="72" y="263" fill="#8b949e" font-size="10">debugging.md, tools.md ...</text>
+
+  <!-- Bot B: Tommy -->
+  <rect x="330" y="55" width="260" height="240" rx="12" fill="#161b22" stroke="#10b981" stroke-width="1.2" filter="url(#sh3)"/>
+  <rect x="330" y="55" width="260" height="28" rx="12" fill="#059669" opacity="0.12"/>
+  <text x="460" y="74" text-anchor="middle" fill="#7ee787" font-size="13" font-weight="600">Bot B — Tommy (TPU VM)</text>
+  <text x="350" y="100" fill="#6e7681" font-size="10">~/.claude/projects/&lt;proj&gt;/memory/</text>
+
+  <rect x="350" y="112" width="220" height="50" rx="6" fill="#0d1117" stroke="#10b981" stroke-width="1"/>
+  <text x="362" y="131" fill="#7ee787" font-size="11" font-weight="600">MEMORY.md</text>
+  <text x="520" y="131" text-anchor="end" fill="#484f58" font-size="9">local identity</text>
+  <text x="362" y="150" fill="#8b949e" font-size="10">TPU expertise, training history</text>
+
+  <rect x="350" y="170" width="220" height="30" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
+  <text x="362" y="190" fill="#8b949e" font-size="10">feedback_*.md, project_*.md</text>
+  <text x="520" y="190" text-anchor="end" fill="#484f58" font-size="9">local only</text>
+
+  <rect x="350" y="210" width="220" height="65" rx="6" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="362" y="230" fill="#58a6ff" font-size="11" font-weight="600">shared/</text>
+  <text x="520" y="230" text-anchor="end" fill="#38bdf8" font-size="9">symlink → gcsfuse</text>
+  <text x="362" y="248" fill="#8b949e" font-size="10">architecture.md</text>
+  <text x="362" y="263" fill="#8b949e" font-size="10">debugging.md, tools.md ...</text>
+
+  <!-- Bot C: Bunny -->
+  <rect x="620" y="55" width="260" height="240" rx="12" fill="#161b22" stroke="#f87171" stroke-width="1.2" filter="url(#sh3)"/>
+  <rect x="620" y="55" width="260" height="28" rx="12" fill="#dc2626" opacity="0.12"/>
+  <text x="750" y="74" text-anchor="middle" fill="#ffa198" font-size="13" font-weight="600">Bot C — Bunny (B200 VM)</text>
+  <text x="640" y="100" fill="#6e7681" font-size="10">~/.claude/projects/&lt;proj&gt;/memory/</text>
+
+  <rect x="640" y="112" width="220" height="50" rx="6" fill="#0d1117" stroke="#f87171" stroke-width="1"/>
+  <text x="652" y="131" fill="#ffa198" font-size="11" font-weight="600">MEMORY.md</text>
+  <text x="810" y="131" text-anchor="end" fill="#484f58" font-size="9">local identity</text>
+  <text x="652" y="150" fill="#8b949e" font-size="10">GPU inference, vLLM experience</text>
+
+  <rect x="640" y="170" width="220" height="30" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
+  <text x="652" y="190" fill="#8b949e" font-size="10">feedback_*.md, project_*.md</text>
+  <text x="810" y="190" text-anchor="end" fill="#484f58" font-size="9">local only</text>
+
+  <rect x="640" y="210" width="220" height="65" rx="6" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="652" y="230" fill="#58a6ff" font-size="11" font-weight="600">shared/</text>
+  <text x="810" y="230" text-anchor="end" fill="#38bdf8" font-size="9">symlink → gcsfuse</text>
+  <text x="652" y="248" fill="#8b949e" font-size="10">architecture.md</text>
+  <text x="652" y="263" fill="#8b949e" font-size="10">debugging.md, tools.md ...</text>
+
+  <!-- ==================== gcsfuse arrows ==================== -->
+  <line x1="170" y1="275" x2="170" y2="340" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="460" y1="275" x2="460" y2="340" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="750" y1="275" x2="750" y2="340" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4"/>
+
+  <!-- gcsfuse labels -->
+  <text x="170" y="312" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+  <text x="460" y="312" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+  <text x="750" y="312" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+
+  <!-- bidirectional arrows -->
+  <path d="M170,280 L170,275" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="166,280 170,273 174,280" fill="#38bdf8"/>
+  <polygon points="166,335 170,342 174,335" fill="#38bdf8"/>
+
+  <path d="M460,280 L460,275" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="456,280 460,273 464,280" fill="#38bdf8"/>
+  <polygon points="456,335 460,342 464,335" fill="#38bdf8"/>
+
+  <path d="M750,280 L750,275" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="746,280 750,273 754,280" fill="#38bdf8"/>
+  <polygon points="746,335 750,342 754,335" fill="#38bdf8"/>
+
+  <!-- ==================== GCS bar ==================== -->
+  <rect x="40" y="345" width="840" height="70" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1.2" filter="url(#sh3)"/>
+  <rect x="40" y="345" width="840" height="28" rx="14" fill="url(#gcsBarGrad)" opacity="0.1"/>
+
+  <text x="460" y="368" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="600">gs://BUCKET/memory/shared/</text>
+  <text x="460" y="393" text-anchor="middle" fill="#8b949e" font-size="11">Single source of truth — any bot writes, all bots read — zero sync code</text>
+
+  <!-- ==================== Legend ==================== -->
+  <rect x="40" y="435" width="840" height="32" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1"/>
+
+  <rect x="65" y="443" width="14" height="14" rx="3" fill="#0d1117" stroke="#a855f7" stroke-width="1.2"/>
+  <text x="85" y="455" fill="#d2a8ff" font-size="11">MEMORY.md — local identity (each bot unique)</text>
+
+  <rect x="380" y="443" width="14" height="14" rx="3" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="400" y="455" fill="#58a6ff" font-size="11">shared/ — team knowledge (gcsfuse → GCS)</text>
+
+  <rect x="690" y="443" width="14" height="14" rx="3" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
+  <text x="710" y="455" fill="#8b949e" font-size="11">feedback/project — local only</text>
+</svg>
