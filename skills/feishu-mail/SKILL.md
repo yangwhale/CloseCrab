@@ -1,6 +1,6 @@
 ---
 name: feishu-mail
-description: 飞书企业邮箱收发。当用户说"发邮件"、"收邮件"、"查邮件"、"回复邮件"、"send email"、"check email"等关键词时触发。
+description: 飞书企业邮箱管理与收发。当用户说"发邮件"、"收邮件"、"查邮件"、"回复邮件"、"send email"、"check email"、"加个邮箱"、"配置邮箱"、"create mailbox"、"setup email"等关键词时触发。
 license: MIT
 ---
 
@@ -119,6 +119,61 @@ python3 ~/.claude/skills/feishu-mail/send_mail.py \
 多 bot 同机时，各 bot 从 Firestore 读取独立邮箱配置，`main.py` 启动时自动设置环境变量。
 
 IMAP 使用相同凭据，服务器 `imap.feishu.cn:993` (SSL)。
+
+## 邮箱管理（创建/删除公共邮箱）
+
+通过 `setup_mailbox.py` 管理飞书公共邮箱，完整流程：创建邮箱 → 管理后台开启 SMTP → 配置密码到 Firestore。
+
+### 创建公共邮箱
+
+```bash
+python3 ~/.claude/skills/feishu-mail/setup_mailbox.py create \
+  --email "bot@higcp.com" \
+  --name "Bot Name"
+```
+
+创建成功后，需要手动去飞书管理后台开启 SMTP：
+1. 打开 https://higcp.feishu.cn/admin/email/public_mailbox
+2. 找到新建的邮箱 → 开启 IMAP/SMTP → 生成应用密码
+
+### 配置 SMTP 密码到 Firestore
+
+```bash
+# 默认写入 FIRESTORE_DATABASE (closecrab)
+python3 ~/.claude/skills/feishu-mail/setup_mailbox.py set-password \
+  --bot athena \
+  --password "E7eBgQcAzgvrM5wA"
+
+# 指定数据库（如 closecrab-public）
+python3 ~/.claude/skills/feishu-mail/setup_mailbox.py set-password \
+  --bot athena \
+  --password "E7eBgQcAzgvrM5wA" \
+  --database closecrab-public
+
+# 如果 bot 还没有 email 配置，用 --email 初始化完整配置
+python3 ~/.claude/skills/feishu-mail/setup_mailbox.py set-password \
+  --bot newbot \
+  --password "xxx" \
+  --email "newbot@higcp.com"
+```
+
+### 列出所有公共邮箱
+
+```bash
+python3 ~/.claude/skills/feishu-mail/setup_mailbox.py list
+```
+
+### 删除公共邮箱
+
+```bash
+python3 ~/.claude/skills/feishu-mail/setup_mailbox.py delete --mailbox-id "1RNM10VNQREQPKK"
+```
+
+### 环境变量
+
+- `MAIL_ADMIN_BOT`: 用于调飞书 API 的 bot（需有 `mail:public_mailbox` 权限，默认 `jarvis`）
+- `FIRESTORE_PROJECT`: GCP 项目（默认 `chris-pgp-host`）
+- `FIRESTORE_DATABASE`: Firestore 数据库（默认 `closecrab`）
 
 ## 限制
 
