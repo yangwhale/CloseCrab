@@ -161,6 +161,18 @@ collect_secrets() {
     local interactive=false
     [[ -t 0 ]] && interactive=true
 
+    # 变量描述（交互模式下显示帮助）
+    declare -A var_desc=(
+        [ANTHROPIC_VERTEX_PROJECT_ID]="Vertex AI 项目 ID（必填，用于调用 Claude 模型）"
+        [GCS_BUCKET]="GCS 桶名（CC Pages 和共享 Memory 需要，如 my-bucket）"
+        [CC_PAGES_URL_PREFIX]="CC Pages 公网 URL（如 https://cc.example.com）"
+        [GITHUB_PERSONAL_ACCESS_TOKEN]="GitHub PAT（GitHub MCP Server 需要）"
+        [GEMINI_API_KEY]="Gemini API Key（Gemini CLI 需要）"
+        [CONTEXT7_API_KEY]="Context7 API Key（Context7 MCP Server）"
+        [JINA_API_KEY]="Jina AI API Key（Jina MCP Server）"
+        [TAVILY_API_KEY]="Tavily API Key（Tavily MCP Server）"
+    )
+
     # CC 相关 secrets (从 config/env.sh 的 CC_SECRETS 数组读取)
     for var in "${CC_SECRETS[@]}"; do
         val="${!var:-}"
@@ -171,6 +183,7 @@ collect_secrets() {
             if $interactive; then
                 echo ""
                 echo "  ✗ $var 未设置"
+                [[ -n "${var_desc[$var]:-}" ]] && echo "    ${var_desc[$var]}"
                 read -rp "    请输入 ${var} (直接回车跳过): " input
                 if [[ -n "$input" ]]; then
                     persist_to_zshenv "$var" "$input"
