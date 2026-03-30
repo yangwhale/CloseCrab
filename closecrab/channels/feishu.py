@@ -394,6 +394,26 @@ class FeishuChannel(Channel):
         # asyncio event loop 引用（WebSocket 回调在别的线程）
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # lark API client（发送消息用）
+        self._client = lark.Client.builder() \
+            .app_id(app_id) \
+            .app_secret(app_secret) \
+            .domain(self._domain) \
+            .build()
+
+        # WebSocket client（接收消息用）
+        self._ws_client: lark_ws.Client | None = None
+
+        # Bot 间通信 Inbox (Firestore)
+        self._inbox = None
+        if inbox_config:
+            from closecrab.utils.firestore_inbox import FirestoreInbox
+            self._inbox = FirestoreInbox(
+                bot_name=bot_name,
+                project=inbox_config.get("project"),
+                database=inbox_config.get("database"),
+            )
+
     def _make_input_callback(self, chat_id: str, user_key: str):
         """为 inbox 消息创建 on_input_needed 回调，复用 _pending_input 机制。"""
         async def on_input_needed(info: dict) -> Optional[str]:
@@ -423,26 +443,6 @@ class FeishuChannel(Channel):
                 self._pending_input.pop(user_key, None)
                 self._last_interactive_card.pop(user_key, None)
         return on_input_needed
-
-        # lark API client（发送消息用）
-        self._client = lark.Client.builder() \
-            .app_id(app_id) \
-            .app_secret(app_secret) \
-            .domain(self._domain) \
-            .build()
-
-        # WebSocket client（接收消息用）
-        self._ws_client: lark_ws.Client | None = None
-
-        # Bot 间通信 Inbox (Firestore)
-        self._inbox = None
-        if inbox_config:
-            from closecrab.utils.firestore_inbox import FirestoreInbox
-            self._inbox = FirestoreInbox(
-                bot_name=bot_name,
-                project=inbox_config.get("project"),
-                database=inbox_config.get("database"),
-            )
 
     def _load_user_chats(self) -> dict[str, str]:
         """从磁盘加载 user_chats。"""
