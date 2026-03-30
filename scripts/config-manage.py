@@ -33,9 +33,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from closecrab.constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
 from google.cloud import firestore
 
+def _detect_claude_bin() -> str:
+    """Auto-detect claude binary path."""
+    import shutil
+    return shutil.which("claude") or "~/.local/bin/claude"
+
 DEFAULT_CONFIG = {
     "model": "claude-opus-4-6@default",
-    "claude_bin": "~/.local/bin/claude",
+    "claude_bin": _detect_claude_bin(),
     "work_dir": "~/",
     "timeout": 600,
     "stt_engine": "gemini",
