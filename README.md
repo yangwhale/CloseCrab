@@ -480,17 +480,32 @@ bash scripts/sync-memory.sh --push   # 同步 + 提交 + push
 
 ### 部署
 
-单文件 SPA（`controlboard/index.html`），无需构建：
+单文件 SPA（`controlboard/index.html`），无需构建。模板中使用占位符，部署时替换为实际值：
 
 ```bash
-gsutil -h "Content-Type:text/html" cp controlboard/index.html \
+# 1. 复制模板并替换 Firebase 配置
+cp controlboard/index.html /tmp/control-board.html
+sed -i 's|"YOUR_FIREBASE_API_KEY"|"your-api-key"|' /tmp/control-board.html
+sed -i 's|"YOUR_PROJECT.firebaseapp.com"|"your-project.firebaseapp.com"|' /tmp/control-board.html
+sed -i 's|"YOUR_PROJECT"|"your-project"|g' /tmp/control-board.html
+sed -i 's|"YOUR_PROJECT.appspot.com"|"your-project.appspot.com"|' /tmp/control-board.html
+sed -i 's|"YOUR_SENDER_ID"|"your-sender-id"|' /tmp/control-board.html
+sed -i 's|"YOUR_APP_ID"|"your-app-id"|' /tmp/control-board.html
+
+# 2. 如果使用非默认 Firestore 数据库，替换数据库名
+sed -i 's|initializeFirestore(app, {}, "closecrab")|initializeFirestore(app, {}, "your-database")|' /tmp/control-board.html
+
+# 3. 上传到 GCS
+gsutil -h "Content-Type:text/html; charset=utf-8" cp /tmp/control-board.html \
   gs://YOUR_BUCKET/cc-pages/pages/control-board.html
 ```
 
+> Firebase 配置值从 [Firebase Console → Project Settings → Your apps → Web app](https://console.firebase.google.com/) 获取。
+
 前置配置：
 
-1. **Firebase Auth** — 启用 Google 登录，将部署域名加入 Authorized domains
-2. **Firestore Rules** — 限制白名单访问：
+1. **Firebase Auth** — 启用 Google 登录，将 CC Pages 域名加入 Authorized domains
+2. **Firestore Rules** — 限制白名单访问（在 Firebase Console 中为对应数据库设置）：
    ```
    rules_version = '2';
    service cloud.firestore {
@@ -502,7 +517,6 @@ gsutil -h "Content-Type:text/html" cp controlboard/index.html \
      }
    }
    ```
-3. **Firebase Config** — 修改 `controlboard/index.html` 中的 `firebaseConfig`
 
 技术栈：Firebase SDK v11 (ES module CDN) · Google Sans + Material Icons · Firestore onSnapshot 实时监听 · 零依赖零构建，单文件 ~97KB。
 
