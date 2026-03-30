@@ -155,7 +155,7 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
 
     return {
         "role": cfg.get("team", {}).get("role", "standalone") if cfg.get("team") else "standalone",
-        "email": os.environ.get(cfg.get("email", {}).get("user_env", "FEISHU_SMTP_USER"), ""),
+        "email": os.environ.get((cfg.get("email") or {}).get("user_env", "FEISHU_SMTP_USER"), ""),
         "channel": cfg.get("channel", "discord"),
         "model": cfg.get("model", ""),
         "host": host,
