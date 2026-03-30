@@ -403,7 +403,7 @@ python3 scripts/inbox-send.py target_bot "请帮我检查服务器状态"
 
 | Skill | 用途 |
 |-------|------|
-| feishu-mail | 企业邮件收发回复 |
+| feishu-mail | 企业邮件收发回复 + 公共邮箱管理 |
 | feishu-doc | 飞书文档创建 |
 | feishu-sheet | 飞书电子表格 |
 | feishu-bitable | 飞书多维表格 |
@@ -415,6 +415,92 @@ python3 scripts/inbox-send.py target_bot "请帮我检查服务器状态"
 | tmux-installer | tmux + Oh My Tmux 配置 |
 | tmux-orchestrator | tmux 多进程编排 |
 | zsh-installer | Zsh + Oh My Zsh 配置 |
+
+## 飞书企业邮箱
+
+每个 bot 可以配置独立的飞书企业邮箱，用于发送通知、接收邮件、bot 间邮件通信。邮箱使用飞书公共邮箱（非个人邮箱），通过 SMTP/IMAP 协议收发，无需 OAuth。
+
+### 配置流程
+
+#### 1. 创建公共邮箱
+
+需要一个具有 `mail:public_mailbox` 权限的飞书应用。使用 `setup_mailbox.py` 脚本通过飞书 API 创建：
+
+```bash
+python3 skills/feishu-mail/setup_mailbox.py create \
+  --email "mybot@example.com" \
+  --name "My Bot"
+```
+
+> 也可以在 [飞书管理后台 → 邮箱管理 → 公共邮箱](https://your-domain.feishu.cn/admin/email/public_mailbox) 手动创建。
+
+#### 2. 开启 SMTP/IMAP
+
+创建后，在飞书管理后台为该公共邮箱开启 SMTP 服务：
+
+1. 进入 **邮箱管理** → **公共邮箱** → 找到新建的邮箱
+2. 开启 **IMAP/SMTP 服务**
+3. 点击 **生成新密码**，复制应用密码
+
+#### 3. 配置到 Firestore
+
+将 SMTP 密码写入 bot 的 Firestore 配置：
+
+```bash
+# 如果 bot 已有 email 配置（只更新密码）
+python3 skills/feishu-mail/setup_mailbox.py set-password \
+  --bot mybot \
+  --password "YOUR_APP_PASSWORD"
+
+# 如果 bot 还没有 email 配置（初始化完整配置）
+python3 skills/feishu-mail/setup_mailbox.py set-password \
+  --bot mybot \
+  --password "YOUR_APP_PASSWORD" \
+  --email "mybot@example.com"
+
+# 指定 Firestore 数据库（默认读取 FIRESTORE_DATABASE 环境变量）
+python3 skills/feishu-mail/setup_mailbox.py set-password \
+  --bot mybot \
+  --password "YOUR_APP_PASSWORD" \
+  --database closecrab-public
+```
+
+#### 4. 验证
+
+```bash
+# 发送测试邮件
+BOT_NAME=mybot python3 skills/feishu-mail/send_mail.py \
+  --to "you@example.com" \
+  --subject "Test" \
+  --body "Hello from mybot!"
+```
+
+### Firestore 中的邮箱配置
+
+配置存储在 `bots/{bot_name}` 文档的 `email` 字段：
+
+```json
+{
+  "email": {
+    "smtp_host": "smtp.feishu.cn",
+    "smtp_port": 465,
+    "imap_host": "imap.feishu.cn",
+    "imap_port": 993,
+    "user": "mybot@example.com",
+    "pass": "APP_PASSWORD"
+  }
+}
+```
+
+### 管理命令
+
+```bash
+# 列出所有公共邮箱
+python3 skills/feishu-mail/setup_mailbox.py list
+
+# 删除公共邮箱
+python3 skills/feishu-mail/setup_mailbox.py delete --mailbox-id "MAILBOX_ID"
+```
 
 ## Auto Memory
 
