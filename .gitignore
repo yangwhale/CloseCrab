@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+*.tmp
+.DS_Store
+.env
+config/bots.yaml
+nohup*.out

@@ -1,0 +1,2247 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CloseCrab Control Board</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cstyle%3Etext%7Bfilter:hue-rotate(200deg) saturate(1.8) brightness(1.1)%7D%3C/style%3E%3Ctext y='.9em' font-size='90'%3E🦀%3C/text%3E%3C/svg%3E">
+<!-- <link rel="apple-touch-icon" href="https://YOUR_DOMAIN/assets/apple-touch-icon.png"> -->
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Roboto+Mono:wght@400;500&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f1f3f4;
+    --surface: #ffffff;
+    --surface-hover: #f8f9fa;
+    --border: #dadce0;
+    --text: #202124;
+    --text2: #5f6368;
+    --text3: #80868b;
+    --blue: #1a73e8;
+    --blue-light: #e8f0fe;
+    --blue-hover: #1765cc;
+    --orange: #ff9100;
+    --orange-dark: #e65100;
+    --green: #1e8e3e;
+    --green-light: #e6f4ea;
+    --red: #d93025;
+    --red-light: #fce8e6;
+    --yellow: #f9ab00;
+    --yellow-light: #fef7e0;
+    --shadow-1: 0 1px 2px 0 rgba(60,64,67,0.3), 0 1px 3px 1px rgba(60,64,67,0.15);
+    --shadow-2: 0 1px 2px 0 rgba(60,64,67,0.3), 0 2px 6px 2px rgba(60,64,67,0.15);
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Google Sans', 'Roboto', -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
+  }
+
+  /* ── Login Screen ── */
+  #login-screen {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100vh; gap: 20px; background: var(--surface);
+  }
+  .login-brand {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 8px;
+  }
+  .login-brand .flame {
+    font-size: 28px; line-height: 1;
+  }
+  #login-screen h1 { font-size: 22px; color: var(--text); font-weight: 400; }
+  #login-screen p { color: var(--text2); font-size: 14px; }
+  #login-btn {
+    padding: 10px 24px; background: var(--blue); color: #fff; border: none;
+    border-radius: 4px; font-size: 14px; cursor: pointer; font-weight: 500;
+    font-family: 'Google Sans', sans-serif; transition: background 0.2s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  #login-btn:hover { background: var(--blue-hover); box-shadow: var(--shadow-1); }
+  #login-error { color: var(--red); font-size: 13px; display: none; }
+
+  /* ── Main Layout ── */
+  #app { display: none; height: 100vh; flex-direction: column; }
+  #app.active { display: flex; }
+
+  /* Header — GCP Console style */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 8px 0 4px; height: 48px; background: var(--surface);
+    border-bottom: 1px solid var(--border); z-index: 10;
+  }
+  .header-left { display: flex; align-items: center; gap: 8px; }
+  .hamburger {
+    width: 40px; height: 40px; border: none; background: transparent;
+    border-radius: 50%; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; color: var(--text2); transition: background 0.15s;
+    flex-shrink: 0;
+  }
+  .hamburger:hover { background: var(--surface-hover); }
+  .hamburger .material-icons-outlined { font-size: 22px; }
+  .header-flame {
+    font-size: 22px; line-height: 1;
+  }
+  header h1 {
+    font-size: 18px; color: var(--text); font-weight: 400;
+    display: flex; align-items: center; gap: 4px;
+  }
+  header h1 span { color: var(--text2); font-size: 14px; font-weight: 400; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .user-info { color: var(--text2); font-size: 13px; }
+  .user-avatar {
+    width: 32px; height: 32px; border-radius: 50%; background: var(--blue);
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 500; cursor: pointer;
+  }
+
+  /* Avatar dropdown */
+  .avatar-menu {
+    display: none; position: absolute; right: 0; top: 40px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: var(--shadow-2); min-width: 200px; z-index: 100; overflow: hidden;
+  }
+  .avatar-menu.show { display: block; }
+  .avatar-menu-email { padding: 12px 16px; font-size: 13px; color: var(--text2); word-break: break-all; }
+  .avatar-menu-divider { height: 1px; background: var(--border); }
+  .avatar-menu-item {
+    padding: 10px 16px; font-size: 14px; color: var(--text2); cursor: pointer;
+    display: flex; align-items: center; gap: 8px; transition: background 0.1s;
+  }
+  .avatar-menu-item:hover { background: var(--surface-hover); }
+
+  /* Body */
+  .main-body { display: flex; flex: 1; overflow: hidden; }
+
+  /* Sidebar — GCP Console style with slide toggle */
+  .sidebar {
+    width: 240px; background: var(--surface); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow-y: auto; padding: 8px 0;
+    transition: width 0.2s ease, opacity 0.15s ease;
+    flex-shrink: 0; overflow-x: hidden;
+  }
+  .sidebar.collapsed { width: 0; padding: 0; border-right: none; opacity: 0; }
+  .sidebar-label {
+    padding: 16px 24px 8px; font-size: 11px; text-transform: uppercase;
+    color: var(--text3); letter-spacing: 0.8px; font-weight: 500;
+  }
+  .bot-item {
+    padding: 8px 16px; cursor: grab;
+    display: flex; align-items: center; gap: 14px;
+    transition: background 0.1s; user-select: none;
+    height: 52px;
+  }
+  .bot-item:active { cursor: grabbing; }
+  .bot-item:hover { background: var(--surface-hover); }
+  .bot-item.active { background: var(--blue-light); }
+  .bot-item.active .bot-name { color: var(--blue); font-weight: 500; }
+  .bot-item.active .bot-host { color: var(--blue); opacity: 0.7; }
+  .bot-item.active .bot-icon { color: var(--blue); }
+  .bot-item.dragging { opacity: 0.4; }
+  .bot-item.drag-over { background: var(--blue-light); }
+  .bot-icon {
+    width: 24px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text2);
+  }
+  .bot-icon .material-icons-outlined { font-size: 24px; }
+  .bot-info { min-width: 0; flex: 1; }
+  .bot-name { font-size: 14px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bot-host { font-size: 11px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; display: flex; align-items: center; gap: 4px; }
+  .bot-host-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .bot-host-dot.online { background: var(--green); }
+  .bot-host-dot.offline { background: var(--border); }
+  .bot-chevron { color: var(--text3); font-size: 18px; flex-shrink: 0; }
+  .sidebar-divider { height: 1px; background: var(--border); margin: 8px 0; }
+  .sidebar-item {
+    padding: 0 12px; margin: 1px 0; cursor: pointer;
+    display: flex; align-items: center; gap: 12px; height: 40px;
+    color: var(--text2); font-size: 14px; border-radius: 0 24px 24px 0;
+    transition: all 0.1s;
+  }
+  .sidebar-item:hover { background: var(--surface-hover); }
+  .sidebar-item.active { background: var(--blue-light); color: var(--blue); font-weight: 500; }
+  .sidebar-item .material-icons-outlined { font-size: 20px; }
+
+  /* Content */
+  .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+
+  /* Tabs — Firebase style: underline tabs */
+  .tabs {
+    display: flex; background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 0 24px; height: 48px; align-items: flex-end;
+  }
+  .tab {
+    padding: 0 16px; cursor: pointer; font-size: 14px; color: var(--text2);
+    border-bottom: 3px solid transparent; height: 48px;
+    display: flex; align-items: center; font-weight: 500;
+    transition: color 0.15s;
+  }
+  .tab:hover { color: var(--blue); }
+  .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+  /* Tab Panels */
+  .tab-panel { flex: 1; overflow-y: auto; padding: 24px; display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Status Panel — Firebase card style */
+  .status-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+  }
+  .card {
+    background: var(--surface); border-radius: var(--radius); padding: 14px 16px;
+    border: 1px solid var(--border);
+  }
+  .card:hover { box-shadow: var(--shadow-1); }
+  .card-title {
+    font-size: 13px; color: var(--text2); font-weight: 500; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .card-title .material-icons-outlined { font-size: 18px; color: var(--text3); }
+  .kv-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0; border-bottom: 1px solid #f1f3f4;
+  }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-label { color: var(--text2); font-size: 12px; }
+  .kv-value {
+    font-size: 12px; font-family: 'Roboto Mono', monospace;
+    color: var(--text); text-align: right; max-width: 60%; word-break: break-all;
+  }
+  .kv-value.online { color: var(--green); font-weight: 500; }
+  .kv-value.offline { color: var(--red); }
+
+  /* Config Panel — Form-based cards */
+  .cfg-cards { display: flex; flex-direction: column; gap: 20px; max-width: 800px; margin: 0; }
+  .cfg-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .cfg-card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--surface-hover);
+  }
+  .cfg-card-title {
+    font-size: 14px; font-weight: 500; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .cfg-card-title .material-icons-outlined { font-size: 20px; color: var(--text3); }
+  .cfg-card-body { padding: 20px 24px; }
+  .cfg-field { margin-bottom: 20px; }
+  .cfg-field:last-child { margin-bottom: 0; }
+  .cfg-label {
+    display: block; font-size: 12px; font-weight: 500; color: var(--text2);
+    margin-bottom: 6px; letter-spacing: 0.2px;
+  }
+  .cfg-input, .cfg-select, .cfg-textarea {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px;
+    font-size: 14px; font-family: 'Google Sans', sans-serif; color: var(--text);
+    background: var(--surface); transition: border-color 0.15s;
+    outline: none;
+  }
+  .cfg-input:focus, .cfg-select:focus, .cfg-textarea:focus {
+    border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light);
+  }
+  .cfg-input:read-only { background: var(--surface-hover); color: var(--text3); }
+  .cfg-input.mono { font-family: 'Roboto Mono', monospace; font-size: 13px; }
+  .cfg-select { cursor: pointer; appearance: auto; }
+  .cfg-textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
+  .cfg-hint { font-size: 11px; color: var(--text3); margin-top: 4px; }
+  .cfg-number { width: 120px; }
+
+  /* Channel selector button group */
+  .channel-group { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .channel-btn {
+    flex: 1; padding: 10px 16px; border: none; background: var(--surface);
+    font-size: 13px; font-family: 'Google Sans', sans-serif; cursor: pointer;
+    color: var(--text2); font-weight: 500; transition: all 0.15s;
+    border-right: 1px solid var(--border); display: flex; align-items: center;
+    justify-content: center; gap: 6px;
+  }
+  .channel-btn:last-child { border-right: none; }
+  .channel-btn:hover { background: var(--surface-hover); }
+  .channel-btn.active { background: var(--blue); color: #fff; }
+  .channel-btn.active:hover { background: var(--blue-hover); }
+
+  /* Secret field with eye toggle */
+  .cfg-secret-wrap {
+    position: relative; display: flex; align-items: center;
+  }
+  .cfg-secret-wrap .cfg-input { padding-right: 40px; }
+  .cfg-eye {
+    position: absolute; right: 8px; border: none; background: transparent;
+    cursor: pointer; color: var(--text3); display: flex; align-items: center;
+    padding: 4px; border-radius: 50%;
+  }
+  .cfg-eye:hover { background: var(--surface-hover); color: var(--text2); }
+  .cfg-eye .material-icons-outlined { font-size: 20px; }
+
+  /* Save button */
+  .cfg-save-btn {
+    padding: 8px 24px; background: var(--surface); color: var(--text3);
+    border: 1px solid var(--border); border-radius: 4px; font-size: 13px;
+    font-family: 'Google Sans', sans-serif; cursor: default; font-weight: 500;
+    transition: all 0.2s; pointer-events: none;
+  }
+  .cfg-save-btn.dirty {
+    background: var(--blue); color: #fff; border-color: var(--blue);
+    cursor: pointer; pointer-events: auto; box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  .cfg-save-btn.dirty:hover { background: var(--blue-hover); }
+  .cfg-save-btn.saving { opacity: 0.7; pointer-events: none; }
+
+  /* Three-dot menu */
+  .cfg-menu-wrap { position: relative; }
+  .cfg-menu-btn {
+    width: 36px; height: 36px; border: none; background: transparent;
+    border-radius: 50%; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; color: var(--text3); transition: background 0.15s;
+  }
+  .cfg-menu-btn:hover { background: var(--surface-hover); color: var(--text2); }
+  .cfg-menu-btn .material-icons-outlined { font-size: 20px; }
+  .cfg-menu {
+    position: absolute; right: 0; top: 40px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 4px; box-shadow: var(--shadow-2);
+    min-width: 140px; z-index: 20; display: none;
+  }
+  .cfg-menu.open { display: block; }
+  .cfg-menu-item {
+    padding: 10px 16px; cursor: pointer; font-size: 13px; color: var(--text);
+    display: flex; align-items: center; gap: 10px; transition: background 0.1s;
+  }
+  .cfg-menu-item:hover { background: var(--surface-hover); }
+  .cfg-menu-item .material-icons-outlined { font-size: 18px; color: var(--text3); }
+
+  /* Display value (non-edit mode) */
+  .cfg-display-value {
+    font-size: 14px; font-family: 'Roboto Mono', monospace; color: var(--text);
+    padding: 8px 0; word-break: break-all;
+  }
+  .cfg-display-value.secret { color: var(--text3); letter-spacing: 2px; }
+
+  /* Toast notification */
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500;
+    z-index: 1000; box-shadow: var(--shadow-2); transition: opacity 0.3s;
+    font-family: 'Google Sans', sans-serif;
+  }
+  .toast.success { background: var(--green); color: #fff; }
+  .toast.error { background: var(--red); color: #fff; }
+  .toast.hidden { opacity: 0; pointer-events: none; }
+
+  /* Collapsible section */
+  .cfg-collapse summary {
+    cursor: pointer; font-size: 13px; font-weight: 500; color: var(--blue);
+    padding: 8px 0; display: flex; align-items: center; gap: 4px;
+    list-style: none;
+  }
+  .cfg-collapse summary::before {
+    content: 'expand_more'; font-family: 'Material Icons Outlined'; font-size: 20px;
+    transition: transform 0.2s;
+  }
+  .cfg-collapse[open] summary::before { transform: rotate(180deg); }
+  .cfg-collapse .cfg-collapse-body { padding-top: 12px; }
+
+  /* Tags input */
+  .cfg-tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; min-height: 40px; align-items: center; cursor: text; }
+  .cfg-tags:focus-within { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }
+  .cfg-tag {
+    display: flex; align-items: center; gap: 4px; padding: 2px 8px;
+    background: var(--blue-light); color: var(--blue); border-radius: 4px;
+    font-size: 12px; font-family: 'Roboto Mono', monospace;
+  }
+  .cfg-tag-x { cursor: pointer; font-size: 14px; line-height: 1; opacity: 0.6; }
+  .cfg-tag-x:hover { opacity: 1; }
+  .cfg-tags input {
+    border: none; outline: none; font-size: 13px; flex: 1; min-width: 80px;
+    font-family: 'Google Sans', sans-serif; background: transparent;
+  }
+
+  /* Logs Panel — Firebase-style list */
+  .log-controls {
+    display: flex; align-items: center; gap: 16px; margin-bottom: 16px;
+  }
+  .log-controls label { font-size: 13px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+  .log-controls input[type="checkbox"] { accent-color: var(--blue); }
+  .log-count { color: var(--text3); font-size: 13px; }
+
+  /* Inbox */
+  .inbox-toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .inbox-tabs { display: flex; gap: 4px; }
+  .inbox-tab {
+    display: flex; align-items: center; gap: 4px; padding: 6px 14px;
+    border: 1px solid var(--border); border-radius: 16px; background: transparent;
+    font-size: 13px; font-family: 'Google Sans', sans-serif; cursor: pointer;
+    color: var(--text2); transition: all 0.15s;
+  }
+  .inbox-tab .material-icons-outlined { font-size: 16px; }
+  .inbox-tab:hover { background: var(--surface-hover); }
+  .inbox-tab.active { background: var(--blue-light); color: var(--blue); border-color: var(--blue); }
+  .inbox-msg {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px 16px; margin: 0 16px 8px 16px;
+  }
+  .inbox-msg:first-of-type { margin-top: 0; }
+  .inbox-meta {
+    display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px;
+  }
+  .inbox-peer { font-weight: 500; color: var(--text); }
+  .inbox-status {
+    padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 500;
+    background: var(--surface-hover); border: 1px solid var(--border);
+  }
+  .inbox-ts { color: var(--text3); margin-left: auto; font-family: 'Roboto Mono', monospace; font-size: 11px; }
+  .inbox-instruction {
+    font-size: 13px; line-height: 1.6; color: var(--text); white-space: pre-wrap;
+    word-break: break-word; max-height: 200px; overflow-y: auto;
+  }
+  .inbox-result-wrap { margin-top: 8px; }
+  .inbox-result-wrap summary {
+    font-size: 12px; color: var(--blue); cursor: pointer; font-weight: 500;
+  }
+  .inbox-result {
+    font-size: 12px; line-height: 1.5; color: var(--text2); white-space: pre-wrap;
+    word-break: break-word; max-height: 300px; overflow-y: auto;
+    margin-top: 6px; padding: 8px; background: var(--surface-hover);
+    border-radius: 4px; font-family: 'Roboto Mono', monospace;
+  }
+
+  /* Chat Tab — Claude/ChatGPT inspired */
+  .tab-panel#panel-chat { flex-direction: column; background: var(--bg); }
+  .tab-panel#panel-chat.active { display: flex; }
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 0; display: flex; flex-direction: column;
+    scroll-behavior: smooth;
+  }
+  .chat-row {
+    display: flex; gap: 16px; padding: 20px 24px; width: 100%; box-sizing: border-box;
+    transition: background 0.15s;
+  }
+  .chat-row:hover { background: rgba(0,0,0,0.02); }
+  .chat-row.sent { background: var(--surface); }
+  .chat-row.sent:hover { background: var(--surface-hover); }
+  .chat-avatar {
+    width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600; color: white;
+  }
+  .chat-avatar.user { background: linear-gradient(135deg, #667eea, #764ba2); }
+  .chat-avatar.bot { background: linear-gradient(135deg, #1a73e8, #00bcd4); }
+  .chat-body { flex: 1; min-width: 0; }
+  .chat-sender {
+    font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .chat-sender .chat-ts {
+    font-size: 11px; font-weight: 400; color: var(--text3);
+    font-family: 'Roboto Mono', monospace;
+  }
+  .chat-content {
+    font-size: 14px; line-height: 1.7; color: var(--text);
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .chat-status {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 10px;
+    margin-top: 6px;
+  }
+  .chat-status.pending { background: #fef3cd; color: #856404; }
+  .chat-status.processing { background: #cce5ff; color: #004085; }
+  .chat-status.processing::before {
+    content: ''; width: 5px; height: 5px; border-radius: 50%; background: #004085;
+    animation: pulse-dot 1.2s ease-in-out infinite;
+  }
+  .chat-status.done { background: #d4edda; color: #155724; }
+  .chat-thinking {
+    display: flex; align-items: center; gap: 6px; margin-top: 8px;
+    font-size: 12px; color: var(--text3); font-style: italic;
+  }
+  .chat-thinking-dots span {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--text3); animation: chat-bounce 1.4s ease-in-out infinite;
+  }
+  .chat-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .chat-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes chat-bounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+    40% { transform: translateY(-6px); opacity: 1; }
+  }
+  .chat-empty {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--text3); gap: 12px; padding: 60px 24px;
+  }
+  .chat-empty-icon {
+    width: 64px; height: 64px; border-radius: 16px;
+    background: linear-gradient(135deg, #1a73e8, #00bcd4);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 32px rgba(26, 115, 232, 0.25);
+  }
+  .chat-empty-icon .material-icons-outlined { font-size: 32px; color: white; }
+  .chat-empty-title { font-size: 16px; font-weight: 600; color: var(--text); }
+  .chat-empty-hint { font-size: 13px; max-width: 300px; text-align: center; line-height: 1.6; }
+  .chat-divider {
+    display: flex; align-items: center; gap: 12px; padding: 8px 24px;
+    font-size: 11px; color: var(--text3);
+  }
+  .chat-divider::before, .chat-divider::after {
+    content: ''; flex: 1; height: 1px; background: var(--border);
+  }
+  .chat-compose {
+    display: flex; align-items: flex-end; gap: 10px; padding: 16px 24px;
+    border-top: 1px solid var(--border); background: var(--surface);
+  }
+  .chat-input-wrap {
+    flex: 1; display: flex; align-items: flex-end;
+    border: 1.5px solid var(--border); border-radius: 12px;
+    background: var(--bg); padding: 4px 4px 4px 14px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .chat-input-wrap:focus-within {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.12);
+  }
+  .chat-input-wrap textarea {
+    flex: 1; resize: none; border: none; outline: none;
+    font-size: 14px; font-family: 'Google Sans', sans-serif;
+    background: transparent; color: var(--text);
+    min-height: 24px; max-height: 120px; line-height: 1.5;
+    padding: 6px 0;
+  }
+  .chat-input-wrap textarea::placeholder { color: var(--text3); }
+  .chat-send-btn {
+    width: 34px; height: 34px; border-radius: 10px; border: none;
+    background: var(--blue); color: white; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s; flex-shrink: 0;
+  }
+  .chat-send-btn:hover { background: #1557b0; transform: scale(1.05); }
+  .chat-send-btn:active { transform: scale(0.95); }
+  .chat-send-btn:disabled { background: var(--border); cursor: not-allowed; transform: none; }
+  .chat-send-btn .material-icons-outlined { font-size: 18px; }
+
+  /* Pagination */
+  .pager {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px; border-top: 1px solid var(--border); background: var(--surface);
+    font-size: 13px; flex-wrap: wrap; gap: 8px;
+  }
+  .pager-left { display: flex; align-items: center; gap: 8px; color: var(--text2); }
+  .pager-left select {
+    padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px;
+    font-size: 12px; font-family: 'Google Sans', sans-serif; background: var(--surface);
+  }
+  .pager-right { display: flex; align-items: center; gap: 2px; }
+  .pager-btn {
+    min-width: 32px; height: 32px; border: none; background: transparent;
+    border-radius: 4px; cursor: pointer; font-size: 13px; color: var(--text2);
+    font-family: 'Google Sans', sans-serif; display: flex; align-items: center; justify-content: center;
+  }
+  .pager-btn:hover { background: var(--surface-hover); }
+  .pager-btn.active { background: var(--blue-light); color: var(--blue); font-weight: 500; }
+  .pager-btn:disabled { opacity: 0.3; cursor: default; }
+  .pager-btn .material-icons-outlined { font-size: 18px; }
+  .pager-info { color: var(--text3); font-size: 12px; }
+
+  .log-entry {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px 20px; margin-bottom: 8px; transition: box-shadow 0.15s;
+  }
+  .log-entry:hover { box-shadow: var(--shadow-1); }
+  .log-meta {
+    display: flex; gap: 8px; font-size: 12px; color: var(--text3); margin-bottom: 12px;
+    align-items: center;
+  }
+  .log-chip {
+    background: var(--surface-hover); padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-family: 'Roboto Mono', monospace;
+  }
+  .log-source {
+    padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500;
+  }
+  .log-source.discord { background: #5865f215; color: #5865f2; }
+  .log-source.feishu, .log-source.lark { background: #3370ff15; color: #3370ff; }
+  .log-source.dingtalk { background: #0089ff15; color: #0089ff; }
+  .log-status-running {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 500; color: #1e8e3e;
+    background: #1e8e3e15; padding: 2px 8px; border-radius: 10px;
+  }
+  .log-status-running::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: #1e8e3e;
+    animation: pulse-dot 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.7); }
+  }
+  .log-entry.running { border-left: 3px solid #1e8e3e; }
+  .log-section { margin-bottom: 8px; }
+  .log-label {
+    font-size: 12px; font-weight: 500; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .log-label.user { color: var(--green); }
+  .log-label.asst { color: var(--blue); }
+  .log-label .material-icons-outlined { font-size: 16px; }
+  .log-text {
+    font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    color: var(--text); padding-left: 22px;
+  }
+  .log-steps { margin-top: 8px; }
+  .log-steps summary {
+    font-size: 12px; color: var(--blue); cursor: pointer; font-weight: 500;
+    padding: 4px 0; display: flex; align-items: center; gap: 4px;
+  }
+  .log-steps summary::marker { color: var(--blue); }
+  .log-steps-scroll {
+    max-height: 60vh; overflow-y: auto; overflow-x: auto;
+    border-radius: 8px; margin-top: 4px;
+    max-width: 100%; box-sizing: border-box;
+    background: #1e1e2e; padding: 12px 16px;
+    border: 1px solid #313244;
+  }
+  .log-step {
+    font-size: 12px; font-family: 'Roboto Mono', monospace;
+    padding: 2px 0; white-space: pre-wrap; word-break: break-word;
+    line-height: 1.6; color: #cdd6f4;
+  }
+  .log-step.tool { color: #f9e2af; }
+  .log-step.result { color: #6c7086; }
+  .log-step.text { color: #a6e3a1; }
+
+  /* Global Config */
+  .global-config { padding: 24px; overflow-y: auto; flex: 1; }
+  .global-config h2 {
+    font-size: 22px; font-weight: 400; color: var(--text); margin-bottom: 20px;
+  }
+
+  /* Empty State → Fleet Overview */
+  .empty-state {
+    display: flex; flex-direction: column; align-items: flex-start;
+    height: 100%; color: var(--text); gap: 16px; padding: 24px; overflow-y: auto;
+    position: relative;
+  }
+  .empty-state .material-icons-outlined { font-size: 64px; opacity: 0.3; }
+  .empty-state p { font-size: 14px; }
+  .fleet-title { font-size: 18px; font-weight: 500; color: var(--text); }
+  .fleet-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px; width: 100%;
+  }
+  .fleet-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s;
+  }
+  .fleet-card:hover { box-shadow: var(--shadow-1); border-color: var(--blue); }
+  .fleet-card-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+  }
+  .fleet-card-header .material-icons-outlined { font-size: 22px; color: var(--text2); }
+  .fleet-card-name { font-size: 15px; font-weight: 500; flex: 1; }
+  .fleet-status-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .fleet-status-dot.online { background: var(--green); }
+  .fleet-status-dot.offline { background: var(--text3); }
+  .fleet-kv { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+  .fleet-kv .fk { color: var(--text3); }
+  .fleet-kv .fv { color: var(--text); font-family: 'Roboto Mono', monospace; font-size: 11px; }
+  @media (max-width: 768px) {
+    .fleet-grid { grid-template-columns: 1fr; }
+  }
+
+  /* Loading */
+  .loading { color: var(--text2); font-size: 14px; padding: 24px; }
+
+  /* Badge */
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px;
+    font-weight: 500;
+  }
+  .badge.discord { background: #5865f215; color: #5865f2; }
+  .badge.feishu, .badge.lark { background: #3370ff15; color: #3370ff; }
+  .badge.dingtalk { background: #0089ff15; color: #0089ff; }
+
+  /* Responsive — mobile */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .sidebar.mobile-open { display: flex; position: fixed; top: 48px; left: 0; bottom: 0; width: 280px; z-index: 20; box-shadow: var(--shadow-2); }
+    .tabs { padding: 0 12px; }
+    .tab { padding: 0 12px; font-size: 13px; }
+    .tab-panel { padding: 16px; }
+    .status-grid { grid-template-columns: 1fr; }
+    .cfg-cards { max-width: 100% !important; }
+    .channel-group { flex-wrap: wrap; }
+    .channel-btn { flex: none; padding: 8px 12px; }
+    .global-config { padding: 16px; }
+    .log-text { padding-left: 0; }
+    header h1 span { display: none; }
+    .user-info { display: none; }
+    .header-right { gap: 8px; }
+    body { overflow: auto; }
+    #app { overflow: auto; height: auto; min-height: 100vh; }
+    .main-body { flex-direction: column; overflow: auto; }
+    .content { overflow: auto; }
+  }
+  /* Mobile overlay backdrop */
+  .sidebar-backdrop {
+    display: none; position: fixed; top: 48px; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.3); z-index: 19;
+  }
+  .sidebar-backdrop.active { display: block; }
+
+  /* Scrollbar — subtle like Firebase */
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #dadce0; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #bdc1c6; }
+</style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen">
+  <div class="login-brand">
+    <div class="flame">🦀</div>
+    <h1>CloseCrab</h1>
+  </div>
+  <p>Bot Team Control Board</p>
+  <button id="login-btn" onclick="doLogin()">Sign in with Google</button>
+  <p id="login-error"></p>
+</div>
+
+<!-- Main App -->
+<div id="app">
+  <header>
+    <div class="header-left">
+      <button class="hamburger" onclick="toggleSidebar()" title="Toggle sidebar">
+        <span class="material-icons-outlined">menu</span>
+      </button>
+      <div class="header-flame" style="cursor:pointer;filter:hue-rotate(200deg) saturate(1.8) brightness(1.1)" onclick="goHome()">🦀</div>
+      <h1 style="cursor:pointer" onclick="goHome()">CloseCrab <span>Control Board</span></h1>
+    </div>
+    <div class="header-right">
+      <span class="user-info" id="user-email"></span>
+      <div style="position:relative">
+        <img id="user-avatar" style="width:32px;height:32px;border-radius:50%;cursor:pointer;display:none" title="" onclick="document.getElementById('avatar-menu').classList.toggle('show')">
+        <div id="avatar-menu" class="avatar-menu">
+          <div class="avatar-menu-email" id="avatar-menu-email"></div>
+          <div class="avatar-menu-divider"></div>
+          <div class="avatar-menu-item" onclick="doLogout()">
+            <span class="material-icons-outlined" style="font-size:18px">logout</span>
+            Sign out
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+  <div class="main-body">
+    <!-- Sidebar -->
+    <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar()"></div>
+    <div class="sidebar">
+      <div class="sidebar-label">Bots</div>
+      <div id="bot-list"></div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-item" onclick="showGlobalConfig()" id="nav-global">
+        <span class="material-icons-outlined">settings</span>
+        Global Config
+      </div>
+      <a href="javascript:void(0)" onclick="window.open((window._ccPagesUrl||'')+'/pages/index.html','_blank')" class="sidebar-item" style="text-decoration:none;color:inherit">
+        <span class="material-icons-outlined">article</span>
+        CC Pages
+      </a>
+      <div style="flex:1"></div>
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-item" onclick="doLogout()">
+        <span class="material-icons-outlined">logout</span>
+        Sign out
+      </div>
+    </div>
+    <!-- Content -->
+    <div class="content" id="content-area">
+      <div class="empty-state" id="empty-state" style="display:none;"></div>
+      <script>if (!location.hash) document.getElementById('empty-state').style.display = '';</script>
+
+      <!-- Bot Detail -->
+      <div id="bot-detail" style="display:none; flex-direction:column; flex:1; overflow:hidden;">
+        <div class="tabs">
+          <div class="tab active" data-tab="status" onclick="switchTab('status')">Status</div>
+          <div class="tab" data-tab="config" onclick="switchTab('config')">Config</div>
+          <div class="tab" data-tab="chat" onclick="switchTab('chat')">Chat</div>
+          <div class="tab" data-tab="inbox" onclick="switchTab('inbox')">Inbox</div>
+          <div class="tab" data-tab="logs" onclick="switchTab('logs')">Logs</div>
+        </div>
+        <div class="tab-panel active" id="panel-status"></div>
+        <div class="tab-panel" id="panel-config"></div>
+        <div class="tab-panel" id="panel-chat"></div>
+        <div class="tab-panel" id="panel-inbox"></div>
+        <div class="tab-panel" id="panel-logs"></div>
+      </div>
+
+      <!-- Global Config -->
+      <div id="global-detail" style="display:none;" class="global-config"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+  import { getAuth, signInWithPopup, signOut, onAuthStateChanged, GoogleAuthProvider }
+    from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+  import { initializeFirestore, collection, doc, onSnapshot, query, orderBy, limit, where, getDocs, updateDoc, addDoc, Timestamp }
+    from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+
+  // TODO: Replace with your Firebase project config
+  // Get these values from Firebase Console → Project Settings → Your apps → Web app
+  const firebaseConfig = {
+    apiKey: "YOUR_FIREBASE_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = initializeFirestore(app, {}, "closecrab");
+  const provider = new GoogleAuthProvider();
+
+  let botsData = {};
+  let registryData = {};
+  let selectedBot = null;
+  let currentTab = "status";
+  let logsUnsubscribe = null;
+  let autoScroll = true;
+  let botOrder = null; // persisted order from Firestore
+  let dragSrcName = null;
+
+  // ── Auth ──
+  window.doLogin = async () => {
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (e) {
+      const errEl = document.getElementById("login-error");
+      errEl.textContent = e.message;
+      errEl.style.display = "block";
+    }
+  };
+  window.doLogout = () => signOut(auth);
+  document.addEventListener('click', (e) => {
+    const menu = document.getElementById('avatar-menu');
+    if (menu && !e.target.closest('#user-avatar') && !e.target.closest('#avatar-menu')) {
+      menu.classList.remove('show');
+    }
+  });
+  window.toggleSidebar = () => {
+    const sb = document.querySelector('.sidebar');
+    const bd = document.getElementById('sidebar-backdrop');
+    const isMobile = window.innerWidth <= 768;
+    if (isMobile) {
+      sb.classList.toggle('mobile-open');
+      bd.classList.toggle('active', sb.classList.contains('mobile-open'));
+    } else {
+      sb.classList.toggle('collapsed');
+    }
+  };
+
+  onAuthStateChanged(auth, (user) => {
+    if (user) {
+      document.getElementById("login-screen").style.display = "none";
+      document.getElementById("app").classList.add("active");
+      document.getElementById("user-email").textContent = user.email;
+      document.getElementById("avatar-menu-email").textContent = user.email;
+      const avatar = document.getElementById("user-avatar");
+      if (user.photoURL) {
+        avatar.src = user.photoURL;
+        avatar.title = user.displayName || user.email;
+        avatar.style.display = "";
+      }
+      startListeners();
+    } else {
+      document.getElementById("login-screen").style.display = "flex";
+      document.getElementById("app").classList.remove("active");
+    }
+  });
+
+  // ── URL Hash Router ──
+  function restoreFromHash() {
+    const hash = location.hash.replace('#', '');
+    if (!hash) return;
+    if (hash === 'global') {
+      showGlobalConfig(true);
+    } else if (hash.startsWith('bot/')) {
+      const parts = hash.split('/');
+      const name = parts[1];
+      const tab = parts[2] || 'status';
+      if (name) {
+        currentTab = tab;
+        selectBot(name, true);
+        if (tab !== 'status') switchTab(tab, true);
+      }
+    }
+  }
+  window.addEventListener('hashchange', restoreFromHash);
+
+  // ── Firestore Listeners ──
+  let _hashRestored = false;
+  function startListeners() {
+    // Load CC Pages URL from secrets for sidebar link
+    getDocs(collection(db, "config")).then(snap => {
+      snap.forEach(d => { if (d.id === "secrets") window._ccPagesUrl = (d.data().CC_PAGES_URL_PREFIX || '').replace(/\/+$/, ''); });
+    }).catch(() => {});
+
+    // Load saved bot order
+    onSnapshot(doc(db, "config", "dashboard"), (snap) => {
+      const data = snap.data();
+      if (data && data.bot_order) botOrder = data.bot_order;
+      renderBotList();
+    });
+
+    onSnapshot(collection(db, "bots"), (snap) => {
+      botsData = {};
+      snap.forEach((d) => { botsData[d.id] = d.data(); });
+      renderBotList();
+      if (!_hashRestored && location.hash) {
+        _hashRestored = true;
+        restoreFromHash();
+      } else {
+        renderFleetOverview();
+      }
+      if (selectedBot) renderBotDetail();
+    });
+    onSnapshot(collection(db, "registry"), (snap) => {
+      registryData = {};
+      snap.forEach((d) => { registryData[d.id] = d.data(); });
+      renderBotList();
+      renderFleetOverview();
+      if (selectedBot && currentTab === "status") renderStatusPanel();
+    });
+  }
+
+  function getSortedBotNames() {
+    const all = Object.keys(botsData);
+    if (!botOrder) return all.sort();
+    const ordered = botOrder.filter(n => all.includes(n));
+    const rest = all.filter(n => !botOrder.includes(n)).sort();
+    return [...ordered, ...rest];
+  }
+
+  // ── Bot Icons ──
+  const BOT_ICONS = {
+    jarvis: 'psychology',
+    hulk: 'fitness_center',
+    tommy: 'pest_control_rodent',
+    bunny: 'cruelty_free',
+    xiaoaitongxue: 'mic',
+    tianmaojingling: 'speaker',
+  };
+  function getBotIconHtml(name) {
+    const icon = BOT_ICONS[name] || 'smart_toy';
+    return `<span class="material-icons-outlined">${icon}</span>`;
+  }
+
+  // ── Bot List ──
+  function _formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return '—';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h${m}m`;
+    if (m > 0) return `${m}m`;
+    return `${seconds}s`;
+  }
+
+  function _liveDuration(ctx) {
+    // 用 session_start_ts 实时计算时长，比 session_duration_s 快照更准确
+    if (ctx.session_start_ts) {
+      const startMs = new Date(ctx.session_start_ts).getTime();
+      if (startMs > 0) return Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+    }
+    return ctx.session_duration_s || 0;
+  }
+
+  function _formatContextSubtitle(reg) {
+    const ctx = reg.context_usage;
+    if (!ctx || !ctx.total_context_tokens) {
+      const online = reg.hostname && reg.hostname !== "?";
+      return `<span class="bot-host-dot ${online ? 'online' : 'offline'}"></span>idle`;
+    }
+    const pct = ctx.usage_pct || 0;
+    const dur = _formatDuration(_liveDuration(ctx));
+    const turns = ctx.turns || 0;
+    // Color: green < 50%, yellow 50-80%, red > 80%
+    const color = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)';
+    return `<span class="bot-host-dot online" style="background:${color}"></span>`
+      + `<span style="color:${color};font-weight:600">${pct}%</span>`
+      + ` · ${turns}t · ${dur}`;
+  }
+
+  // 每 10 秒刷新 bot list 和 status panel 的时长显示
+  setInterval(() => {
+    renderBotList();
+    if (selectedBot) renderStatusPanel();
+  }, 10000);
+
+  function renderBotList() {
+    const el = document.getElementById("bot-list");
+    const names = getSortedBotNames();
+    el.innerHTML = names.map((name) => {
+      const reg = registryData[name] || {};
+      const isActive = selectedBot === name;
+      const subtitle = _formatContextSubtitle(reg);
+      return `
+        <div class="bot-item ${isActive ? 'active' : ''}" draggable="true"
+          data-bot="${name}"
+          onclick="selectBot('${name}')"
+          ondragstart="window._dragStart(event,'${name}')"
+          ondragend="window._dragEnd(event)"
+          ondragover="window._dragOver(event)"
+          ondragenter="window._dragEnter(event)"
+          ondragleave="window._dragLeave(event)"
+          ondrop="window._drop(event,'${name}')">
+          <div class="bot-icon">
+            ${getBotIconHtml(name)}
+          </div>
+          <div class="bot-info">
+            <div class="bot-name">${name}</div>
+            <div class="bot-host">${subtitle}</div>
+          </div>
+          <span class="material-icons-outlined bot-chevron">chevron_right</span>
+        </div>`;
+    }).join("");
+  }
+
+  // ── Drag & Drop ──
+  window._dragStart = (e, name) => {
+    dragSrcName = name;
+    e.target.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  window._dragEnd = (e) => {
+    e.target.classList.remove('dragging');
+    document.querySelectorAll('.bot-item').forEach(el => el.classList.remove('drag-over'));
+  };
+  window._dragOver = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
+  window._dragEnter = (e) => {
+    const item = e.target.closest('.bot-item');
+    if (item && item.dataset.bot !== dragSrcName) item.classList.add('drag-over');
+  };
+  window._dragLeave = (e) => {
+    const item = e.target.closest('.bot-item');
+    if (item) item.classList.remove('drag-over');
+  };
+  window._drop = async (e, targetName) => {
+    e.preventDefault();
+    if (!dragSrcName || dragSrcName === targetName) return;
+    const names = getSortedBotNames();
+    const fromIdx = names.indexOf(dragSrcName);
+    const toIdx = names.indexOf(targetName);
+    if (fromIdx < 0 || toIdx < 0) return;
+    names.splice(fromIdx, 1);
+    names.splice(toIdx, 0, dragSrcName);
+    botOrder = [...names];
+    renderBotList();
+    try {
+      const { setDoc } = await import("https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js");
+      await setDoc(doc(db, "config", "dashboard"), { bot_order: botOrder }, { merge: true });
+    } catch (err) { console.error('Save bot order failed:', err); }
+    dragSrcName = null;
+  };
+
+  // ── Fleet Overview (default page) ──
+  function renderFleetOverview() {
+    const el = document.getElementById("empty-state");
+    if (el.style.display === 'none') return; // not visible
+    const botNames = getSortedBotNames();
+    if (!botNames.length) {
+      el.innerHTML = '<span class="material-icons-outlined">smart_toy</span><p>Loading bots...</p>';
+      return;
+    }
+    let html = `<div class="fleet-title">Bot Fleet Overview</div><div class="fleet-grid">`;
+    botNames.forEach(name => {
+      const cfg = botsData[name] || {};
+      const reg = registryData[name] || {};
+      const online = reg.hostname && reg.hostname !== "?";
+      const icon = BOT_ICONS[name] || 'smart_toy';
+      const channel = cfg.active_channel || cfg.channel || '—';
+      const model = cfg.model ? cfg.model.replace(/@.*/, '') : '—';
+      const host = reg.hostname || '—';
+      const role = cfg.team?.role || 'standalone';
+      const accel = reg.accelerator && reg.accelerator !== 'none' ? reg.accelerator : '—';
+      const sshAlias = reg.ssh_alias || reg.host || '—';
+      const ctx = reg.context_usage;
+      const ctxHtml = (() => {
+        if (!ctx || !ctx.total_context_tokens) return '<div class="fleet-kv"><span class="fk">Context</span><span class="fv" style="color:var(--text3)">idle</span></div>';
+        const pct = ctx.usage_pct || 0;
+        const barColor = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)';
+        const totalK = Math.round(ctx.total_context_tokens / 1000);
+        const dur = _formatDuration(_liveDuration(ctx));
+        return `<div style="margin:4px 0 2px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px;">
+            <span style="color:var(--text3)">${totalK}K · ${ctx.turns || 0}t · ${dur}</span>
+            <span style="color:${barColor};font-weight:600">${pct}%</span>
+          </div>
+          <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;">
+            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:2px;"></div>
+          </div>
+        </div>`;
+      })();
+      html += `
+        <div class="fleet-card" onclick="selectBot('${name}')">
+          <div class="fleet-card-header">
+            <span class="material-icons-outlined">${icon}</span>
+            <span class="fleet-card-name">${name}</span>
+            <span class="fleet-status-dot ${online ? 'online' : 'offline'}" title="${online ? 'Online' : 'Offline'}"></span>
+          </div>
+          <div class="fleet-kv"><span class="fk">SSH</span><span class="fv">${sshAlias}</span></div>
+          <div class="fleet-kv"><span class="fk">Accel</span><span class="fv">${accel}</span></div>
+          <div class="fleet-kv"><span class="fk">Channel</span><span class="fv">${channel}</span></div>
+          ${ctxHtml}
+        </div>`;
+    });
+    html += '</div>';
+    el.innerHTML = html;
+  }
+
+  // ── Go Home ──
+  window.goHome = () => {
+    selectedBot = null;
+    if (logsUnsubscribe) { logsUnsubscribe(); logsUnsubscribe = null; }
+    if (chatUnsubscribe) { chatUnsubscribe(); chatUnsubscribe = null; }
+    if (inboxUnsubscribe) { inboxUnsubscribe(); inboxUnsubscribe = null; }
+    document.getElementById("bot-detail").style.display = "none";
+    document.getElementById("global-detail").style.display = "none";
+    document.getElementById("empty-state").style.display = "";
+    document.querySelectorAll(".sidebar-item").forEach(s => s.classList.remove("active"));
+    document.getElementById("nav-global")?.classList.remove("active");
+    renderBotList();
+    renderFleetOverview();
+    location.hash = '';
+  };
+
+  // ── Select Bot ──
+  window.selectBot = (name, skipHash) => {
+    selectedBot = name;
+    document.getElementById("empty-state").style.display = "none";
+    document.getElementById("global-detail").style.display = "none";
+    document.getElementById("bot-detail").style.display = "flex";
+    document.querySelectorAll(".sidebar-item").forEach(s => s.classList.remove("active"));
+    renderBotList();
+    renderBotDetail();
+    if (!skipHash) location.hash = currentTab === 'status' ? `bot/${name}` : `bot/${name}/${currentTab}`;
+  };
+
+  // ── Global Config ──
+  // ── Global Config Fields Definition (non-secret infra config, stored in config/secrets) ──
+  const GLOBAL_FIELDS = [
+    { key: 'ANTHROPIC_VERTEX_PROJECT_ID', label: 'Vertex AI Project', hint: 'Google Cloud project for Vertex AI', source: 'secrets' },
+    { key: 'GCS_BUCKET', label: 'GCS Bucket', hint: 'Cloud Storage bucket for shared data', source: 'secrets' },
+    { key: 'CC_PAGES_URL_PREFIX', label: 'CC Pages URL', hint: 'Public URL prefix for CC Pages', source: 'secrets' },
+  ];
+  const GLOBAL_SECRET_PATTERNS = ['secret', 'token', 'password', 'api_key'];
+  function isGlobalSecret(k) { return GLOBAL_SECRET_PATTERNS.some(p => k.toLowerCase().includes(p)); }
+
+  let globalEditMode = {};  // cardId -> true/false
+
+  window.showGlobalConfig = async (skipHash) => {
+    selectedBot = null;
+    if (logsUnsubscribe) { logsUnsubscribe(); logsUnsubscribe = null; }
+    if (chatUnsubscribe) { chatUnsubscribe(); chatUnsubscribe = null; }
+    if (inboxUnsubscribe) { inboxUnsubscribe(); inboxUnsubscribe = null; }
+    document.getElementById("empty-state").style.display = "none";
+    document.getElementById("bot-detail").style.display = "none";
+    const detail = document.getElementById("global-detail");
+    detail.style.display = "block";
+    document.getElementById("nav-global").classList.add("active");
+    renderBotList();
+    await renderGlobalConfig();
+    if (!skipHash) location.hash = 'global';
+  };
+
+  async function renderGlobalConfig() {
+    const snap = await getDocs(collection(db, "config"));
+    const allDocs = {};
+    snap.forEach((d) => { allDocs[d.id] = d.data(); });
+    window._globalDocs = allDocs;
+
+    const globalCfg = allDocs.global || {};
+    const secretsDoc = allDocs.secrets || {};
+    const dashCfg = allDocs.dashboard || {};
+
+    const editing = globalEditMode.system || false;
+    let html = '<div class="cfg-cards">';
+
+    // ── System Config Card (non-secret infra config from config/secrets) ──
+    html += `<div class="cfg-card">
+      <div class="cfg-card-header">
+        <div class="cfg-card-title"><span class="material-icons-outlined">cloud</span>System Configuration</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${editing ? `
+            <button class="cfg-save-btn dirty" onclick="window._saveGlobalAndExit()">Save</button>
+            <button class="cfg-save-btn" style="pointer-events:auto;cursor:pointer;color:var(--text2);" onclick="window._cancelGlobalEdit('system')">Cancel</button>
+          ` : `
+            <div class="cfg-menu-wrap">
+              <button class="cfg-menu-btn" onclick="window._toggleMenu(event,'menu-system')">
+                <span class="material-icons-outlined">more_vert</span>
+              </button>
+              <div class="cfg-menu" id="menu-system">
+                <div class="cfg-menu-item" onclick="window._enterGlobalEdit('system')">
+                  <span class="material-icons-outlined">edit</span>Edit
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      </div>
+      <div class="cfg-card-body">
+        ${GLOBAL_FIELDS.map(f => {
+          const val = secretsDoc[f.key] || '';
+          if (editing) {
+            return `<div class="cfg-field">
+              <label class="cfg-label">${f.label}</label>
+              <input class="cfg-input mono" id="gcfg-${f.key}" value="${escHtml(String(val))}">
+              ${f.hint ? `<div class="cfg-hint">${f.hint}</div>` : ''}
+            </div>`;
+          } else {
+            return `<div class="cfg-field">
+              <label class="cfg-label">${f.label}</label>
+              <div class="cfg-display-value">${escHtml(String(val)) || '—'}</div>
+            </div>`;
+          }
+        }).join('')}
+      </div>
+    </div>`;
+
+    // ── Global Secrets Card (from config/secrets doc, shared with deploy.sh) ──
+    // Separate real secrets from non-secret config values
+    const SECRET_KEYS = new Set([
+      'CONTEXT7_API_KEY', 'JINA_API_KEY', 'GITHUB_PERSONAL_ACCESS_TOKEN',
+      'TAVILY_API_KEY', 'GEMINI_API_KEY',
+    ]);
+    const GLOBAL_SECRETS = [
+      { key: 'CONTEXT7_API_KEY', label: 'Context7 API Key' },
+      { key: 'JINA_API_KEY', label: 'Jina API Key' },
+      { key: 'GITHUB_PERSONAL_ACCESS_TOKEN', label: 'GitHub Token' },
+      { key: 'TAVILY_API_KEY', label: 'Tavily API Key' },
+      { key: 'GEMINI_API_KEY', label: 'Gemini API Key' },
+    ];
+    // Pick up any extra keys in secretsDoc that look like secrets
+    const knownSecretKeys = new Set(GLOBAL_SECRETS.map(s => s.key));
+    Object.keys(secretsDoc).forEach(k => {
+      if (!knownSecretKeys.has(k) && isGlobalSecret(k)) {
+        GLOBAL_SECRETS.push({ key: k, label: k });
+        SECRET_KEYS.add(k);
+      }
+    });
+
+    const secEdit = globalEditMode.secrets || false;
+    html += `<div class="cfg-card">
+      <div class="cfg-card-header">
+        <div class="cfg-card-title"><span class="material-icons-outlined">key</span>Secrets</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${secEdit ? `
+            <button class="cfg-save-btn dirty" onclick="window._saveSecrets()">Save</button>
+            <button class="cfg-save-btn" style="pointer-events:auto;cursor:pointer;color:var(--text2);" onclick="window._cancelGlobalEdit('secrets')">Cancel</button>
+          ` : `
+            <div class="cfg-menu-wrap">
+              <button class="cfg-menu-btn" onclick="window._toggleMenu(event,'menu-secrets')">
+                <span class="material-icons-outlined">more_vert</span>
+              </button>
+              <div class="cfg-menu" id="menu-secrets">
+                <div class="cfg-menu-item" onclick="window._enterGlobalEdit('secrets')">
+                  <span class="material-icons-outlined">edit</span>Edit
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      </div>
+      <div class="cfg-card-body">
+        ${GLOBAL_SECRETS.map(s => {
+          const val = secretsDoc[s.key] || '';
+          const fid = 'gsec-' + s.key;
+          if (secEdit) {
+            return `<div class="cfg-field"><label class="cfg-label">${s.label}</label>
+              <div class="cfg-secret-wrap">
+                <input class="cfg-input mono" type="password" id="${fid}" value="${escHtml(String(val))}" data-key="${s.key}">
+                <button class="cfg-eye" onclick="window._toggleSecret('${fid}')"><span class="material-icons-outlined">visibility</span></button>
+              </div>
+            </div>`;
+          } else {
+            return `<div class="cfg-field"><label class="cfg-label">${s.label}</label>
+              <div class="cfg-display-value secret">${val ? '••••••••••••' : '—'}</div>
+            </div>`;
+          }
+        }).join('')}
+      </div>
+    </div>`;
+
+    // ── Firestore Info Card ──
+    const fsEdit = globalEditMode.firestore || false;
+    html += `<div class="cfg-card">
+      <div class="cfg-card-header">
+        <div class="cfg-card-title"><span class="material-icons-outlined">storage</span>Firestore Database</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${fsEdit ? `
+            <button class="cfg-save-btn dirty" onclick="window._saveFirestoreInfo()">Save</button>
+            <button class="cfg-save-btn" style="pointer-events:auto;cursor:pointer;color:var(--text2);" onclick="window._cancelGlobalEdit('firestore')">Cancel</button>
+          ` : `
+            <div class="cfg-menu-wrap">
+              <button class="cfg-menu-btn" onclick="window._toggleMenu(event,'menu-firestore')">
+                <span class="material-icons-outlined">more_vert</span>
+              </button>
+              <div class="cfg-menu" id="menu-firestore">
+                <div class="cfg-menu-item" onclick="window._enterGlobalEdit('firestore')">
+                  <span class="material-icons-outlined">edit</span>Edit
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      </div>
+      <div class="cfg-card-body">
+        <div class="cfg-field">
+          <label class="cfg-label">Project</label>
+          ${fsEdit
+            ? `<input class="cfg-input mono" id="fs-project" value="${firebaseConfig.projectId}">`
+            : `<div class="cfg-display-value">${firebaseConfig.projectId}</div>`}
+        </div>
+        <div class="cfg-field">
+          <label class="cfg-label">Database</label>
+          ${fsEdit
+            ? `<input class="cfg-input mono" id="fs-database" value="closecrab">`
+            : `<div class="cfg-display-value">closecrab</div>`}
+        </div>
+        <div class="cfg-field">
+          <label class="cfg-label">Collections</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+            ${['config', 'bots', 'registry', 'messages'].map(c =>
+              `<span style="padding:4px 12px;background:var(--surface-hover);border:1px solid var(--border);border-radius:4px;font-family:'Roboto Mono',monospace;font-size:12px;">${c}</span>`
+            ).join('')}
+          </div>
+        </div>
+        <div class="cfg-field">
+          <label class="cfg-label">Dashboard Preferences</label>
+          <div style="font-size:12px;color:var(--text3);">Bot order: ${(dashCfg.bot_order || []).join(' → ') || 'default (alphabetical)'}</div>
+          <div class="cfg-hint">Drag bots in the sidebar to reorder. Saved automatically.</div>
+        </div>
+      </div>
+    </div>`;
+
+    html += '</div>';
+    document.getElementById("global-detail").innerHTML = html;
+  }
+
+  window._toggleMenu = (e, menuId) => {
+    e.stopPropagation();
+    const menu = document.getElementById(menuId);
+    const wasOpen = menu.classList.contains('open');
+    document.querySelectorAll('.cfg-menu.open').forEach(m => m.classList.remove('open'));
+    if (!wasOpen) menu.classList.add('open');
+  };
+  // Close menus on click outside
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.cfg-menu.open').forEach(m => m.classList.remove('open'));
+  });
+
+  window._enterGlobalEdit = (cardId) => {
+    globalEditMode[cardId] = true;
+    document.querySelectorAll('.cfg-menu.open').forEach(m => m.classList.remove('open'));
+    renderGlobalConfig();
+  };
+  window._cancelGlobalEdit = (cardId) => {
+    globalEditMode[cardId] = false;
+    renderGlobalConfig();
+  };
+  window._saveGlobalAndExit = async () => {
+    try {
+      const updates = {};
+      document.querySelectorAll('[id^="gcfg-"]').forEach(el => {
+        const key = el.id.replace('gcfg-', '');
+        updates[key] = el.value;
+      });
+      await updateDoc(doc(db, "config", "secrets"), updates);
+      globalEditMode.system = false;
+      showToast('System config saved');
+      await renderGlobalConfig();
+    } catch (e) {
+      showToast(`Save failed: ${e.message}`, 'error');
+    }
+  };
+
+  window._saveFirestoreInfo = async () => {
+    // Firestore info card — currently read-only metadata, just exit edit mode
+    globalEditMode.firestore = false;
+    showToast('Firestore info updated');
+    renderGlobalConfig();
+  };
+
+  window._saveSecrets = async () => {
+    try {
+      const updates = {};
+      document.querySelectorAll('.cfg-card-body input[data-key]').forEach(el => {
+        const key = el.dataset.key;
+        if (key && el.id.startsWith('gsec-')) {
+          updates[key] = el.value;
+        }
+      });
+      await updateDoc(doc(db, "config", "secrets"), updates);
+      globalEditMode.secrets = false;
+      showToast('Secrets saved');
+      renderGlobalConfig();
+    } catch (e) {
+      showToast(`Save failed: ${e.message}`, 'error');
+    }
+  };
+
+  // ── Bot Detail ──
+  function renderBotDetail() {
+    renderStatusPanel();
+    renderConfigPanel();
+    startLogsListener();
+    if (currentTab === 'chat') startChatListener();
+    if (currentTab === 'inbox') startInboxListener();
+  }
+
+  window.switchTab = (tab, skipHash) => {
+    currentTab = tab;
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.id === `panel-${tab}`));
+    if (tab === "logs") {
+      const panel = document.getElementById("panel-logs");
+      if (autoScroll) panel.scrollTop = panel.scrollHeight;
+    }
+    if (tab === "chat") startChatListener();
+    if (tab === "inbox") startInboxListener();
+    if (!skipHash && selectedBot) location.hash = tab === 'status' ? `bot/${selectedBot}` : `bot/${selectedBot}/${tab}`;
+  };
+
+  // ── Status Panel ──
+  function renderStatusPanel() {
+    if (!selectedBot) return;
+    const cfg = botsData[selectedBot] || {};
+    const reg = registryData[selectedBot] || {};
+    const online = reg.hostname && reg.hostname !== "?";
+    const channel = cfg.active_channel || cfg.channel || "?";
+
+    document.getElementById("panel-status").innerHTML = `
+      <div class="status-grid">
+        <div class="card">
+          <div class="card-title"><span class="material-icons-outlined">monitor_heart</span>Runtime</div>
+          <div class="kv-row"><span class="kv-label">Status</span><span class="kv-value ${online ? 'online' : 'offline'}">${online ? 'Online' : 'Offline'}</span></div>
+          <div class="kv-row"><span class="kv-label">Host</span><span class="kv-value">${reg.hostname || '—'}</span></div>
+          <div class="kv-row"><span class="kv-label">SSH Alias</span><span class="kv-value">${reg.ssh_alias || reg.host || '—'}</span></div>
+          <div class="kv-row"><span class="kv-label">Accelerator</span><span class="kv-value">${reg.accelerator || '—'}</span></div>
+          <div class="kv-row"><span class="kv-label">Last Seen</span><span class="kv-value">${reg.last_seen || '—'}</span></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="material-icons-outlined">data_usage</span>Context Usage</div>
+          ${(() => {
+            const ctx = reg.context_usage;
+            if (!ctx || !ctx.total_context_tokens) return '<div style="color:var(--text3);font-size:12px;padding:4px 0;">No active session</div>';
+            const pct = ctx.usage_pct || 0;
+            const barColor = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)';
+            const totalK = Math.round(ctx.total_context_tokens / 1000);
+            const windowK = Math.round((ctx.context_window || 1000000) / 1000);
+            return `
+              <div style="margin:4px 0 8px">
+                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                  <span>${totalK}K / ${windowK}K tokens</span>
+                  <span style="color:${barColor};font-weight:600">${pct}%</span>
+                </div>
+                <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+                  <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width 0.3s;"></div>
+                </div>
+              </div>
+              <div class="kv-row"><span class="kv-label">Turns</span><span class="kv-value">${ctx.turns || 0}</span></div>
+              <div class="kv-row"><span class="kv-label">Duration</span><span class="kv-value">${_formatDuration(_liveDuration(ctx))}</span></div>
+              <div class="kv-row"><span class="kv-label">Input Tokens</span><span class="kv-value">${(ctx.input_tokens || 0).toLocaleString()}</span></div>
+              <div class="kv-row"><span class="kv-label">Output Tokens</span><span class="kv-value">${(ctx.output_tokens || 0).toLocaleString()}</span></div>
+              <div class="kv-row"><span class="kv-label">Cache Read</span><span class="kv-value">${(ctx.cache_read_input_tokens || 0).toLocaleString()}</span></div>
+              <div class="kv-row"><span class="kv-label">Cost</span><span class="kv-value">$${(ctx.cost_usd || 0).toFixed(4)}</span></div>
+            `;
+          })()}
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="material-icons-outlined">settings</span>Configuration</div>
+          <div class="kv-row"><span class="kv-label">Channel</span><span class="kv-value"><span class="badge ${channel}">${channel}</span></span></div>
+          <div class="kv-row"><span class="kv-label">Model</span><span class="kv-value">${cfg.model || '—'}</span></div>
+          <div class="kv-row"><span class="kv-label">Work Dir</span><span class="kv-value">${cfg.work_dir || '—'}</span></div>
+          <div class="kv-row"><span class="kv-label">Timeout</span><span class="kv-value">${cfg.timeout || '—'}s</span></div>
+          <div class="kv-row"><span class="kv-label">STT Engine</span><span class="kv-value">${cfg.stt_engine || '—'}</span></div>
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="material-icons-outlined">groups</span>Team</div>
+          ${cfg.team ? `
+            <div class="kv-row"><span class="kv-label">Role</span><span class="kv-value">${cfg.team.role || '—'}</span></div>
+            <div class="kv-row"><span class="kv-label">Team Channel</span><span class="kv-value">${cfg.team.team_channel_id || '—'}</span></div>
+            ${cfg.team.teammates ? `<div class="kv-row"><span class="kv-label">Teammates</span><span class="kv-value">${Object.keys(cfg.team.teammates).join(', ')}</span></div>` : ''}
+          ` : '<div style="color:var(--text3);font-size:13px;padding:8px 0;">No team config</div>'}
+        </div>
+        <div class="card">
+          <div class="card-title"><span class="material-icons-outlined">info</span>Description</div>
+          <div style="font-size:13px;line-height:1.6;color:var(--text2);">${cfg.description || 'No description'}</div>
+        </div>
+      </div>`;
+  }
+
+  // ── Config Panel ──
+  const MODELS = [
+    "claude-opus-4-6@default",
+    "claude-sonnet-4-6@default",
+    "claude-haiku-4-5-20251001",
+    "claude-opus-4-20250514",
+    "claude-sonnet-4-20250514",
+  ];
+  const STT_ENGINES = ["gemini", "gemini:gemini-2.0-flash", "gemini:gemini-2.5-flash", "whisper"];
+  const CHANNELS = ["discord", "feishu", "lark", "dingtalk"];
+  const CHANNEL_ICONS = { discord: "forum", feishu: "chat", lark: "chat", dingtalk: "sms" };
+  const TEAM_ROLES = ["standalone", "leader", "teammate"];
+
+  // Track dirty state and edit mode per card
+  let cfgDirty = {};
+  let cfgEditMode = {};  // card -> true/false
+
+  function markDirty(card) {
+    cfgDirty[card] = true;
+    const btn = document.getElementById(`cfg-save-${card}`);
+    if (btn) btn.classList.add('dirty');
+  }
+
+  window._enterEdit = (card) => {
+    cfgEditMode[card] = true;
+    document.querySelectorAll('.cfg-menu.open').forEach(m => m.classList.remove('open'));
+    renderConfigPanel();
+  };
+  window._cancelEdit = (card) => {
+    cfgEditMode[card] = false;
+    cfgDirty[card] = false;
+    renderConfigPanel();
+  };
+  window._saveAndExit = async (card) => {
+    await window._saveCard(card);
+    cfgEditMode[card] = false;
+    renderConfigPanel();
+  };
+
+  function renderConfigPanel() {
+    if (!selectedBot) return;
+    const cfg = botsData[selectedBot] || {};
+    const channels = cfg.channels || {};
+    const team = cfg.team || {};
+    const email = cfg.email || {};
+    const inbox = cfg.inbox || {};
+
+    const activeChannel = cfg.active_channel || "discord";
+    const secretFields = new Set(['token', 'app_secret', 'client_secret']);
+    const tagFields = new Set(['auto_respond_channels', 'auto_respond_chats', 'allowed_open_ids', 'allowed_user_ids']);
+
+    // Helper: card header with three-dot menu or save/cancel
+    function cardHeader(icon, title, cardId) {
+      const editing = cfgEditMode[cardId];
+      return `<div class="cfg-card-header">
+        <div class="cfg-card-title"><span class="material-icons-outlined">${icon}</span>${title}</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${editing ? `
+            <button class="cfg-save-btn dirty" onclick="window._saveAndExit('${cardId}')">Save</button>
+            <button class="cfg-save-btn" style="pointer-events:auto;cursor:pointer;color:var(--text2);" onclick="window._cancelEdit('${cardId}')">Cancel</button>
+          ` : `
+            <div class="cfg-menu-wrap">
+              <button class="cfg-menu-btn" onclick="window._toggleMenu(event,'menu-${cardId}')">
+                <span class="material-icons-outlined">more_vert</span>
+              </button>
+              <div class="cfg-menu" id="menu-${cardId}">
+                <div class="cfg-menu-item" onclick="window._enterEdit('${cardId}')">
+                  <span class="material-icons-outlined">edit</span>Edit
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      </div>`;
+    }
+
+    let html = '<div class="cfg-cards">';
+
+    // ── Card 1: General ──
+    const gEdit = cfgEditMode.general;
+    html += `<div class="cfg-card">${cardHeader('tune','General','general')}
+      <div class="cfg-card-body">
+        <div class="cfg-field"><label class="cfg-label">Description</label>
+          ${gEdit ? `<textarea class="cfg-textarea" id="cfg-description">${escHtml(cfg.description || '')}</textarea>`
+            : `<div class="cfg-display-value">${escHtml(cfg.description || '') || '—'}</div>`}
+        </div>
+        <div class="cfg-field"><label class="cfg-label">Model</label>
+          ${gEdit ? `<select class="cfg-select" id="cfg-model">
+            ${MODELS.map(m => `<option value="${m}" ${m === cfg.model ? 'selected' : ''}>${m}</option>`).join('')}
+            ${cfg.model && !MODELS.includes(cfg.model) ? `<option value="${escHtml(cfg.model)}" selected>${escHtml(cfg.model)}</option>` : ''}
+          </select>` : `<div class="cfg-display-value">${escHtml(cfg.model || '—')}</div>`}
+        </div>
+        <div class="cfg-field"><label class="cfg-label">Work Directory</label>
+          ${gEdit ? `<input class="cfg-input mono" id="cfg-work_dir" value="${escHtml(cfg.work_dir || '~/')}">` : `<div class="cfg-display-value">${escHtml(cfg.work_dir || '~/')}</div>`}
+        </div>
+        <div style="display:flex;gap:20px;">
+          <div class="cfg-field" style="flex:1;"><label class="cfg-label">Timeout (seconds)</label>
+            ${gEdit ? `<input class="cfg-input cfg-number" type="number" id="cfg-timeout" value="${cfg.timeout || 600}">` : `<div class="cfg-display-value">${cfg.timeout || 600}s</div>`}
+          </div>
+          <div class="cfg-field" style="flex:1;"><label class="cfg-label">STT Engine</label>
+            ${gEdit ? `<select class="cfg-select" id="cfg-stt_engine">
+              ${STT_ENGINES.map(e => `<option value="${e}" ${e === cfg.stt_engine ? 'selected' : ''}>${e}</option>`).join('')}
+              ${cfg.stt_engine && !STT_ENGINES.includes(cfg.stt_engine) ? `<option value="${escHtml(cfg.stt_engine)}" selected>${escHtml(cfg.stt_engine)}</option>` : ''}
+            </select>` : `<div class="cfg-display-value">${escHtml(cfg.stt_engine || '—')}</div>`}
+          </div>
+        </div>
+        <div class="cfg-field"><label class="cfg-label">Claude CLI Path</label>
+          <div class="cfg-display-value">${escHtml(cfg.claude_bin || '~/.local/bin/claude')}</div>
+          <div class="cfg-hint">Read-only. Change via dispatch-bot.sh</div>
+        </div>
+      </div>
+    </div>`;
+
+    // ── Card 2: Channel ──
+    const chEdit = cfgEditMode.channel;
+    html += `<div class="cfg-card">${cardHeader('cell_tower','Channel','channel')}
+      <div class="cfg-card-body">
+        <div class="cfg-field"><label class="cfg-label">Active Channel</label>
+          ${chEdit ? `<div class="channel-group">
+            ${CHANNELS.map(ch => `<button class="channel-btn ${ch === activeChannel ? 'active' : ''}" onclick="window._selectChannel('${ch}')">${ch}</button>`).join('')}
+          </div>` : `<div class="cfg-display-value"><span class="badge ${activeChannel}">${activeChannel}</span></div>`}
+        </div>
+        <div id="cfg-channel-detail">${renderChannelFields(activeChannel, channels, chEdit)}</div>
+      </div>
+    </div>`;
+
+    // ── Card 3: Team ──
+    const tEdit = cfgEditMode.team;
+    const role = team.role || "standalone";
+    html += `<div class="cfg-card">${cardHeader('groups','Team','team')}
+      <div class="cfg-card-body">
+        <div class="cfg-field"><label class="cfg-label">Role</label>
+          ${tEdit ? `<select class="cfg-select" id="cfg-team-role">
+            ${TEAM_ROLES.map(r => `<option value="${r}" ${r === role ? 'selected' : ''}>${r}</option>`).join('')}
+          </select>` : `<div class="cfg-display-value">${role}</div>`}
+        </div>
+        ${role !== "standalone" ? `
+          <div class="cfg-field"><label class="cfg-label">Team Channel ID</label>
+            ${tEdit ? `<input class="cfg-input mono" id="cfg-team-channel" value="${escHtml(team.team_channel_id || '')}">` : `<div class="cfg-display-value">${escHtml(team.team_channel_id || '—')}</div>`}
+          </div>
+          ${role === "leader" && team.teammates ? `
+            <div class="cfg-field"><label class="cfg-label">Teammates</label>
+              ${Object.entries(team.teammates).map(([name, id]) => `
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                  <span style="font-size:13px;font-weight:500;min-width:80px;">${escHtml(name)}</span>
+                  <span class="cfg-display-value" style="padding:0;">${escHtml(String(id))}</span>
+                </div>`).join('')}
+            </div>` : ''}
+          ${role === "teammate" ? `
+            <div class="cfg-field"><label class="cfg-label">Leader Bot ID</label>
+              ${tEdit ? `<input class="cfg-input mono" id="cfg-team-leader" value="${escHtml(String(team.leader_bot_id || ''))}">` : `<div class="cfg-display-value">${escHtml(String(team.leader_bot_id || '—'))}</div>`}
+            </div>` : ''}
+        ` : ''}
+      </div>
+    </div>`;
+
+    // ── Card 4: Email & Inbox ──
+    const hasEmail = Object.keys(email).length > 0;
+    const hasInbox = Object.keys(inbox).length > 0;
+    if (hasEmail || hasInbox) {
+      html += `<div class="cfg-card">
+        <div class="cfg-card-header">
+          <div class="cfg-card-title"><span class="material-icons-outlined">mail</span>Email & Inbox</div>
+        </div>
+        <div class="cfg-card-body">
+          ${hasEmail ? `<details class="cfg-collapse"><summary>Email Configuration</summary><div class="cfg-collapse-body">
+            ${['user','smtp_host','smtp_port','imap_host','imap_port'].map(k => email[k] !== undefined ? `
+              <div class="cfg-field"><label class="cfg-label">${k}</label><div class="cfg-display-value">${escHtml(String(email[k]))}</div></div>` : '').join('')}
+            ${email.pass ? `<div class="cfg-field"><label class="cfg-label">pass</label><div class="cfg-display-value secret">••••••••••••</div></div>` : ''}
+          </div></details>` : ''}
+          ${hasInbox ? `<details class="cfg-collapse" ${!hasEmail ? 'open' : ''}><summary>Inbox Configuration</summary><div class="cfg-collapse-body">
+            ${Object.entries(inbox).map(([k,v]) => `<div class="cfg-field"><label class="cfg-label">${k}</label><div class="cfg-display-value">${escHtml(String(v))}</div></div>`).join('')}
+          </div></details>` : ''}
+        </div>
+      </div>`;
+    }
+
+    html += '</div>';
+    document.getElementById("panel-config").innerHTML = html;
+  }
+
+  function renderChannelFields(ch, channels, editing) {
+    const chCfg = channels[ch] || {};
+    const secretFields = new Set(['token', 'app_secret', 'client_secret']);
+    const tagFields = new Set(['auto_respond_channels', 'auto_respond_chats', 'allowed_open_ids', 'allowed_user_ids']);
+    const fieldDefs = {
+      discord: ['token', 'guild_id', 'log_channel_id', 'auto_respond_channels', 'allowed_user_ids'],
+      feishu: ['app_id', 'app_secret', 'log_chat_id', 'auto_respond_chats', 'allowed_open_ids'],
+      lark: ['app_id', 'app_secret', 'log_chat_id', 'auto_respond_chats', 'allowed_open_ids'],
+      dingtalk: ['client_id', 'client_secret'],
+    };
+    const fields = fieldDefs[ch] || Object.keys(chCfg);
+    const cfg = botsData[selectedBot] || {};
+    let html = '';
+
+    fields.forEach(f => {
+      let val = chCfg[f] !== undefined ? chCfg[f] : (cfg[f] !== undefined ? cfg[f] : '');
+      const isSecret = secretFields.has(f);
+      const isTag = tagFields.has(f);
+      const fieldId = `cfg-ch-${f}`;
+
+      html += `<div class="cfg-field"><label class="cfg-label">${f}</label>`;
+
+      if (editing) {
+        if (isSecret) {
+          html += `<div class="cfg-secret-wrap">
+            <input class="cfg-input mono" type="password" id="${fieldId}" value="${escHtml(String(val))}">
+            <button class="cfg-eye" onclick="window._toggleSecret('${fieldId}')"><span class="material-icons-outlined">visibility</span></button>
+          </div>`;
+        } else if (isTag) {
+          const items = Array.isArray(val) ? val : (val ? [val] : []);
+          html += `<div class="cfg-tags" id="${fieldId}" onclick="this.querySelector('input')?.focus()">
+            ${items.map(t => `<span class="cfg-tag">${escHtml(String(t))}<span class="cfg-tag-x" onclick="window._removeTag('${fieldId}',this.parentElement)">&times;</span></span>`).join('')}
+            <input placeholder="Type and press Enter" onkeydown="window._tagKeydown(event,'${fieldId}')">
+          </div>`;
+        } else {
+          html += `<input class="cfg-input mono" id="${fieldId}" value="${escHtml(String(val))}">`;
+        }
+      } else {
+        if (isSecret) {
+          html += `<div class="cfg-display-value secret">••••••••••••</div>`;
+        } else if (isTag) {
+          const items = Array.isArray(val) ? val : (val ? [val] : []);
+          html += `<div style="display:flex;gap:6px;flex-wrap:wrap;padding:4px 0;">
+            ${items.length ? items.map(t => `<span class="cfg-tag">${escHtml(String(t))}</span>`).join('') : '<span style="color:var(--text3);">—</span>'}
+          </div>`;
+        } else {
+          html += `<div class="cfg-display-value">${escHtml(String(val)) || '—'}</div>`;
+        }
+      }
+      html += '</div>';
+    });
+    return html;
+  }
+
+  // ── Config interactions ──
+  window._selectChannel = (ch) => {
+    const cfg = botsData[selectedBot] || {};
+    document.querySelectorAll('.channel-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === ch));
+    document.getElementById('cfg-channel-detail').innerHTML = renderChannelFields(ch, cfg.channels || {}, true);
+  };
+
+  window._toggleSecret = (id) => {
+    const inp = document.getElementById(id);
+    const icon = inp.parentElement.querySelector('.material-icons-outlined');
+    if (inp.type === 'password') { inp.type = 'text'; icon.textContent = 'visibility_off'; }
+    else { inp.type = 'password'; icon.textContent = 'visibility'; }
+  };
+
+  window._removeTag = (containerId, tagEl) => {
+    tagEl.remove();
+    markDirty('channel');
+  };
+
+  window._tagKeydown = (e, containerId) => {
+    if (e.key !== 'Enter' || !e.target.value.trim()) return;
+    e.preventDefault();
+    const container = document.getElementById(containerId);
+    const tag = document.createElement('span');
+    tag.className = 'cfg-tag';
+    tag.innerHTML = `${escHtml(e.target.value.trim())}<span class="cfg-tag-x" onclick="window._removeTag('${containerId}',this.parentElement)">&times;</span>`;
+    container.insertBefore(tag, e.target);
+    e.target.value = '';
+    markDirty('channel');
+  };
+
+  window.markDirty = markDirty;
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = `toast ${type}`;
+    setTimeout(() => el.classList.add('hidden'), 2500);
+  }
+
+  window._saveCard = async (card) => {
+    if (!selectedBot || !cfgDirty[card]) return;
+    const btn = document.getElementById(`cfg-save-${card}`);
+    btn.classList.add('saving');
+    btn.textContent = 'Saving...';
+
+    try {
+      const updates = {};
+      const cfg = botsData[selectedBot] || {};
+
+      if (card === 'general') {
+        updates.description = document.getElementById('cfg-description').value;
+        updates.model = document.getElementById('cfg-model').value;
+        updates.work_dir = document.getElementById('cfg-work_dir').value;
+        updates.timeout = parseInt(document.getElementById('cfg-timeout').value) || 600;
+        updates.stt_engine = document.getElementById('cfg-stt_engine').value;
+      }
+
+      if (card === 'channel') {
+        const activeBtn = document.querySelector('.channel-btn.active');
+        const ch = activeBtn ? activeBtn.textContent.trim() : cfg.active_channel;
+        updates.active_channel = ch;
+
+        // Collect channel-specific fields
+        const chCfg = { ...(cfg.channels?.[ch] || {}) };
+        const fieldDefs = {
+          discord: ['token', 'guild_id', 'log_channel_id'],
+          feishu: ['app_id', 'app_secret', 'log_chat_id'],
+          lark: ['app_id', 'app_secret', 'log_chat_id'],
+          dingtalk: ['client_id', 'client_secret'],
+        };
+        const tagFieldDefs = {
+          discord: ['auto_respond_channels', 'allowed_user_ids'],
+          feishu: ['auto_respond_chats', 'allowed_open_ids'],
+          lark: ['auto_respond_chats', 'allowed_open_ids'],
+          dingtalk: [],
+        };
+
+        (fieldDefs[ch] || []).forEach(f => {
+          const el = document.getElementById(`cfg-ch-${f}`);
+          if (el) chCfg[f] = el.value;
+        });
+        (tagFieldDefs[ch] || []).forEach(f => {
+          const container = document.getElementById(`cfg-ch-${f}`);
+          if (container) {
+            chCfg[f] = [...container.querySelectorAll('.cfg-tag')].map(t => {
+              const text = t.childNodes[0].textContent;
+              return isNaN(text) ? text : parseInt(text);
+            });
+          }
+        });
+
+        updates[`channels.${ch}`] = chCfg;
+      }
+
+      if (card === 'team') {
+        const role = document.getElementById('cfg-team-role').value;
+        if (role === 'standalone') {
+          updates.team = {};
+        } else {
+          const teamData = { role, ...(cfg.team || {}) };
+          teamData.role = role;
+          const chEl = document.getElementById('cfg-team-channel');
+          if (chEl) teamData.team_channel_id = chEl.value;
+          const leaderEl = document.getElementById('cfg-team-leader');
+          if (leaderEl) teamData.leader_bot_id = leaderEl.value;
+          updates.team = teamData;
+        }
+      }
+
+      await updateDoc(doc(db, "bots", selectedBot), updates);
+      cfgDirty[card] = false;
+      btn.classList.remove('dirty', 'saving');
+      btn.textContent = 'Save';
+      showToast('Configuration saved');
+    } catch (e) {
+      btn.classList.remove('saving');
+      btn.textContent = 'Save';
+      showToast(`Save failed: ${e.message}`, 'error');
+      console.error('Save error:', e);
+    }
+  };
+
+  // ── Pagination Helper ──
+  function renderPager(total, page, pageSize, onChangeId) {
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const sizes = [10, 20, 50, 100, 200];
+    let pages = [];
+    // Show max 7 page buttons
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages = [1];
+      let start = Math.max(2, page - 2), end = Math.min(totalPages - 1, page + 2);
+      if (start > 2) pages.push('...');
+      for (let i = start; i <= end; i++) pages.push(i);
+      if (end < totalPages - 1) pages.push('...');
+      pages.push(totalPages);
+    }
+    return `<div class="pager">
+      <div class="pager-left">
+        <span class="pager-info">${total} items</span>
+        <select onchange="window._pagerSize('${onChangeId}', +this.value)">
+          ${sizes.map(s => `<option value="${s}" ${s === pageSize ? 'selected' : ''}>${s} / page</option>`).join('')}
+        </select>
+      </div>
+      <div class="pager-right">
+        <button class="pager-btn" onclick="window._pagerGo('${onChangeId}', ${page - 1})" ${page <= 1 ? 'disabled' : ''}>
+          <span class="material-icons-outlined">chevron_left</span>
+        </button>
+        ${pages.map(p => p === '...'
+          ? '<span style="padding:0 4px;color:var(--text3);">…</span>'
+          : `<button class="pager-btn ${p === page ? 'active' : ''}" onclick="window._pagerGo('${onChangeId}', ${p})">${p}</button>`
+        ).join('')}
+        <button class="pager-btn" onclick="window._pagerGo('${onChangeId}', ${page + 1})" ${page >= totalPages ? 'disabled' : ''}>
+          <span class="material-icons-outlined">chevron_right</span>
+        </button>
+      </div>
+    </div>`;
+  }
+
+  // ── Logs Panel ──
+  let logsPage = 1, logsPageSize = 10;
+  let _allLogs = [];
+
+  window._pagerGo = (id, page) => {
+    if (id === 'logs') { logsPage = page; _renderLogs(); }
+    else if (id === 'inbox') { inboxPage = page; _renderCurrentInbox(); }
+  };
+  window._pagerSize = (id, size) => {
+    if (id === 'logs') { logsPageSize = size; logsPage = 1; _renderLogs(); }
+    else if (id === 'inbox') { inboxPageSize = size; inboxPage = 1; _renderCurrentInbox(); }
+  };
+
+  function _renderLogs() {
+    const panel = document.getElementById("panel-logs");
+    const total = _allLogs.length;
+    const totalPages = Math.max(1, Math.ceil(total / logsPageSize));
+    if (logsPage > totalPages) logsPage = totalPages;
+    const start = (logsPage - 1) * logsPageSize;
+    const pageLogs = _allLogs.slice(start, start + logsPageSize);
+
+    let html = renderPager(total, logsPage, logsPageSize, 'logs');
+    pageLogs.forEach((log) => {
+      const ts = formatTs(log.timestamp);
+      const steps = log.steps || [];
+      const src = log.source || '';
+      const isRunning = log.status === 'running';
+      html += `<div class="log-entry${isRunning ? ' running' : ''}">
+        <div class="log-meta">
+          <span class="log-chip">${ts}</span>
+          ${src ? `<span class="log-source ${src}">${src}</span>` : ''}
+          ${isRunning ? '<span class="log-status-running">running</span>' : ''}
+          <span class="log-chip">${(log.session_id || '').slice(0,8)}</span>
+        </div>
+        <div class="log-section">
+          <div class="log-label user"><span class="material-icons-outlined">person</span>User</div>
+          <div class="log-text">${escHtml(log.user || '')}</div>
+        </div>
+        <div class="log-section">
+          <div class="log-label asst"><span class="material-icons-outlined">smart_toy</span>Assistant</div>
+          <div class="log-text">${isRunning && !log.assistant ? '<span style="color:var(--text3);font-style:italic">thinking...</span>' : escHtml(log.assistant || '')}</div>
+        </div>
+        ${steps.length > 0 ? `<div class="log-steps"><details${isRunning ? ' open' : ''}>
+          <summary>${steps.length} steps${isRunning ? ' (live)' : ''}</summary>
+          <div class="log-steps-scroll">${steps.map(s => {
+            let cls = 'text';
+            if (s.startsWith('[tool]')) cls = 'tool';
+            else if (s.startsWith('[result]')) cls = 'result';
+            return `<div class="log-step ${cls}">${escHtml(s)}</div>`;
+          }).join('')}</div>
+        </details></div>` : (isRunning ? '<div class="log-steps"><div style="color:var(--text3);font-size:12px;font-style:italic;padding:4px 0">waiting for steps...</div></div>' : '')}
+      </div>`;
+    });
+    html += renderPager(total, logsPage, logsPageSize, 'logs');
+
+    // 记住当前展开状态和页面滚动位置
+    const openDetails = new Set();
+    panel.querySelectorAll('details[open]').forEach(det => {
+      const entry = det.closest('.log-entry');
+      if (entry) openDetails.add(Array.from(panel.querySelectorAll('.log-entry')).indexOf(entry));
+    });
+    const scrollTop = panel.scrollTop;
+
+    panel.innerHTML = html;
+
+    // 恢复展开状态
+    const entries = panel.querySelectorAll('.log-entry');
+    entries.forEach((entry, i) => {
+      const det = entry.querySelector('details');
+      if (det && openDetails.has(i)) det.setAttribute('open', '');
+    });
+
+    // 所有展开的 steps 滚动框自动滚到底部
+    panel.querySelectorAll('details[open] .log-steps-scroll').forEach(el => {
+      el.scrollTop = el.scrollHeight;
+    });
+
+    // 恢复页面滚动位置
+    panel.scrollTop = scrollTop;
+  }
+
+  // ── Chat Panel ──
+  let chatUnsubscribe = null;
+  let _chatJustSent = false;
+
+  function _renderChat(msgs) {
+    const panel = document.getElementById("panel-chat");
+    const botInitial = (selectedBot || '?')[0].toUpperCase();
+    let html = '<div class="chat-messages" id="chat-messages">';
+
+    if (!msgs.length) {
+      html += `<div class="chat-empty">
+        <div class="chat-empty-icon"><span class="material-icons-outlined">smart_toy</span></div>
+        <div class="chat-empty-title">Chat with ${escHtml(selectedBot)}</div>
+        <div class="chat-empty-hint">Send a message below. It will be delivered via Firestore Inbox and processed by the bot.</div>
+      </div>`;
+    } else {
+      let lastDate = '';
+      msgs.forEach(m => {
+        const isSent = m.from === 'controlboard';
+        const ts = formatTs(m.created_at);
+        const statusCls = m.status || 'pending';
+        const msgDate = m.created_at?.toDate?.()?.toLocaleDateString?.() || '';
+        if (msgDate && msgDate !== lastDate) {
+          lastDate = msgDate;
+          html += `<div class="chat-divider">${msgDate}</div>`;
+        }
+
+        // User message
+        html += `<div class="chat-row sent">
+          <div class="chat-avatar user">You</div>
+          <div class="chat-body">
+            <div class="chat-sender">You <span class="chat-ts">${ts}</span></div>
+            <div class="chat-content">${escHtml(m.instruction || '')}</div>
+            ${statusCls !== 'done' ? `<span class="chat-status ${statusCls}">${statusCls === 'processing' ? 'Processing...' : statusCls}</span>` : ''}
+          </div>
+        </div>`;
+
+        // Bot response
+        if (m.result) {
+          html += `<div class="chat-row">
+            <div class="chat-avatar bot">${botInitial}</div>
+            <div class="chat-body">
+              <div class="chat-sender">${escHtml(selectedBot)} <span class="chat-ts">${ts}</span></div>
+              <div class="chat-content">${escHtml(m.result)}</div>
+            </div>
+          </div>`;
+        } else if (statusCls === 'processing') {
+          html += `<div class="chat-row">
+            <div class="chat-avatar bot">${botInitial}</div>
+            <div class="chat-body">
+              <div class="chat-sender">${escHtml(selectedBot)}</div>
+              <div class="chat-thinking">
+                <div class="chat-thinking-dots"><span></span><span></span><span></span></div>
+                Thinking...
+              </div>
+            </div>
+          </div>`;
+        }
+      });
+    }
+    html += '</div>';
+    html += `<div class="chat-compose">
+      <div class="chat-input-wrap">
+        <textarea id="chat-input" placeholder="Message ${escHtml(selectedBot)}..." rows="1"
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();window._sendChatMsg()}"
+          oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px'"></textarea>
+        <button class="chat-send-btn" onclick="window._sendChatMsg()" title="Send">
+          <span class="material-icons-outlined">send</span>
+        </button>
+      </div>
+    </div>`;
+    const oldInput = document.getElementById('chat-input');
+    const savedText = _chatJustSent ? '' : (oldInput ? oldInput.value : '');
+    _chatJustSent = false;
+    panel.innerHTML = html;
+    const newInput = document.getElementById('chat-input');
+    if (newInput && savedText) newInput.value = savedText;
+    const chatMsgs = document.getElementById('chat-messages');
+    if (chatMsgs) chatMsgs.scrollTop = chatMsgs.scrollHeight;
+  }
+
+  window._sendChatMsg = async () => {
+    const input = document.getElementById('chat-input');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+    const btn = input.closest('.chat-input-wrap')?.querySelector('.chat-send-btn');
+    input.disabled = true;
+    if (btn) btn.disabled = true;
+    try {
+      await addDoc(collection(db, "messages"), {
+        from: "controlboard",
+        to: selectedBot,
+        instruction: text,
+        task_id: "",
+        status: "pending",
+        result: "",
+        created_at: Timestamp.now(),
+      });
+      _chatJustSent = true;
+      input.value = '';
+      input.style.height = 'auto';
+    } catch (e) {
+      alert('Send failed: ' + e.message);
+    } finally {
+      input.disabled = false;
+      if (btn) btn.disabled = false;
+      input.focus();
+    }
+  };
+
+  function startChatListener() {
+    if (chatUnsubscribe) { chatUnsubscribe(); chatUnsubscribe = null; }
+    if (!selectedBot) return;
+    const panel = document.getElementById("panel-chat");
+    panel.innerHTML = '<div class="loading">Loading...</div>';
+
+    // 只查 controlboard 发给此 bot 的消息（result 字段自带回复内容）
+    const q = query(collection(db, "messages"),
+      where("from", "==", "controlboard"), where("to", "==", selectedBot), limit(100));
+
+    chatUnsubscribe = onSnapshot(q, snap => {
+      const msgs = [];
+      snap.forEach(d => msgs.push({ id: d.id, ...d.data() }));
+      msgs.sort((a, b) => {
+        const ta = a.created_at?.toDate?.() || new Date(0);
+        const tb = b.created_at?.toDate?.() || new Date(0);
+        return ta - tb;
+      });
+      _renderChat(msgs);
+    });
+  }
+
+  function startLogsListener() {
+    if (logsUnsubscribe) { logsUnsubscribe(); logsUnsubscribe = null; }
+    if (!selectedBot) return;
+    const panel = document.getElementById("panel-logs");
+    panel.innerHTML = '<div class="loading">Loading logs...</div>';
+    logsPage = 1;
+
+    const q = query(collection(db, "bots", selectedBot, "logs"), orderBy("timestamp", "desc"), limit(200));
+    logsUnsubscribe = onSnapshot(q, (snap) => {
+      _allLogs = [];
+      snap.forEach((d) => _allLogs.push({ id: d.id, ...d.data() }));
+      // Already sorted desc by Firestore (newest first)
+      _renderLogs();
+    });
+  }
+
+  // ── Inbox Panel ──
+  let inboxUnsubscribe = null;
+  let inboxMode = 'inbox';
+  let inboxPage = 1, inboxPageSize = 10;
+  let _allInbox = [];
+
+  window._switchInboxMode = (mode) => {
+    inboxMode = mode;
+    inboxPage = 1;
+    startInboxListener();
+  };
+
+  function _renderCurrentInbox() {
+    const panel = document.getElementById("panel-inbox");
+    const total = _allInbox.length;
+    const totalPages = Math.max(1, Math.ceil(total / inboxPageSize));
+    if (inboxPage > totalPages) inboxPage = totalPages;
+    const start = (inboxPage - 1) * inboxPageSize;
+    const pageMsgs = _allInbox.slice(start, start + inboxPageSize);
+
+    let html = `<div class="inbox-toolbar">
+      <div class="inbox-tabs">
+        <button class="inbox-tab ${inboxMode === 'all' ? 'active' : ''}" onclick="window._switchInboxMode('all')">
+          <span class="material-icons-outlined">sync_alt</span>All
+        </button>
+        <button class="inbox-tab ${inboxMode === 'inbox' ? 'active' : ''}" onclick="window._switchInboxMode('inbox')">
+          <span class="material-icons-outlined">call_received</span>Inbox
+        </button>
+        <button class="inbox-tab ${inboxMode === 'outbox' ? 'active' : ''}" onclick="window._switchInboxMode('outbox')">
+          <span class="material-icons-outlined">call_made</span>Outbox
+        </button>
+      </div>
+    </div>`;
+    html += renderPager(total, inboxPage, inboxPageSize, 'inbox');
+
+    if (!pageMsgs.length) {
+      html += `<div style="padding:24px;color:var(--text3);font-size:14px;">No messages</div>`;
+    } else {
+      pageMsgs.forEach(m => {
+        const statusColor = m.status === 'done' ? 'var(--green)' : m.status === 'processing' ? 'var(--yellow)' : 'var(--text3)';
+        const isSent = m.from === selectedBot;
+        const peer = isSent ? (m.to || '?') : (m.from || '?');
+        const dirIcon = isSent ? 'call_made' : 'call_received';
+        const dirColor = isSent ? 'var(--blue)' : 'var(--green)';
+        html += `
+          <div class="inbox-msg">
+            <div class="inbox-meta">
+              <span class="material-icons-outlined" style="font-size:14px;color:${dirColor}">${dirIcon}</span>
+              <span class="inbox-peer">${peer}</span>
+              <span class="inbox-status" style="color:${statusColor}">${m.status || '?'}</span>
+              <span class="inbox-ts">${formatTs(m.created_at)}</span>
+            </div>
+            <div class="inbox-instruction">${escHtml(m.instruction || '')}</div>
+            ${m.result ? `<details class="inbox-result-wrap"><summary>Result</summary><div class="inbox-result">${escHtml(m.result)}</div></details>` : ''}
+          </div>`;
+      });
+    }
+    html += renderPager(total, inboxPage, inboxPageSize, 'inbox');
+    panel.innerHTML = html;
+  }
+
+  function _sortMsgs(msgs) {
+    msgs.sort((a, b) => {
+      const ta = a.created_at?.toDate?.() || new Date(0);
+      const tb = b.created_at?.toDate?.() || new Date(0);
+      return tb - ta;
+    });
+  }
+
+  function startInboxListener() {
+    if (inboxUnsubscribe) { inboxUnsubscribe(); inboxUnsubscribe = null; }
+    if (!selectedBot) return;
+    const panel = document.getElementById("panel-inbox");
+    panel.innerHTML = '<div class="loading">Loading...</div>';
+
+    if (inboxMode === 'all') {
+      const qIn = query(collection(db, "messages"), where("to", "==", selectedBot), limit(200));
+      const qOut = query(collection(db, "messages"), where("from", "==", selectedBot), limit(200));
+      let inMsgs = [], outMsgs = [], ready = 0;
+
+      function _mergeAndRender() {
+        const all = {};
+        inMsgs.forEach(m => { all[m.id] = m; });
+        outMsgs.forEach(m => { all[m.id] = m; });
+        _allInbox = Object.values(all);
+        _sortMsgs(_allInbox);
+        _renderCurrentInbox();
+      }
+
+      const u1 = onSnapshot(qIn, (snap) => {
+        inMsgs = []; snap.forEach(d => inMsgs.push({ id: d.id, ...d.data() }));
+        ready++; if (ready >= 2) _mergeAndRender();
+      });
+      const u2 = onSnapshot(qOut, (snap) => {
+        outMsgs = []; snap.forEach(d => outMsgs.push({ id: d.id, ...d.data() }));
+        ready++; if (ready >= 2) _mergeAndRender();
+      });
+      inboxUnsubscribe = () => { u1(); u2(); };
+      return;
+    }
+
+    const field = inboxMode === 'inbox' ? 'to' : 'from';
+    const q = inboxMode === 'inbox'
+      ? query(collection(db, "messages"), where(field, "==", selectedBot), orderBy("created_at", "desc"), limit(200))
+      : query(collection(db, "messages"), where(field, "==", selectedBot), limit(200));
+
+    inboxUnsubscribe = onSnapshot(q, (snap) => {
+      _allInbox = [];
+      snap.forEach(d => _allInbox.push({ id: d.id, ...d.data() }));
+      if (inboxMode === 'outbox') _sortMsgs(_allInbox);
+      _renderCurrentInbox();
+    });
+  }
+
+  // ── Helpers ──
+  function escHtml(s) {
+    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+  function formatTs(ts) {
+    if (!ts) return "—";
+    if (ts.toDate) ts = ts.toDate();
+    if (ts instanceof Date) return ts.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
+    return String(ts).slice(0, 19);
+  }
+</script>
+</body>
+</html>

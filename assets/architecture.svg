@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="channelGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a6bff"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="coreGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="workerGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="toolGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="userGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#dc2626"/>
+      <stop offset="100%" stop-color="#f87171"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="620" rx="12" fill="url(#bgGrad)"/>
+
+  <!-- Title -->
+  <text x="450" y="38" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="700" letter-spacing="0.5">CloseCrab Architecture</text>
+  <text x="450" y="56" text-anchor="middle" fill="#7d8590" font-size="11">Channel  →  Core  →  Worker  →  Claude Code CLI</text>
+
+  <!-- ==================== USER ROW ==================== -->
+  <g filter="shadow">
+    <rect x="250" y="74" width="400" height="44" rx="22" fill="url(#userGrad)" opacity="0.9"/>
+    <text x="450" y="101" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">User Message</text>
+  </g>
+
+  <!-- Arrow down from user -->
+  <line x1="450" y1="118" x2="450" y2="142" stroke="#7d8590" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <polygon points="445,140 450,150 455,140" fill="#7d8590"/>
+
+  <!-- ==================== CHANNEL ROW ==================== -->
+  <!-- Channel platforms -->
+  <g filter="shadow">
+    <rect x="50" y="152" width="800" height="110" rx="10" fill="#1a1f2b" stroke="#30363d" stroke-width="1"/>
+    <text x="80" y="175" fill="#58a6ff" font-size="12" font-weight="700">CHANNEL</text>
+  </g>
+
+  <!-- Discord -->
+  <g>
+    <rect x="80" y="190" width="140" height="56" rx="8" fill="url(#channelGrad)" opacity="0.85"/>
+    <text x="150" y="213" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Discord</text>
+    <text x="150" y="234" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="10">Slash / Voice / DM</text>
+  </g>
+
+  <!-- Feishu -->
+  <g>
+    <rect x="240" y="190" width="140" height="56" rx="8" fill="url(#channelGrad)" opacity="0.85"/>
+    <text x="310" y="213" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Feishu</text>
+    <text x="310" y="234" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="10">Card / WebSocket</text>
+  </g>
+
+  <!-- Lark -->
+  <g>
+    <rect x="400" y="190" width="140" height="56" rx="8" fill="url(#channelGrad)" opacity="0.85"/>
+    <text x="470" y="213" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Lark</text>
+    <text x="470" y="234" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="10">Card / WebSocket</text>
+  </g>
+
+  <!-- DingTalk -->
+  <g>
+    <rect x="560" y="190" width="140" height="56" rx="8" fill="url(#channelGrad)" opacity="0.85"/>
+    <text x="630" y="213" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">DingTalk</text>
+    <text x="630" y="234" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="10">Stream Mode</text>
+  </g>
+
+  <!-- STT badge -->
+  <g>
+    <rect x="720" y="190" width="110" height="56" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="775" y="210" text-anchor="middle" fill="#94a3b8" font-size="10" font-weight="600">STT Engine</text>
+    <text x="775" y="226" text-anchor="middle" fill="#64748b" font-size="9">Gemini Flash</text>
+    <text x="775" y="239" text-anchor="middle" fill="#64748b" font-size="9">Chirp2 / Whisper</text>
+  </g>
+
+  <!-- Arrow down from channels -->
+  <line x1="450" y1="262" x2="450" y2="286" stroke="#7d8590" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <polygon points="445,284 450,294 455,284" fill="#7d8590"/>
+  <text x="462" y="280" fill="#7d8590" font-size="9">UnifiedMessage</text>
+
+  <!-- ==================== CORE ROW ==================== -->
+  <g filter="shadow">
+    <rect x="150" y="296" width="600" height="80" rx="10" fill="#1a1f2b" stroke="#30363d" stroke-width="1"/>
+    <text x="180" y="319" fill="#a855f7" font-size="12" font-weight="700">CORE</text>
+  </g>
+
+  <g>
+    <rect x="180" y="328" width="130" height="36" rx="6" fill="url(#coreGrad)" opacity="0.85"/>
+    <text x="245" y="351" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">BotCore</text>
+  </g>
+  <g>
+    <rect x="330" y="328" width="130" height="36" rx="6" fill="url(#coreGrad)" opacity="0.7"/>
+    <text x="395" y="351" text-anchor="middle" fill="#fff" font-size="12">Session Mgr</text>
+  </g>
+  <g>
+    <rect x="480" y="328" width="100" height="36" rx="6" fill="url(#coreGrad)" opacity="0.55"/>
+    <text x="530" y="351" text-anchor="middle" fill="#fff" font-size="12">Auth</text>
+  </g>
+  <g>
+    <rect x="600" y="328" width="120" height="36" rx="6" fill="url(#coreGrad)" opacity="0.55"/>
+    <text x="660" y="351" text-anchor="middle" fill="#fff" font-size="12">Token Track</text>
+  </g>
+
+  <!-- Arrow down from core -->
+  <line x1="450" y1="376" x2="450" y2="400" stroke="#7d8590" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <polygon points="445,398 450,408 455,398" fill="#7d8590"/>
+  <text x="462" y="394" fill="#7d8590" font-size="9">socketpair IPC</text>
+
+  <!-- ==================== WORKER ROW ==================== -->
+  <g filter="shadow">
+    <rect x="200" y="410" width="500" height="70" rx="10" fill="#1a1f2b" stroke="#30363d" stroke-width="1"/>
+    <text x="230" y="433" fill="#10b981" font-size="12" font-weight="700">WORKER</text>
+  </g>
+
+  <g>
+    <rect x="230" y="440" width="220" height="30" rx="6" fill="url(#workerGrad)" opacity="0.85"/>
+    <text x="340" y="460" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Claude Code CLI</text>
+  </g>
+  <g>
+    <rect x="470" y="440" width="200" height="30" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="570" y="460" text-anchor="middle" fill="#94a3b8" font-size="11">stream-json protocol</text>
+  </g>
+
+  <!-- Arrow down from worker -->
+  <path d="M 300 480 L 300 510 L 200 510" stroke="#7d8590" stroke-width="1.2" fill="none" stroke-dasharray="4,3"/>
+  <path d="M 450 480 L 450 510" stroke="#7d8590" stroke-width="1.2" fill="none" stroke-dasharray="4,3"/>
+  <path d="M 600 480 L 600 510 L 700 510" stroke="#7d8590" stroke-width="1.2" fill="none" stroke-dasharray="4,3"/>
+  <polygon points="195,505 195,515 205,510" fill="#7d8590" transform="rotate(180,200,510)"/>
+  <polygon points="445,508 450,518 455,508" fill="#7d8590"/>
+  <polygon points="695,505 695,515 705,510" fill="#7d8590"/>
+
+  <!-- ==================== TOOLS ROW ==================== -->
+  <!-- Tools -->
+  <g>
+    <rect x="60" y="520" width="180" height="50" rx="8" fill="#1a1f2b" stroke="#d97706" stroke-width="1" opacity="0.9"/>
+    <text x="150" y="543" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="600">Tools</text>
+    <text x="150" y="559" text-anchor="middle" fill="#7d8590" font-size="10">Read / Edit / Bash / Grep</text>
+  </g>
+
+  <!-- MCP -->
+  <g>
+    <rect x="280" y="520" width="220" height="50" rx="8" fill="#1a1f2b" stroke="#d97706" stroke-width="1" opacity="0.9"/>
+    <text x="390" y="543" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="600">MCP Servers</text>
+    <text x="390" y="559" text-anchor="middle" fill="#7d8590" font-size="10">GitHub / Playwright / Jina / Context7</text>
+  </g>
+
+  <!-- Skills -->
+  <g>
+    <rect x="540" y="520" width="200" height="50" rx="8" fill="#1a1f2b" stroke="#d97706" stroke-width="1" opacity="0.9"/>
+    <text x="640" y="543" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="600">Skills (30)</text>
+    <text x="640" y="559" text-anchor="middle" fill="#7d8590" font-size="10">sglang / vllm / imagen / veo ...</text>
+  </g>
+
+  <!-- ==================== SIDE PANELS ==================== -->
+  <!-- Firestore side panel -->
+  <g>
+    <rect x="770" y="296" width="110" height="80" rx="8" fill="#1a1f2b" stroke="#f97316" stroke-width="1" stroke-dasharray="3,2"/>
+    <text x="825" y="320" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="600">Firestore</text>
+    <text x="825" y="337" text-anchor="middle" fill="#7d8590" font-size="9">Bot Config</text>
+    <text x="825" y="350" text-anchor="middle" fill="#7d8590" font-size="9">Registry</text>
+    <text x="825" y="363" text-anchor="middle" fill="#7d8590" font-size="9">Inbox</text>
+  </g>
+  <line x1="750" y1="336" x2="770" y2="336" stroke="#f97316" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Team side panel -->
+  <g>
+    <rect x="770" y="410" width="110" height="70" rx="8" fill="#1a1f2b" stroke="#22d3ee" stroke-width="1" stroke-dasharray="3,2"/>
+    <text x="825" y="434" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">Bot Team</text>
+    <text x="825" y="451" text-anchor="middle" fill="#7d8590" font-size="9">Leader ↔ Teammate</text>
+    <text x="825" y="464" text-anchor="middle" fill="#7d8590" font-size="9">@mention / Inbox</text>
+  </g>
+  <line x1="700" y1="445" x2="770" y2="445" stroke="#22d3ee" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Footer -->
+  <text x="450" y="600" text-anchor="middle" fill="#484f58" font-size="10">github.com/yangwhale/CloseCrab</text>
+</svg>

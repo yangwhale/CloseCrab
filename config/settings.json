@@ -1,0 +1,40 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_USE_VERTEX": "1",
+    "CLOUD_ML_REGION": "global",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "${ANTHROPIC_VERTEX_PROJECT_ID}",
+    "ANTHROPIC_MODEL": "claude-opus-4-6@default",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5@20251001",
+    "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}",
+    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}",
+    "JINA_API_KEY": "${JINA_API_KEY}",
+    "TAVILY_API_KEY": "${TAVILY_API_KEY}",
+    "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+    "LANG": "zh_CN.UTF-8",
+    "CC_PAGES_URL_PREFIX": "${CC_PAGES_URL_PREFIX}",
+    "CC_PAGES_WEB_ROOT": "${CC_PAGES_WEB_ROOT}",
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
+    "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "180000"
+  },
+  "cleanupPeriodDays": 7,
+  "permissions": {
+    "allow": [
+      "Read(//home/${USER}/.claude/**)",
+      "Bash(grep:*)"
+    ]
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "planning-with-files@planning-with-files": true,
+    "commit-commands@claude-plugins-official": true,
+    "explanatory-output-style@claude-plugins-official": true,
+    "github@claude-plugins-official": true,
+    "playwright@claude-plugins-official": true,
+    "ui-ux-pro-max@ui-ux-pro-max-skill": true
+  },
+  "extraKnownMarketplaces": {},
+  "language": "中文",
+  "skipDangerousModePermissionPrompt": true
+}

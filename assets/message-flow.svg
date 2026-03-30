@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <filter id="sh">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <rect width="900" height="400" rx="12" fill="url(#bg)"/>
+  <text x="450" y="32" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Message Processing Flow</text>
+
+  <!-- User -->
+  <g filter="sh">
+    <rect x="30" y="60" width="120" height="50" rx="25" fill="#dc2626" opacity="0.9"/>
+    <text x="90" y="90" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">User</text>
+  </g>
+
+  <!-- Arrow 1 -->
+  <line x1="150" y1="85" x2="180" y2="85" stroke="#7d8590" stroke-width="1.5"/>
+  <polygon points="178,80 188,85 178,90" fill="#7d8590"/>
+  <text x="165" y="75" text-anchor="middle" fill="#484f58" font-size="8">text/voice</text>
+
+  <!-- Channel -->
+  <g filter="sh">
+    <rect x="190" y="55" width="140" height="60" rx="8" fill="#1a1f2b" stroke="#1a6bff" stroke-width="1.5"/>
+    <text x="260" y="78" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">Channel Adapter</text>
+    <text x="260" y="95" text-anchor="middle" fill="#7d8590" font-size="9">Discord / Feishu / DingTalk</text>
+  </g>
+
+  <!-- Arrow 2 -->
+  <line x1="330" y1="85" x2="360" y2="85" stroke="#7d8590" stroke-width="1.5"/>
+  <polygon points="358,80 368,85 358,90" fill="#7d8590"/>
+  <text x="345" y="75" text-anchor="middle" fill="#484f58" font-size="8">UnifiedMsg</text>
+
+  <!-- BotCore -->
+  <g filter="sh">
+    <rect x="370" y="55" width="130" height="60" rx="8" fill="#1a1f2b" stroke="#a855f7" stroke-width="1.5"/>
+    <text x="435" y="78" text-anchor="middle" fill="#a855f7" font-size="11" font-weight="600">BotCore</text>
+    <text x="435" y="95" text-anchor="middle" fill="#7d8590" font-size="9">Route + Session + Auth</text>
+  </g>
+
+  <!-- Arrow 3 -->
+  <line x1="500" y1="85" x2="530" y2="85" stroke="#7d8590" stroke-width="1.5"/>
+  <polygon points="528,80 538,85 528,90" fill="#7d8590"/>
+
+  <!-- Worker -->
+  <g filter="sh">
+    <rect x="540" y="55" width="150" height="60" rx="8" fill="#1a1f2b" stroke="#10b981" stroke-width="1.5"/>
+    <text x="615" y="78" text-anchor="middle" fill="#10b981" font-size="11" font-weight="600">ClaudeCodeWorker</text>
+    <text x="615" y="95" text-anchor="middle" fill="#7d8590" font-size="9">socketpair IPC</text>
+  </g>
+
+  <!-- Arrow 4 -->
+  <line x1="690" y1="85" x2="720" y2="85" stroke="#7d8590" stroke-width="1.5"/>
+  <polygon points="718,80 728,85 718,90" fill="#7d8590"/>
+
+  <!-- Claude Code CLI -->
+  <g filter="sh">
+    <rect x="730" y="55" width="140" height="60" rx="8" fill="#1a1f2b" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="800" y="78" text-anchor="middle" fill="#f59e0b" font-size="11" font-weight="600">Claude Code CLI</text>
+    <text x="800" y="95" text-anchor="middle" fill="#7d8590" font-size="9">→ Vertex AI / Claude</text>
+  </g>
+
+  <!-- === socketpair detail === -->
+  <rect x="50" y="140" width="800" height="240" rx="10" fill="#1a1f2b" stroke="#30363d" stroke-width="1"/>
+  <text x="80" y="168" fill="#58a6ff" font-size="13" font-weight="700">socketpair IPC Detail</text>
+
+  <!-- Process boxes -->
+  <rect x="80" y="185" width="300" height="170" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="230" y="208" text-anchor="middle" fill="#a855f7" font-size="12" font-weight="600">Bot Process (Python)</text>
+
+  <rect x="520" y="185" width="300" height="170" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="670" y="208" text-anchor="middle" fill="#10b981" font-size="12" font-weight="600">Claude Code CLI (Node.js)</text>
+
+  <!-- socketpair pipe -->
+  <rect x="390" y="235" width="120" height="80" rx="6" fill="#0d1117" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="450" y="258" text-anchor="middle" fill="#f59e0b" font-size="11" font-weight="600">socketpair</text>
+  <text x="450" y="275" text-anchor="middle" fill="#7d8590" font-size="9">fd[0] ↔ fd[1]</text>
+  <text x="450" y="290" text-anchor="middle" fill="#7d8590" font-size="9">stdin + stdout</text>
+  <text x="450" y="305" text-anchor="middle" fill="#484f58" font-size="8">bidirectional</text>
+
+  <!-- Left side items -->
+  <text x="110" y="235" fill="#7d8590" font-size="10">send() → JSON message</text>
+  <text x="110" y="255" fill="#7d8590" font-size="10">recv() ← stream-json events</text>
+  <text x="110" y="280" fill="#484f58" font-size="9">• on_event → progress callback</text>
+  <text x="110" y="296" fill="#484f58" font-size="9">• on_step → Firestore live log</text>
+  <text x="110" y="312" fill="#484f58" font-size="9">• on_stale_result → buffer flush</text>
+  <text x="110" y="328" fill="#484f58" font-size="9">• FIONREAD peek (non-blocking)</text>
+  <text x="110" y="344" fill="#484f58" font-size="9">• token usage accumulation</text>
+
+  <!-- Right side items -->
+  <text x="550" y="235" fill="#7d8590" font-size="10">system:init → new turn</text>
+  <text x="550" y="255" fill="#7d8590" font-size="10">result → final response</text>
+  <text x="550" y="280" fill="#484f58" font-size="9">• Tool calls: Read/Edit/Bash/...</text>
+  <text x="550" y="296" fill="#484f58" font-size="9">• MCP Server interactions</text>
+  <text x="550" y="312" fill="#484f58" font-size="9">• AskUserQuestion → user input</text>
+  <text x="550" y="328" fill="#484f58" font-size="9">• ExitPlanMode → approval flow</text>
+  <text x="550" y="344" fill="#484f58" font-size="9">• --resume session recovery</text>
+
+  <!-- Arrows between process and socketpair -->
+  <line x1="380" y1="255" x2="390" y2="265" stroke="#f59e0b" stroke-width="1.2"/>
+  <line x1="510" y1="265" x2="520" y2="255" stroke="#f59e0b" stroke-width="1.2"/>
+  <line x1="390" y1="285" x2="380" y2="275" stroke="#f59e0b" stroke-width="1.2"/>
+  <line x1="520" y1="275" x2="510" y2="285" stroke="#f59e0b" stroke-width="1.2"/>
+
+  <!-- Footer -->
+  <text x="450" y="393" text-anchor="middle" fill="#484f58" font-size="9">Unix socketpair: zero-copy, no network overhead, Claude Code CLI subprocess with full tool access</text>
+</svg>
