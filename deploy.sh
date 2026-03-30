@@ -279,6 +279,117 @@ except Exception:
 " 2>/dev/null || true
 }
 
+# ====================================================================
+# gcsfuse 自动挂载（CC Pages + 共享 Memory）
+# ====================================================================
+
+setup_gcsfuse() {
+    local bucket="${GCS_BUCKET:-}"
+    if [[ -z "$bucket" ]]; then
+        echo "  GCS_BUCKET 未设置，跳过 gcsfuse 挂载"
+        return
+    fi
+
+    # 判断是否有 sudo
+    local has_sudo=false
+    sudo -n true 2>/dev/null && has_sudo=true
+
+    # 1. 安装 gcsfuse
+    if command -v gcsfuse &>/dev/null; then
+        echo "  gcsfuse 已安装: $(gcsfuse --version 2>/dev/null | head -1)"
+    elif $has_sudo && command -v apt-get &>/dev/null; then
+        echo "  通过 apt 安装 gcsfuse..."
+        local codename
+        codename=$(lsb_release -c -s 2>/dev/null || echo "bookworm")
+        export GCSFUSE_REPO="gcsfuse-${codename}"
+        echo "deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" \
+            | sudo tee /etc/apt/sources.list.d/gcsfuse.list >/dev/null
+        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+            | sudo tee /usr/share/keyrings/cloud.google.asc >/dev/null
+        sudo apt-get update -qq && sudo apt-get install -y -qq gcsfuse
+        echo "  gcsfuse 安装完成"
+    else
+        echo "  无 sudo，下载 gcsfuse binary..."
+        local gcsfuse_version="3.7.1"
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        (
+            cd "$tmpdir"
+            curl -fsSL -o gcsfuse.deb \
+                "https://github.com/GoogleCloudPlatform/gcsfuse/releases/download/v${gcsfuse_version}/gcsfuse_${gcsfuse_version}_amd64.deb"
+            ar x gcsfuse.deb
+            tar xf data.tar.* 2>/dev/null || tar xf data.tar.gz 2>/dev/null
+            mkdir -p "$HOME/.local/bin"
+            cp usr/bin/gcsfuse "$HOME/.local/bin/"
+            chmod +x "$HOME/.local/bin/gcsfuse"
+        )
+        rm -rf "$tmpdir"
+        export PATH="$HOME/.local/bin:$PATH"
+        echo "  gcsfuse 已安装到 $HOME/.local/bin/gcsfuse"
+    fi
+
+    if ! command -v gcsfuse &>/dev/null; then
+        echo "  ⚠ gcsfuse 安装失败，跳过挂载"
+        return
+    fi
+
+    # 2. 确定挂载点（整个 bucket）
+    local mount_parent
+    if $has_sudo; then
+        mount_parent="/gcs"
+    else
+        mount_parent="$HOME/gcs-mount"
+    fi
+
+    # 3. 挂载整个 bucket
+    mkdir -p "$mount_parent"
+    if mountpoint -q "$mount_parent" 2>/dev/null; then
+        echo "  $mount_parent 已挂载"
+    else
+        echo "  挂载 $bucket → $mount_parent ..."
+        if gcsfuse --implicit-dirs "$bucket" "$mount_parent"; then
+            echo "  挂载成功"
+        else
+            echo "  ⚠ gcsfuse 挂载失败"
+            return
+        fi
+    fi
+
+    # 4. 创建 cc-pages 子目录结构
+    mkdir -p "$mount_parent/cc-pages/pages" "$mount_parent/cc-pages/assets" 2>/dev/null || true
+    echo "  cc-pages/pages/ 和 cc-pages/assets/ 目录已就绪"
+
+    # 5. 共享 Memory 挂载：将 bucket 内 memory/shared/ 链接到 project memory 目录
+    local project_name
+    project_name=$(echo "$HOME" | tr '/' '-')
+    local memory_shared="$HOME/.claude/projects/${project_name}/memory/shared"
+    local gcs_shared="$mount_parent/memory/shared"
+    mkdir -p "$mount_parent/memory/shared" 2>/dev/null || true
+
+    if [[ -L "$memory_shared" ]]; then
+        echo "  shared memory symlink 已存在: $(readlink "$memory_shared")"
+    elif [[ -d "$memory_shared" ]]; then
+        echo "  shared memory 目录已存在（非 symlink），跳过"
+    else
+        mkdir -p "$(dirname "$memory_shared")"
+        ln -s "$gcs_shared" "$memory_shared"
+        echo "  shared memory: $memory_shared → $gcs_shared"
+    fi
+
+    # 6. fstab 持久化（仅有 sudo 时）
+    if $has_sudo; then
+        local fstab_entry="${bucket} ${mount_parent} gcsfuse implicit_dirs,allow_other,_netdev 0 0"
+        if grep -qF "$bucket" /etc/fstab 2>/dev/null; then
+            echo "  fstab 条目已存在"
+        else
+            echo "$fstab_entry" | sudo tee -a /etc/fstab >/dev/null
+            echo "  fstab 条目已添加"
+        fi
+    fi
+
+    echo "  gcsfuse 设置完成: CC_PAGES_WEB_ROOT=$mount_parent/cc-pages"
+}
+
 collect_secrets
 echo "=== CloseCrab Deploy (mode: $MODE) ==="
 
@@ -290,7 +401,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 0. 基础工具检查 (nodejs, npm, git)
     # ----------------------------------------------------------------
-    echo "[0/10] 检查基础工具..."
+    echo "[0/11] 检查基础工具..."
     # git
     if ! command -v git &>/dev/null; then
         echo "  安装 git..."
@@ -328,7 +439,7 @@ install_cc() {
     # 确保 ~/.local/bin 在 PATH 中（Claude CLI 默认安装位置）
     export PATH="$HOME/.local/bin:$PATH"
 
-    echo "[1/10] 检查 Claude Code CLI..."
+    echo "[1/11] 检查 Claude Code CLI..."
     if command -v claude &>/dev/null; then
         echo "  已安装: $(claude --version)"
     else
@@ -360,7 +471,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 2. GCP 认证
     # ----------------------------------------------------------------
-    echo "[2/10] GCP 认证..."
+    echo "[2/11] GCP 认证..."
     GCLOUD_ACCOUNT=$(gcloud auth list --filter='status:ACTIVE' --format='value(account)' 2>/dev/null || true)
     if [[ -n "$GCLOUD_ACCOUNT" ]]; then
         echo "  gcloud 已认证: $GCLOUD_ACCOUNT"
@@ -392,7 +503,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 3. Claude Code 配置
     # ----------------------------------------------------------------
-    echo "[3/10] 配置 Claude Code..."
+    echo "[3/11] 配置 Claude Code..."
     mkdir -p ~/.claude ~/.claude/closecrab
 
     # 确保 ~/.zshenv 中的环境变量在非登录 shell 中也能用
@@ -434,7 +545,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 4. Skills 部署（增量拷贝，不删除用户自行添加的 skill）
     # ----------------------------------------------------------------
-    echo "[4/10] 部署 Skills..."
+    echo "[4/11] 部署 Skills..."
     # 如果存在旧的 symlink，先移除
     if [[ -L ~/.claude/skills ]]; then
         echo "  移除旧 symlink: $(readlink ~/.claude/skills)"
@@ -447,7 +558,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 5. Helper Scripts 部署
     # ----------------------------------------------------------------
-    echo "[5/10] 部署 Helper Scripts..."
+    echo "[5/11] 部署 Helper Scripts..."
     mkdir -p ~/.claude/scripts
     for f in "$SCRIPT_DIR/scripts/"*; do
         cp -a "$f" ~/.claude/scripts/
@@ -459,7 +570,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 6. Auto Memory 同步（从 private repo）
     # ----------------------------------------------------------------
-    echo "[6/10] 同步 Auto Memory..."
+    echo "[6/11] 同步 Auto Memory..."
     # 检测 CC project 目录名（依赖 $HOME 路径）
     PROJECT_NAME=$(echo "$HOME" | tr '/' '-')
     MEMORY_DIR="$HOME/.claude/projects/${PROJECT_NAME}/memory"
@@ -492,7 +603,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 7. Plugins 恢复
     # ----------------------------------------------------------------
-    echo "[7/10] 恢复 Plugins..."
+    echo "[7/11] 恢复 Plugins..."
     mkdir -p ~/.claude/plugins
     if [[ -d "$PRIVATE_REPO/claude-code/plugins" ]]; then
         # 恢复插件注册和市场配置
@@ -507,9 +618,15 @@ install_cc() {
     fi
 
     # ----------------------------------------------------------------
-    # 8. Gemini CLI 安装
+    # 8. gcsfuse 挂载 (CC Pages + 共享 Memory)
     # ----------------------------------------------------------------
-    echo "[8/9] 安装 Gemini CLI..."
+    echo "[8/11] 设置 gcsfuse..."
+    setup_gcsfuse
+
+    # ----------------------------------------------------------------
+    # 9. Gemini CLI 安装
+    # ----------------------------------------------------------------
+    echo "[9/11] 安装 Gemini CLI..."
     if command -v gemini &>/dev/null; then
         echo "  已安装: $(gemini --version 2>/dev/null || echo 'unknown')"
         echo "  更新到最新版..."
@@ -562,9 +679,9 @@ GEMINI_ENV
     fi
 
     # ----------------------------------------------------------------
-    # 9. MCP Config 注入
+    # 10. MCP Config 注入
     # ----------------------------------------------------------------
-    echo "[9/9] 配置 MCP Server..."
+    echo "[10/11] 配置 MCP Server..."
     if [[ ! -f ~/.claude.json ]]; then
         echo '{}' > ~/.claude.json
         echo "  ~/.claude.json 已创建"

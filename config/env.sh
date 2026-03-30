@@ -29,10 +29,13 @@ compute_dynamic_vars() {
     CC_PAGES_URL_PREFIX="${CC_PAGES_URL_PREFIX:-}"
     export CC_PAGES_URL_PREFIX
 
-    # gcsfuse 挂载点：gLinux 用 ~/gcs-mount/cc-pages，VMs 用 /gcs/cc-pages
+    # gcsfuse 挂载点：优先检测已存在的目录，fallback 到 /gcs/cc-pages
     if [[ -d "$HOME/gcs-mount/cc-pages" ]]; then
         CC_PAGES_WEB_ROOT="$HOME/gcs-mount/cc-pages"
+    elif [[ -d "/gcs/cc-pages" ]]; then
+        CC_PAGES_WEB_ROOT="/gcs/cc-pages"
     else
+        # 目录尚未存在，默认 /gcs/cc-pages（setup_gcsfuse 会创建）
         CC_PAGES_WEB_ROOT="/gcs/cc-pages"
     fi
     export CC_PAGES_WEB_ROOT
