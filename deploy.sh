@@ -197,41 +197,7 @@ collect_secrets() {
         fi
     done
 
-    # DISCORD_BOT_TOKEN — 特殊处理
-    if [[ "$MODE" == "full" || "$MODE" == "bot" ]]; then
-        val="${DISCORD_BOT_TOKEN:-}"
-        if [[ -n "$val" ]]; then
-            echo "  ✓ DISCORD_BOT_TOKEN 已设置"
-        elif $interactive; then
-            echo ""
-            echo "  ✗ DISCORD_BOT_TOKEN 未设置"
-            read -rp "    请输入 DISCORD_BOT_TOKEN (直接回车跳过): " input
-            if [[ -n "$input" ]]; then
-                persist_to_zshenv "DISCORD_BOT_TOKEN" "$input"
-                echo "    已保存到 ~/.zshenv"
-            else
-                echo ""
-                echo "  ⚠ 没有 DISCORD_BOT_TOKEN 将无法安装 Bot 功能"
-                read -rp "    确定跳过吗？(y/N): " confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    echo "    已跳过，切换为 --cc-only 模式"
-                    MODE="cc-only"
-                else
-                    read -rp "    请输入 DISCORD_BOT_TOKEN: " input2
-                    if [[ -n "$input2" ]]; then
-                        persist_to_zshenv "DISCORD_BOT_TOKEN" "$input2"
-                        echo "    已保存到 ~/.zshenv"
-                    else
-                        echo "    仍然为空，切换为 --cc-only 模式"
-                        MODE="cc-only"
-                    fi
-                fi
-            fi
-        else
-            echo "  ✗ DISCORD_BOT_TOKEN 未设置 (非交互模式，切换为 --cc-only)"
-            MODE="cc-only"
-        fi
-    fi
+    # Bot token 已迁移到 Firestore bots/{name} 文档，不再通过环境变量管理
 
     if $has_missing; then
         if $interactive; then
@@ -732,7 +698,7 @@ with open(path, 'w') as f:
 # ====================================================================
 
 install_bot() {
-    echo "[Bot] 安装 Discord Bot 依赖..."
+    echo "[Bot] 安装 Bot 依赖..."
 
     # 确保 pip 可用
     if ! command -v pip3 &>/dev/null && ! python3 -m pip --version &>/dev/null; then
@@ -742,70 +708,68 @@ install_bot() {
     local PIP="pip3"
     command -v pip3 &>/dev/null || PIP="python3 -m pip"
 
-    # Python 依赖
-    if $PIP install --break-system-packages -q py-cord google-cloud-firestore google-cloud-speech google-genai fastapi uvicorn 2>&1 | tail -3; then
-        echo "  Python 依赖安装完成"
+    # Python 依赖（核心 + 全平台 channel）
+    local DEPS=(
+        # 核心
+        google-cloud-firestore
+        google-cloud-speech
+        google-genai
+        fastapi
+        uvicorn
+        # Discord
+        py-cord
+        # 飞书 / Lark
+        lark-oapi
+        # 钉钉
+        dingtalk-stream
+    )
+    if $PIP install --break-system-packages -q "${DEPS[@]}" 2>&1 | tail -3; then
+        echo "  Python 依赖安装完成 (${#DEPS[@]} 个包)"
     else
         echo "  警告: 部分依赖安装失败"
     fi
 
-    # .env 配置
+    # .env 配置（只需 Firestore 引导信息，bot 配置在 Firestore 里）
     if [[ -f "$SCRIPT_DIR/.env" ]]; then
         echo "  .env 已存在，跳过"
     else
-        DISCORD_TOKEN="${DISCORD_BOT_TOKEN:-YOUR_TOKEN_HERE}"
-        VERTEX_PROJECT="${ANTHROPIC_VERTEX_PROJECT_ID:-YOUR_GCP_PROJECT}"
         cat > "$SCRIPT_DIR/.env" <<EOF
-# CloseCrab 环境配置
-DISCORD_BOT_TOKEN=${DISCORD_TOKEN}
-
-# Firestore (bot config source)
+# CloseCrab 环境配置 — Bot 详细配置在 Firestore bots/{name} 文档中
 FIRESTORE_PROJECT=${FIRESTORE_PROJECT:-YOUR_FIRESTORE_PROJECT}
 FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-closecrab}
-
-# 安全: 只响应这些 Discord 用户 ID (逗号分隔)
-ALLOWED_USER_IDS=YOUR_DISCORD_USER_ID
-
-# Claude Code 配置
-CLAUDE_BIN=$(which claude)
-CLAUDE_WORK_DIR=$HOME
-CLAUDE_TIMEOUT=600
-
-# Vertex AI (Claude CLI 认证)
-CLAUDE_CODE_USE_VERTEX=1
-ANTHROPIC_VERTEX_PROJECT_ID=${VERTEX_PROJECT}
-ANTHROPIC_MODEL=claude-opus-4-6@default
-
-# STT 语音转文字: gemini / chirp2 / whisper:medium
-STT_ENGINE=gemini
-GOOGLE_CLOUD_PROJECT=${VERTEX_PROJECT}
-CHIRP2_LOCATION=us-central1
-
-# 自动响应频道 (逗号分隔，留空则只响应 DM 和 @mention)
-AUTO_RESPOND_CHANNELS=
 EOF
-        if [[ "$DISCORD_TOKEN" == "YOUR_TOKEN_HERE" ]]; then
-            echo "  .env 已生成，请编辑 DISCORD_BOT_TOKEN"
-        else
-            echo "  .env 已生成"
-        fi
+        echo "  .env 已生成 (Firestore: ${FIRESTORE_PROJECT:-未设置}/${FIRESTORE_DATABASE:-closecrab})"
     fi
 
     # 验证
-    echo "[Bot] 验证..."
+    echo "[Bot] 验证 imports..."
     cd "$SCRIPT_DIR"
     python3 -c '
 from closecrab.core.bot import BotCore
-from closecrab.channels.discord import DiscordChannel
 from closecrab.workers.claude_code import ClaudeCodeWorker
 from closecrab.utils.stt import STTEngine
-print("  Bot imports OK")
+print("  核心模块 OK")
+# Channel imports (任一可用即可)
+ok = []
+try:
+    from closecrab.channels.discord import DiscordChannel
+    ok.append("discord")
+except: pass
+try:
+    from closecrab.channels.feishu import FeishuChannel
+    ok.append("feishu")
+except: pass
+try:
+    from closecrab.channels.dingtalk import DingTalkChannel
+    ok.append("dingtalk")
+except: pass
+print(f"  可用 channels: {ok}")
 '
 
     echo ""
-    echo "Discord Bot 就绪！"
-    echo "  启动: cd $(basename "$SCRIPT_DIR") && ./run.sh"
-    echo "  后台: cd $(basename "$SCRIPT_DIR") && nohup ./run.sh &>/dev/null &"
+    echo "Bot 就绪！"
+    echo "  配置: python3 scripts/config-manage.py create <bot_name> --channel <discord|feishu|dingtalk>"
+    echo "  启动: python3 -m closecrab --bot <bot_name>"
 }
 
 # ====================================================================
