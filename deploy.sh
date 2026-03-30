@@ -278,26 +278,36 @@ install_cc() {
     # 0. 基础工具检查 (nodejs, npm, git)
     # ----------------------------------------------------------------
     echo "[0/10] 检查基础工具..."
-    local missing_pkgs=()
-    command -v git &>/dev/null  || missing_pkgs+=(git)
-    command -v node &>/dev/null || missing_pkgs+=(nodejs)
-    command -v npm &>/dev/null  || missing_pkgs+=(npm)
-    if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
-        echo "  安装缺失的基础工具: ${missing_pkgs[*]}"
-        sudo apt-get update -qq && sudo apt-get install -y -qq "${missing_pkgs[@]}" 2>/dev/null || true
-        # 验证安装结果
-        for pkg_cmd in git node npm; do
-            if command -v "$pkg_cmd" &>/dev/null; then
-                echo "  ✓ $pkg_cmd: $($pkg_cmd --version 2>/dev/null)"
-            else
-                echo "  ⚠ $pkg_cmd 安装失败，部分功能可能不可用"
-            fi
-        done
-    else
-        echo "  ✓ git: $(git --version 2>/dev/null | head -1)"
-        echo "  ✓ node: $(node --version 2>/dev/null)"
-        echo "  ✓ npm: $(npm --version 2>/dev/null)"
+    # git
+    if ! command -v git &>/dev/null; then
+        echo "  安装 git..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq git 2>/dev/null || true
     fi
+    # Node.js: 需要 20+，Debian/Ubuntu apt 默认版本太旧，自动加 nodesource 源
+    local need_node=false
+    if ! command -v node &>/dev/null; then
+        need_node=true
+    elif [[ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 20 ]]; then
+        echo "  Node.js $(node -v) 版本过低 (需要 20+)，升级中..."
+        need_node=true
+    fi
+    if $need_node; then
+        echo "  安装 Node.js 22 (nodesource)..."
+        if curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - 2>/dev/null \
+            && sudo apt-get install -y -qq nodejs 2>/dev/null; then
+            echo "  ✓ node: $(node --version)"
+        else
+            echo "  ⚠ Node.js 22 自动安装失败，请手动安装: https://nodejs.org/"
+        fi
+    fi
+    # 验证
+    for pkg_cmd in git node npm; do
+        if command -v "$pkg_cmd" &>/dev/null; then
+            echo "  ✓ $pkg_cmd: $($pkg_cmd --version 2>/dev/null | head -1)"
+        else
+            echo "  ⚠ $pkg_cmd 未找到"
+        fi
+    done
 
     # ----------------------------------------------------------------
     # 1. Claude CLI 检查
@@ -310,21 +320,27 @@ install_cc() {
         echo "  已安装: $(claude --version)"
     else
         echo "  未安装，正在安装..."
-        if $USE_NPM; then
-            echo "  使用 npm 安装..."
-            if sudo npm install -g @anthropic-ai/claude-code 2>&1; then
-                echo "  安装完成: $(claude --version)"
+        local installed=false
+        if ! $USE_NPM; then
+            # 优先尝试官方安装脚本
+            if curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash 2>&1; then
+                export PATH="$HOME/.local/bin:$PATH"
+                installed=true
             else
-                echo "  npm 安装失败，请确认 Node.js 20+ 已安装"
-                exit 1
+                echo "  官方安装脚本失败（可能是区域限制），尝试 npm 安装..."
             fi
+        fi
+        if ! $installed; then
+            # npm fallback（或 --npm 模式）
+            if sudo npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; then
+                installed=true
+            fi
+        fi
+        if $installed && command -v claude &>/dev/null; then
+            echo "  安装完成: $(claude --version)"
         else
-            if curl -fsSL https://claude.ai/install.sh | bash 2>&1; then
-                echo "  安装完成: $(~/.local/bin/claude --version)"
-            else
-                echo "  自动安装失败，请手动安装: https://docs.anthropic.com/en/docs/claude-code"
-                exit 1
-            fi
+            echo "  ✗ 安装失败，请手动安装: https://docs.anthropic.com/en/docs/claude-code"
+            exit 1
         fi
     fi
 
