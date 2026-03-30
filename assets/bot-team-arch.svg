@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 580" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="gcsGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="leaderGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="tpuGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="gpuGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="b200Grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#dc2626"/>
+      <stop offset="100%" stop-color="#f87171"/>
+    </linearGradient>
+    <linearGradient id="inboxGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="50%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <marker id="arrowDown" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M1,1 L4,7 L7,1" fill="none" stroke="#58a6ff" stroke-width="1.5"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="580" fill="url(#bg)" rx="12"/>
+
+  <!-- Title -->
+  <text x="480" y="36" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">Bot Team Architecture</text>
+
+  <!-- GCS Bucket (top cloud) -->
+  <rect x="130" y="55" width="700" height="130" rx="16" fill="#0d1117" stroke="#30363d" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="130" y="55" width="700" height="32" rx="16" fill="url(#gcsGrad)" opacity="0.15"/>
+  <text x="480" y="77" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="600">GCS Bucket (gcsfuse mount)</text>
+
+  <!-- 3 sub-boxes inside GCS -->
+  <rect x="160" y="100" width="180" height="65" rx="8" fill="#161b22" stroke="#238636" stroke-width="1"/>
+  <text x="250" y="122" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">memory/shared/</text>
+  <text x="250" y="142" text-anchor="middle" fill="#8b949e" font-size="11">Public Knowledge</text>
+  <text x="250" y="156" text-anchor="middle" fill="#6e7681" font-size="10">architecture, debugging, tools</text>
+
+  <rect x="370" y="100" width="180" height="65" rx="8" fill="#161b22" stroke="#1f6feb" stroke-width="1"/>
+  <text x="460" y="122" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">cc-pages/</text>
+  <text x="460" y="142" text-anchor="middle" fill="#8b949e" font-size="11">Reports &amp; Dashboard</text>
+  <text x="460" y="156" text-anchor="middle" fill="#6e7681" font-size="10">HTML, assets, Control Board</text>
+
+  <rect x="580" y="100" width="220" height="65" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1"/>
+  <text x="690" y="122" text-anchor="middle" fill="#e3b341" font-size="12" font-weight="600">data-exchange/</text>
+  <text x="690" y="142" text-anchor="middle" fill="#8b949e" font-size="11">Models &amp; Data</text>
+  <text x="690" y="156" text-anchor="middle" fill="#6e7681" font-size="10">checkpoints, datasets, results</text>
+
+  <!-- gcsfuse arrows -->
+  <line x1="195" y1="185" x2="195" y2="260" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowDown)"/>
+  <line x1="390" y1="185" x2="390" y2="260" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowDown)"/>
+  <line x1="590" y1="185" x2="590" y2="260" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowDown)"/>
+  <line x1="770" y1="185" x2="770" y2="260" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowDown)"/>
+  <text x="195" y="225" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+  <text x="390" y="225" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+  <text x="590" y="225" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+  <text x="770" y="225" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+
+  <!-- Bot cards -->
+  <!-- Leader -->
+  <rect x="100" y="265" width="195" height="150" rx="12" fill="#161b22" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="100" y="265" width="195" height="30" rx="12" fill="url(#leaderGrad)" opacity="0.2"/>
+  <circle cx="125" cy="280" r="8" fill="#a855f7"/>
+  <text x="125" y="284" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">L</text>
+  <text x="200" y="284" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="600">Jarvis (Leader)</text>
+  <text x="197" y="308" text-anchor="middle" fill="#8b949e" font-size="11">gLinux / Mac</text>
+  <text x="120" y="332" fill="#c9d1d9" font-size="11">Task decomposition</text>
+  <text x="120" y="352" fill="#c9d1d9" font-size="11">Report generation</text>
+  <text x="120" y="372" fill="#c9d1d9" font-size="11">User interaction</text>
+  <text x="120" y="392" fill="#c9d1d9" font-size="11">Team coordination</text>
+
+  <!-- Tommy -->
+  <rect x="320" y="265" width="195" height="150" rx="12" fill="#161b22" stroke="#059669" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="320" y="265" width="195" height="30" rx="12" fill="url(#tpuGrad)" opacity="0.2"/>
+  <circle cx="345" cy="280" r="8" fill="#10b981"/>
+  <text x="345" y="284" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">T</text>
+  <text x="420" y="284" text-anchor="middle" fill="#7ee787" font-size="13" font-weight="600">Tommy (TPU)</text>
+  <text x="417" y="308" text-anchor="middle" fill="#8b949e" font-size="11">TPU v6e-8 VM</text>
+  <text x="340" y="332" fill="#c9d1d9" font-size="11">JAX / MaxText training</text>
+  <text x="340" y="352" fill="#c9d1d9" font-size="11">Model evaluation</text>
+  <text x="340" y="372" fill="#c9d1d9" font-size="11">Large-scale fine-tune</text>
+  <text x="340" y="392" fill="#c9d1d9" font-size="11">TPU profiling</text>
+
+  <!-- Hulk -->
+  <rect x="540" y="265" width="195" height="150" rx="12" fill="#161b22" stroke="#d97706" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="540" y="265" width="195" height="30" rx="12" fill="url(#gpuGrad)" opacity="0.2"/>
+  <circle cx="565" cy="280" r="8" fill="#f59e0b"/>
+  <text x="565" y="284" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">H</text>
+  <text x="640" y="284" text-anchor="middle" fill="#e3b341" font-size="13" font-weight="600">Hulk (GPU)</text>
+  <text x="637" y="308" text-anchor="middle" fill="#8b949e" font-size="11">gLinux Workstation</text>
+  <text x="560" y="332" fill="#c9d1d9" font-size="11">Data analysis</text>
+  <text x="560" y="352" fill="#c9d1d9" font-size="11">Benchmarking</text>
+  <text x="560" y="372" fill="#c9d1d9" font-size="11">Code review</text>
+  <text x="560" y="392" fill="#c9d1d9" font-size="11">Infra management</text>
+
+  <!-- Bunny -->
+  <rect x="760" y="265" width="175" height="150" rx="12" fill="#161b22" stroke="#dc2626" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="760" y="265" width="175" height="30" rx="12" fill="url(#b200Grad)" opacity="0.2"/>
+  <circle cx="785" cy="280" r="8" fill="#f87171"/>
+  <text x="785" y="284" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">B</text>
+  <text x="850" y="284" text-anchor="middle" fill="#ffa198" font-size="13" font-weight="600">Bunny (B200)</text>
+  <text x="847" y="308" text-anchor="middle" fill="#8b949e" font-size="11">B200 x8 VM</text>
+  <text x="780" y="332" fill="#c9d1d9" font-size="11">vLLM inference</text>
+  <text x="780" y="352" fill="#c9d1d9" font-size="11">sglang serving</text>
+  <text x="780" y="372" fill="#c9d1d9" font-size="11">Model comparison</text>
+  <text x="780" y="392" fill="#c9d1d9" font-size="11">GPU profiling</text>
+
+  <!-- Firestore Inbox bar -->
+  <rect x="100" y="440" width="835" height="42" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <rect x="100" y="440" width="835" height="42" rx="10" fill="url(#inboxGrad)" opacity="0.08"/>
+  <text x="518" y="466" text-anchor="middle" fill="#8b949e" font-size="13" font-weight="500">Firestore Inbox — on_snapshot real-time push — zero polling</text>
+
+  <!-- Connection lines bot → inbox -->
+  <line x1="197" y1="415" x2="197" y2="440" stroke="#7c3aed" stroke-width="1.5"/>
+  <line x1="417" y1="415" x2="417" y2="440" stroke="#059669" stroke-width="1.5"/>
+  <line x1="637" y1="415" x2="637" y2="440" stroke="#d97706" stroke-width="1.5"/>
+  <line x1="847" y1="415" x2="847" y2="440" stroke="#dc2626" stroke-width="1.5"/>
+
+  <!-- User -->
+  <rect x="340" y="505" width="280" height="55" rx="12" fill="#161b22" stroke="#58a6ff" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="480" y="530" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="600">User</text>
+  <text x="480" y="548" text-anchor="middle" fill="#6e7681" font-size="11">Discord / Feishu / Lark / DingTalk</text>
+
+  <!-- User → Leader arrow -->
+  <line x1="430" y1="505" x2="220" y2="488" stroke="#58a6ff" stroke-width="1.5"/>
+  <polygon points="220,485 228,493 222,492" fill="#58a6ff"/>
+  <text x="310" y="492" text-anchor="middle" fill="#484f58" font-size="9">chat message</text>
+</svg>
