@@ -665,15 +665,6 @@ Bot 生成的 HTML 报告、数据分析、Benchmark 结果通过域名发布。
   <img src="assets/cc-pages-arch.svg" alt="CC Pages Architecture" width="800"/>
 </p>
 
-```
-所有机器 (gcsfuse)        反代服务器 (nginx)          GCP HTTPS LB + IAP
-     │                        │                          │
-     ▼                        ▼                          ▼
-  写入 GCS ──────────► nginx + gcsfuse ◄──────── HTTPS Load Balancer
-  gs://BUCKET/cc-pages/                          ├── /assets/* → 公开
-                                                 └── 其他路径  → IAP 登录
-```
-
 ### 部署步骤
 
 #### 1. 创建 GCS 桶
