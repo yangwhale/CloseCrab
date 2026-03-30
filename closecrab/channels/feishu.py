@@ -93,9 +93,9 @@ _PROGRESS_EMOJI = {
 # header 动画帧：满头大汗的螃蟹（左右晃动 = 忙碌感）
 _CRAB_FRAMES = ["🦀💦", "💦🦀💨", "🦀🔥", "💨🦀💦"]
 # 俏皮话每 N 帧换一次（螃蟹晃 4 下换一句）
-_TIP_CHANGE_EVERY = 2  # 动画 6s/帧，2帧=12s 换一句俏皮话
-_PROGRESS_THROTTLE = 5  # on_progress 节流间隔（秒），降低 API 配额消耗
-_ANIMATE_INTERVAL = 6.0  # 螃蟹动画帧间隔（秒）
+_TIP_CHANGE_EVERY = 2  # 动画帧换一句俏皮话的间隔（帧数）
+_PROGRESS_THROTTLE = 15  # on_progress 节流间隔（秒），降低 API 配额消耗
+_ANIMATE_INTERVAL = 20.0  # 螃蟹动画帧间隔（秒）
 
 # 俏皮话列表：AI 大模型思考中的场景
 _WITTY_TIPS = [
@@ -281,7 +281,7 @@ def _format_interactive_prompt(info: dict) -> str:
 class _LogBuffer:
     """日志攒批器（复用 Discord 版逻辑，适配飞书发送）。"""
 
-    def __init__(self, send_fn, interval: float = 5.0):
+    def __init__(self, send_fn, interval: float = 15.0):
         self._send_fn = send_fn  # async fn(text) -> None
         self._interval = interval
         self._buffer: list[str] = []
