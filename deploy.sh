@@ -187,7 +187,7 @@ collect_secrets() {
                 read -rp "    请输入 ${var} (直接回车跳过): " input
                 if [[ -n "$input" ]]; then
                     persist_to_zshenv "$var" "$input"
-                    echo "    已保存到 ~/.zshenv"
+                    echo "    已保存"
                 else
                     echo "    已跳过 (settings.json 中将保留占位符)"
                 fi
@@ -202,9 +202,9 @@ collect_secrets() {
     if $has_missing; then
         if $interactive; then
             echo ""
-            echo "  提示: secrets 保存在 ~/.zshenv，新 shell 自动加载"
+            echo "  提示: secrets 已保存到 Firestore，下次部署其他机器自动拉取"
         else
-            echo "  提示: 请先设置缺失的环境变量到 ~/.zshenv，或以交互模式运行 deploy.sh"
+            echo "  提示: 请以交互模式运行 deploy.sh 输入缺失的环境变量，或直接写入 Firestore config/secrets"
         fi
     fi
 

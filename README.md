@@ -168,7 +168,7 @@ bash scripts/launcher.sh start mybot       # 带自动重启
 10. 安装 Gemini CLI
 11. 配置 MCP Server
 
-首次部署时会交互式提示输入环境变量（Vertex AI 项目 ID、GCS 桶名、API keys 等），输入后自动保存到 `~/.zshenv` 和 Firestore，下次在其他机器部署自动拉取。
+首次部署时会交互式提示输入环境变量（Vertex AI 项目 ID、GCS 桶名、API keys 等），输入后自动保存到 Firestore，下次在其他机器部署时自动拉取，无需重复输入。
 
 ## 命令参考
 
@@ -303,7 +303,7 @@ FIRESTORE_DATABASE=closecrab
 
 `config/settings.json` 是模板，`deploy.sh` 用 `envsubst` 替换占位符后写入 `~/.claude/settings.json`。
 
-需要的环境变量（首次部署时交互输入并显示描述提示，自动保存到 `~/.zshenv` 和 Firestore，下次部署其他机器自动拉取）：
+需要的环境变量（首次部署时交互输入并显示描述提示，自动保存到 Firestore，下次部署其他机器自动拉取）：
 
 | 变量 | 必填 | 用途 |
 |------|------|------|
