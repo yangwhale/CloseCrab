@@ -310,6 +310,7 @@ setup_gcsfuse() {
     # 3. 挂载整个 bucket
     if $has_sudo; then
         sudo mkdir -p "$mount_parent"
+        sudo chown "$(id -u):$(id -g)" "$mount_parent"
     else
         mkdir -p "$mount_parent"
     fi
