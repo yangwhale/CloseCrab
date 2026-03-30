@@ -308,7 +308,11 @@ setup_gcsfuse() {
     fi
 
     # 3. 挂载整个 bucket
-    mkdir -p "$mount_parent"
+    if $has_sudo; then
+        sudo mkdir -p "$mount_parent"
+    else
+        mkdir -p "$mount_parent"
+    fi
     if mountpoint -q "$mount_parent" 2>/dev/null; then
         echo "  $mount_parent 已挂载"
     else
