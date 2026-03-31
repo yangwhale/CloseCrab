@@ -10,6 +10,12 @@
 
 CloseCrab 通过 Unix socketpair 与 Claude Code CLI 进程通信，在聊天平台里提供完整的 Claude Code 体验——工具调用、MCP Server、Skills、Auto Memory、Agent Teams，一个不少。
 
+### 为什么选择直接集成 Claude Code？
+
+CloseCrab 不重新造轮子——它直接驱动 Claude Code CLI 进程，这意味着 **Claude Code 生态里的一切你都能直接用**：官方 Skills、第三方 Plugins、[Marketplace](https://marketplace.claudecode.ai) 里的 MCP Server，装上就能在聊天平台里调用，零适配成本。
+
+更重要的是：**Claude Code 正在以每天一个版本的速度迭代**。新工具、新能力、性能优化——上游一发布，你只需 `claude update` 升一下版本，CloseCrab 立刻就能用上。不需要等框架跟进、不需要改一行代码。这是 API wrapper 方案做不到的。
+
 ## 架构
 
 <p align="center">
@@ -39,6 +45,44 @@ Bot 进程和 Claude Code CLI 之间用 Unix socketpair 通信，零网络开销
 - CLI 端将 `fd[1]` 映射为 stdin/stdout，像正常终端一样工作
 - 1 秒间隔的 Buffer Poller 通过 `FIONREAD` ioctl + `MSG_PEEK` 非阻塞监测数据
 - 支持交互式流程：`ExitPlanMode`（Plan 审批）、`AskUserQuestion`（多选项回复）
+
+## 💡 推荐安装方式
+
+完整部署涉及 Claude Code CLI、Firestore、GCS、聊天平台 Token、MCP Server 等多个组件，步骤较多。**推荐先装好 Claude Code，然后让 Claude Code 帮你完成剩余部署**：
+
+```bash
+# 1. 先装 Claude Code CLI（二选一）
+curl -fsSL https://claude.ai/install.sh | sh          # 官方脚本
+npm install -g @anthropic-ai/claude-code               # 或 npm 安装
+
+# 2. 配置认证（确保 claude 命令能正常运行）
+gcloud auth application-default login                   # ADC 认证（GCE VM 可跳过）
+
+# 3. 克隆仓库，把 README 交给 Claude Code
+git clone https://github.com/yangwhale/CloseCrab.git && cd CloseCrab
+claude                                                  # 启动 Claude Code
+# 然后告诉它："按照 README.md 帮我完成部署"
+```
+
+Claude Code 会读取本文档，按步骤引导你完成 Firestore 创建、`deploy.sh` 执行、Bot 配置、GCS 挂载等所有操作，遇到问题也能即时排查。
+
+<details>
+<summary><b>已有 Claude Code 环境？</b></summary>
+
+如果你已经安装并配置好了 Claude Code（无论是通过 Vertex AI、API Key 还是其他方式认证），只需确保 `claude` 命令能正常执行即可。CloseCrab 不关心 Claude Code 的认证方式——它通过 socketpair 启动 `claude` 子进程，继承你当前环境的所有认证配置。
+
+```bash
+# 验证 Claude Code 可用
+claude --version
+
+# 直接部署（跳过 Claude Code 安装步骤）
+cd CloseCrab
+./deploy.sh    # deploy.sh 检测到已安装的 claude 会自动跳过安装步骤
+```
+
+`deploy.sh` 中 Claude Code 的安装路径通过 `which claude` 自动检测，也可以在 Firestore bot 配置中通过 `claude_bin` 字段手动指定。
+
+</details>
 
 ## 你需要准备什么
 
