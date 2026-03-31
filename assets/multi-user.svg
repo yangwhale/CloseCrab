@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <linearGradient id="userA" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#2563eb"/>
+    </linearGradient>
+    <linearGradient id="userB" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="userC" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#059669"/>
+    </linearGradient>
+    <linearGradient id="bot" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#d97706"/>
+    </linearGradient>
+    <linearGradient id="worker" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#374151"/>
+      <stop offset="100%" style="stop-color:#1f2937"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="520" rx="16" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="450" y="40" text-anchor="middle" fill="#f8fafc" font-size="20" font-weight="700">Multi-User Architecture — One Bot, Many Users</text>
+  <text x="450" y="62" text-anchor="middle" fill="#94a3b8" font-size="13">每个用户独立进程、独立 Session，共享工作目录</text>
+
+  <!-- Users Column -->
+  <text x="90" y="100" text-anchor="middle" fill="#64748b" font-size="12" font-weight="600">USERS</text>
+
+  <!-- User A -->
+  <rect x="30" y="120" width="120" height="55" rx="10" fill="url(#userA)" filter="url(#shadow)"/>
+  <text x="90" y="144" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">👤 Alice</text>
+  <text x="90" y="162" text-anchor="middle" fill="#bfdbfe" font-size="10">Discord DM</text>
+
+  <!-- User B -->
+  <rect x="30" y="210" width="120" height="55" rx="10" fill="url(#userB)" filter="url(#shadow)"/>
+  <text x="90" y="234" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">👤 Bob</text>
+  <text x="90" y="252" text-anchor="middle" fill="#ddd6fe" font-size="10">飞书私聊</text>
+
+  <!-- User C -->
+  <rect x="30" y="300" width="120" height="55" rx="10" fill="url(#userC)" filter="url(#shadow)"/>
+  <text x="90" y="324" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">👤 Carol</text>
+  <text x="90" y="342" text-anchor="middle" fill="#a7f3d0" font-size="10">Discord DM</text>
+
+  <!-- Bot Process (single) -->
+  <text x="330" y="100" text-anchor="middle" fill="#64748b" font-size="12" font-weight="600">BOT PROCESS (1 个)</text>
+
+  <rect x="240" y="115" width="180" height="260" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="260" y="130" width="140" height="35" rx="8" fill="url(#bot)"/>
+  <text x="330" y="152" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">🦀 Athena</text>
+
+  <!-- BotCore -->
+  <rect x="260" y="175" width="140" height="28" rx="6" fill="#334155"/>
+  <text x="330" y="194" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="600">BotCore</text>
+
+  <!-- Workers dict -->
+  <rect x="260" y="213" width="140" height="22" rx="4" fill="#1e3a5f"/>
+  <text x="330" y="228" text-anchor="middle" fill="#93c5fd" font-size="10" font-weight="500">_workers: dict</text>
+
+  <!-- Worker entries -->
+  <rect x="262" y="242" width="136" height="18" rx="3" fill="#1e3a5f" opacity="0.6"/>
+  <text x="330" y="255" text-anchor="middle" fill="#60a5fa" font-size="9">alice → Worker A</text>
+  <rect x="262" y="265" width="136" height="18" rx="3" fill="#2d1b69" opacity="0.6"/>
+  <text x="330" y="278" text-anchor="middle" fill="#a78bfa" font-size="9">bob → Worker B</text>
+  <rect x="262" y="288" width="136" height="18" rx="3" fill="#134e4a" opacity="0.6"/>
+  <text x="330" y="301" text-anchor="middle" fill="#6ee7b7" font-size="9">carol → Worker C</text>
+
+  <!-- Auth -->
+  <rect x="260" y="316" width="140" height="22" rx="4" fill="#334155"/>
+  <text x="330" y="332" text-anchor="middle" fill="#fbbf24" font-size="10">🔒 Auth (白名单)</text>
+
+  <!-- Firestore -->
+  <rect x="260" y="346" width="140" height="22" rx="4" fill="#334155"/>
+  <text x="330" y="362" text-anchor="middle" fill="#fb923c" font-size="10">📊 Firestore 日志</text>
+
+  <!-- Workers Column -->
+  <text x="600" y="100" text-anchor="middle" fill="#64748b" font-size="12" font-weight="600">CLAUDE CODE 进程 (独立)</text>
+
+  <!-- Worker A -->
+  <rect x="510" y="120" width="180" height="70" rx="10" fill="url(#worker)" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="600" y="142" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="600">Claude CLI — Alice</text>
+  <text x="600" y="160" text-anchor="middle" fill="#94a3b8" font-size="10">Session: abc123</text>
+  <text x="600" y="176" text-anchor="middle" fill="#64748b" font-size="9">socketpair · 独立 context</text>
+
+  <!-- Worker B -->
+  <rect x="510" y="210" width="180" height="70" rx="10" fill="url(#worker)" stroke="#8b5cf6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="600" y="232" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="600">Claude CLI — Bob</text>
+  <text x="600" y="250" text-anchor="middle" fill="#94a3b8" font-size="10">Session: def456</text>
+  <text x="600" y="266" text-anchor="middle" fill="#64748b" font-size="9">socketpair · 独立 context</text>
+
+  <!-- Worker C -->
+  <rect x="510" y="300" width="180" height="70" rx="10" fill="url(#worker)" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="600" y="322" text-anchor="middle" fill="#6ee7b7" font-size="12" font-weight="600">Claude CLI — Carol</text>
+  <text x="600" y="340" text-anchor="middle" fill="#94a3b8" font-size="10">Session: ghi789</text>
+  <text x="600" y="356" text-anchor="middle" fill="#64748b" font-size="9">socketpair · 独立 context</text>
+
+  <!-- Shared Work Dir -->
+  <rect x="760" y="165" width="120" height="160" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6,3" filter="url(#shadow)"/>
+  <text x="820" y="190" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="600">~/</text>
+  <text x="820" y="208" text-anchor="middle" fill="#94a3b8" font-size="10">共享工作目录</text>
+  <line x1="780" y1="218" x2="860" y2="218" stroke="#334155" stroke-width="1"/>
+  <text x="820" y="236" text-anchor="middle" fill="#64748b" font-size="10">📁 文件可见</text>
+  <text x="820" y="254" text-anchor="middle" fill="#64748b" font-size="10">📝 可读写</text>
+  <text x="820" y="272" text-anchor="middle" fill="#64748b" font-size="10">🔄 实时共享</text>
+  <text x="820" y="298" text-anchor="middle" fill="#475569" font-size="9">但各自不知道</text>
+  <text x="820" y="312" text-anchor="middle" fill="#475569" font-size="9">对方做了什么</text>
+
+  <!-- Arrows: Users → Bot -->
+  <line x1="150" y1="147" x2="238" y2="200" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+  <line x1="150" y1="237" x2="238" y2="237" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
+  <line x1="150" y1="327" x2="238" y2="280" stroke="#10b981" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <!-- Arrows: Bot → Workers -->
+  <line x1="420" y1="253" x2="508" y2="155" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <line x1="420" y1="275" x2="508" y2="245" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <line x1="420" y1="298" x2="508" y2="335" stroke="#10b981" stroke-width="1.5" stroke-dasharray="5,3"/>
+
+  <!-- Arrows: Workers → Shared Dir -->
+  <line x1="690" y1="155" x2="758" y2="215" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>
+  <line x1="690" y1="245" x2="758" y2="245" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>
+  <line x1="690" y1="335" x2="758" y2="275" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#10b981"/>
+    </marker>
+  </defs>
+
+  <!-- Legend -->
+  <rect x="30" y="400" width="840" height="105" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="60" y="425" fill="#f8fafc" font-size="13" font-weight="700">✨ 核心优势</text>
+
+  <circle cx="60" cy="447" r="4" fill="#3b82f6"/>
+  <text x="75" y="451" fill="#cbd5e1" font-size="11"><tspan font-weight="600" fill="#e2e8f0">一 Bot 多用户</tspan> — 一个 bot 进程同时服务 N 个用户，无需为每人部署独立 bot</text>
+
+  <circle cx="60" cy="469" r="4" fill="#8b5cf6"/>
+  <text x="75" y="473" fill="#cbd5e1" font-size="11"><tspan font-weight="600" fill="#e2e8f0">进程级隔离</tspan> — 每个用户独立 Claude Code 子进程 + 独立 Session，对话互不可见</text>
+
+  <circle cx="60" cy="491" r="4" fill="#10b981"/>
+  <text x="75" y="495" fill="#cbd5e1" font-size="11"><tspan font-weight="600" fill="#e2e8f0">跨平台统一</tspan> — Discord / 飞书 / 钉钉用户混合接入同一个 bot，架构完全一致</text>
+</svg>
