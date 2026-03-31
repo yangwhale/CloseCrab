@@ -6,3 +6,16 @@ __pycache__/
 .env
 config/bots.yaml
 nohup*.out
+
+# 私有 skills（从 ClosedCrab 安装到 ~/.claude/skills/，不要进公开 repo）
+skills/bugged/
+skills/chip-performance-test/
+skills/deepep-installer/
+skills/gemini-cli/
+skills/google-internal-mcp/
+skills/internal-doc-site/
+skills/lssd-mounter/
+skills/sglang-installer/
+skills/tpu-benchmark/
+skills/tpu-trainer/
+skills/vllm-installer/
