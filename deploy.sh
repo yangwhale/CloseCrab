@@ -515,7 +515,11 @@ install_cc() {
         echo "  警告: 无 settings.json 模板，请手动配置"
     fi
 
-    # CLAUDE.md: 已由用户手动管理，不再从 config/ 覆盖
+    # CLAUDE.md: symlink 到 home 目录，确保 bot 在 ~/ 工作时也能加载
+    if [[ -f "$SCRIPT_DIR/CLAUDE.md" ]]; then
+        ln -sf "$SCRIPT_DIR/CLAUDE.md" ~/CLAUDE.md
+        echo "  CLAUDE.md symlink: ~/CLAUDE.md → $SCRIPT_DIR/CLAUDE.md"
+    fi
 
     # ----------------------------------------------------------------
     # 4. Skills 部署（增量拷贝，不删除用户自行添加的 skill）

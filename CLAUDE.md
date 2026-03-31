@@ -98,13 +98,28 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 - 错误处理：log + graceful degradation，不要 silent `except:`
 - 类型提示：保持现有风格即可
 
+### Channel 开发
+- 新 channel 继承 `closecrab/channels/base.py` 的 `Channel` ABC（start/stop/send_message/send_to_user）
+- 所有平台消息转为 `UnifiedMessage`（`core/types.py`）再交给 BotCore，语音在 Channel 层完成 STT
+- `_format_interactive_prompt()` 三个 channel 都有，修改一个必须检查另外两个是否需要同步
+- `ExitPlanMode` 必须从 `inp.get("plan", "")` 提取并展示 plan 内容，不能只发"方案已就绪"
+- Discord 消息限 2000 字符，超长内容必须截断
+
+### Worker 开发
+- `ClaudeCodeWorker` 通过 Unix socketpair 双 fd 通信（`sock_in` 写, `sock_out` 读），**不是** stdin/stdout
+- Claude CLI 启动时通过 `--input-fd` / `--output-fd` 接收 fd 编号
+- stream-JSON 事件类型：`assistant`（回复）、`tool_use/tool_result`（工具）、`control_request`（ExitPlanMode/AskUserQuestion）、`usage`（用量）
+- 改 JSON 解析时注意不完整行（可能分多次到达）
+- Worker 生命周期由 BotCore 管理，不要在 Worker 内自行 restart
+
 ### 重要约束
 - **不要修改 `.env`** — deploy.sh 生成的，手动改会被覆盖
 - **不要 commit secrets** — tokens、API keys 存 Firestore，不进 git
 - **不要直接 kill bot 进程** — 用 `/stop` 命令或 SIGTERM 给 run.sh PID
-- **修改 channel 代码后** — 检查三个 channel（discord/feishu/dingtalk）是否需要同步改动
-- **ExitPlanMode 必须展示 plan 内容** — 从 `inp.get("plan", "")` 提取，不能只发"方案已就绪"
-- **socketpair 不是 stdin/stdout** — Worker 用 socketpair 双 fd，不是进程的 stdio
+- **deploy.sh 修改后** — 至少在一台 VM 上测试 `./deploy.sh --cc-only` 通过
+- **run.sh 退出码** — 不要改约定（42=restart, 130/137=不重启, 1=不重启）
+- **Firestore schema 变更** — 考虑已部署 bot 的向后兼容性
+- **Skill 命名** — kebab-case（如 `sglang-installer`），新建用 `skill-creator` skill
 
 ## Firestore 数据结构
 | Collection | 用途 |
