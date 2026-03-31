@@ -1,106 +1,128 @@
 # CloseCrab — Claude Code Bot Framework
 
 ## 项目概述
-CloseCrab 是一个多平台 AI Bot 框架，将 Claude Code CLI 包装为可通过 Discord/飞书/钉钉 交互的 bot。每个 bot 是一个独立进程，通过 Unix socketpair 与 Claude Code CLI 通信。
+CloseCrab 将 Claude Code CLI 包装为多平台 AI Bot（Discord/飞书/钉钉）。每个 bot 是独立进程，通过 Unix socketpair 与 Claude Code CLI 通信，Firestore 存配置和日志。
 
 ## 架构
 
 ```
-用户消息 → Channel Adapter → UnifiedMessage → BotCore → ClaudeCodeWorker → Claude CLI
-                                                  ↕                            ↕
-                                            Firestore                    Skills/MCP
+用户消息 → Channel Adapter → UnifiedMessage → BotCore → ClaudeCodeWorker ⇄ Claude CLI
+              (STT if voice)       ↕                           ↕
+                              Firestore                  Skills / MCP
 ```
 
 ### 核心模块
 | 模块 | 路径 | 职责 |
 |------|------|------|
-| 入口 | `closecrab/main.py` | CLI 参数解析、日志、bot 初始化 |
-| 核心 | `closecrab/core/bot.py` | 消息路由、session 管理、Firestore 日志 |
-| Worker | `closecrab/workers/claude_code.py` | socketpair IPC、stream-JSON 事件解析 |
-| Discord | `closecrab/channels/discord.py` | py-cord 集成、slash commands、语音 STT |
-| 飞书 | `closecrab/channels/feishu.py` | lark-oapi WebSocket、卡片消息、团队协作 |
-| 钉钉 | `closecrab/channels/dingtalk.py` | dingtalk-stream 集成 |
+| 入口 | `closecrab/main.py` | CLI 解析、配置加载、system prompt 构造、信号处理 |
+| 核心 | `closecrab/core/bot.py` | BotCore: 消息路由、per-user worker 管理、Firestore 日志 |
+| Worker | `closecrab/workers/claude_code.py` | socketpair IPC、stream-JSON 解析、usage 追踪、中断处理 |
+| 类型 | `closecrab/core/types.py` | `UnifiedMessage` dataclass（channel_type, user_id, content, reply callback, metadata） |
+| 鉴权 | `closecrab/core/auth.py` | 白名单鉴权（Discord user ID / 飞书 open_id） |
+| Session | `closecrab/core/session.py` | Session 持久化/归档/摘要读取 |
+| STT | `closecrab/utils/stt.py` | 语音转文字引擎（Gemini → Chirp2 → Whisper fallback chain） |
 | 配置 | `closecrab/utils/config_store.py` | Firestore bot 配置读取 |
-| 注册 | `closecrab/utils/registry.py` | Bot 运行时状态注册 |
-| 收件箱 | `closecrab/utils/firestore_inbox.py` | Bot 间实时消息（on_snapshot） |
+| 注册 | `closecrab/utils/registry.py` | Bot 运行时状态注册（hostname、accelerator、last_seen） |
+| 收件箱 | `closecrab/utils/firestore_inbox.py` | Bot 间实时消息（Firestore on_snapshot） |
 
 ### IPC 机制
-- Bot 进程与 Claude CLI 之间通过 **Unix socketpair** 通信
-- 协议：line-delimited JSON（stream-JSON）
-- 控制请求（ExitPlanMode、AskUserQuestion）通过 `control_request` 事件传递
-- 中断信号通过 socketpair 发送，不是 SIGINT
+- Bot ↔ Claude CLI 通过 **Unix socketpair** 通信（`sock_in` 写入, `sock_out` 读取）
+- 协议：line-delimited stream-JSON，每行一个 JSON 事件
+- 控制请求（ExitPlanMode、AskUserQuestion）通过 `control_request` 事件传递给 Channel 层
+- 中断通过 socketpair 发送 interrupt 消息，**不是** SIGINT
+- buffer 检测：1 秒 interval FIONREAD + MSG_PEEK 非阻塞读
+
+### System Prompt 构造（`main.py:build_system_prompt()`）
+按顺序拼接：channel style → safety rule → bot 身份 → 语音总结指令 → Firestore Inbox 说明 → Team 角色（如有）。每个 channel 有独立的 style loader（`load_discord_style()` / `load_feishu_style()` 等）。
 
 ## 常用命令
 
 ```bash
-# 启动 bot（带自动重启）
-./run.sh <bot_name>
+# 启动
+./run.sh <bot_name>              # 带自动重启的 wrapper
 
-# 部署环境
-./deploy.sh              # 完整安装: CC + Skills + Bot 依赖
-./deploy.sh --cc-only    # 只装 Claude Code 环境
-./deploy.sh --bot        # 补装 Bot Python 依赖
+# 部署
+./deploy.sh                      # 完整: CC + Skills + Bot 依赖
+./deploy.sh --cc-only            # 只装 Claude Code 环境
+./deploy.sh --bot                # 补装 Bot Python 依赖
+./deploy.sh --npm                # 用 npm 替代官方 installer
 
-# Bot 配置管理（Firestore）
+# 配置管理
 python3 scripts/config-manage.py list
 python3 scripts/config-manage.py show <bot_name>
 python3 scripts/config-manage.py set-channel <bot_name> discord
 
 # Bot 间消息
 python3 scripts/inbox-send.py <target_bot> "<message>"
+
+# 运维脚本
+scripts/dispatch-bot.sh deploy|recall|move|check   # 多 bot 调度
+scripts/sync-memory.sh --push|--pull               # 记忆同步
+scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 ```
 
 ## 退出码约定
-- `42` — `/restart` 命令触发，run.sh 会自动重启
-- `130` / `137` — SIGINT/SIGKILL，不重启
-- `1` — 配置错误，不重启
-- 其他非零 — 崩溃，run.sh 自动重启（连续崩溃 >10 次则停止）
+| 码 | 含义 | run.sh 行为 |
+|----|------|------------|
+| `42` | `/restart` 命令 | 立即重启 |
+| `130` / `137` | SIGINT / SIGKILL | 不重启 |
+| `1` | 配置错误 | 不重启 |
+| 其他非零 | 崩溃 | 重启（连续 >10 次则停止） |
 
 ## 配置体系
-- **Bootstrap**: `.env` 文件只含 `FIRESTORE_PROJECT` 和 `FIRESTORE_DATABASE`
-- **运行时配置**: 全部存 Firestore `bots/{bot_name}` collection，包含 channel tokens、model、allowed users、team 设置等
-- **Claude Code 环境**: `~/.claude/settings.json` 存 env vars、permissions、plugins
-- **MCP Servers**: `~/.claude.json` 存 MCP server 配置
-- **Secrets**: 绝不硬编码，通过 Firestore 或 K8s Secret 注入
+- **Bootstrap**: `.env` 只含 `FIRESTORE_PROJECT` + `FIRESTORE_DATABASE`（由 deploy.sh 生成，不要手动改）
+- **运行时配置**: Firestore `bots/{bot_name}` — channel tokens、model、allowed users、team、inbox、email
+- **全局常量**: Firestore `config/global` — cc_pages_url、gcs_bucket
+- **Claude Code 环境**: `~/.claude/settings.json` — env vars、permissions、plugins
+- **MCP Servers**: `~/.claude.json` — MCP server 配置
+- **Secrets**: 绝不硬编码。Firestore 存 tokens，GKE 用 K8s Secret 挂载
+
+## Bot Team 系统
+- 角色分两种：**Leader**（协调派活）和 **Teammate**（执行汇报）
+- Team 配置存 Firestore `bots/{name}.team`（role、team_channel_id、teammates/leader_bot_id）
+- `build_system_prompt()` 根据角色动态注入协调规则到 Claude 的 system prompt
+- Leader 在 #team-ops 频道 @mention 派活，Teammate 完成后 @Leader 汇报
+- Bot 间也可通过 Firestore Inbox (`scripts/inbox-send.py`) 异步通信
 
 ## Skills 系统
-- Skills 放在 `skills/{skill-name}/SKILL.md`
-- 部署时 deploy.sh 创建 symlink: `~/.claude/skills/{name}` → `CloseCrab/skills/{name}`
-- 私有 skills 通过 `install-private-skills.sh` 从 ClosedCrab（私有 repo）安装
-- 新建 skill 用 `skill-creator` skill，不要手动创建
+- 结构：`skills/{skill-name}/SKILL.md`（+ 可选的 scripts/、references/ 子目录）
+- 部署：deploy.sh 创建 symlink `~/.claude/skills/{name}` → `CloseCrab/skills/{name}`
+- 私有 skills：`install-private-skills.sh` 从 ClosedCrab（私有 repo）安装
+- 新建 skill：用 `skill-creator` skill，不要手动创建文件
 
 ## 编码规范
 
 ### Python
 - 全异步（async/await），基于 asyncio
-- 日志用 `logging.getLogger("closecrab.{module}")`，不用 print
-- 错误处理：log + graceful degradation，不要 silent except
-- 类型提示：保持现有风格，不强制补全
-
-### Channel 开发
-- 新 channel 必须继承 `closecrab/channels/base.py` 的抽象基类
-- 所有平台消息必须转换为 `UnifiedMessage` 再交给 BotCore
-- `_format_interactive_prompt()` 必须处理 `ExitPlanMode`（展示 plan 内容）和 `AskUserQuestion`
-- Discord 消息限 2000 字符，超长内容必须截断
+- 日志：`logging.getLogger("closecrab.{module}")`，不用 print
+- 错误处理：log + graceful degradation，不要 silent `except:`
+- 类型提示：保持现有风格即可
 
 ### 重要约束
-- **不要修改 `.env` 文件** — 它由 deploy.sh 生成
+- **不要修改 `.env`** — deploy.sh 生成的，手动改会被覆盖
 - **不要 commit secrets** — tokens、API keys 存 Firestore，不进 git
-- **不要直接 kill bot 进程** — 用 `/stop` 命令或发 SIGTERM 给 run.sh 的 PID
-- **修改 channel 代码后** — 必须检查所有三个 channel（discord/feishu/dingtalk）是否有对应的改动需要同步
+- **不要直接 kill bot 进程** — 用 `/stop` 命令或 SIGTERM 给 run.sh PID
+- **修改 channel 代码后** — 检查三个 channel（discord/feishu/dingtalk）是否需要同步改动
 - **ExitPlanMode 必须展示 plan 内容** — 从 `inp.get("plan", "")` 提取，不能只发"方案已就绪"
+- **socketpair 不是 stdin/stdout** — Worker 用 socketpair 双 fd，不是进程的 stdio
 
 ## Firestore 数据结构
 | Collection | 用途 |
 |-----------|------|
-| `bots/{name}` | Bot 配置（channel tokens、model、权限） |
-| `bots/{name}/logs/{id}` | 对话日志（timestamp、steps、reply） |
-| `messages` | Bot 间收件箱（from、to、instruction、status） |
-| `registry` | Bot 运行时状态（hostname、last_seen） |
-| `config/global` | 全局常量（cc_pages_url、gcs_bucket） |
+| `bots/{name}` | Bot 配置（tokens、model、权限、team、inbox） |
+| `bots/{name}/logs/{id}` | 对话日志（timestamp、status、steps、reply） |
+| `messages` | Bot 间收件箱（from、to、instruction、status、result） |
+| `registry` | Bot 运行时状态（hostname、accelerator、last_seen） |
+| `config/global` | 全局常量 |
 
 ## 部署拓扑
-- 每个 bot 运行在独立机器上（GCE VM、GKE Pod、gLinux）
-- 代码通过 `git clone` + `deploy.sh` 部署
-- 升级流程：`git pull` → 重启 bot 进程
-- GKE Pod 需要额外挂载 SA key 访问 Firestore（Workload Identity 对 Firestore 不生效）
+- 每个 bot 独立机器（GCE VM / GKE Pod / gLinux），`git clone` + `deploy.sh` 部署
+- 升级流程：`git pull` → 重启 bot 进程（kill run.sh PID 或 `/restart` 命令）
+- GKE Pod 必须挂载 SA key 访问 Firestore（Workload Identity principal:// 对 Firestore 不生效）
+
+## Troubleshooting
+- **Bot 不响应**: 先 `ps aux | grep closecrab` 看进程在不在，再查 `~/.claude/closecrab/{name}/bot.log`
+- **Claude CLI 卡住**: 检查 `~/.claude/closecrab/{name}/` 下的 stderr 文件，看 API 错误
+- **重复进程**: `ps aux | grep "run.sh\|closecrab"` 确认只有一组进程，多余的 kill 掉
+- **npm 版本冲突**: `which claude && ls -la $(which claude)` 确认 symlink 指向对的 npm prefix
+- **Firestore 403**: 检查 `GOOGLE_APPLICATION_CREDENTIALS` 指向有效 SA key，且 SA 有 `roles/datastore.user`
