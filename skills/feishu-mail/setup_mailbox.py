@@ -25,7 +25,7 @@ import urllib.error
 
 def _get_firestore_client(database=None):
     from google.cloud import firestore
-    project = os.environ.get("FIRESTORE_PROJECT", "chris-pgp-host")
+    project = os.environ.get("FIRESTORE_PROJECT")
     db_name = database or os.environ.get("FIRESTORE_DATABASE", "closecrab")
     return firestore.Client(project=project, database=db_name)
 
@@ -107,7 +107,7 @@ def cmd_create(args):
         print()
         print("Next steps:")
         print(f"  1. Go to Feishu Admin → Email → Public Mailboxes")
-        print(f"     https://higcp.feishu.cn/admin/email/public_mailbox")
+        print(f"     https://your-org.feishu.cn/admin/email/public_mailbox")
         print(f"  2. Find '{args.email}' → Enable SMTP → Generate app password")
         print(f"  3. Run: python3 {__file__} set-password --bot <bot_name> --password <password>")
     else:
@@ -164,7 +164,7 @@ def cmd_set_password(args):
             "smtp_port": 465,
             "imap_host": "imap.feishu.cn",
             "imap_port": 993,
-            "user": args.email or f"{args.bot}@higcp.com",
+            "user": args.email or f"{args.bot}@your-domain.com",
             "pass": args.password,
         }
         doc_ref.update({"email": email_cfg})
@@ -180,7 +180,7 @@ def main():
 
     # create
     p_create = sub.add_parser("create", help="Create a public mailbox")
-    p_create.add_argument("--email", required=True, help="Email address (e.g. bot@higcp.com)")
+    p_create.add_argument("--email", required=True, help="Email address (e.g. bot@your-domain.com)")
     p_create.add_argument("--name", required=True, help="Display name")
 
     # list

@@ -128,12 +128,12 @@ IMAP 使用相同凭据，服务器 `imap.feishu.cn:993` (SSL)。
 
 ```bash
 python3 ~/.claude/skills/feishu-mail/setup_mailbox.py create \
-  --email "bot@higcp.com" \
+  --email "bot@your-domain.com" \
   --name "Bot Name"
 ```
 
 创建成功后，需要手动去飞书管理后台开启 SMTP：
-1. 打开 https://higcp.feishu.cn/admin/email/public_mailbox
+1. 打开 https://your-org.feishu.cn/admin/email/public_mailbox
 2. 找到新建的邮箱 → 开启 IMAP/SMTP → 生成应用密码
 
 ### 配置 SMTP 密码到 Firestore
@@ -142,19 +142,19 @@ python3 ~/.claude/skills/feishu-mail/setup_mailbox.py create \
 # 默认写入 FIRESTORE_DATABASE (closecrab)
 python3 ~/.claude/skills/feishu-mail/setup_mailbox.py set-password \
   --bot athena \
-  --password "E7eBgQcAzgvrM5wA"
+  --password "YOUR_APP_PASSWORD"
 
 # 指定数据库（如 closecrab-public）
 python3 ~/.claude/skills/feishu-mail/setup_mailbox.py set-password \
   --bot athena \
-  --password "E7eBgQcAzgvrM5wA" \
+  --password "YOUR_APP_PASSWORD" \
   --database closecrab-public
 
 # 如果 bot 还没有 email 配置，用 --email 初始化完整配置
 python3 ~/.claude/skills/feishu-mail/setup_mailbox.py set-password \
   --bot newbot \
   --password "xxx" \
-  --email "newbot@higcp.com"
+  --email "newbot@your-domain.com"
 ```
 
 ### 列出所有公共邮箱
@@ -172,7 +172,7 @@ python3 ~/.claude/skills/feishu-mail/setup_mailbox.py delete --mailbox-id "1RNM1
 ### 环境变量
 
 - `MAIL_ADMIN_BOT`: 用于调飞书 API 的 bot（需有 `mail:public_mailbox` 权限，默认 `jarvis`）
-- `FIRESTORE_PROJECT`: GCP 项目（默认 `chris-pgp-host`）
+- `FIRESTORE_PROJECT`: GCP 项目（默认 `your-gcp-project`）
 - `FIRESTORE_DATABASE`: Firestore 数据库（默认 `closecrab`）
 
 ## 限制

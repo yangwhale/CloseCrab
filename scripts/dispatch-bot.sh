@@ -299,7 +299,7 @@ GCSFUSE_EOF
 
 ## Team Rules
 - Reply directly to messages — the bot framework routes replies automatically
-- When reporting in #team-ops, mention <@1473626259190845520> so Jarvis sees it
+- When reporting in #team-ops, mention the Leader bot so they see it
 - Be concise: conclusion first, key data listed
 - I am ${bot_name}, not Jarvis
 
@@ -420,7 +420,8 @@ else:
         # 用 Jarvis token 给新 bot 加 #team-ops 权限
         local jarvis_token
         jarvis_token=$(python3 "$SCRIPT_DIR/get-bot-secret.py" jarvis channels.discord.token 2>/dev/null) || true
-        local team_channel="1477228921593528472"
+        local team_channel
+        team_channel=$(python3 "$SCRIPT_DIR/get-bot-secret.py" jarvis team.team_channel_id 2>/dev/null) || true
         if [[ -n "$jarvis_token" ]]; then
             python3 -c "
 import requests
