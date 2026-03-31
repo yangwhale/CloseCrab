@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 <p align="center">
-  <img src="close-no-d-crab.png" alt="CloseCrab" width="600"/>
+  <img src="crab-with-claude-code-inside.png" alt="CloseCrab" width="600"/>
 </p>
 
 > 把 Claude Code 的全部能力接入 Discord / 飞书 / Lark / 钉钉，打造你的 24/7 AI 助手团队。
