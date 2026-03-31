@@ -308,15 +308,19 @@ setup_gcsfuse() {
     fi
 
     # 3. 挂载整个 bucket
-    if $has_sudo; then
-        sudo mkdir -p "$mount_parent"
-        sudo chown "$(id -u):$(id -g)" "$mount_parent"
-    else
-        mkdir -p "$mount_parent"
-    fi
+    # 先检查是否已挂载（已挂载时 mkdir/stat 可能因 fuse 权限失败）
     if mountpoint -q "$mount_parent" 2>/dev/null; then
         echo "  $mount_parent 已挂载"
     else
+        # 目录不存在时创建
+        if [[ ! -d "$mount_parent" ]]; then
+            if $has_sudo; then
+                sudo mkdir -p "$mount_parent"
+                sudo chown "$(id -u):$(id -g)" "$mount_parent"
+            else
+                mkdir -p "$mount_parent"
+            fi
+        fi
         echo "  挂载 $bucket → $mount_parent ..."
         if gcsfuse --implicit-dirs "$bucket" "$mount_parent"; then
             echo "  挂载成功"
@@ -735,15 +739,22 @@ install_bot() {
     fi
 
     # .env 配置（只需 Firestore 引导信息，bot 配置在 Firestore 里）
-    if [[ -f "$SCRIPT_DIR/.env" ]]; then
-        echo "  .env 已存在，跳过"
+    # 保护已有的 .env：只要文件存在且 FIRESTORE_PROJECT 不是占位符就不覆盖
+    if [[ -f "$SCRIPT_DIR/.env" ]] && grep -q '^FIRESTORE_PROJECT=' "$SCRIPT_DIR/.env" \
+       && ! grep -q 'YOUR_FIRESTORE_PROJECT' "$SCRIPT_DIR/.env"; then
+        echo "  .env 已存在 ($(grep '^FIRESTORE_PROJECT=' "$SCRIPT_DIR/.env"))，跳过"
     else
+        # 优先使用环境变量中的值，其次保留已有文件中的值
+        local env_project="${FIRESTORE_PROJECT:-}"
+        local env_database="${FIRESTORE_DATABASE:-closecrab}"
+        if [[ -z "$env_project" && -f "$SCRIPT_DIR/.env" ]]; then
+            env_project=$(grep '^FIRESTORE_PROJECT=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2)
+        fi
         cat > "$SCRIPT_DIR/.env" <<EOF
-# CloseCrab 环境配置 — Bot 详细配置在 Firestore bots/{name} 文档中
-FIRESTORE_PROJECT=${FIRESTORE_PROJECT:-YOUR_FIRESTORE_PROJECT}
-FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-closecrab}
+FIRESTORE_PROJECT=${env_project:-YOUR_FIRESTORE_PROJECT}
+FIRESTORE_DATABASE=${env_database}
 EOF
-        echo "  .env 已生成 (Firestore: ${FIRESTORE_PROJECT:-未设置}/${FIRESTORE_DATABASE:-closecrab})"
+        echo "  .env 已生成 (Firestore: ${env_project:-未设置}/${env_database})"
     fi
 
     # 验证
