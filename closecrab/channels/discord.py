@@ -103,10 +103,16 @@ def _format_interactive_prompt(info: dict) -> str:
     inp = info.get("input", {})
 
     if tool == "ExitPlanMode":
-        return (
-            "📋 **方案已就绪，等你审批**\n"
-            "回复「可以了」继续执行，或说明需要修改的地方。"
-        )
+        plan_content = inp.get("plan", "")
+        header = "📋 **方案已就绪，等你审批**\n"
+        footer = "\n回复「可以了」继续执行，或说明需要修改的地方。"
+        if plan_content:
+            # 截断过长的 plan，Discord 单条消息限 2000 字符
+            max_plan_len = 1800 - len(header) - len(footer)
+            if len(plan_content) > max_plan_len:
+                plan_content = plan_content[:max_plan_len] + "\n…(方案过长已截断)"
+            return f"{header}\n{plan_content}{footer}"
+        return f"{header}回复「可以了」继续执行，或说明需要修改的地方。"
 
     if tool == "AskUserQuestion":
         questions = inp.get("questions", [])
