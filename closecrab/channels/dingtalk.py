@@ -55,20 +55,6 @@ _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停
 # 文本指令
 _TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/context", "/sessions"}
 
-# 进度 emoji 映射
-_PROGRESS_EMOJI = {
-    "reading file": "📖 读取文件",
-    "writing file": "✏️ 写入文件",
-    "editing file": "✏️ 编辑文件",
-    "running command": "⚡ 执行命令",
-    "searching files": "🔍 搜索文件",
-    "searching code": "🔍 搜索代码",
-    "spawning subtask": "🤖 启动子任务",
-    "fetching web page": "🌐 抓取网页",
-    "searching web": "🌐 搜索网页",
-}
-
-
 def load_dingtalk_style() -> str:
     """加载钉钉聊天风格规则。"""
     for path in [Path.home() / ".claude/skills/chat-style/SKILL.md"]:
@@ -91,13 +77,6 @@ def _extract_stop_and_rest(content: str) -> tuple[bool, str]:
             if stripped.lower().startswith(kw + sep):
                 return True, stripped[len(kw) + len(sep):].strip()
     return False, content
-
-
-def _format_progress(text: str) -> str:
-    for key, emoji_label in _PROGRESS_EMOJI.items():
-        if text.startswith(key):
-            return f"{emoji_label}{text[len(key):]}".strip()
-    return f"🔧 {text}"
 
 
 def _format_interactive_prompt(info: dict) -> str:
@@ -414,19 +393,29 @@ class DingTalkChannel(Channel):
                 await self._async_reply_text(msg, result or "Session ended.")
                 return
 
-            # ── 文本进度 ──
-            _last_progress = [0.0]
-            _progress_sent = [False]
+            # ── TUI-style 进度（增量发送，钉钉不支持消息编辑） ──
+            _tui_last_update = [0.0]
+            _tui_sent_count = [0]  # 已发送到第几条 step
 
-            async def on_progress(text: str):
+            async def on_tui_step(lines: list[str]):
                 now = asyncio.get_running_loop().time()
-                # 限流：首次进度立即发，之后每 5 秒最多发一条
-                if _progress_sent[0] and now - _last_progress[0] < 5:
+                # 节流：至少 5 秒发一次（钉钉 webhook 限流较严）
+                if _tui_sent_count[0] > 0 and now - _tui_last_update[0] < 5:
                     return
-                _last_progress[0] = now
-                _progress_sent[0] = True
-                formatted = _format_progress(text)
-                await self._async_reply_text(msg, f"⏳ {formatted}")
+                # 只发新增的 steps
+                new_lines = lines[_tui_sent_count[0]:]
+                if not new_lines:
+                    return
+                _tui_last_update[0] = now
+                _tui_sent_count[0] = len(lines)
+                # 截取最多 10 条新 step，避免单条消息过长
+                if len(new_lines) > 10:
+                    new_lines = new_lines[-10:]
+                content = "\n".join(f"- {l}" for l in new_lines)
+                # markdown 限 4000 字符
+                if len(content) > 3800:
+                    content = content[-3800:]
+                await self._async_reply_markdown(msg, "进度", f"⏳ **进度更新**\n\n{content}")
 
             # 交互式工具回调
             async def on_input_needed(info: dict) -> Optional[str]:
@@ -453,7 +442,7 @@ class DingTalkChannel(Channel):
             # 构造 UnifiedMessage
             metadata = {
                 "conversation_id": msg.conversation_id,
-                "on_progress": on_progress,
+                "on_tui_step": on_tui_step,
                 "on_input_needed": on_input_needed,
                 "on_log": None,
             }
