@@ -976,13 +976,15 @@ class DiscordChannel(Channel):
             if _log:
                 await _log.add(text)
 
-        # TUI-style 进度：Thread 内单条消息实时编辑，累积显示 steps
-        _tui_thread = [None]  # Thread 引用
-        _tui_msg = [None]  # Thread 内的进度消息引用
+        # TUI-style 进度：单条消息实时编辑，累积显示 steps
+        # 服务器频道用 Thread（可折叠），DM 用 reply（DM 不支持 Thread）
+        _is_dm = not hasattr(message.channel, 'guild') or message.channel.guild is None
+        _tui_thread = [None]  # Thread 引用（仅服务器频道）
+        _tui_msg = [None]  # 进度消息引用
         _tui_last_edit = [0.0]
 
         async def on_tui_step(lines: list[str]):
-            """收到新的 TUI step 列表，在 Thread 内编辑单条进度消息展示。"""
+            """收到新的 TUI step 列表，编辑单条进度消息展示。"""
             now = asyncio.get_event_loop().time()
             # 节流：至少 1.5 秒编辑一次（Discord rate limit 友好）
             if now - _tui_last_edit[0] < 1.5 and _tui_msg[0] is not None:
@@ -1002,10 +1004,15 @@ class DiscordChannel(Channel):
             content = "```\n" + "\n".join(display_lines) + "\n```"
 
             try:
-                if _tui_thread[0] is None:
-                    _tui_thread[0] = await message.create_thread(name="⚙️ Progress")
                 if _tui_msg[0] is None:
-                    _tui_msg[0] = await _tui_thread[0].send(content)
+                    if _is_dm:
+                        # DM 不支持 Thread，用 reply
+                        _tui_msg[0] = await message.reply(content, mention_author=False)
+                    else:
+                        # 服务器频道用 Thread（可折叠）
+                        if _tui_thread[0] is None:
+                            _tui_thread[0] = await message.create_thread(name="⚙️ Progress")
+                        _tui_msg[0] = await _tui_thread[0].send(content)
                 else:
                     await _tui_msg[0].edit(content=content)
             except Exception:
