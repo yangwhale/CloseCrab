@@ -6,4 +6,5 @@ __pycache__/
 .env
 config/bots.yaml
 nohup*.out
+controlboard/config.js
 

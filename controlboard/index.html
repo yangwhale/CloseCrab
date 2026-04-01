@@ -8,6 +8,7 @@
 <!-- <link rel="apple-touch-icon" href="https://YOUR_DOMAIN/assets/apple-touch-icon.png"> -->
 <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Roboto+Mono:wght@400;500&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
+<script src="config.js"></script>
 <style>
   :root {
     --bg: #f1f3f4;
@@ -798,16 +799,8 @@
   import { initializeFirestore, collection, doc, onSnapshot, query, orderBy, limit, where, getDocs, updateDoc, addDoc, Timestamp }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
 
-  // TODO: Replace with your Firebase project config
-  // Get these values from Firebase Console → Project Settings → Your apps → Web app
-  const firebaseConfig = {
-    apiKey: "YOUR_FIREBASE_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    projectId: "YOUR_PROJECT",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
-  };
+  // Firebase config loaded from external config.js (gitignored)
+  const firebaseConfig = window.FIREBASE_CONFIG;
 
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app);
@@ -1283,6 +1276,53 @@
       </div>
     </div>`;
 
+    // ── Feishu Tuning Card (config/global) ──
+    const FEISHU_TUNING_FIELDS = [
+      { key: 'feishu_progress_interval', label: '飞书进度刷新间隔', hint: '进度卡片更新节流（秒），降低越快刷新越频繁', default: '5' },
+      { key: 'feishu_animate_interval', label: '飞书动画帧间隔', hint: '螃蟹动画帧切换间隔（秒）', default: '5' },
+    ];
+    const feishuEdit = globalEditMode.feishu || false;
+    html += `<div class="cfg-card">
+      <div class="cfg-card-header">
+        <div class="cfg-card-title"><span class="material-icons-outlined">tune</span>Feishu Tuning</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${feishuEdit ? `
+            <button class="cfg-save-btn dirty" onclick="window._saveFeishuTuning()">Save</button>
+            <button class="cfg-save-btn" style="pointer-events:auto;cursor:pointer;color:var(--text2);" onclick="window._cancelGlobalEdit('feishu')">Cancel</button>
+          ` : `
+            <div class="cfg-menu-wrap">
+              <button class="cfg-menu-btn" onclick="window._toggleMenu(event,'menu-feishu')">
+                <span class="material-icons-outlined">more_vert</span>
+              </button>
+              <div class="cfg-menu" id="menu-feishu">
+                <div class="cfg-menu-item" onclick="window._enterGlobalEdit('feishu')">
+                  <span class="material-icons-outlined">edit</span>Edit
+                </div>
+              </div>
+            </div>
+          `}
+        </div>
+      </div>
+      <div class="cfg-card-body">
+        ${FEISHU_TUNING_FIELDS.map(f => {
+          const val = globalCfg[f.key] || f.default;
+          if (feishuEdit) {
+            return `<div class="cfg-field">
+              <label class="cfg-label">${f.label}</label>
+              <input class="cfg-input mono" id="ftune-${f.key}" type="number" step="1" min="1" max="60" value="${escHtml(String(val))}">
+              ${f.hint ? `<div class="cfg-hint">${f.hint}</div>` : ''}
+            </div>`;
+          } else {
+            return `<div class="cfg-field">
+              <label class="cfg-label">${f.label}</label>
+              <div class="cfg-display-value">${escHtml(String(val))}s</div>
+            </div>`;
+          }
+        }).join('')}
+        <div class="cfg-hint" style="margin-top:8px;">修改后需重启 bot 生效（/restart）</div>
+      </div>
+    </div>`;
+
     // ── Firestore Info Card ──
     const fsEdit = globalEditMode.firestore || false;
     html += `<div class="cfg-card">
@@ -1396,6 +1436,22 @@
       globalEditMode.secrets = false;
       showToast('Secrets saved');
       renderGlobalConfig();
+    } catch (e) {
+      showToast(`Save failed: ${e.message}`, 'error');
+    }
+  };
+
+  window._saveFeishuTuning = async () => {
+    try {
+      const updates = {};
+      document.querySelectorAll('[id^="ftune-"]').forEach(el => {
+        const key = el.id.replace('ftune-', '');
+        updates[key] = el.value;
+      });
+      await updateDoc(doc(db, "config", "global"), updates);
+      globalEditMode.feishu = false;
+      showToast('Feishu tuning saved — 重启 bot 后生效');
+      await renderGlobalConfig();
     } catch (e) {
       showToast(`Save failed: ${e.message}`, 'error');
     }

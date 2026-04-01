@@ -59,6 +59,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from .base import Channel
+from ..constants import G
 from ..core.types import UnifiedMessage
 from ..utils.stt import STTEngine
 
@@ -94,8 +95,13 @@ _PROGRESS_EMOJI = {
 _CRAB_FRAMES = ["🦀💦", "💦🦀💨", "🦀🔥", "💨🦀💦"]
 # 俏皮话每 N 帧换一次（螃蟹晃 4 下换一句）
 _TIP_CHANGE_EVERY = 2  # 动画帧换一句俏皮话的间隔（帧数）
-_PROGRESS_THROTTLE = 30  # on_progress 节流间隔（秒），降低 API 配额消耗
-_ANIMATE_INTERVAL = 30.0  # 螃蟹动画帧间隔（秒）
+# 从 Firestore config/global 读取，默认 5 秒（可在 Control Board 修改）
+def _get_progress_throttle() -> float:
+    return G.FEISHU_PROGRESS_INTERVAL
+
+
+def _get_animate_interval() -> float:
+    return G.FEISHU_ANIMATE_INTERVAL
 
 # 俏皮话列表：AI 大模型思考中的场景
 _WITTY_TIPS = [
@@ -963,7 +969,7 @@ class FeishuChannel(Channel):
 
         async def on_progress(text: str):
             now = asyncio.get_running_loop().time()
-            if now - _last_progress[0] < _PROGRESS_THROTTLE:
+            if now - _last_progress[0] < _get_progress_throttle():
                 return
             _last_progress[0] = now
             formatted = _format_progress(text)
@@ -1000,9 +1006,9 @@ class FeishuChannel(Channel):
         async def _animate():
             try:
                 while True:
-                    await asyncio.sleep(_ANIMATE_INTERVAL)
+                    await asyncio.sleep(_get_animate_interval())
                     now = asyncio.get_running_loop().time()
-                    if _last_progress[0] > 0 and now - _last_progress[0] < _PROGRESS_THROTTLE + 1:
+                    if _last_progress[0] > 0 and now - _last_progress[0] < _get_progress_throttle() + 1:
                         continue
                     if not _progress_card_id[0]:
                         continue
@@ -1143,7 +1149,7 @@ class FeishuChannel(Channel):
 
             async def _on_progress(text: str):
                 now = asyncio.get_running_loop().time()
-                if now - _last_prog[0] < _PROGRESS_THROTTLE:
+                if now - _last_prog[0] < _get_progress_throttle():
                     return
                 _last_prog[0] = now
                 formatted = _format_progress(text)
@@ -1489,7 +1495,7 @@ class FeishuChannel(Channel):
 
             async def on_progress(text: str):
                 now = asyncio.get_running_loop().time()
-                if now - _last_progress[0] < _PROGRESS_THROTTLE:
+                if now - _last_progress[0] < _get_progress_throttle():
                     return
                 _last_progress[0] = now
 
@@ -1531,13 +1537,13 @@ class FeishuChannel(Channel):
 
             async def on_tui_step(lines: list[str]):
                 now = asyncio.get_running_loop().time()
-                if now - _tui_last_update[0] < 3:  # 飞书 API 节流 3 秒
+                if now - _tui_last_update[0] < _get_progress_throttle():
                     return
                 _tui_last_update[0] = now
 
                 elapsed = now - _start_time
-                # 取最后 8 行作为历史，最后一行作为当前
-                display = lines[-9:] if len(lines) > 9 else lines
+                # 取最后 20 行作为历史，最后一行作为当前
+                display = lines[-20:] if len(lines) > 20 else lines
                 history = display[:-1] if len(display) > 1 else []
                 current = display[-1] if display else "..."
 
@@ -1643,10 +1649,10 @@ class FeishuChannel(Channel):
                 """后台循环：无 tool call 时让螃蟹满头大汗动起来。"""
                 try:
                     while True:
-                        await asyncio.sleep(_ANIMATE_INTERVAL)
+                        await asyncio.sleep(_get_animate_interval())
                         # 有真实 progress 在跑时让路
                         now = asyncio.get_running_loop().time()
-                        if _last_progress[0] > 0 and now - _last_progress[0] < _PROGRESS_THROTTLE + 1:
+                        if _last_progress[0] > 0 and now - _last_progress[0] < _get_progress_throttle() + 1:
                             continue
                         if not _progress_card_id[0]:
                             continue
@@ -2310,7 +2316,7 @@ class FeishuChannel(Channel):
 
         # 已完成步骤（删除线 + 灰色）
         if history:
-            done_text = "\n".join(f"~~{h}~~" for h in history[-5:])
+            done_text = "\n".join(f"~~{h}~~" for h in history[-18:])
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": done_text},

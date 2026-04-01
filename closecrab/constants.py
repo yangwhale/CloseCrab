@@ -106,12 +106,17 @@ FIRESTORE_PROJECT, FIRESTORE_DATABASE = _setup_bootstrap()
 # ── Business constants: read from Firestore config/global ──
 
 _global_config: dict | None = None
+_global_config_ts: float = 0.0  # 上次加载时间
+_GLOBAL_CONFIG_TTL = 60.0  # 缓存有效期（秒）
 
 
 def _load_global_config() -> dict:
-    """Read global config from Firestore, cache in module-level variable."""
-    global _global_config
-    if _global_config is not None:
+    """Read global config from Firestore, with 60s TTL cache."""
+    import time
+    global _global_config, _global_config_ts
+
+    now = time.monotonic()
+    if _global_config is not None and (now - _global_config_ts) < _GLOBAL_CONFIG_TTL:
         return _global_config
 
     try:
@@ -120,8 +125,10 @@ def _load_global_config() -> dict:
         doc = db.collection("config").document("global").get()
         _global_config = doc.to_dict() if doc.exists else {}
     except Exception:
-        _global_config = {}
+        if _global_config is None:
+            _global_config = {}
 
+    _global_config_ts = now
     return _global_config
 
 
@@ -146,6 +153,24 @@ class _Const:
     @property
     def GCS_BUCKET(self) -> str:
         return os.environ.get("GCS_BUCKET") or get("gcs_bucket", "")
+
+    @property
+    def FEISHU_PROGRESS_INTERVAL(self) -> float:
+        """飞书进度更新节流间隔（秒），同时控制 on_progress 和螃蟹动画帧。"""
+        env = os.environ.get("FEISHU_PROGRESS_INTERVAL")
+        if env:
+            return float(env)
+        val = get("feishu_progress_interval", "")
+        return float(val) if val else 5.0
+
+    @property
+    def FEISHU_ANIMATE_INTERVAL(self) -> float:
+        """飞书螃蟹动画帧刷新间隔（秒）。"""
+        env = os.environ.get("FEISHU_ANIMATE_INTERVAL")
+        if env:
+            return float(env)
+        val = get("feishu_animate_interval", "")
+        return float(val) if val else 5.0
 
 
 G = _Const()
