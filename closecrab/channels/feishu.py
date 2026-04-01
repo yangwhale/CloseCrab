@@ -1526,6 +1526,46 @@ class FeishuChannel(Channel):
                 except Exception:
                     pass
 
+            # TUI-style 进度：用卡片显示完整 step 列表
+            _tui_last_update = [0.0]
+
+            async def on_tui_step(lines: list[str]):
+                now = asyncio.get_running_loop().time()
+                if now - _tui_last_update[0] < 3:  # 飞书 API 节流 3 秒
+                    return
+                _tui_last_update[0] = now
+
+                elapsed = now - _start_time
+                # 取最后 8 行作为历史，最后一行作为当前
+                display = lines[-9:] if len(lines) > 9 else lines
+                history = display[:-1] if len(display) > 1 else []
+                current = display[-1] if display else "..."
+
+                card = self._build_progress_card(
+                    current_action=current,
+                    history=history,
+                    elapsed=elapsed,
+                    usage=_get_usage_info(),
+                )
+
+                if _progress_card_id[0]:
+                    try:
+                        ok = await self._async_update_card(_progress_card_id[0], card)
+                        if ok:
+                            return
+                    except Exception:
+                        pass
+                    try:
+                        await self._async_delete_message(_progress_card_id[0])
+                    except Exception:
+                        pass
+
+                try:
+                    mid = await self._async_send_card_with_id(chat_id, card)
+                    _progress_card_id[0] = mid
+                except Exception:
+                    pass
+
             # 交互式工具回调
             async def on_input_needed(info: dict) -> Optional[str]:
                 tool = info.get("tool", "")
@@ -1578,6 +1618,7 @@ class FeishuChannel(Channel):
             metadata = {
                 "chat_id": chat_id,
                 "on_progress": on_progress,
+                "on_tui_step": on_tui_step,
                 "on_input_needed": on_input_needed,
                 "on_log": on_log if _log else None,
             }

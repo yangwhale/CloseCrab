@@ -976,18 +976,35 @@ class DiscordChannel(Channel):
             if _log:
                 await _log.add(text)
 
-        # 进度回调：节流推送到 Discord 用户频道（简要版，完成后删除）
-        _last_progress = [0.0]
-        _progress_msgs = []
+        # TUI-style 进度：单条消息实时编辑，累积显示 steps
+        _tui_msg = [None]  # 进度消息引用
+        _tui_last_edit = [0.0]
 
-        async def on_progress(text: str):
+        async def on_tui_step(lines: list[str]):
+            """收到新的 TUI step 列表，编辑单条进度消息展示。"""
             now = asyncio.get_event_loop().time()
-            if now - _last_progress[0] < 1:
+            # 节流：至少 1.5 秒编辑一次（Discord rate limit 友好）
+            if now - _tui_last_edit[0] < 1.5 and _tui_msg[0] is not None:
                 return
-            _last_progress[0] = now
+            _tui_last_edit[0] = now
+
+            # 从尾部截取，保证不超过 1900 字符（留余量给 header）
+            display_lines = []
+            total_len = 0
+            for line in reversed(lines):
+                if total_len + len(line) + 1 > 1800:
+                    display_lines.insert(0, f"… (+{len(lines) - len(display_lines)} earlier steps)")
+                    break
+                display_lines.insert(0, line)
+                total_len += len(line) + 1
+
+            content = "```\n" + "\n".join(display_lines) + "\n```"
+
             try:
-                pm = await message.channel.send(f"⏳ {_format_progress(text)}")
-                _progress_msgs.append(pm)
+                if _tui_msg[0] is None:
+                    _tui_msg[0] = await message.channel.send(content)
+                else:
+                    await _tui_msg[0].edit(content=content)
             except Exception:
                 pass
 
@@ -1014,7 +1031,7 @@ class DiscordChannel(Channel):
             async with message.channel.typing():
                 metadata = {
                     "channel_id": str(message.channel.id),
-                    "on_progress": on_progress,
+                    "on_tui_step": on_tui_step,
                     "on_input_needed": on_input_needed,
                     "on_log": on_log if _log else None,
                 }
@@ -1031,10 +1048,10 @@ class DiscordChannel(Channel):
                 )
                 result = await self._core.handle_message(msg)
 
-            # 清理进度消息
-            for pm in _progress_msgs:
+            # TUI 进度消息：完成后删除（最终回复已包含结果）
+            if _tui_msg[0]:
                 try:
-                    await pm.delete()
+                    await _tui_msg[0].delete()
                 except Exception:
                     pass
 
