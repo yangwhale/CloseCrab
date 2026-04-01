@@ -152,6 +152,13 @@ class BotCore:
                 log.warning(f"Failed to create live log doc: {e}")
                 log_ref = None
 
+        _STEP_EMOJI = {
+            "Read": "📖", "Write": "✏️", "Edit": "✏️",
+            "Bash": "⚡", "Grep": "🔍", "Glob": "🔍",
+            "Agent": "🤖", "WebSearch": "🌐", "WebFetch": "🌐",
+            "TodoWrite": "📝", "Skill": "🎯",
+        }
+
         def _format_step(d: dict) -> list[str]:
             """从原始 stream-json 事件提取 step 文本，返回新增的 step 列表。"""
             new_steps = []
@@ -160,17 +167,18 @@ class BotCore:
                 for block in d.get("message", {}).get("content", []):
                     bt = block.get("type", "")
                     if bt == "text" and block.get("text", "").strip():
-                        new_steps.append(block["text"])
+                        new_steps.append(f"💬 {block['text']}")
                     elif bt == "tool_use":
                         name = block.get("name", "")
                         inp = block.get("input", {})
+                        emoji = _STEP_EMOJI.get(name, "🔧")
                         if name in ("Read", "Write", "Edit") and "file_path" in inp:
                             detail = inp['file_path']
                             if name == "Edit" and "old_string" in inp:
                                 detail += f"\n  old: {inp['old_string'][:200]}\n  new: {inp.get('new_string', '')[:200]}"
-                            new_steps.append(f"[tool] {name}: {detail}")
+                            new_steps.append(f"{emoji} {name}: {detail}")
                         elif name == "Bash" and "command" in inp:
-                            new_steps.append(f"[tool] Bash: {inp['command'][:1000]}")
+                            new_steps.append(f"{emoji} Bash: {inp['command'][:1000]}")
                         elif name == "Grep" and "pattern" in inp:
                             detail = f"/{inp['pattern']}/"
                             if inp.get("path"):
@@ -179,22 +187,22 @@ class BotCore:
                                 detail += f" glob={inp['glob']}"
                             if inp.get("output_mode"):
                                 detail += f" mode={inp['output_mode']}"
-                            new_steps.append(f"[tool] Grep: {detail}")
+                            new_steps.append(f"{emoji} Grep: {detail}")
                         elif name == "Glob" and "pattern" in inp:
                             detail = inp['pattern']
                             if inp.get("path"):
                                 detail += f" in {inp['path']}"
-                            new_steps.append(f"[tool] Glob: {detail}")
+                            new_steps.append(f"{emoji} Glob: {detail}")
                         elif name == "Agent":
                             detail = inp.get('description', '') or inp.get('prompt', '')[:500]
-                            new_steps.append(f"[tool] Agent: {detail}")
+                            new_steps.append(f"{emoji} Agent: {detail}")
                         elif name == "WebSearch":
-                            new_steps.append(f"[tool] WebSearch: {inp.get('query', '')}")
+                            new_steps.append(f"{emoji} WebSearch: {inp.get('query', '')}")
                         elif name == "WebFetch":
-                            new_steps.append(f"[tool] WebFetch: {inp.get('url', '')[:500]}")
+                            new_steps.append(f"{emoji} WebFetch: {inp.get('url', '')[:500]}")
                         else:
                             params = ", ".join(f"{k}={str(v)[:100]}" for k, v in list(inp.items())[:5])
-                            new_steps.append(f"[tool] {name}: {params}" if params else f"[tool] {name}")
+                            new_steps.append(f"{emoji} {name}: {params}" if params else f"{emoji} {name}")
             elif t == "user":
                 msg_content = d.get("message", {}).get("content", "")
                 raw = None
@@ -206,7 +214,7 @@ class BotCore:
                             raw = block.get("content", "")
                             break
                 if raw and isinstance(raw, str) and raw.strip():
-                    new_steps.append(f"[result] {raw[:2000]}")
+                    new_steps.append(f"   ↳ {raw[:2000]}")
             return new_steps
 
         async def _on_step(d: dict):
