@@ -1101,6 +1101,7 @@ class FeishuChannel(Channel):
                     None, self._inbox.mark_done, record_id, "restarting"
                 )
             self._restart_requested = True
+            loop.stop()  # 让 run_forever() 退出，触发 run.sh 重启
             return
 
         # 回执消息：展示给用户，但不再执行（防止乒乓循环）
