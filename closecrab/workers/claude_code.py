@@ -107,6 +107,7 @@ class ClaudeCodeWorker(Worker):
 
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
+        env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)  # 让 Claude CLI 用 VM 默认 SA 调 Vertex AI
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "0"
 
         stderr_fd, self._stderr_path = tempfile.mkstemp(prefix="claude_stderr_", suffix=".log")
