@@ -150,6 +150,18 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
         except Exception:
             pass
 
+    # Claude Code version
+    cc_version = ""
+    claude_bin = os.path.expanduser(cfg.get("claude_bin", "~/.local/bin/claude"))
+    try:
+        out = subprocess.check_output(
+            [claude_bin, "--version"], text=True, timeout=5
+        ).strip()
+        # "2.1.88 (Claude Code)" → "2.1.88"
+        cc_version = out.split()[0] if out else ""
+    except Exception:
+        pass
+
     # Host alias from config
     host = cfg.get("host", bot_name)
 
@@ -171,6 +183,7 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
         "accel_mem_total_gb": accel_mem_total_gb,
         "accel_interconnect": accel_interconnect,
         "memory_gb": memory_gb,
+        "cc_version": cc_version,
         "status": "online",
         "last_seen": now,
     }

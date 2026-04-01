@@ -1096,6 +1096,7 @@
           <div class="fleet-kv"><span class="fk">SSH</span><span class="fv">${sshAlias}</span></div>
           <div class="fleet-kv"><span class="fk">Accel</span><span class="fv">${accel}</span></div>
           <div class="fleet-kv"><span class="fk">Channel</span><span class="fv">${channel}</span></div>
+          <div class="fleet-kv"><span class="fk">CC</span><span class="fv">${reg.cc_version || '—'}</span></div>
           ${ctxHtml}
         </div>`;
     });
@@ -1495,6 +1496,7 @@
           <div class="kv-row"><span class="kv-label">Host</span><span class="kv-value">${reg.hostname || '—'}</span></div>
           <div class="kv-row"><span class="kv-label">SSH Alias</span><span class="kv-value">${reg.ssh_alias || reg.host || '—'}</span></div>
           <div class="kv-row"><span class="kv-label">Accelerator</span><span class="kv-value">${reg.accelerator || '—'}</span></div>
+          <div class="kv-row"><span class="kv-label">CC Version</span><span class="kv-value">${reg.cc_version || '—'}</span></div>
           <div class="kv-row"><span class="kv-label">Last Seen</span><span class="kv-value">${reg.last_seen || '—'}</span></div>
         </div>
         <div class="card">
