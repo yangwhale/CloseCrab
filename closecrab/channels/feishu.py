@@ -1087,6 +1087,16 @@ class FeishuChannel(Channel):
         log.info(f"Processing inbox message from {from_bot}: {instruction[:60]}")
         loop = asyncio.get_running_loop()
 
+        # 系统重启命令（如 control board 切换 channel 后触发）
+        if instruction.startswith("[system:restart]"):
+            log.info(f"System restart requested via inbox: {instruction}")
+            if self._inbox:
+                await loop.run_in_executor(
+                    None, self._inbox.mark_done, record_id, "restarting"
+                )
+            self._restart_requested = True
+            return
+
         # 回执消息：展示给用户，但不再执行（防止乒乓循环）
         if instruction.startswith("✅ 任务完成:"):
             log.info(f"Receipt from {from_bot}: {instruction[:80]}")

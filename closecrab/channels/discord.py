@@ -529,6 +529,15 @@ class DiscordChannel(Channel):
         self._inbox_processing.add(doc_id)
         log.info(f"Processing inbox message from {from_bot}: {instruction[:60]}")
 
+        # System restart command (e.g. from control board after channel switch)
+        if instruction.startswith("[system:restart]"):
+            log.info(f"System restart requested via inbox: {instruction}")
+            if self._inbox:
+                self._inbox.mark_done(doc_id, "restarting")
+            self._restart_requested = True
+            await self._bot.close()
+            return
+
         # Receipt messages: feed into session so bot knows about it, don't execute as task
         if instruction.startswith("✅ 任务完成:"):
             log.info(f"Receipt from {from_bot}: {instruction[:80]}")

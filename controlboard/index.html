@@ -1550,7 +1550,7 @@
         <div class="cfg-card-title"><span class="material-icons-outlined">${icon}</span>${title}</div>
         <div style="display:flex;align-items:center;gap:8px;">
           ${editing ? `
-            <button class="cfg-save-btn dirty" onclick="window._saveAndExit('${cardId}')">Save</button>
+            <button class="cfg-save-btn dirty" id="cfg-save-${cardId}" onclick="window._saveAndExit('${cardId}')">Save</button>
             <button class="cfg-save-btn" style="pointer-events:auto;cursor:pointer;color:var(--text2);" onclick="window._cancelEdit('${cardId}')">Cancel</button>
           ` : `
             <div class="cfg-menu-wrap">
@@ -1732,6 +1732,7 @@
     const cfg = botsData[selectedBot] || {};
     document.querySelectorAll('.channel-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === ch));
     document.getElementById('cfg-channel-detail').innerHTML = renderChannelFields(ch, cfg.channels || {}, true);
+    markDirty('channel');
   };
 
   window._toggleSecret = (id) => {
@@ -1838,10 +1839,26 @@
       }
 
       await updateDoc(doc(db, "bots", selectedBot), updates);
+
+      // If active_channel changed, send restart command via inbox
+      if (card === 'channel' && updates.active_channel && updates.active_channel !== cfg.active_channel) {
+        await addDoc(collection(db, "messages"), {
+          from: "control-board",
+          to: selectedBot,
+          instruction: `[system:restart] channel switched to ${updates.active_channel}`,
+          task_id: "",
+          status: "pending",
+          result: "",
+          created_at: Timestamp.now(),
+        });
+        showToast(`Configuration saved · ${selectedBot} restarting...`);
+      } else {
+        showToast('Configuration saved');
+      }
+
       cfgDirty[card] = false;
       btn.classList.remove('dirty', 'saving');
       btn.textContent = 'Save';
-      showToast('Configuration saved');
     } catch (e) {
       btn.classList.remove('saving');
       btn.textContent = 'Save';
