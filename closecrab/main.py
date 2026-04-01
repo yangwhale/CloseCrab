@@ -303,6 +303,19 @@ def main():
 
     auth = Auth(allowed_user_ids=cfg["allowed_user_ids"])
     session_mgr = SessionManager(state_dir=cfg["state_dir"])
+
+    # Channel 切换检测：如果 channel 变了，清掉所有 active session 防止跨 channel resume 崩溃
+    _channel_file = Path(cfg["state_dir"]) / "last_channel"
+    _prev_channel = _channel_file.read_text().strip() if _channel_file.exists() else None
+    if _prev_channel and _prev_channel != channel_type:
+        log.info(f"Channel switched: {_prev_channel} → {channel_type}, clearing active sessions")
+        data = session_mgr.load()
+        for user_key in data:
+            if data[user_key].get("active"):
+                session_mgr.archive(user_key, data[user_key]["active"])
+        log.info(f"Archived {len(data)} active sessions")
+    _channel_file.write_text(channel_type)
+
     system_prompt = build_system_prompt(bot_name, team=cfg.get("team"), channel_type=channel_type)
 
     stt = STTEngine(
