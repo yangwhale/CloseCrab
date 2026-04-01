@@ -152,14 +152,6 @@ class BotCore:
                 log.warning(f"Failed to create live log doc: {e}")
                 log_ref = None
 
-        # TUI-style emoji mapping for tool names
-        _TUI_EMOJI = {
-            "Read": "📖", "Write": "✏️", "Edit": "✏️",
-            "Bash": "⚡", "Grep": "🔍", "Glob": "🔍",
-            "Agent": "🤖", "WebSearch": "🌐", "WebFetch": "🌐",
-            "TodoWrite": "📝", "Skill": "🎯",
-        }
-
         def _format_step(d: dict) -> list[str]:
             """从原始 stream-json 事件提取 step 文本，返回新增的 step 列表。"""
             new_steps = []
@@ -217,84 +209,17 @@ class BotCore:
                     new_steps.append(f"[result] {raw[:2000]}")
             return new_steps
 
-        def _format_tui_line(d: dict) -> str | None:
-            """从 stream-json 事件生成一行 TUI 风格的进度文本。只处理 tool_use 和 tool_result。"""
-            t = d.get("type", "")
-            if t == "assistant":
-                for block in d.get("message", {}).get("content", []):
-                    if block.get("type") != "tool_use":
-                        continue
-                    name = block.get("name", "")
-                    inp = block.get("input", {})
-                    emoji = _TUI_EMOJI.get(name, "🔧")
-                    if name in ("Read", "Write", "Edit") and "file_path" in inp:
-                        path = inp["file_path"]
-                        # Show only filename for brevity, full path if short
-                        short = path.rsplit("/", 1)[-1] if len(path) > 60 else path
-                        return f"{emoji} {name} `{short}`"
-                    elif name == "Bash" and "command" in inp:
-                        cmd = inp["command"].split("\n")[0][:80]
-                        return f"{emoji} Bash `{cmd}`"
-                    elif name == "Grep" and "pattern" in inp:
-                        detail = f"/{inp['pattern']}/"
-                        if inp.get("path"):
-                            p = inp["path"].rsplit("/", 1)[-1]
-                            detail += f" in {p}"
-                        return f"{emoji} Grep {detail}"
-                    elif name == "Glob":
-                        return f"{emoji} Glob `{inp.get('pattern', '')}`"
-                    elif name == "Agent":
-                        desc = inp.get("description", "")[:40]
-                        return f"{emoji} Agent: {desc}"
-                    elif name == "WebSearch":
-                        return f"{emoji} Search: {inp.get('query', '')[:50]}"
-                    elif name == "WebFetch":
-                        url = inp.get("url", "")
-                        # Show domain only
-                        domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:40]
-                        return f"{emoji} Fetch {domain}"
-                    else:
-                        return f"{emoji} {name}"
-            elif t == "user":
-                # Tool result — show abbreviated
-                msg_content = d.get("message", {}).get("content", "")
-                raw = None
-                if isinstance(msg_content, list):
-                    for block in msg_content:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            raw = block.get("content", "")
-                            break
-                elif isinstance(msg_content, str):
-                    raw = msg_content
-                if raw and isinstance(raw, str) and raw.strip():
-                    preview = raw.strip().split("\n")[0][:60]
-                    return f"   ↳ {preview}"
-            return None
-
-        # TUI step 累积列表（供 channel 回调使用）
-        tui_lines: list[str] = []
-
         async def _on_step(d: dict):
             new_steps = _format_step(d)
             if not new_steps:
-                # 即使 _format_step 无输出，TUI 行可能有（如 tool_result 摘要）
-                tui_line = _format_tui_line(d)
-                if tui_line and on_tui_step:
-                    tui_lines.append(tui_line)
-                    try:
-                        await on_tui_step(list(tui_lines))
-                    except Exception as e:
-                        log.debug(f"on_tui_step callback failed: {e}")
                 return
             for s in new_steps:
                 steps.append(s[:500])
 
-            # TUI 进度推送到 channel
-            tui_line = _format_tui_line(d)
-            if tui_line and on_tui_step:
-                tui_lines.append(tui_line)
+            # TUI 进度推送到 channel（直接复用 steps，和 Firestore 日志一致）
+            if on_tui_step:
                 try:
-                    await on_tui_step(list(tui_lines))
+                    await on_tui_step(list(steps))
                 except Exception as e:
                     log.debug(f"on_tui_step callback failed: {e}")
 

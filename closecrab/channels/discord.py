@@ -1002,7 +1002,7 @@ class DiscordChannel(Channel):
 
             try:
                 if _tui_msg[0] is None:
-                    _tui_msg[0] = await message.channel.send(content)
+                    _tui_msg[0] = await message.reply(content, mention_author=False)
                 else:
                     await _tui_msg[0].edit(content=content)
             except Exception:
@@ -1047,13 +1047,6 @@ class DiscordChannel(Channel):
                     metadata=metadata,
                 )
                 result = await self._core.handle_message(msg)
-
-            # TUI 进度消息：完成后删除（最终回复已包含结果）
-            if _tui_msg[0]:
-                try:
-                    await _tui_msg[0].delete()
-                except Exception:
-                    pass
 
             if result:
                 # 提取 <voice-summary> 标签（如果有）
