@@ -126,7 +126,7 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
         except Exception:
             pass
 
-    # TPU detection (metadata server)
+    # TPU detection (metadata server — works on GCE TPU VMs)
     if accel_type == "none":
         try:
             import requests
@@ -149,6 +149,13 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
                 accelerator = f"TPU {tpu_type}"
         except Exception:
             pass
+
+    # Fallback: read accelerator override from bot config (for GKE pods etc.)
+    if accel_type == "none":
+        cfg_accel = cfg.get("accelerator_override", "")
+        if cfg_accel:
+            accelerator = cfg_accel
+            accel_type = "TPU" if "TPU" in cfg_accel.upper() else "GPU"
 
     # Claude Code version
     cc_version = ""
