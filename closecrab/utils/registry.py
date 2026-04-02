@@ -150,7 +150,27 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
         except Exception:
             pass
 
-    # Fallback: read accelerator override from bot config (for GKE pods etc.)
+    # TPU detection via tpu-info (works in GKE TPU pods with tpu-info installed)
+    if accel_type == "none" and shutil.which("tpu-info"):
+        try:
+            out = subprocess.check_output(
+                ["tpu-info", "-v"], text=True, timeout=15,
+            )
+            # Parse "accelerator type: 7x" → "v7"
+            for line in out.splitlines():
+                if "accelerator type" in line.lower():
+                    raw = line.split(":", 1)[1].strip()  # e.g. "7x"
+                    accel_model = f"v{raw.rstrip('x')}"  # "v7"
+                    accel_type = "TPU"
+                    hbm_per_chip = {"v6e": 16, "v6": 32, "v5e": 16, "v5p": 96, "v4": 32, "v7": 192}
+                    accel_mem_each_gb = hbm_per_chip.get(accel_model, 16)
+                    accel_interconnect = "ICI"
+                    accelerator = f"TPU {accel_model}"
+                    break
+        except Exception:
+            pass
+
+    # Fallback: read accelerator override from bot config
     if accel_type == "none":
         cfg_accel = cfg.get("accelerator_override", "")
         if cfg_accel:
