@@ -110,6 +110,7 @@ def _resolve_config(bot_name: str) -> dict:
         "allowed_open_ids": set(cfg.get("allowed_open_ids", [])),
         "auto_respond_chats": set(str(x) for x in cfg.get("auto_respond_chats", [])),
         "log_chat_id": cfg.get("log_chat_id", ""),
+        "accelerator_override": cfg.get("accelerator_override", ""),
     }
 
 
