@@ -96,6 +96,7 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
         "team": data.get("team"),
         "inbox": data.get("inbox"),
         "email": data.get("email"),
+        "accelerator_override": data.get("accelerator_override", ""),
     }
 
     # Flatten channel-specific config to top level
