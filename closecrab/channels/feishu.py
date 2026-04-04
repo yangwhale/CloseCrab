@@ -34,6 +34,7 @@ import random
 import re
 import tempfile
 import threading
+from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -1381,7 +1382,7 @@ class FeishuChannel(Channel):
                         # 下载嵌入的图片
                         for img_key in image_keys:
                             file_info = await self._download_resource_by_key(
-                                message.message_id, img_key, "image", ".png",
+                                message.message_id, img_key, "image", ".jpg",
                             )
                             if file_info:
                                 path, fname = file_info
@@ -1995,6 +1996,25 @@ class FeishuChannel(Channel):
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
+    @staticmethod
+    def _convert_image_to_jpeg(data: bytes) -> tuple[bytes, str]:
+        """将图片数据转换为 JPEG 格式。
+
+        Vertex AI 可能不支持 PNG，统一转 JPEG 最安全。
+        返回 (jpeg_bytes, suffix)。如果转换失败则原样返回。
+        """
+        try:
+            from PIL import Image
+            img = Image.open(BytesIO(data))
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGB")
+            out = BytesIO()
+            img.save(out, format="JPEG", quality=95)
+            return out.getvalue(), ".jpg"
+        except Exception as e:
+            log.warning(f"Image JPEG conversion failed, using original: {e}")
+            return data, ".png"
+
     async def _download_attachment(self, message) -> Optional[tuple[str, str]]:
         """下载文件或图片附件。"""
         try:
@@ -2009,7 +2029,7 @@ class FeishuChannel(Channel):
             elif image_key:
                 resource_type = "image"
                 key = image_key
-                file_name = f"{image_key}.png"
+                file_name = f"{image_key}.jpg"
             else:
                 return None
 
@@ -2028,11 +2048,18 @@ class FeishuChannel(Channel):
                 log.error(f"Download file failed: {resp.code} {resp.msg}")
                 return None
 
-            suffix = Path(file_name).suffix or ".bin"
+            data = resp.file.read() if hasattr(resp.file, "read") else resp.file
+
+            # 图片类型：转换为 JPEG（Vertex AI 兼容性）
+            if resource_type == "image":
+                data, suffix = self._convert_image_to_jpeg(data)
+                file_name = Path(file_name).stem + suffix
+            else:
+                suffix = Path(file_name).suffix or ".bin"
+
             tmp = tempfile.NamedTemporaryFile(
                 delete=False, suffix=suffix, dir="/tmp", prefix="feishu_"
             )
-            data = resp.file.read() if hasattr(resp.file, "read") else resp.file
             tmp.write(data)
             tmp.close()
 
@@ -2045,7 +2072,7 @@ class FeishuChannel(Channel):
 
     async def _download_resource_by_key(
         self, message_id: str, file_key: str,
-        resource_type: str = "image", suffix: str = ".png",
+        resource_type: str = "image", suffix: str = ".jpg",
     ) -> Optional[tuple[str, str]]:
         """通过 file_key/image_key 下载消息中的资源。"""
         try:
@@ -2064,10 +2091,15 @@ class FeishuChannel(Channel):
                 log.error(f"Download resource failed: {resp.code} {resp.msg}")
                 return None
 
+            data = resp.file.read() if hasattr(resp.file, "read") else resp.file
+
+            # 图片类型：转换为 JPEG（Vertex AI 兼容性）
+            if resource_type == "image":
+                data, suffix = self._convert_image_to_jpeg(data)
+
             tmp = tempfile.NamedTemporaryFile(
                 delete=False, suffix=suffix, dir="/tmp", prefix="feishu_"
             )
-            data = resp.file.read() if hasattr(resp.file, "read") else resp.file
             tmp.write(data)
             tmp.close()
 
