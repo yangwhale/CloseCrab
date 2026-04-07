@@ -1007,6 +1007,8 @@ class FeishuChannel(Channel):
                     if _card_dirty[0]:
                         if current != _pending_action[0][:40] and (not _progress_history or _progress_history[-1] != current):
                             _progress_history.append(current)
+                            if len(_progress_history) > 20:
+                                _progress_history[:] = _progress_history[-20:]
                         _card_dirty[0] = False
                     try:
                         await self._async_update_card(_progress_card_id[0], card)
@@ -1607,6 +1609,8 @@ class FeishuChannel(Channel):
                             action = _pending_action[0]
                             if action != "🧠 思考中..." and (not _progress_history or _progress_history[-1] != action):
                                 _progress_history.append(action)
+                                if len(_progress_history) > 20:
+                                    _progress_history[:] = _progress_history[-20:]
 
                         _card_dirty[0] = False
 
@@ -2286,9 +2290,9 @@ class FeishuChannel(Channel):
 
         elements = []
 
-        # 已完成步骤（删除线 + 灰色）
+        # 已完成步骤（删除线 + 灰色），只保留最近 5 条
         if history:
-            done_text = "\n".join(f"~~{h}~~" for h in history[-18:])
+            done_text = "\n".join(f"~~{h}~~" for h in history[-5:])
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": done_text},
