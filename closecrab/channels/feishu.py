@@ -958,39 +958,21 @@ class FeishuChannel(Channel):
         _start_time = asyncio.get_running_loop().time()
         _progress_card_id: list = [None]
         _progress_history: list = []
-        _last_progress = [0.0]
+        _pending_action: list = [f"📋 执行任务: {summary[:40]}"]
+        _card_dirty = [True]
         _anim_task: list = [None]
 
         init_card = self._build_progress_card(
-            current_action=f"📋 执行任务: {summary[:40]}",
+            current_action=_pending_action[0],
             history=[], elapsed=0,
             header_text=_make_header(_CRAB_FRAMES[0], random.randint(0, len(_WITTY_TIPS) - 1)),
         )
         _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 
         async def on_progress(text: str):
-            now = asyncio.get_running_loop().time()
-            if now - _last_progress[0] < _get_progress_throttle():
-                return
-            _last_progress[0] = now
-            formatted = _format_progress(text)
-            elapsed = now - _start_time
-            card = self._build_progress_card(
-                current_action=formatted, history=_progress_history, elapsed=elapsed,
-            )
-            if _progress_card_id[0]:
-                try:
-                    ok = await self._async_update_card(_progress_card_id[0], card)
-                    if ok:
-                        _progress_history.append(formatted)
-                        return
-                except Exception:
-                    pass
-            try:
-                _progress_card_id[0] = await self._async_send_card_with_id(chat_id, card)
-                _progress_history.append(formatted)
-            except Exception:
-                pass
+            """只缓存进度文本，由 _card_update_loop 统一刷新。"""
+            _pending_action[0] = _format_progress(text)
+            _card_dirty[0] = True
 
         async def on_log(text: str):
             if self._log_buffer:
@@ -999,18 +981,15 @@ class FeishuChannel(Channel):
         async def reply_fn(text: str):
             await self._send_long(chat_id, text)
 
-        # 螃蟹动画
+        # 统一卡片更新循环（动画 + 进度合并）
         _anim_frame = [0]
         _tip_idx = [random.randint(0, len(_WITTY_TIPS) - 1)]
         _tip_counter = [0]
 
-        async def _animate():
+        async def _card_update_loop_inbox():
             try:
                 while True:
-                    await asyncio.sleep(_get_animate_interval())
-                    now = asyncio.get_running_loop().time()
-                    if _last_progress[0] > 0 and now - _last_progress[0] < _get_progress_throttle() + 1:
-                        continue
+                    await asyncio.sleep(_get_progress_throttle())
                     if not _progress_card_id[0]:
                         continue
                     _anim_frame[0] = (_anim_frame[0] + 1) % len(_CRAB_FRAMES)
@@ -1018,11 +997,17 @@ class FeishuChannel(Channel):
                     if _tip_counter[0] >= _TIP_CHANGE_EVERY:
                         _tip_counter[0] = 0
                         _tip_idx[0] = random.randint(0, len(_WITTY_TIPS) - 1)
+                    now = asyncio.get_running_loop().time()
                     header = _make_header(_CRAB_FRAMES[_anim_frame[0]], _tip_idx[0])
+                    current = _pending_action[0]
                     card = self._build_progress_card(
-                        current_action=f"📋 {summary[:40]}", history=_progress_history,
+                        current_action=current, history=_progress_history,
                         elapsed=now - _start_time, header_text=header,
                     )
+                    if _card_dirty[0]:
+                        if current != _pending_action[0][:40] and (not _progress_history or _progress_history[-1] != current):
+                            _progress_history.append(current)
+                        _card_dirty[0] = False
                     try:
                         await self._async_update_card(_progress_card_id[0], card)
                     except Exception:
@@ -1030,7 +1015,7 @@ class FeishuChannel(Channel):
             except asyncio.CancelledError:
                 pass
 
-        _anim_task[0] = asyncio.create_task(_animate())
+        _anim_task[0] = asyncio.create_task(_card_update_loop_inbox())
 
         # 构造消息送入 Claude
         content = f"[from: Bitable Inbox]\n{instruction}"
@@ -1165,13 +1150,10 @@ class FeishuChannel(Channel):
                         ok = await self._async_update_card(_card_id[0], card)
                         if ok:
                             _prog_history.append(formatted)
-                            return
                     except Exception:
-                        pass
-                    try:
-                        await self._async_delete_message(_card_id[0])
-                    except Exception:
-                        pass
+                        pass  # 更新失败就跳过，不删旧发新
+                    return
+                # 首次发送
                 try:
                     _card_id[0] = await self._async_send_card_with_id(chat_id, card)
                     _prog_history.append(formatted)
@@ -1484,9 +1466,12 @@ class FeishuChannel(Channel):
                 if _log:
                     await _log.add(text)
 
-            # ── Living Progress Card ──
-            _last_progress = [0.0]
+            # ── Living Progress Card (unified update loop) ──
             _progress_history: list = []
+            # 缓冲区：on_progress / on_tui_step 只写这里，不直接调 API
+            _pending_action: list = ["🧠 思考中..."]  # [current_action_text]
+            _pending_tui: list = [None]  # [lines] or None
+            _card_dirty = [True]  # 首次发送后立即标脏以触发第一帧
 
             def _get_usage_info() -> dict:
                 """获取当前 session 的 usage 信息。"""
@@ -1496,83 +1481,16 @@ class FeishuChannel(Channel):
                     return {}
 
             async def on_progress(text: str):
-                now = asyncio.get_running_loop().time()
-                if now - _last_progress[0] < _get_progress_throttle():
-                    return
-                _last_progress[0] = now
-
+                """只缓存进度文本，不调飞书 API。由 _card_update_loop 统一刷新。"""
                 formatted = _format_progress(text)
-                elapsed = now - _start_time
-
-                card = self._build_progress_card(
-                    current_action=formatted,
-                    history=_progress_history,
-                    elapsed=elapsed,
-                    usage=_get_usage_info(),
-                )
-
-                if _progress_card_id[0]:
-                    # 原地更新卡片
-                    try:
-                        ok = await self._async_update_card(_progress_card_id[0], card)
-                        if ok:
-                            _progress_history.append(formatted)
-                            return
-                    except Exception:
-                        pass
-                    # update 失败，尝试删旧发新
-                    try:
-                        await self._async_delete_message(_progress_card_id[0])
-                    except Exception:
-                        pass
-
-                # 发送新卡片（首次 or fallback）
-                try:
-                    mid = await self._async_send_card_with_id(chat_id, card)
-                    _progress_card_id[0] = mid
-                    _progress_history.append(formatted)
-                except Exception:
-                    pass
-
-            # TUI-style 进度：用卡片显示完整 step 列表
-            _tui_last_update = [0.0]
+                _pending_action[0] = formatted
+                _pending_tui[0] = None  # progress 模式优先于 tui 模式
+                _card_dirty[0] = True
 
             async def on_tui_step(lines: list[str]):
-                now = asyncio.get_running_loop().time()
-                if now - _tui_last_update[0] < _get_progress_throttle():
-                    return
-                _tui_last_update[0] = now
-
-                elapsed = now - _start_time
-                # 取最后 20 行作为历史，最后一行作为当前
-                display = lines[-20:] if len(lines) > 20 else lines
-                history = display[:-1] if len(display) > 1 else []
-                current = display[-1] if display else "..."
-
-                card = self._build_progress_card(
-                    current_action=current,
-                    history=history,
-                    elapsed=elapsed,
-                    usage=_get_usage_info(),
-                )
-
-                if _progress_card_id[0]:
-                    try:
-                        ok = await self._async_update_card(_progress_card_id[0], card)
-                        if ok:
-                            return
-                    except Exception:
-                        pass
-                    try:
-                        await self._async_delete_message(_progress_card_id[0])
-                    except Exception:
-                        pass
-
-                try:
-                    mid = await self._async_send_card_with_id(chat_id, card)
-                    _progress_card_id[0] = mid
-                except Exception:
-                    pass
+                """只缓存 TUI 行，不调飞书 API。由 _card_update_loop 统一刷新。"""
+                _pending_tui[0] = lines
+                _card_dirty[0] = True
 
             # 交互式工具回调
             async def on_input_needed(info: dict) -> Optional[str]:
@@ -1642,36 +1560,57 @@ class FeishuChannel(Channel):
                 metadata=metadata,
             )
 
-            # ── 螃蟹动画 ──
+            # ── 统一卡片更新循环（动画 + 进度合并为单一出口）──
             _anim_frame = [0]
             _tip_idx = [random.randint(0, len(_WITTY_TIPS) - 1)]
             _tip_counter = [0]
 
-            async def _animate_header():
-                """后台循环：无 tool call 时让螃蟹满头大汗动起来。"""
+            async def _card_update_loop():
+                """唯一的卡片更新出口：每 tick 合并动画帧 + 最新进度，发一次 API。"""
                 try:
                     while True:
-                        await asyncio.sleep(_get_animate_interval())
-                        # 有真实 progress 在跑时让路
-                        now = asyncio.get_running_loop().time()
-                        if _last_progress[0] > 0 and now - _last_progress[0] < _get_progress_throttle() + 1:
-                            continue
+                        await asyncio.sleep(_get_progress_throttle())
                         if not _progress_card_id[0]:
                             continue
+
+                        # 推进动画帧（每 tick 都转）
                         _anim_frame[0] = (_anim_frame[0] + 1) % len(_CRAB_FRAMES)
                         _tip_counter[0] += 1
                         if _tip_counter[0] >= _TIP_CHANGE_EVERY:
                             _tip_counter[0] = 0
                             _tip_idx[0] = random.randint(0, len(_WITTY_TIPS) - 1)
+
+                        now = asyncio.get_running_loop().time()
                         elapsed = now - _start_time
                         header = _make_header(_CRAB_FRAMES[_anim_frame[0]], _tip_idx[0])
+
+                        # 确定当前显示内容：TUI 模式 > progress 模式
+                        if _pending_tui[0] is not None:
+                            lines = _pending_tui[0]
+                            display = lines[-20:] if len(lines) > 20 else lines
+                            history = display[:-1] if len(display) > 1 else []
+                            current = display[-1] if display else "🧠 思考中..."
+                        else:
+                            history = _progress_history
+                            current = _pending_action[0]
+
                         card = self._build_progress_card(
-                            current_action="🧠 思考中...",
-                            history=_progress_history,
+                            current_action=current,
+                            history=history,
                             elapsed=elapsed,
                             header_text=header,
                             usage=_get_usage_info(),
                         )
+
+                        # 如果有新进度，先提交到 history（在发 API 之前）
+                        if _card_dirty[0] and _pending_tui[0] is None:
+                            action = _pending_action[0]
+                            if action != "🧠 思考中..." and (not _progress_history or _progress_history[-1] != action):
+                                _progress_history.append(action)
+
+                        _card_dirty[0] = False
+
+                        # 唯一的 API 调用点：更新卡片，失败就跳过等下次
                         try:
                             await self._async_update_card(_progress_card_id[0], card)
                         except Exception:
@@ -1688,12 +1627,12 @@ class FeishuChannel(Channel):
             )
             _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 
-            # 启动螃蟹动画
-            _anim_task[0] = asyncio.create_task(_animate_header())
+            # 启动统一更新循环
+            _anim_task[0] = asyncio.create_task(_card_update_loop())
 
             result = await self._core.handle_message(msg)
 
-            # 停止 dots 动画
+            # 停止卡片更新循环
             if _anim_task[0]:
                 _anim_task[0].cancel()
 
