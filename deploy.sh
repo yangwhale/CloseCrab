@@ -515,10 +515,12 @@ install_cc() {
         echo "  警告: 无 settings.json 模板，请手动配置"
     fi
 
-    # CLAUDE.md: symlink 到 home 目录，确保 bot 在 ~/ 工作时也能加载
+    # CLAUDE.md: symlink 到 ~/.claude/（全局生效，不受 cwd 影响）
     if [[ -f "$SCRIPT_DIR/CLAUDE.md" ]]; then
-        ln -sf "$SCRIPT_DIR/CLAUDE.md" ~/CLAUDE.md
-        echo "  CLAUDE.md symlink: ~/CLAUDE.md → $SCRIPT_DIR/CLAUDE.md"
+        ln -sf "$SCRIPT_DIR/CLAUDE.md" ~/.claude/CLAUDE.md
+        echo "  CLAUDE.md symlink: ~/.claude/CLAUDE.md → $SCRIPT_DIR/CLAUDE.md"
+        # 清理旧位置的 symlink（如果存在）
+        [[ -L ~/CLAUDE.md ]] && rm ~/CLAUDE.md && echo "  已清理旧 ~/CLAUDE.md symlink"
     fi
 
     # ----------------------------------------------------------------

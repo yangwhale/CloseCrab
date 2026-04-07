@@ -1,3 +1,29 @@
+# Chris 的 Claude Code 全局偏好
+
+## 语言和沟通
+- 用中文回复，技术术语保留英文原文
+- 直接给结论，不要啰嗦
+- 不确定的时候先调查再回答，不要猜
+
+## 工作流程
+- 复杂任务（多步骤、架构设计、新功能）必须先出方案，讨论确认后再动手写代码。不要上来就干
+- 用 Plan Mode 列想法，等用户明确说"开干"、"可以了"、"开始吧"等明确指示后才能开始写代码
+- 没有收到明确的开始指令之前，绝对不要动手实现
+
+## 工作环境
+- 机器: GCP VM (ubuntu, zsh + oh-my-zsh)
+- 主要工作: GPU/TPU 基础设施管理、ML 模型训练和推理
+- 详细环境信息见 auto memory 的 topic 文件
+
+## CC Pages (Web 内容发布)
+- 架构: GCS (`gs://chris-pgp-host-asia/cc-pages/`) + hk-jmp gcsfuse 反代，所有机器统一
+- Web root: 环境变量 `CC_PAGES_WEB_ROOT` (gcsfuse 挂载点，gLinux: `~/gcs-mount/cc-pages`，VMs: `/gcs/cc-pages`)
+- URL 前缀: `CC_PAGES_URL_PREFIX=https://cc.higcp.com`（所有机器统一，无 `/g1/` `/c1/` 前缀）
+- 生成文件写到 `$CC_PAGES_WEB_ROOT/pages/` 或 `$CC_PAGES_WEB_ROOT/assets/`
+- 发送链接时用 `$CC_PAGES_URL_PREFIX/pages/xxx.html` 或 `$CC_PAGES_URL_PREFIX/assets/xxx.png`
+
+---
+
 # CloseCrab — Claude Code Bot Framework
 
 ## 项目概述
