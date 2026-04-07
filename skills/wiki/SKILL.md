@@ -101,6 +101,7 @@ WIKI_URL=$CC_PAGES_URL_PREFIX/wiki           # 公网 URL 前缀
 │   └── notes/                   # 碎片笔记
 └── wiki-data/                   # 元数据（非 HTML）
     ├── graph.json               # 页面关系图
+    ├── log.json                 # 操作日志（机器可读）
     └── search-index.json        # 搜索索引
 ```
 
@@ -143,7 +144,7 @@ ln -sfn ~/my-wiki/wiki $CC_PAGES_WEB_ROOT/wiki 2>/dev/null || rsync
    - 更新所有受影响页面的 backlinks
 5. **更新索引**：运行 `rebuild-index.py` 重建 `index.html`
 6. **更新图谱**：运行 `rebuild-graph.py` 重建 `graph.json`
-7. **追加日志**：在 `log.html` 追加一条记录
+7. **追加日志**：在 `log.html` 追加一条记录，同时追加 `wiki-data/log.json`（格式见 `references/log-json-spec.md`）
 8. **同步**：
    - `git add -A && git commit -m "ingest: {title}"` 
    - `python3 sync-to-gcs.py`
@@ -195,139 +196,19 @@ Lint 不只是被动的健康检查，更是**主动的知识发现引擎**。
 
 ## 页面 HTML 规范
 
-### Meta 标签（必须）
+> 📄 详见 `references/html-page-spec.md` — 包含 meta 标签、HTML 结构模板、交叉引用约定、特殊标注（callouts）
 
-每个 Wiki 页面的 `<head>` 必须包含：
-
-```html
-<meta name="wiki-type" content="concept">           <!-- source|entity|concept|analysis -->
-<meta name="wiki-tags" content="ai,knowledge,llm">  <!-- 逗号分隔标签 -->
-<meta name="wiki-created" content="2026-04-07">
-<meta name="wiki-updated" content="2026-04-07">
-<meta name="wiki-sources" content="3">               <!-- 引用来源数 -->
-<meta name="wiki-links-to" content="rag,memex">      <!-- 出链页面 slug -->
-```
-
-### HTML 结构
-
-```html
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{页面标题} — CC Wiki</title>
-  <!-- wiki-* meta tags -->
-  <!-- OG tags for sharing -->
-  <link rel="stylesheet" href="../style.css">
-</head>
-<body>
-  <nav class="wiki-nav">
-    <a href="../index.html">Index</a>
-    <a href="../graph.html">Graph</a>
-    <a href="../log.html">Log</a>
-  </nav>
-
-  <article class="wiki-content">
-    <header>
-      <div class="wiki-meta">
-        <span class="wiki-type">{type}</span>
-        <span class="wiki-date">Created: {date} · Updated: {date}</span>
-      </div>
-      <h1>{标题}</h1>
-      <p class="wiki-summary">{一行摘要}</p>
-      <div class="wiki-tags">{tags}</div>
-    </header>
-
-    <main>
-      <!-- 页面主体内容 -->
-    </main>
-
-    <section class="wiki-backlinks">
-      <h3>引用了此页面的页面</h3>
-      <ul>
-        <li><a href="...">{title}</a></li>
-      </ul>
-    </section>
-
-    <section class="wiki-sources-list">
-      <h3>参考来源</h3>
-      <ul>
-        <li><a href="...">{source title}</a></li>
-      </ul>
-    </section>
-  </article>
-
-  <footer class="wiki-footer">
-    CC Wiki · Maintained by CloseCrab Bot
-  </footer>
-</body>
-</html>
-```
-
-### 交叉引用
-
-```html
-<!-- Wiki 内部链接 -->
-<a href="../concepts/rag.html" class="wiki-link">RAG</a>
-
-<!-- 原始资料引用 -->
-<a href="../../raw/articles/xxx.html" class="source-ref">[来源]</a>
-
-<!-- 外部链接 -->
-<a href="https://..." target="_blank" rel="noopener">外部链接</a>
-```
-
-### 特殊标注
-
-```html
-<!-- 矛盾标注 -->
-<div class="wiki-callout wiki-warning">
-  <strong>矛盾</strong>：此观点与 <a href="...">xxx</a> 中的结论冲突。
-</div>
-
-<!-- 不确定标注 -->
-<div class="wiki-callout wiki-question">
-  <strong>待验证</strong>：此数据来源单一，需要更多佐证。
-</div>
-
-<!-- 过时标注 -->
-<div class="wiki-callout wiki-outdated">
-  <strong>可能过时</strong>：较新的来源 <a href="...">xxx</a> 提供了更新数据。
-</div>
-```
+**要点速记**（生成页面时查阅完整规范）：
+- 每页必须有 `wiki-type`、`wiki-tags`、`wiki-created`、`wiki-updated`、`wiki-links-to` meta 标签
+- 使用 `class="wiki-link"` 做内部链接，`class="source-ref"` 引用原始资料
+- 矛盾用 `wiki-warning`、待验证用 `wiki-question`、过时用 `wiki-outdated` callout
+- 每页底部要有 backlinks 和参考来源两个 section
 
 ## graph.json 格式
 
-```json
-{
-  "meta": {
-    "updated": "2026-04-07T10:30:00Z",
-    "node_count": 42,
-    "link_count": 128
-  },
-  "nodes": [
-    {
-      "id": "rag",
-      "title": "RAG (Retrieval-Augmented Generation)",
-      "type": "concept",
-      "path": "concepts/rag.html",
-      "tags": ["ai", "retrieval", "llm"],
-      "summary": "基于检索增强的生成方法...",
-      "created": "2026-04-07",
-      "updated": "2026-04-07",
-      "source_count": 3
-    }
-  ],
-  "links": [
-    {
-      "source": "karpathy-llm-wiki",
-      "target": "rag",
-      "type": "mentions"
-    }
-  ]
-}
-```
+> 📄 详见 `references/graph-json-spec.md` — 包含完整 JSON schema 和字段说明
+
+**要点速记**：`meta`（统计）+ `nodes`（id/title/type/path/tags/summary）+ `links`（source/target/type）
 
 ## 同步机制
 

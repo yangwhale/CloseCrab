@@ -56,6 +56,13 @@ cat > wiki-data/graph.json << 'GRAPH'
 }
 GRAPH
 
+# Create empty log.json
+cat > wiki-data/log.json << 'LOGJSON'
+{
+  "entries": []
+}
+LOGJSON
+
 # Create .gitignore
 cat > .gitignore << 'GI'
 .DS_Store
