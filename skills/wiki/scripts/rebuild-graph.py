@@ -11,43 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from html.parser import HTMLParser
 
+# Allow running from any directory
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+from wiki_utils import WikiMetaParser, SKIP_FILES, TYPE_COLORS
+
 WIKI_REPO = Path(os.environ.get("WIKI_REPO", os.path.expanduser("~/my-wiki")))
 WIKI_DIR = WIKI_REPO / "wiki"
 DATA_DIR = WIKI_REPO / "wiki-data"
-
-SKIP_FILES = {"index.html", "log.html", "graph.html", "style.css", "overview.html"}
-
-TYPE_COLORS = {
-    "source": "#F59E0B",
-    "entity": "#0EA5E9",
-    "concept": "#10B981",
-    "analysis": "#F43F5E",
-}
-
-
-class WikiMetaParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.meta = {}
-        self.title = ""
-        self._in_title = False
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "meta":
-            d = dict(attrs)
-            name = d.get("name", "")
-            if name.startswith("wiki-"):
-                self.meta[name] = d.get("content", "")
-        elif tag == "title":
-            self._in_title = True
-
-    def handle_data(self, data):
-        if self._in_title:
-            self.title += data
-
-    def handle_endtag(self, tag):
-        if tag == "title":
-            self._in_title = False
 
 
 class LinkExtractor(HTMLParser):
@@ -83,7 +54,7 @@ def scan_pages():
         except Exception:
             continue
 
-        # Parse meta
+        # Parse meta + summary
         meta_parser = WikiMetaParser()
         try:
             meta_parser.feed(content)
@@ -94,7 +65,7 @@ def scan_pages():
             continue
 
         slug = html_file.stem
-        title = meta_parser.title.replace(" — CC Wiki", "").strip()
+        title = meta_parser.clean_title()
         tags = [t.strip() for t in meta_parser.meta.get("wiki-tags", "").split(",") if t.strip()]
 
         nodes.append({
@@ -103,6 +74,7 @@ def scan_pages():
             "type": meta_parser.meta.get("wiki-type", ""),
             "path": str(rel),
             "tags": tags,
+            "summary": meta_parser.summary.strip(),
             "created": meta_parser.meta.get("wiki-created", ""),
             "updated": meta_parser.meta.get("wiki-updated", ""),
             "source_count": int(meta_parser.meta.get("wiki-sources", "0") or "0"),
@@ -254,7 +226,7 @@ function renderGraph(data) {{
   // Interactions
   node.on('mouseover', (e, d) => {{
     tooltip.style.opacity = 1;
-    tooltip.innerHTML = `<strong>${{d.title}}</strong><br>${{d.type}} · ${{d.tags.join(', ')}}<br>Created: ${{d.created}}`;
+    tooltip.innerHTML = `<strong>${{d.title}}</strong><br>${{d.type}} · ${{d.tags.join(', ')}}<br>${{d.summary ? d.summary + '<br>' : ''}}Created: ${{d.created}}`;
   }}).on('mousemove', (e) => {{
     tooltip.style.left = (e.offsetX + 15) + 'px';
     tooltip.style.top = (e.offsetY - 10) + 'px';

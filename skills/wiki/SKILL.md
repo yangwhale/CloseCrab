@@ -88,7 +88,6 @@ WIKI_URL=$CC_PAGES_URL_PREFIX/wiki           # 公网 URL 前缀
 │   ├── index.html               # 总索引页（自动生成）
 │   ├── log.html                 # 操作日志（追加式）
 │   ├── graph.html               # D3.js 知识图谱
-│   ├── overview.html            # 全局综述
 │   ├── style.css                # 共享样式
 │   ├── sources/                 # 来源摘要
 │   ├── entities/                # 实体页面（人/产品/项目）
@@ -123,9 +122,6 @@ fi
 
 # 2. 同步到 GCS
 python3 ~/.claude/skills/wiki/scripts/sync-to-gcs.py
-
-# 3. 创建 symlink（如果没有）
-ln -sfn ~/my-wiki/wiki $CC_PAGES_WEB_ROOT/wiki 2>/dev/null || rsync
 ```
 
 ### /wiki ingest — 录入新资料

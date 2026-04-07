@@ -9,54 +9,14 @@ import re
 import json
 from datetime import datetime
 from pathlib import Path
-from html.parser import HTMLParser
+
+# Allow running from any directory
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+from wiki_utils import WikiMetaParser, SKIP_FILES, TYPE_ORDER, TYPE_LABELS, TYPE_COLORS
 
 WIKI_REPO = Path(os.environ.get("WIKI_REPO", os.path.expanduser("~/my-wiki")))
 WIKI_DIR = WIKI_REPO / "wiki"
-
-# Files to skip (not regular wiki pages)
-SKIP_FILES = {"index.html", "log.html", "graph.html", "style.css"}
-
-# Type display names and order
-TYPE_ORDER = ["source", "entity", "concept", "analysis"]
-TYPE_LABELS = {
-    "source": "Sources 来源摘要",
-    "entity": "Entities 实体",
-    "concept": "Concepts 概念",
-    "analysis": "Analyses 分析",
-}
-TYPE_COLORS = {
-    "source": "#F59E0B",
-    "entity": "#0EA5E9",
-    "concept": "#10B981",
-    "analysis": "#F43F5E",
-}
-
-
-class MetaParser(HTMLParser):
-    """Extract <meta> and <title> from HTML head."""
-    def __init__(self):
-        super().__init__()
-        self.meta = {}
-        self.title = ""
-        self._in_title = False
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "meta":
-            d = dict(attrs)
-            name = d.get("name", "")
-            if name.startswith("wiki-"):
-                self.meta[name] = d.get("content", "")
-        elif tag == "title":
-            self._in_title = True
-
-    def handle_data(self, data):
-        if self._in_title:
-            self.title += data
-
-    def handle_endtag(self, tag):
-        if tag == "title":
-            self._in_title = False
 
 
 def parse_page(filepath: Path) -> dict | None:
@@ -66,7 +26,7 @@ def parse_page(filepath: Path) -> dict | None:
     except Exception:
         return None
 
-    parser = MetaParser()
+    parser = WikiMetaParser()
     try:
         parser.feed(content)
     except Exception:
@@ -75,8 +35,7 @@ def parse_page(filepath: Path) -> dict | None:
     if not parser.meta.get("wiki-type"):
         return None
 
-    # Clean title (remove " — CC Wiki" suffix)
-    title = parser.title.replace(" — CC Wiki", "").strip()
+    title = parser.clean_title()
 
     # Determine relative path from wiki/
     rel_path = filepath.relative_to(WIKI_DIR)
