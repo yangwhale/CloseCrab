@@ -2290,9 +2290,9 @@ class FeishuChannel(Channel):
 
         elements = []
 
-        # 已完成步骤（删除线 + 灰色），只保留最近 5 条
+        # 已完成步骤，保留最近 5 条，正常显示（不加删除线）
         if history:
-            done_text = "\n".join(f"~~{h}~~" for h in history[-5:])
+            done_text = "\n".join(history[-5:])
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": done_text},
