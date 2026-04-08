@@ -671,7 +671,7 @@ gs://YOUR_BUCKET/
 
 ## Skills
 
-24 个 Skill 通过拷贝部署到 `~/.claude/skills/`：
+23 个 Skill 通过拷贝部署到 `~/.claude/skills/`（另有 private skills 通过 `install-private-skills.sh` 从 [ClosedCrab](https://github.com/yangwhale/ClosedCrab) 安装）：
 
 ### 知识管理
 
@@ -691,7 +691,7 @@ gs://YOUR_BUCKET/
 | issue-handler | GitHub Issue 处理 |
 | agent-teams | Agent Teams 管理 |
 | chrome-browser | Chrome 浏览器自动化 |
-| go-eat | 随机选餐厅（生活技能 🦀） |
+| go-eat | 随机选餐厅 |
 
 ### 媒体生成
 
@@ -720,7 +720,6 @@ gs://YOUR_BUCKET/
 | tmux-orchestrator | tmux 多进程编排 |
 | zsh-installer | Zsh + Oh My Zsh 配置 |
 | gemini-ui-reviewer | Gemini 驱动的 UI 审查 |
-| maxdiffusion-trainer | MaxDiffusion 训练管理 |
 
 ## CC Wiki — 个人知识 Wiki
 
@@ -1298,7 +1297,7 @@ CloseCrab/
 │       ├── firestore_inbox.py  # Bot 间实时通信（on_snapshot）
 │       ├── registry.py         # 自注册（硬件 + context 上报）
 │       └── stt.py              # 语音转文字（Gemini / Chirp2 / Whisper）
-├── skills/                     # 24 个 Skills（deploy.sh 拷贝到 ~/.claude/skills/）
+├── skills/                     # 23 个 Skills（deploy.sh 拷贝到 ~/.claude/skills/）
 │   └── wiki/                   # CC Wiki（Karpathy LLM Wiki 实现，含 36 个脚本）
 ├── scripts/
 │   ├── launcher.sh             # 本地 bot 管理（start/stop/restart/status/logs）
