@@ -8,7 +8,7 @@
 
 > 把 Claude Code 的全部能力接入 Discord / 飞书 / Lark / 钉钉，打造你的 24/7 AI 助手团队。
 
-CloseCrab 通过 Unix socketpair 与 Claude Code CLI 进程通信，在聊天平台里提供完整的 Claude Code 体验——工具调用、MCP Server、Skills、Auto Memory、Agent Teams，一个不少。
+CloseCrab 通过 Unix socketpair 与 Claude Code CLI 进程通信，在聊天平台里提供完整的 Claude Code 体验——工具调用、MCP Server、Skills、Auto Memory、Agent Teams，一个不少。内置基于 [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 理念的个人知识 Wiki 系统，让知识在对话中持续编译和增值。
 
 ### 为什么选择直接集成 Claude Code？
 
@@ -671,7 +671,13 @@ gs://YOUR_BUCKET/
 
 ## Skills
 
-19 个 Skill 通过拷贝部署到 `~/.claude/skills/`：
+24 个 Skill 通过拷贝部署到 `~/.claude/skills/`：
+
+### 知识管理
+
+| Skill | 用途 |
+|-------|------|
+| **wiki** | **个人知识 Wiki**（Karpathy LLM Wiki 实现）— 录入/查询/Lint/MCP Server |
 
 ### 通用
 
@@ -684,6 +690,8 @@ gs://YOUR_BUCKET/
 | skill-creator | Skill 开发指南 |
 | issue-handler | GitHub Issue 处理 |
 | agent-teams | Agent Teams 管理 |
+| chrome-browser | Chrome 浏览器自动化 |
+| go-eat | 随机选餐厅（生活技能 🦀） |
 
 ### 媒体生成
 
@@ -711,6 +719,106 @@ gs://YOUR_BUCKET/
 | tmux-installer | tmux + Oh My Tmux 配置 |
 | tmux-orchestrator | tmux 多进程编排 |
 | zsh-installer | Zsh + Oh My Zsh 配置 |
+| gemini-ui-reviewer | Gemini 驱动的 UI 审查 |
+| maxdiffusion-trainer | MaxDiffusion 训练管理 |
+
+## CC Wiki — 个人知识 Wiki
+
+受 [Andrej Karpathy 的 LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 启发，CloseCrab 内置了一个 LLM 驱动的个人知识 Wiki 系统。核心理念：**知识应该编译一次、持续增值，而不是每次从原始文档重新检索。**
+
+传统 RAG 每次查询都要从原始文档检索碎片再拼凑答案。CC Wiki 反其道而行——将知识 **编译** 为结构化的 HTML 页面，交叉引用已建好，矛盾已标记，综合分析已完成。每次录入新资料，不只是存档，而是触发级联更新，让整个知识图谱变得更完整。
+
+### 设计原则（来自 Karpathy）
+
+| 原则 | 说明 |
+|------|------|
+| **人类策展，LLM 执行** | 人负责选来源、问好问题、思考含义；LLM 负责总结、交叉引用、归档、维护 |
+| **编译，不检索** | 知识编译一次，持续更新。Wiki 是编译产物，不是搜索引擎 |
+| **Schema 共同进化** | 规则文档随使用迭代，不是写死的静态配置 |
+| **知识复利** | 每次 Ingest 更新多个页面，每次 Query 可回存为新分析，每次 Lint 修复不一致 |
+
+### 三层架构
+
+```
+~/my-wiki/
+├── raw/          # 原始资料（人策展，不可变）
+│   ├── articles/     PDF / 网页 / 转录稿
+│   ├── papers/
+│   └── notes/
+├── wiki/         # 知识页面（LLM 全权维护）
+│   ├── sources/      来源摘要（每篇资料一页）
+│   ├── entities/     实体页面（人/产品/项目）
+│   ├── concepts/     概念页面（技术/方法/理论）
+│   ├── analyses/     分析和对比
+│   ├── index.html    总索引（自动生成）
+│   ├── search.html   Pagefind 全文搜索
+│   ├── graph.html    D3.js 知识图谱可视化
+│   └── health.html   健康看板
+└── wiki-data/    # 元数据
+    ├── graph.json        页面关系图
+    └── search-chunks.json  BM25 搜索索引
+```
+
+### 核心能力
+
+**Ingest — 录入知识**
+
+```bash
+# 一条命令完成：保存原文 → 创建骨架页面 → 重建索引 → 同步发布
+python3 ingest-pipeline.py pdf paper.pdf --slug my-paper --title "Paper Title" --tags "ml,training"
+python3 ingest-pipeline.py url --slug article --title "Article" --tags "infra" --text "content..."
+```
+
+Bot 自动完成体力活（存档、建索引、同步），LLM 专注于有价值的部分：填充详细内容、识别实体和概念、建立交叉引用。PDF 提取支持四级降级链（pymupdf4llm → markitdown → pdfminer → pypdf）。
+
+**Query — 知识检索**
+
+```bash
+python3 wiki-query.py "TPU v7 和 B200 谁更适合 MoE？" --top-k 5 --format json
+```
+
+BM25 关键词匹配 + 知识图谱增强（1-hop 邻居扩展），返回相关页面和匹配段落。好的分析结果可以回存为新的 analysis 页面——**每次查询都在让 Wiki 变得更好**。
+
+**Lint — 健康检查 + 知识发现**
+
+不只检查断链和孤儿页面，还主动发现：哪些领域来源太少？哪些概念被多次提到但没有独立页面？哪些页面应该关联但还没有链接？
+
+**MCP Server — 多 Bot 共享查询**
+
+Wiki 暴露为 MCP Server，所有 Bot 通过标准协议查询同一个知识库：
+
+```json
+// ~/.claude.json
+{
+  "mcpServers": {
+    "wiki": {
+      "command": "python3",
+      "args": ["~/.claude/skills/wiki/scripts/wiki-mcp-server.py"]
+    }
+  }
+}
+```
+
+提供 `wiki_query`、`wiki_page`、`wiki_graph_neighbors`、`wiki_graph_path`、`wiki_search`、`wiki_list`、`wiki_status` 七个 MCP tools。
+
+### Health Dashboard
+
+自动生成的健康看板，包含：
+
+- **健康分数**（0-100）— 基于孤儿页面、断链、缺失 backlinks 加权计算
+- **类型分布** — SVG 甜甜圈图
+- **活动时间线** — 最近 30 天 ingest 热度
+- **问题清单** — 可修复的结构性问题
+- **知识发现建议** — 缺失概念、潜在关联、综合分析机会
+
+### 日常行为
+
+Wiki 不只是被动的命令工具。Bot 在日常对话中会：
+
+1. 回答知识性问题前，先查 Wiki 看是否已有编译好的知识
+2. 用户分享有价值的文章/论文时，主动提议录入
+3. 生成有持久价值的分析后，建议回存 Wiki
+4. 定期提醒跑 Lint 保持知识库健康
 
 ## 飞书企业邮箱
 
@@ -1190,7 +1298,8 @@ CloseCrab/
 │       ├── firestore_inbox.py  # Bot 间实时通信（on_snapshot）
 │       ├── registry.py         # 自注册（硬件 + context 上报）
 │       └── stt.py              # 语音转文字（Gemini / Chirp2 / Whisper）
-├── skills/                     # 19 个 Skills（deploy.sh 拷贝到 ~/.claude/skills/）
+├── skills/                     # 24 个 Skills（deploy.sh 拷贝到 ~/.claude/skills/）
+│   └── wiki/                   # CC Wiki（Karpathy LLM Wiki 实现，含 36 个脚本）
 ├── scripts/
 │   ├── launcher.sh             # 本地 bot 管理（start/stop/restart/status/logs）
 │   ├── dispatch-bot.sh         # 远程 bot 部署 / 召回 / 迁移
