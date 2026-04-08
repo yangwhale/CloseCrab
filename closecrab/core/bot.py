@@ -21,6 +21,7 @@ and holds shared dependencies (Auth, SessionManager).
 import asyncio
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -68,7 +69,7 @@ class BotCore:
         self.session_mgr = session_mgr
         self.bot_name = bot_name
         self._state_dir = Path(state_dir) if state_dir else Path.home() / ".claude/closecrab"
-        self._claude_bin = claude_bin or str(Path.home() / ".local/bin/claude")
+        self._claude_bin = claude_bin or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         self._work_dir = work_dir or str(Path.home())
         self._timeout = timeout
         self._system_prompt = system_prompt

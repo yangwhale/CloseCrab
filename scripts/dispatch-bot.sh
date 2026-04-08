@@ -168,13 +168,19 @@ cmd_deploy() {
         pip3 install --break-system-packages --quiet py-cord google-cloud-firestore google-genai 2>/dev/null || \
         pip3 install --user --quiet py-cord google-cloud-firestore google-genai 2>/dev/null || true
 
-        # Claude CLI
+        # Claude CLI: prefer native installer, fallback to npm
         if ! command -v claude &>/dev/null; then
-            echo 'Installing Claude CLI...'
-            NPM_BIN=\$(command -v npm 2>/dev/null || echo '/usr/local/bin/npm')
-            sudo \$NPM_BIN install -g @anthropic-ai/claude-code 2>/dev/null || \
-            \$NPM_BIN install -g @anthropic-ai/claude-code 2>/dev/null || \
-            echo 'WARN: Claude CLI install failed'
+            echo 'Installing Claude CLI (native)...'
+            if curl -fsSL https://claude.ai/install.sh | bash 2>/dev/null; then
+                export PATH="\$HOME/.local/bin:\$PATH"
+                echo 'Claude CLI installed (native)'
+            else
+                echo 'Native install failed, trying npm...'
+                NPM_BIN=\$(command -v npm 2>/dev/null || echo '/usr/local/bin/npm')
+                sudo \$NPM_BIN install -g @anthropic-ai/claude-code 2>/dev/null || \
+                \$NPM_BIN install -g @anthropic-ai/claude-code 2>/dev/null || \
+                echo 'WARN: Claude CLI install failed'
+            fi
         fi
 
         echo \"python3: \$(python3 --version 2>&1)\"

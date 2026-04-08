@@ -179,7 +179,7 @@ def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
 
     # Claude Code version
     cc_version = ""
-    claude_bin = os.path.expanduser(cfg.get("claude_bin", "~/.local/bin/claude"))
+    claude_bin = os.path.expanduser(cfg.get("claude_bin", shutil.which("claude") or "~/.local/bin/claude"))
     try:
         out = subprocess.check_output(
             [claude_bin, "--version"], text=True, timeout=5

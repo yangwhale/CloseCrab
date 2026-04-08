@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -51,7 +52,7 @@ class ClaudeCodeWorker(Worker):
         system_prompt: str = "",
         session_id: Optional[str] = None,
     ):
-        self._claude_bin = claude_bin or str(Path.home() / ".local/bin/claude")
+        self._claude_bin = claude_bin or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         self._work_dir = work_dir or str(Path.home())
         self._timeout = timeout
         self._system_prompt = system_prompt

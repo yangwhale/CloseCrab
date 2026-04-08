@@ -49,12 +49,22 @@ Document structure:
 """
 
 import logging
+import os
+import shutil
 
 from google.cloud import firestore
 
 from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
 
 log = logging.getLogger(__name__)
+
+def _resolve_claude_bin(configured: str) -> str:
+    """Resolve Claude CLI path: verify configured path exists, fallback to shutil.which."""
+    if configured:
+        expanded = os.path.expanduser(configured)
+        if os.path.isfile(expanded):
+            return configured
+    return shutil.which("claude") or "~/.local/bin/claude"
 
 
 def load_bot_config_from_firestore(bot_name: str) -> dict | None:
@@ -87,7 +97,7 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
         "description": data.get("description", ""),
         "channel": active_channel,
         "model": data.get("model", "claude-opus-4-6@default"),
-        "claude_bin": data.get("claude_bin", "~/.local/bin/claude"),
+        "claude_bin": _resolve_claude_bin(data.get("claude_bin", "")),
         "work_dir": data.get("work_dir", "~/"),
         "timeout": data.get("timeout", 600),
         "stt_engine": data.get("stt_engine", "gemini"),

@@ -24,6 +24,7 @@ Usage:
 import argparse
 import logging
 import os
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -88,7 +89,7 @@ def _resolve_config(bot_name: str) -> dict:
         "channel": channel_type,
         "token": cfg.get("token", ""),
         "model": cfg.get("model", "claude-opus-4-6@default"),
-        "claude_bin": os.path.expanduser(cfg.get("claude_bin", "~/.local/bin/claude")),
+        "claude_bin": os.path.expanduser(cfg.get("claude_bin", shutil.which("claude") or "~/.local/bin/claude")),
         "work_dir": os.path.expanduser(cfg.get("work_dir", "~/")),
         "timeout": int(cfg.get("timeout", 600)),
         "stt_engine": cfg.get("stt_engine", "gemini"),
