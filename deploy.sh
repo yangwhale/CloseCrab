@@ -20,25 +20,27 @@
 #   ./deploy.sh --cc-only    # 只装 Claude Code 环境 + Skills
 #   ./deploy.sh --bot        # 补装 Bot（已有 CC 环境后追加）
 #
-# 安装方式: 统一使用官方 native installer (curl https://claude.ai/install.sh)
-# 升级方式: claude update（自动更新 ~/.local/share/claude/versions/ 下的 binary）
+# 前提: Claude Code CLI 已安装 (curl -fsSL https://claude.ai/install.sh | bash)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config/env.sh"
 MODE="full"
+USE_NPM=false
 
 for arg in "$@"; do
     case "$arg" in
         --cc-only) MODE="cc-only" ;;
         --bot)     MODE="bot" ;;
+        --npm)     USE_NPM=true ;;
         --help|-h)
-            echo "用法: ./deploy.sh [--cc-only | --bot]"
+            echo "用法: ./deploy.sh [--cc-only | --bot] [--npm]"
             echo ""
             echo "  (无参数)    完整安装: Claude Code 环境 + Skills + Bot"
             echo "  --cc-only   只装 Claude Code 环境 + Skills"
             echo "  --bot       补装 Bot（需要先装过 CC 环境）"
+            echo "  --npm       用 npm 安装 Claude Code (默认用官方 install.sh)"
             exit 0
             ;;
     esac
@@ -414,22 +416,26 @@ install_cc() {
 
     echo "[1/11] 检查 Claude Code CLI..."
     if command -v claude &>/dev/null; then
-        local current_ver
-        current_ver="$(claude --version 2>/dev/null | awk '{print $1}')"
-        echo "  已安装: $current_ver"
-        # 清理残留的 npm 安装（统一用 native installer）
-        local npm_claude="/usr/local/bin/claude"
-        if [[ -L "$npm_claude" ]] && readlink "$npm_claude" | grep -q "node_modules"; then
-            echo "  清理 npm 残留: $npm_claude"
-            sudo rm -f "$npm_claude"
-            sudo npm uninstall -g @anthropic-ai/claude-code 2>/dev/null || true
-        fi
+        echo "  已安装: $(claude --version)"
     else
-        echo "  未安装，正在安装（native installer）..."
-        if curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash 2>&1; then
-            export PATH="$HOME/.local/bin:$PATH"
+        echo "  未安装，正在安装..."
+        local installed=false
+        if ! $USE_NPM; then
+            # 优先尝试官方安装脚本
+            if curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash 2>&1; then
+                export PATH="$HOME/.local/bin:$PATH"
+                installed=true
+            else
+                echo "  官方安装脚本失败（可能是区域限制），尝试 npm 安装..."
+            fi
         fi
-        if command -v claude &>/dev/null; then
+        if ! $installed; then
+            # npm fallback（或 --npm 模式）
+            if sudo npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; then
+                installed=true
+            fi
+        fi
+        if $installed && command -v claude &>/dev/null; then
             echo "  安装完成: $(claude --version)"
         else
             echo "  ✗ 安装失败，请手动安装: https://docs.anthropic.com/en/docs/claude-code"
