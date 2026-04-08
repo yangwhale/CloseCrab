@@ -128,27 +128,35 @@ python3 ~/.claude/skills/wiki/scripts/sync-to-gcs.py
 
 ### /wiki ingest — 录入新资料
 
-**步骤：**
+**推荐方式（Pipeline 自动化）：**
 
-1. **获取内容**：URL → WebFetch 抓取；文件 → 直接读取；文本 → 直接使用
-2. **保存原始资料**：存到 `raw/` 对应子目录，文件名用 kebab-case + 日期
-   - 文章: `raw/articles/karpathy-llm-wiki-20260407.html`
-   - 论文: `raw/papers/attention-is-all-you-need.pdf`
+```bash
+# PDF 论文
+python3 ingest-pipeline.py pdf /path/to/paper.pdf --slug paper-name --title "Title" --tags "ml,training"
+
+# URL 文章（Bot 先 WebFetch 获取内容）
+python3 ingest-pipeline.py url --slug article-name --title "Title" --tags "tag1,tag2" --text "fetched content..."
+
+# 纯文本
+python3 ingest-pipeline.py text --slug note-name --title "Title" --tags "misc" --text "内容..."
+
+# Bot 已手动创建页面后，只执行 rebuild+sync
+python3 ingest-pipeline.py post-ingest --slug existing-slug --title "Title" --type source
+```
+
+Pipeline 自动完成：保存 raw → 生成骨架 source 页面 → rebuild index/graph/search → 追加 log → 同步 GCS。
+Bot 只需关注：**填充 source 页面详细内容** + **识别和创建 entity/concept 页面**。
+
+**手动步骤（Pipeline 不覆盖的部分）：**
+
+1. **获取内容**：URL → WebFetch 抓取；PDF → `extract-pdf.py` 提取；文本 → 直接使用
+2. Pipeline 自动保存 raw + 创建骨架 source 页面
 3. **与用户讨论**：展示 3-5 个关键要点，确认重点方向
-4. **生成/更新 Wiki 页面**：
-   - 新建 source 页面 `wiki/sources/{slug}.html`，**必须包含详细结构化内容**（见下方 Source 页面内容要求）
-   - 新建或更新相关 entity 页面
-   - 新建或更新相关 concept 页面
-   - 更新所有受影响页面的 backlinks
-5. **更新索引**：运行 `rebuild-index.py` 重建 `index.html`
-6. **更新图谱**：运行 `rebuild-graph.py` 重建 `graph.json`
-7. **追加日志**：运行 `python3 add-log-entry.py ingest {slug} "{title}" {type}` 追加 `wiki-data/log.json`
-8. **构建搜索索引**：运行 `bash ~/.claude/skills/wiki/scripts/rebuild-search.sh`（Pagefind 全文搜索索引）
-9. **同步**：
-   - `git add -A && git commit -m "ingest: {title}"`
-   - `python3 sync-to-gcs.py`
-   - （定期或手动 `git push`）
-10. **回复用户**：附上新页面的 URL
+4. **填充 source 页面详细内容**：**必须包含详细结构化内容**（见下方 Source 页面内容要求）
+5. **创建/更新 entity 和 concept 页面**（Bot LLM 判断）
+6. Pipeline 已自动执行 rebuild + sync
+7. 如果 Bot 额外修改了页面，再跑一次 `post-ingest`
+8. **回复用户**：附上新页面的 URL
 
 ### Source 页面内容要求
 
@@ -260,6 +268,9 @@ python3 ~/.claude/skills/wiki/scripts/status.py
 | `create-page.py` | 创建标准 entity/concept 页面 | ingest 新建页面 |
 | `backfill-sources.py` | 批量注入 CC Pages 内容 | 批量录入 |
 | `patch-all-pages.py` | 批量补全 pagefind/nav/graph | 升级功能后 |
+| `extract-pdf.py` | PDF 文本提取（pymupdf4llm→markitdown→pdfminer→pypdf） | PDF ingest 时 |
+| `ingest-pipeline.py` | 自动化 ingest 确定性步骤（保存raw/建骨架/rebuild/sync） | `/wiki ingest` |
+| `knowledge-discovery.py` | 知识发现引擎（缺失概念/潜在关联/综合机会） | rebuild-all / lint |
 | `wiki_utils.py` | 公共工具函数 | 被其他脚本引用 |
 
 ## Wiki MCP Server（多 Bot 共享查询）
