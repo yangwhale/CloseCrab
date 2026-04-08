@@ -59,12 +59,7 @@ def build_page(page_type, slug, title, tags, summary, links_to, cc_pages_url):
 <link rel="stylesheet" href="{prefix}style.css">
 </head>
 <body>
-<nav class="wiki-nav">
-  <a href="{prefix}index.html">Index</a>
-  <a href="{prefix}search.html">Search</a>
-  <a href="{prefix}graph.html">Graph</a>
-  <a href="{prefix}log.html">Log</a>
-</nav>
+<script src="{prefix}wiki-shell.js"></script>
 <article class="wiki-content">
   <header data-pagefind-ignore="">
     <div class="wiki-meta">
@@ -93,7 +88,6 @@ def build_page(page_type, slug, title, tags, summary, links_to, cc_pages_url):
     <div class="local-graph-container" data-page-slug="{slug}"></div>
   </section>
 </article>
-<footer class="wiki-footer">CC Wiki · Maintained by CloseCrab Bot</footer>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script src="{prefix}local-graph.js"></script>
 </body>

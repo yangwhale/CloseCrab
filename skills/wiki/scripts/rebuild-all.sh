@@ -67,7 +67,7 @@ fi
 # Optional: fix issues first
 if $DO_FIX; then
     echo ""
-    echo "[1/10] Fixing broken links..."
+    echo "[1/12] Fixing broken links..."
     python3 "$SCRIPT_DIR/fix-broken-links.py"
 else
     echo ""
@@ -75,31 +75,39 @@ else
 fi
 
 echo ""
-echo "[2/10] Rebuilding index..."
+echo "[2/12] Rebuilding index..."
 python3 "$SCRIPT_DIR/rebuild-index.py"
 
 echo ""
-echo "[3/10] Rebuilding graph (+ auto backlinks)..."
+echo "[3/12] Rebuilding graph (+ auto backlinks)..."
 python3 "$SCRIPT_DIR/rebuild-graph.py"
 
 echo ""
-echo "[4/10] Rebuilding Pagefind search..."
+echo "[4/12] Rebuilding Pagefind search..."
 bash "$SCRIPT_DIR/rebuild-search.sh"
 
 echo ""
-echo "[5/10] Building query search index..."
+echo "[5/12] Building query search index..."
 python3 "$SCRIPT_DIR/build-search-index.py"
 
 echo ""
-echo "[6/10] Updating compile manifest..."
+echo "[6/12] Updating compile manifest..."
 python3 "$SCRIPT_DIR/update-manifest.py"
 
 echo ""
-echo "[7/10] Building health dashboard..."
+echo "[7/12] Rebuilding log page..."
+python3 "$SCRIPT_DIR/rebuild-log.py"
+
+echo ""
+echo "[8/12] Running lint (for health dashboard)..."
+python3 "$SCRIPT_DIR/lint.py" --quiet 2>/dev/null || python3 "$SCRIPT_DIR/lint.py" 2>/dev/null || echo "  (lint.py failed, skipping)"
+
+echo ""
+echo "[9/12] Building health dashboard..."
 python3 "$SCRIPT_DIR/rebuild-health.py" 2>/dev/null || echo "  (rebuild-health.py not found, skipping)"
 
 echo ""
-echo "[8/10] Running knowledge discovery..."
+echo "[10/12] Running knowledge discovery..."
 python3 "$SCRIPT_DIR/knowledge-discovery.py" 2>/dev/null || echo "  (knowledge-discovery.py not found, skipping)"
 
 if $NO_SYNC; then
@@ -107,11 +115,11 @@ if $NO_SYNC; then
     echo "[skip] --no-sync specified, skipping GCS sync"
 else
     echo ""
-    echo "[9/10] Syncing to GCS..."
+    echo "[11/12] Syncing to GCS..."
     python3 "$SCRIPT_DIR/sync-to-gcs.py"
 
     echo ""
-    echo "[10/10] Uploading wiki-data via gsutil..."
+    echo "[12/12] Uploading wiki-data via gsutil..."
     gsutil -q cp "$WIKI_REPO/wiki-data/graph.json" gs://chris-pgp-host-asia/cc-pages/wiki-data/graph.json 2>/dev/null || true
     gsutil -q cp "$WIKI_REPO/wiki-data/log.json" gs://chris-pgp-host-asia/cc-pages/wiki-data/log.json 2>/dev/null || true
 fi

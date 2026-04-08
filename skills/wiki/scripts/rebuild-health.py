@@ -40,12 +40,16 @@ def compute_health_score(graph, lint_report):
     if not nodes:
         return 0
 
-    # Orphan penalty
+    # Orphan penalty — source pages are leaf nodes by nature, lower weight
     inbound = defaultdict(int)
     for link in links:
         inbound[link["target"]] += 1
-    orphans = sum(1 for n in nodes if inbound[n["id"]] == 0)
-    score -= orphans * 0.5
+    for n in nodes:
+        if inbound[n["id"]] == 0:
+            if n["type"] == "source":
+                score -= 0.1  # sources are naturally terminal
+            else:
+                score -= 2.0  # entity/concept/analysis orphans are serious
 
     # Use lint report if available
     if lint_report:
@@ -345,38 +349,14 @@ def build_html(score, type_counts, total_pages, total_links,
   .dashboard-grid {{
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px;
+    gap: 16px;
     margin: 20px 0;
-  }}
-  .stat-card {{
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 20px;
-    text-align: center;
-  }}
-  .stat-card:hover {{ box-shadow: var(--shadow-1); }}
-  .stat-value {{
-    font-size: 32px;
-    font-weight: 600;
-    line-height: 1;
-    margin-bottom: 4px;
-  }}
-  .stat-label {{
-    font-size: 13px;
-    color: var(--text2);
-    font-weight: 500;
-  }}
-  .stat-sub {{
-    font-size: 11px;
-    color: var(--text3);
-    margin-top: 4px;
   }}
   .score-ring {{
     position: relative;
     display: inline-block;
   }}
-  .score-ring svg {{ transform: rotate(-90deg); }}
+  .score-ring svg {{ transform: rotate(-90deg); filter: drop-shadow(0 2px 4px rgba(0,0,0,0.05)); }}
   .score-text {{
     position: absolute;
     top: 50%;
@@ -384,76 +364,45 @@ def build_html(score, type_counts, total_pages, total_links,
     transform: translate(-50%, -50%);
     text-align: center;
   }}
-  .score-text .num {{ font-size: 28px; font-weight: 600; }}
-  .score-text .label {{ font-size: 11px; color: var(--text3); }}
-  .chart-section {{
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 20px 24px;
-    margin: 16px 0;
-  }}
-  .chart-section:hover {{ box-shadow: var(--shadow-1); }}
+  .chart-section {{ padding: 20px 24px; }}
   .chart-row {{
     display: flex;
     gap: 24px;
     align-items: center;
     flex-wrap: wrap;
   }}
-  .legend-items {{
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }}
-  .legend-item {{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text);
-  }}
-  .legend-dot {{
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }}
-  .issues-section ul {{
-    list-style: none;
-    padding: 0;
-  }}
+  .legend-items {{ display: flex; flex-direction: column; gap: 8px; }}
+  .legend-item {{ display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }}
+  .legend-dot {{ width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }}
+  .issues-section ul {{ list-style: none; padding: 0; }}
   .issues-section li {{
-    padding: 6px 0;
+    padding: 10px 0;
     border-bottom: 1px solid var(--bg);
     font-size: 13px;
     color: var(--text);
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
   }}
+  .issues-section li:last-child {{ border-bottom: none; }}
   .issue-type {{
     font-size: 11px;
-    padding: 2px 6px;
+    padding: 2px 8px;
     border-radius: 4px;
     background: var(--bg);
     color: var(--text2);
+    white-space: nowrap;
+    font-weight: 500;
   }}
-  .activity-section {{
-    overflow-x: auto;
-  }}
-  .timestamp {{
-    font-size: 11px;
-    color: var(--text3);
-    text-align: right;
-    margin-top: 12px;
+  .activity-section {{ overflow-x: auto; }}
+  .timestamp {{ font-size: 11px; color: var(--text3); text-align: right; margin-top: 12px; }}
+  @media (max-width: 640px) {{
+    .chart-row {{ flex-direction: column; align-items: flex-start; }}
   }}
 </style>
 </head>
 <body>
-<nav class="wiki-nav">
-  <a href="index.html">Index</a>
-  <a href="search.html">Search</a>
-  <a href="graph.html">Graph</a>
-  <a href="log.html">Log</a>
-  <a href="health.html" class="active">Health</a>
-</nav>
+<script src="wiki-shell.js"></script>
 <article class="wiki-content">
   <h1>Health Dashboard</h1>
   <p class="wiki-summary">Wiki health overview — {total_pages} pages, {total_links} links</p>
@@ -526,7 +475,6 @@ def build_html(score, type_counts, total_pages, total_links,
     Generated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
   </div>
 </article>
-<footer class="wiki-footer">CC Wiki Health Dashboard &middot; Maintained by CloseCrab Bot</footer>
 </body>
 </html>"""
 

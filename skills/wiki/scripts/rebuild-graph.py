@@ -254,33 +254,25 @@ def build_graph_html():
 <title>Knowledge Graph — CC Wiki</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  #graph-container {{ width: 100%; height: 70vh; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); margin: 12px 0; position: relative; overflow: hidden; }}
+  #graph-container {{ width: 100%; height: 70vh; position: relative; overflow: hidden; }}
   #graph-container svg {{ width: 100%; height: 100%; }}
   .graph-legend {{ display: flex; gap: 16px; margin: 8px 0; flex-wrap: wrap; }}
   .graph-legend-item {{ display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); }}
   .graph-legend-dot {{ width: 12px; height: 12px; border-radius: 50%; }}
-  .graph-tooltip {{ position: absolute; background: rgba(32,33,36,0.9); color: white; padding: 8px 12px; border-radius: var(--radius); font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; max-width: 250px; }}
+  .graph-tooltip {{ position: absolute; background: rgba(32,33,36,0.9); color: var(--surface); padding: 8px 12px; border-radius: var(--radius); font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; max-width: 250px; box-shadow: var(--shadow-2); }}
   .graph-controls {{ display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }}
-  .graph-search {{ flex: 1; min-width: 200px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; background: var(--surface); font-family: 'Google Sans', sans-serif; }}
-  .graph-search:focus {{ outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgba(26,115,232,0.15); }}
   .graph-filters {{ display: flex; gap: 4px; flex-wrap: wrap; }}
-  .graph-filter {{ padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; background: var(--surface); display: inline-flex; align-items: center; font-family: 'Google Sans', sans-serif; }}
-  .graph-filter:hover {{ border-color: rgba(26,115,232,0.3); }}
-  .graph-filter.active {{ background: var(--blue); color: white; border-color: var(--blue); }}
+  .graph-filter {{ padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; background: var(--surface); display: inline-flex; align-items: center; font-family: 'Google Sans', sans-serif; transition: all 0.15s ease; color: var(--text2); }}
+  .graph-filter:hover {{ border-color: var(--blue-light); color: var(--blue); }}
+  .graph-filter.active {{ background: var(--blue); color: var(--surface); border-color: var(--blue); }}
   .graph-slider {{ display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12px; color: var(--text3); }}
   .graph-slider input[type="range"] {{ flex: 1; accent-color: var(--blue); }}
-  .graph-slider label {{ min-width: 60px; font-weight: 500; }}
+  .graph-slider label {{ min-width: 60px; font-weight: 500; color: var(--text2); }}
   .color-toggle {{ display: flex; gap: 4px; }}
 </style>
 </head>
 <body>
-<nav class="wiki-nav">
-  <a href="index.html">Index</a>
-  <a href="search.html">Search</a>
-  <a href="graph.html" class="active">Graph</a>
-  <a href="log.html">Log</a>
-  <a href="health.html">Health</a>
-</nav>
+<script src="wiki-shell.js"></script>
 <article class="wiki-content">
   <h1>Knowledge Graph</h1>
 
@@ -317,8 +309,6 @@ def build_graph_html():
     <div class="graph-tooltip" id="tooltip"></div>
   </div>
 </article>
-<footer class="wiki-footer">CC Wiki · Maintained by CloseCrab Bot</footer>
-
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const TYPE_COLORS = {{ source: "#F59E0B", entity: "#0EA5E9", concept: "#10B981", analysis: "#F43F5E" }};

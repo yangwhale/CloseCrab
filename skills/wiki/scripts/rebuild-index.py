@@ -120,17 +120,7 @@ def build_index_html(pages: list[dict]) -> str:
     total = len(pages)
     sections_html = "\n".join(sections)
 
-    # Collect all unique tags for the filter bar
-    all_tags = {}
-    for p in pages:
-        for tag in p["tags"]:
-            all_tags[tag] = all_tags.get(tag, 0) + 1
-    # Sort by frequency desc
-    sorted_tags = sorted(all_tags.items(), key=lambda x: -x[1])
-    tag_buttons = "".join(
-        f'<button class="idx-filter-tag" data-tag="{_html.escape(tag)}" onclick="toggleTag(this)">{_html.escape(tag)} <span class="idx-filter-count">{count}</span></button>'
-        for tag, count in sorted_tags
-    )
+    # Tag filter bar removed — search box handles filtering
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -140,43 +130,19 @@ def build_index_html(pages: list[dict]) -> str:
 <title>Index — CC Wiki</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  .idx-stats {{ display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }}
-  .idx-stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; cursor: pointer; transition: all 0.15s; }}
-  .idx-stat:hover {{ box-shadow: var(--shadow-1); }}
-  .idx-stat.active {{ border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }}
-  .idx-stat .num {{ font-size: 24px; font-weight: 600; }}
-  .idx-stat .label {{ font-size: 12px; color: var(--text3); }}
+  .idx-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }}
   .idx-search-row {{ display: flex; gap: 8px; margin: 16px 0; align-items: center; }}
-  .idx-search {{ flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 14px; background: var(--surface); font-family: 'Google Sans', sans-serif; }}
-  .idx-search:focus {{ outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }}
-  .idx-fullsearch {{ padding: 10px 16px; border: none; border-radius: 4px; font-size: 13px; background: var(--blue); color: white; text-decoration: none; white-space: nowrap; font-weight: 500; transition: background 0.15s; font-family: 'Google Sans', sans-serif; }}
-  .idx-fullsearch:hover {{ background: var(--blue-hover); }}
-  .idx-tag-filters {{ display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 16px; }}
-  .idx-filter-tag {{ display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 16px; font-size: 12px; font-weight: 500; background: var(--blue-light); color: var(--blue); border: 1px solid transparent; cursor: pointer; transition: all 0.15s; }}
-  .idx-filter-tag:hover {{ border-color: rgba(26,115,232,0.3); }}
-  .idx-filter-tag.active {{ background: var(--blue); color: white; }}
-  .idx-filter-count {{ font-size: 10px; opacity: 0.7; }}
   .idx-section {{ margin: 24px 0; }}
-  .idx-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  .idx-table th {{ text-align: left; padding: 8px 16px; background: var(--surface-hover); color: var(--text2); font-weight: 500; border-bottom: 1px solid var(--border); }}
-  .idx-table td {{ padding: 8px 16px; border-bottom: 1px solid var(--bg); }}
-  .idx-table tr:hover td {{ background: var(--surface-hover); }}
-  .idx-tag {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: var(--blue-light); color: var(--blue); margin-right: 2px; cursor: pointer; }}
+  .idx-tag {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: var(--blue-light); color: var(--blue); margin-right: 2px; cursor: pointer; transition: background 0.15s; }}
   .idx-tag:hover {{ background: #d2e3fc; }}
-  .idx-kbd {{ display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 11px; color: var(--text3); margin-left: 4px; }}
-  .idx-new {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background: var(--green); color: white; margin-left: 6px; letter-spacing: 0.5px; vertical-align: middle; }}
+  .idx-kbd {{ display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 11px; color: var(--text3); margin-left: 4px; background: var(--surface-hover); }}
+  .idx-new {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background: var(--green); color: var(--surface); margin-left: 6px; letter-spacing: 0.5px; vertical-align: middle; }}
   .idx-health {{ display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 14px; font-weight: 500; }}
   .idx-health-dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
 </style>
 </head>
 <body>
-<nav class="wiki-nav">
-  <a href="index.html" class="active">Index</a>
-  <a href="search.html">Search</a>
-  <a href="graph.html">Graph</a>
-  <a href="log.html">Log</a>
-  <a href="health.html">Health</a>
-</nav>
+<script src="wiki-shell.js"></script>
 <article class="wiki-content">
   <h1>CC Wiki Index{f' <span class="idx-health"><span class="idx-health-dot" style="background:{"#1e8e3e" if (health_score or 0) >= 80 else ("#f9ab00" if (health_score or 0) >= 60 else "#d93025")}"></span>{health_score}/100</span>' if health_score else ''}</h1>
   <p class="wiki-summary">Total: {total} pages · Last rebuilt: {now} · <a href="health.html" style="color:var(--blue)">Health Dashboard</a></p>
@@ -187,20 +153,13 @@ def build_index_html(pages: list[dict]) -> str:
 
   <div class="idx-search-row">
     <input type="text" class="idx-search" placeholder="Filter by title or tag..." oninput="filterPages()">
-    <a href="search.html" class="idx-fullsearch">Full-text Search <span class="idx-kbd">Ctrl+K</span></a>
-  </div>
-
-  <div class="idx-tag-filters">
-    {tag_buttons}
+    <a href="search.html" class="idx-fullsearch" onclick="event.preventDefault();var q=document.querySelector('.idx-search').value;window.location.href='search.html'+(q?'?q='+encodeURIComponent(q):'')">Full-text Search <span class="idx-kbd">Ctrl+K</span></a>
   </div>
 
   {sections_html}
 </article>
-<footer class="wiki-footer">CC Wiki · Maintained by CloseCrab Bot</footer>
 <script>
 let activeType = null;
-let activeTags = new Set();
-
 function toggleType(el) {{
   const type = el.dataset.type;
   document.querySelectorAll('.idx-stat').forEach(s => s.classList.remove('active'));
@@ -208,18 +167,6 @@ function toggleType(el) {{
     activeType = null;
   }} else {{
     activeType = type;
-    el.classList.add('active');
-  }}
-  filterPages();
-}}
-
-function toggleTag(el) {{
-  const tag = el.dataset.tag;
-  if (activeTags.has(tag)) {{
-    activeTags.delete(tag);
-    el.classList.remove('active');
-  }} else {{
-    activeTags.add(tag);
     el.classList.add('active');
   }}
   filterPages();
@@ -240,33 +187,11 @@ function filterPages() {{
     // Filter rows within section
     sec.querySelectorAll('tbody tr').forEach(tr => {{
       const text = tr.textContent.toLowerCase();
-      const rowTags = tr.dataset.tags ? tr.dataset.tags.split(',') : [];
-
       let matchText = !q || text.includes(q);
-      let matchTag = activeTags.size === 0 || rowTags.some(t => activeTags.has(t));
-
-      tr.style.display = (matchText && matchTag) ? '' : 'none';
+      tr.style.display = matchText ? '' : 'none';
     }});
   }});
 }}
-
-// Clickable tags in table rows
-document.querySelectorAll('.idx-tag').forEach(tag => {{
-  tag.addEventListener('click', (e) => {{
-    e.preventDefault();
-    const tagName = tag.textContent.trim();
-    const filterBtn = document.querySelector(`.idx-filter-tag[data-tag="${{tagName}}"]`);
-    if (filterBtn) toggleTag(filterBtn);
-  }});
-}});
-
-// Ctrl+K / Cmd+K → search page
-document.addEventListener('keydown', (e) => {{
-  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {{
-    e.preventDefault();
-    window.location.href = 'search.html';
-  }}
-}});
 </script>
 </body>
 </html>"""

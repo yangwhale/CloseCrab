@@ -89,7 +89,9 @@ WIKI_URL=$CC_PAGES_URL_PREFIX/wiki           # 公网 URL 前缀
 │   ├── search.html              # Pagefind 全文搜索页（自动生成）
 │   ├── log.html                 # 操作日志（追加式）
 │   ├── graph.html               # D3.js 知识图谱
-│   ├── style.css                # 共享样式
+│   ├── style.css                # 共享样式（GCP Console 调色板）
+│   ├── wiki-shell.js            # 共享 nav/footer/快捷键（动态注入）
+│   ├── local-graph.js           # 页面级关联图谱
 │   ├── _pagefind/               # Pagefind 搜索索引（自动生成）
 │   ├── sources/                 # 来源摘要
 │   ├── entities/                # 实体页面（人/产品/项目）
@@ -248,10 +250,11 @@ python3 ~/.claude/skills/wiki/scripts/status.py
 |------|------|---------|
 | `init-wiki.sh` | 首次初始化 repo | `/wiki init` |
 | `rebuild-index.py` | 重建 index.html | ingest 后 |
-| `rebuild-graph.py` | 重建 graph.json + graph.html | ingest 后 |
+| `rebuild-graph.py` | 重建 graph.json + graph.html + backlinks | ingest 后 |
 | `rebuild-search-page.py` | 生成 search.html | 修改搜索页时 |
+| `rebuild-log.py` | 重建 log.html | rebuild-all 自动调用 |
 | `rebuild-search.sh` | 构建 Pagefind 搜索索引 | ingest 后 |
-| `rebuild-all.sh` | 一键 rebuild 全套 + sync | 批量操作后 |
+| `rebuild-all.sh` | 一键 rebuild 全套 + lint + sync（12 步） | 批量操作后 |
 | `sync-to-gcs.py` | 同步到 GCS | 每次操作后 |
 | `lint.py` | 全量体检 | `/wiki lint` |
 | `build-search-index.py` | 构建 BM25 搜索索引 (search-chunks.json) | rebuild-all 自动调用 |
@@ -301,6 +304,21 @@ Wiki 提供 MCP Server (`wiki-mcp-server.py`)，让所有 Bot 通过 Claude Code
   }
 }
 ```
+
+## 共享组件
+
+Nav、footer、全局快捷键由 `wiki-shell.js` 统一管理，**不要硬编码在页面 HTML 里**。
+
+| 组件 | 管理方式 | 修改位置 |
+|------|---------|---------|
+| 导航栏（5 个 tab） | `wiki-shell.js` document.write 同步注入 | `wiki/wiki-shell.js` |
+| 页脚 | `wiki-shell.js` DOMContentLoaded 注入 | `wiki/wiki-shell.js` |
+| Ctrl+K 搜索快捷键 | `wiki-shell.js` 全局键盘监听 | `wiki/wiki-shell.js` |
+| 样式 | `wiki/style.css`（GCP Console 调色板） | `wiki/style.css` |
+| 页面级关联图谱 | `wiki/local-graph.js` + D3.js | `wiki/local-graph.js` |
+
+**页面模板只需**：`<script src="[prefix]wiki-shell.js"></script>` 放在 `<body>` 开头。
+生成器脚本（create-page.py、rebuild-*.py）不输出 nav/footer HTML。
 
 ## 页面 HTML 规范
 
