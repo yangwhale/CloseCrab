@@ -525,6 +525,12 @@ def main():
 
     out_path = WIKI_DIR / "health.html"
     out_path.write_text(html, encoding="utf-8")
+
+    # Write score to JSON for other scripts (e.g. rebuild-index.py)
+    score_path = DATA_DIR / "health-score.json"
+    score_path.write_text(json.dumps({"score": score, "label": score_label(score)},
+                                     ensure_ascii=False), encoding="utf-8")
+
     print(f"Health dashboard: {out_path}")
     print(f"  Score: {score}/100 ({score_label(score)})")
     print(f"  Pages: {total_pages} | Links: {total_links} | Issues: {len(orphans) + len(short_pages)}")

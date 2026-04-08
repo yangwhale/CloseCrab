@@ -57,18 +57,12 @@ def build_index_html(pages: list[dict]) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
-    # Load health score
+    # Load health score from rebuild-health.py output
     health_score = None
-    graph_path = WIKI_REPO / "wiki-data" / "graph.json"
-    if graph_path.exists():
+    score_path = WIKI_REPO / "wiki-data" / "health-score.json"
+    if score_path.exists():
         try:
-            g = json.loads(graph_path.read_text())
-            from collections import defaultdict
-            inbound = defaultdict(int)
-            for link in g.get("links", []):
-                inbound[link["target"]] += 1
-            orphans = sum(1 for n in g.get("nodes", []) if inbound[n["id"]] == 0)
-            health_score = max(0, min(100, round(100 - orphans * 0.5)))
+            health_score = json.loads(score_path.read_text()).get("score")
         except Exception:
             pass
 
