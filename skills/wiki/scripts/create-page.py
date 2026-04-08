@@ -11,6 +11,7 @@ Examples:
   python3 create-page.py concept ring-attention --title "Ring Attention" --tags "attention,parallelism" --summary "跨设备环形注意力"
 """
 import argparse
+import html as html_mod
 import os
 from datetime import datetime
 from pathlib import Path
@@ -28,8 +29,10 @@ TYPE_SUBDIRS = {
 
 def build_page(page_type, slug, title, tags, summary, links_to, cc_pages_url):
     today = datetime.now().strftime("%Y-%m-%d")
+    esc_title = html_mod.escape(title)
+    esc_summary = html_mod.escape(summary)
     tag_spans = "\n".join(
-        f'      <span class="wiki-tag" data-pagefind-filter="tag">{t.strip()}</span>'
+        f'      <span class="wiki-tag" data-pagefind-filter="tag">{html_mod.escape(t.strip())}</span>'
         for t in tags.split(",") if t.strip()
     )
     links_meta = links_to if links_to else ""
@@ -40,14 +43,14 @@ def build_page(page_type, slug, title, tags, summary, links_to, cc_pages_url):
     # CC Pages link for source pages
     cc_link = ""
     if cc_pages_url:
-        cc_link = f'\n  <p><a href="{cc_pages_url}" target="_blank">📄 原始文档</a></p>'
+        cc_link = f'\n  <p><a href="{html_mod.escape(cc_pages_url)}" target="_blank">📄 原始文档</a></p>'
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} — CC Wiki</title>
+<title>{esc_title} — CC Wiki</title>
 <meta name="wiki-type" content="{page_type}">
 <meta name="wiki-tags" content="{tags}">
 <meta name="wiki-created" content="{today}">
@@ -68,8 +71,8 @@ def build_page(page_type, slug, title, tags, summary, links_to, cc_pages_url):
       <span class="wiki-type" data-type="{page_type}" data-pagefind-filter="type">{page_type.upper()}</span>
       <span class="wiki-date">Created: {today} · Updated: {today}</span>
     </div>
-    <h1 data-pagefind-meta="title">{title}</h1>
-    <p class="wiki-summary">{summary}</p>
+    <h1 data-pagefind-meta="title">{esc_title}</h1>
+    <p class="wiki-summary">{esc_summary}</p>
     <div class="wiki-tags">
 {tag_spans}
     </div>
@@ -77,7 +80,7 @@ def build_page(page_type, slug, title, tags, summary, links_to, cc_pages_url):
 
   <main>
     <h2>概述</h2>
-    <p>{summary}</p>{cc_link}
+    <p>{esc_summary}</p>{cc_link}
   </main>
 
   <section class="wiki-backlinks" data-pagefind-ignore="">

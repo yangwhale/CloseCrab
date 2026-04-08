@@ -34,7 +34,7 @@ class LinkExtractor(HTMLParser):
             href = d.get("href") or ""
             if "wiki-link" in cls and href:
                 # Extract slug from path like ../concepts/rag.html
-                match = re.search(r'(\w[\w-]*)\.html$', href)
+                match = re.search(r'([\w][\w.-]*)\.html$', href)
                 if match:
                     self.links.append(match.group(1))
 
@@ -137,7 +137,8 @@ def inject_backlinks(nodes, links):
                     rel_path = os.path.relpath(target, this_dir)
                 except ValueError:
                     rel_path = path
-                items.append(f'<li><a class="wiki-link" href="{rel_path}">{title}</a></li>')
+                import html as _html
+                items.append(f'<li><a class="wiki-link" href="{rel_path}">{_html.escape(title)}</a></li>')
             backlinks_html = (
                 '<section class="wiki-backlinks" data-pagefind-ignore="">\n'
                 '<h3>引用了此页面的页面</h3>\n'
@@ -153,7 +154,7 @@ def inject_backlinks(nodes, links):
         cleaned = re.sub(
             r'<section class="wiki-backlinks"[^>]*>.*?</section>',
             '', content, flags=re.DOTALL
-        ).rstrip()
+        ).rstrip('\n')
 
         # Insert backlinks after </main>
         if backlinks_html:
