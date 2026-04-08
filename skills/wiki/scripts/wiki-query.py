@@ -15,8 +15,6 @@ import re
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
-
 sys.path.insert(0, os.path.dirname(__file__))
 from wiki_utils import WIKI_REPO
 
@@ -134,8 +132,8 @@ def get_graph_neighbors(graph, slug, depth=1):
     node_ids = {n["id"] for n in graph.get("nodes", [])}
     adj = defaultdict(set)
     for link in graph.get("links", []):
-        src = link["source"] if isinstance(link["source"], str) else link["source"].get("id", "")
-        tgt = link["target"] if isinstance(link["target"], str) else link["target"].get("id", "")
+        src = link["source"] if isinstance(link["source"], str) else (link["source"].get("id", "") if isinstance(link["source"], dict) else "")
+        tgt = link["target"] if isinstance(link["target"], str) else (link["target"].get("id", "") if isinstance(link["target"], dict) else "")
         if src in node_ids and tgt in node_ids:
             adj[src].add(tgt)
             adj[tgt].add(src)

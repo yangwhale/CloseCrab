@@ -9,16 +9,15 @@ Adds to every wiki page (entity, concept, analysis, source):
 """
 import os
 import re
+import sys
 from pathlib import Path
 from bs4 import BeautifulSoup, NavigableString
 
+sys.path.insert(0, os.path.dirname(__file__))
+from wiki_utils import SKIP_FILES
+
 WIKI_REPO = Path(os.environ.get("WIKI_REPO", os.path.expanduser("~/my-wiki")))
 WIKI_DIR = WIKI_REPO / "wiki"
-
-SKIP_FILES = {
-    "index.html", "search.html", "graph.html", "log.html",
-    "style.css", "local-graph.js",
-}
 
 
 def patch_page(html_path: Path) -> bool:

@@ -276,7 +276,7 @@ def build_html(score, type_counts, total_pages, total_links,
     if orphans:
         issues_html += f'<h3>Orphan Pages ({len(orphans)})</h3><ul>\n'
         for o in orphans[:15]:
-            issues_html += (f'<li><a class="wiki-link" href="{o["path"]}">{html.escape(o["title"])}</a> '
+            issues_html += (f'<li><a class="wiki-link" href="{html.escape(o["path"])}">{html.escape(o["title"])}</a> '
                             f'<span class="issue-type">{html.escape(o["type"])}</span></li>\n')
         if len(orphans) > 15:
             issues_html += f'<li>... and {len(orphans) - 15} more</li>\n'

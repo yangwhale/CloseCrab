@@ -4,6 +4,7 @@
 Reads wiki-* meta tags from each HTML to build the knowledge graph data,
 then generates an interactive D3.js visualization.
 """
+import html as _html
 import os
 import re
 import json
@@ -137,7 +138,6 @@ def inject_backlinks(nodes, links):
                     rel_path = os.path.relpath(target, this_dir)
                 except ValueError:
                     rel_path = path
-                import html as _html
                 items.append(f'<li><a class="wiki-link" href="{rel_path}">{_html.escape(title)}</a></li>')
             backlinks_html = (
                 '<section class="wiki-backlinks" data-pagefind-ignore="">\n'

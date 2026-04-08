@@ -4,6 +4,7 @@
 Reads wiki-* meta tags from each HTML file to build a structured index page
 with search/filter functionality.
 """
+import html as _html
 import json
 import os
 from datetime import datetime, timedelta
@@ -95,11 +96,11 @@ def build_index_html(pages: list[dict]) -> str:
 
         rows = []
         for p in items:
-            tags_html = " ".join(f'<span class="idx-tag">{tag}</span>' for tag in p["tags"])
-            tags_data = ",".join(p["tags"])
+            tags_html = " ".join(f'<span class="idx-tag">{_html.escape(tag)}</span>' for tag in p["tags"])
+            tags_data = _html.escape(",".join(p["tags"]))
             new_badge = ' <span class="idx-new">NEW</span>' if p.get("created", "") >= week_ago else ""
             rows.append(f"""      <tr data-tags="{tags_data}">
-        <td><a href="{p['path']}" class="wiki-link">{p['title']}</a>{new_badge}</td>
+        <td><a href="{_html.escape(p['path'])}" class="wiki-link">{_html.escape(p['title'])}</a>{new_badge}</td>
         <td>{tags_html}</td>
         <td>{p['updated']}</td>
         <td>{p['sources']}</td>
@@ -127,7 +128,7 @@ def build_index_html(pages: list[dict]) -> str:
     # Sort by frequency desc
     sorted_tags = sorted(all_tags.items(), key=lambda x: -x[1])
     tag_buttons = "".join(
-        f'<button class="idx-filter-tag" data-tag="{tag}" onclick="toggleTag(this)">{tag} <span class="idx-filter-count">{count}</span></button>'
+        f'<button class="idx-filter-tag" data-tag="{_html.escape(tag)}" onclick="toggleTag(this)">{_html.escape(tag)} <span class="idx-filter-count">{count}</span></button>'
         for tag, count in sorted_tags
     )
 
