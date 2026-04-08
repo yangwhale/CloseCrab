@@ -17,6 +17,12 @@ GCS_ROOT = Path(os.environ.get("CC_PAGES_WEB_ROOT", "/gcs/cc-pages"))
 
 SYNC_DIRS = ["wiki", "wiki-data"]
 
+# Extra files to copy into wiki/ (from skill references)
+SKILL_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+EXTRA_FILES = {
+    "local-graph.js": SKILL_DIR / "references" / "local-graph.js",
+}
+
 
 def sync():
     if not WIKI_REPO.exists():
@@ -27,6 +33,15 @@ def sync():
     if not GCS_ROOT.exists():
         print(f"Error: GCS root not found at {GCS_ROOT}", file=sys.stderr)
         sys.exit(1)
+
+    # Copy extra files into wiki/ before syncing
+    wiki_dir = WIKI_REPO / "wiki"
+    for filename, src_path in EXTRA_FILES.items():
+        if src_path.exists():
+            dst = wiki_dir / filename
+            import shutil
+            shutil.copy2(src_path, dst)
+            print(f"Copied {filename} → {dst}")
 
     for dir_name in SYNC_DIRS:
         src = WIKI_REPO / dir_name

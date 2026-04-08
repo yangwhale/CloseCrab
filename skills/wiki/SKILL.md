@@ -86,9 +86,11 @@ WIKI_URL=$CC_PAGES_URL_PREFIX/wiki           # 公网 URL 前缀
 ~/my-wiki/                       # GitHub private repo
 ├── wiki/                        # Wiki 知识页面（Bot 维护）
 │   ├── index.html               # 总索引页（自动生成）
+│   ├── search.html              # Pagefind 全文搜索页（自动生成）
 │   ├── log.html                 # 操作日志（追加式）
 │   ├── graph.html               # D3.js 知识图谱
 │   ├── style.css                # 共享样式
+│   ├── _pagefind/               # Pagefind 搜索索引（自动生成）
 │   ├── sources/                 # 来源摘要
 │   ├── entities/                # 实体页面（人/产品/项目）
 │   ├── concepts/                # 概念页面（技术/方法/理论）
@@ -134,33 +136,58 @@ python3 ~/.claude/skills/wiki/scripts/sync-to-gcs.py
    - 论文: `raw/papers/attention-is-all-you-need.pdf`
 3. **与用户讨论**：展示 3-5 个关键要点，确认重点方向
 4. **生成/更新 Wiki 页面**：
-   - 新建 source 摘要页 `wiki/sources/{slug}.html`
+   - 新建 source 页面 `wiki/sources/{slug}.html`，**必须包含详细结构化内容**（见下方 Source 页面内容要求）
    - 新建或更新相关 entity 页面
    - 新建或更新相关 concept 页面
    - 更新所有受影响页面的 backlinks
 5. **更新索引**：运行 `rebuild-index.py` 重建 `index.html`
 6. **更新图谱**：运行 `rebuild-graph.py` 重建 `graph.json`
-7. **追加日志**：在 `log.html` 追加一条记录，同时追加 `wiki-data/log.json`（格式见 `references/log-json-spec.md`）
-8. **同步**：
-   - `git add -A && git commit -m "ingest: {title}"` 
+7. **追加日志**：运行 `python3 add-log-entry.py ingest {slug} "{title}" {type}` 追加 `wiki-data/log.json`
+8. **构建搜索索引**：运行 `bash ~/.claude/skills/wiki/scripts/rebuild-search.sh`（Pagefind 全文搜索索引）
+9. **同步**：
+   - `git add -A && git commit -m "ingest: {title}"`
    - `python3 sync-to-gcs.py`
    - （定期或手动 `git push`）
-9. **回复用户**：附上新页面的 URL
+10. **回复用户**：附上新页面的 URL
+
+### Source 页面内容要求
+
+Source 页面不是书签或链接集合，而是**编译后的知识页面**。用户打开 source 页面就能获取核心知识，不需要跳到外部原文。
+
+**必须包含**（在 `<main>` 标签内）：
+1. **原文链接**：保留指向原始资料的链接（CC Pages URL 或外部 URL）
+2. **核心要点**（Key Takeaways）：3-7 个最重要的结论或发现，用编号列表
+3. **详细内容**：根据原文类型选择合适的结构：
+   - 技术文章 → 架构说明、关键参数、对比数据、代码示例
+   - 论文 → 研究动机、方法、实验结果、局限性
+   - 教程/指南 → 步骤摘要、关键配置、注意事项
+   - 对比分析 → 对比表格、各方优劣、适用场景
+4. **数据和表格**：原文中的关键数据（benchmark 数据、配置参数、性能指标）应该以表格形式保留
+5. **与 Wiki 的关联**：通过 `wiki-link` 链接到相关的 entity/concept 页面
+
+**不需要**：
+- 逐字复制原文（这是摘要编译，不是转载）
+- 原文的前言/致谢等非核心内容
 
 ### /wiki query — 基于 Wiki 提问
 
 **步骤：**
 
-1. 读取 `wiki-data/graph.json` 了解 Wiki 全局结构
-2. 根据问题定位相关页面
-3. 深入阅读相关页面内容
-4. 综合回答，引用具体页面 URL
-5. **判断是否回存 Wiki**（好回答不应消失在聊天历史里）：
+1. **搜索引擎查询**：运行 `python3 ~/.claude/skills/wiki/scripts/wiki-query.py "{问题}" --top-k 5 --format json`
+   - 返回 BM25 + 图谱增强的相关页面列表和匹配段落
+   - 如果 search-chunks.json 不存在，先运行 `python3 build-search-index.py`
+2. 深入阅读返回的 top-k 相关页面内容（用 Read 工具读取 HTML 文件）
+3. 综合回答，引用具体页面 URL
+4. **判断是否回存 Wiki**（好回答不应消失在聊天历史里）：
    - **应该回存**：对比分析、综合研究、新发现的关联、跨来源的综合结论、用户引导出的新洞察
    - **不需要回存**：简单事实查询、单页面信息复述、临时计算
-   - 回存时生成新的 analysis 页面存入 `wiki/analyses/`
-   - 更新索引和图谱
-   - 告知用户"这个分析已保存为 {url}"
+   - 回存时：
+     1. 生成新的 analysis 页面存入 `wiki/analyses/{slug}.html`（遵循 html-page-spec.md 模板）
+     2. 更新相关 entity/concept 页面的 backlinks
+     3. 运行 `rebuild-index.py` + `rebuild-graph.py`
+     4. 运行 `bash ~/.claude/skills/wiki/scripts/rebuild-search.sh`（更新搜索索引）
+     5. 运行 `python3 sync-to-gcs.py`
+     6. 告知用户"这个分析已保存为 {url}"
    - **每次探索都在让 Wiki 变得更好，这就是知识复利**
 
 ### /wiki lint — 健康检查
@@ -184,11 +211,85 @@ Lint 不只是被动的健康检查，更是**主动的知识发现引擎**。
 10. **综合机会**：是否可以从已有页面生成新的对比分析或综述？
 11. **Schema 审视**：当前规则是否需要调整？有没有反复出现的模式应该变成约定？
 
-**输出**：生成 lint 报告，分"问题"和"机会"两部分。问题确认后执行修复，机会作为后续 ingest/query 的建议。
+**输出**：生成 lint 报告到 `wiki-data/lint-report.json`，分"问题"和"机会"两部分。问题确认后执行修复，机会作为后续 ingest/query 的建议。
+
+**脚本调用**：
+```bash
+# 体检
+python3 ~/.claude/skills/wiki/scripts/lint.py
+
+# 自动修复
+python3 ~/.claude/skills/wiki/scripts/fix-backlinks.py
+python3 ~/.claude/skills/wiki/scripts/fix-broken-links.py
+
+# 一键体检+修复+重建+同步
+bash ~/.claude/skills/wiki/scripts/rebuild-all.sh --fix
+```
 
 ### /wiki status — 统计信息
 
+```bash
+python3 ~/.claude/skills/wiki/scripts/status.py
+```
+
 显示：页面总数（按类型）、来源数、最近 5 次操作、图谱节点/边数、上次 lint 时间。
+
+## 脚本清单
+
+| 脚本 | 用途 | 调用时机 |
+|------|------|---------|
+| `init-wiki.sh` | 首次初始化 repo | `/wiki init` |
+| `rebuild-index.py` | 重建 index.html | ingest 后 |
+| `rebuild-graph.py` | 重建 graph.json + graph.html | ingest 后 |
+| `rebuild-search-page.py` | 生成 search.html | 修改搜索页时 |
+| `rebuild-search.sh` | 构建 Pagefind 搜索索引 | ingest 后 |
+| `rebuild-all.sh` | 一键 rebuild 全套 + sync | 批量操作后 |
+| `sync-to-gcs.py` | 同步到 GCS | 每次操作后 |
+| `lint.py` | 全量体检 | `/wiki lint` |
+| `build-search-index.py` | 构建 BM25 搜索索引 (search-chunks.json) | rebuild-all 自动调用 |
+| `wiki-query.py` | BM25+图谱增强查询引擎 | `/wiki query` |
+| `update-manifest.py` | 更新编译清单 (compile-manifest.json) | rebuild-all 自动调用 |
+| `rebuild-health.py` | 生成 health.html 健康看板 | rebuild-all 自动调用 |
+| `graph-query.py` | 图谱遍历（BFS路径/邻居/社区/中心性） | 分析时 |
+| `wiki-mcp-server.py` | MCP Server（多 Bot 共享查询） | Claude Code 自动启动 |
+| `fix-backlinks.py` | 自动补全缺失 backlinks（legacy，rebuild-graph 已内建） | lint 发现问题后 |
+| `fix-broken-links.py` | 修复 HTML wiki-link 断链 | lint 发现问题后 |
+| `add-log-entry.py` | 追加 log.json 条目 | ingest/create 后 |
+| `scan-uningested.py` | 扫描未录入的 CC Pages | lint 或手动扫描 |
+| `status.py` | 显示 Wiki 统计（含健康分/manifest/query 历史） | `/wiki status` |
+| `create-page.py` | 创建标准 entity/concept 页面 | ingest 新建页面 |
+| `backfill-sources.py` | 批量注入 CC Pages 内容 | 批量录入 |
+| `patch-all-pages.py` | 批量补全 pagefind/nav/graph | 升级功能后 |
+| `wiki_utils.py` | 公共工具函数 | 被其他脚本引用 |
+
+## Wiki MCP Server（多 Bot 共享查询）
+
+Wiki 提供 MCP Server (`wiki-mcp-server.py`)，让所有 Bot 通过 Claude Code MCP 协议查询 Wiki。
+
+**MCP Tools**：
+| Tool | 用途 |
+|------|------|
+| `wiki_query` | BM25 + 图谱增强搜索 |
+| `wiki_page` | 读取页面纯文本 |
+| `wiki_graph_neighbors` | N-hop 邻居 |
+| `wiki_graph_path` | 两节点最短路径 |
+| `wiki_status` | 统计信息 |
+| `wiki_search` | 关键词搜索 |
+| `wiki_list` | 按类型/标签列表 |
+
+**查询优先级**：MCP tools 可用时优先用 MCP，否则回退到脚本调用。
+
+**配置**（`~/.claude.json`）：
+```json
+{
+  "mcpServers": {
+    "wiki": {
+      "command": "python3",
+      "args": ["~/.claude/skills/wiki/scripts/wiki-mcp-server.py"]
+    }
+  }
+}
+```
 
 ## 页面 HTML 规范
 

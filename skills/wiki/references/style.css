@@ -302,6 +302,31 @@ pre code { background: none; color: inherit; padding: 0; }
   padding: 0.3rem 0;
 }
 
+/* ── Local Graph ── */
+
+.wiki-local-graph {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--slate-200);
+}
+.wiki-local-graph h3 {
+  font-size: 0.9rem;
+  color: var(--slate-500);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+.local-graph-container {
+  background: rgba(255,255,255,0.4);
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 100px;
+}
+.local-graph-container svg {
+  display: block;
+}
+
 /* ── Footer ── */
 
 .wiki-footer {
