@@ -254,23 +254,23 @@ def build_graph_html():
 <title>Knowledge Graph — CC Wiki</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  #graph-container {{ width: 100%; height: 70vh; border-radius: 16px; background: rgba(255,255,255,0.6); border: 1px solid rgba(255,255,255,0.3); margin: 1rem 0; position: relative; overflow: hidden; }}
+  #graph-container {{ width: 100%; height: 70vh; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); margin: 12px 0; position: relative; overflow: hidden; }}
   #graph-container svg {{ width: 100%; height: 100%; }}
-  .graph-legend {{ display: flex; gap: 1.5rem; margin: 0.5rem 0; flex-wrap: wrap; }}
-  .graph-legend-item {{ display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: #475569; }}
+  .graph-legend {{ display: flex; gap: 16px; margin: 8px 0; flex-wrap: wrap; }}
+  .graph-legend-item {{ display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); }}
   .graph-legend-dot {{ width: 12px; height: 12px; border-radius: 50%; }}
-  .graph-tooltip {{ position: absolute; background: rgba(15,23,42,0.9); color: white; padding: 0.5rem 0.8rem; border-radius: 8px; font-size: 0.8rem; pointer-events: none; opacity: 0; transition: opacity 0.15s; max-width: 250px; }}
-  .graph-controls {{ display: flex; gap: 0.8rem; margin: 0.5rem 0; flex-wrap: wrap; align-items: center; }}
-  .graph-search {{ flex: 1; min-width: 200px; padding: 0.5rem 1rem; border: 1px solid #E2E8F0; border-radius: 8px; font-size: 0.85rem; background: rgba(255,255,255,0.6); }}
-  .graph-search:focus {{ outline: none; border-color: #8B5CF6; box-shadow: 0 0 0 2px rgba(139,92,246,0.1); }}
-  .graph-filters {{ display: flex; gap: 0.3rem; flex-wrap: wrap; }}
-  .graph-filter {{ padding: 0.3rem 0.8rem; border-radius: 8px; border: 1px solid #E2E8F0; font-size: 0.8rem; cursor: pointer; background: white; display: inline-flex; align-items: center; }}
-  .graph-filter:hover {{ border-color: rgba(139,92,246,0.3); }}
-  .graph-filter.active {{ background: #8B5CF6; color: white; border-color: #8B5CF6; }}
-  .graph-slider {{ display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0; font-size: 0.8rem; color: #64748B; }}
-  .graph-slider input[type="range"] {{ flex: 1; accent-color: #8B5CF6; }}
+  .graph-tooltip {{ position: absolute; background: rgba(32,33,36,0.9); color: white; padding: 8px 12px; border-radius: var(--radius); font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; max-width: 250px; }}
+  .graph-controls {{ display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }}
+  .graph-search {{ flex: 1; min-width: 200px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; background: var(--surface); font-family: 'Google Sans', sans-serif; }}
+  .graph-search:focus {{ outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgba(26,115,232,0.15); }}
+  .graph-filters {{ display: flex; gap: 4px; flex-wrap: wrap; }}
+  .graph-filter {{ padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); font-size: 12px; cursor: pointer; background: var(--surface); display: inline-flex; align-items: center; font-family: 'Google Sans', sans-serif; }}
+  .graph-filter:hover {{ border-color: rgba(26,115,232,0.3); }}
+  .graph-filter.active {{ background: var(--blue); color: white; border-color: var(--blue); }}
+  .graph-slider {{ display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12px; color: var(--text3); }}
+  .graph-slider input[type="range"] {{ flex: 1; accent-color: var(--blue); }}
   .graph-slider label {{ min-width: 60px; font-weight: 500; }}
-  .color-toggle {{ display: flex; gap: 0.3rem; }}
+  .color-toggle {{ display: flex; gap: 4px; }}
 </style>
 </head>
 <body>
@@ -322,13 +322,13 @@ def build_graph_html():
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
 const TYPE_COLORS = {{ source: "#F59E0B", entity: "#0EA5E9", concept: "#10B981", analysis: "#F43F5E" }};
-const CLUSTER_PALETTE = ["#8B5CF6","#0EA5E9","#10B981","#F59E0B","#F43F5E","#6366F1","#EC4899","#14B8A6","#F97316","#06B6D4","#A855F7","#EAB308"];
+const CLUSTER_PALETTE = ["#1a73e8","#0EA5E9","#1e8e3e","#f9ab00","#d93025","#4285f4","#e8710a","#12b5cb","#9334e6","#a142f4","#e37400","#1967d2"];
 const DATA_URL = "../wiki-data/graph.json";
 let GS = {{ node: null, link: null, label: null, activeType: 'all', colorMode: 'type', timeValue: 100, allDates: [] }};
 
 function nodeColor(d) {{
   if (GS.colorMode === 'cluster') return CLUSTER_PALETTE[(d.cluster || 0) % CLUSTER_PALETTE.length];
-  return TYPE_COLORS[d.type] || '#64748B';
+  return TYPE_COLORS[d.type] || '#5f6368';
 }}
 
 function setColorMode(mode) {{

@@ -189,9 +189,9 @@ def build_donut_svg(type_counts, total):
     return (f'<svg viewBox="0 0 200 200" width="200" height="200">\n'
             + '\n'.join(segments)
             + f'\n<text x="100" y="95" text-anchor="middle" font-size="28" '
-              f'font-weight="700" fill="#1E293B">{total}</text>'
+              f'font-weight="600" fill="#202124">{total}</text>'
             f'\n<text x="100" y="115" text-anchor="middle" font-size="12" '
-            f'fill="#64748B">pages</text>'
+            f'fill="#5f6368">pages</text>'
             f'\n</svg>')
 
 
@@ -212,7 +212,7 @@ def build_activity_svg(activity_data):
         x = i * (bar_w + gap)
         h = (d["count"] / max_count) * (chart_h - 10) if d["count"] > 0 else 0
         y = chart_h - h
-        color = "#8B5CF6" if d["count"] > 0 else "#E2E8F0"
+        color = "#1a73e8" if d["count"] > 0 else "#dadce0"
         opacity = min(0.4 + d["count"] / max_count * 0.6, 1) if d["count"] > 0 else 0.3
         bars.append(
             f'<rect x="{x}" y="{y}" width="{bar_w}" height="{max(h, 2)}" '
@@ -223,7 +223,7 @@ def build_activity_svg(activity_data):
             label = d["date"][5:]  # MM-DD
             bars.append(
                 f'<text x="{x + bar_w / 2}" y="{svg_h - 2}" text-anchor="middle" '
-                f'font-size="9" fill="#94A3B8">{label}</text>')
+                f'font-size="9" fill="#80868b">{label}</text>')
 
     return (f'<svg viewBox="0 0 {total_w} {svg_h}" width="100%" '
             f'height="{svg_h}" preserveAspectRatio="xMinYMid meet">\n'
@@ -232,11 +232,11 @@ def build_activity_svg(activity_data):
 
 def score_color(score):
     if score >= 80:
-        return "#10B981"  # green
+        return "#1e8e3e"  # green
     elif score >= 60:
-        return "#F59E0B"  # amber
+        return "#f9ab00"  # amber
     else:
-        return "#F43F5E"  # red
+        return "#d93025"  # red
 
 
 def score_label(score):
@@ -345,33 +345,32 @@ def build_html(score, type_counts, total_pages, total_links,
   .dashboard-grid {{
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-    margin: 1.5rem 0;
+    gap: 12px;
+    margin: 20px 0;
   }}
   .stat-card {{
-    background: var(--glass-bg);
-    backdrop-filter: blur(16px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
     text-align: center;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.04);
   }}
+  .stat-card:hover {{ box-shadow: var(--shadow-1); }}
   .stat-value {{
-    font-size: 2.5rem;
-    font-weight: 800;
+    font-size: 32px;
+    font-weight: 600;
     line-height: 1;
-    margin-bottom: 0.3rem;
+    margin-bottom: 4px;
   }}
   .stat-label {{
-    font-size: 0.85rem;
-    color: var(--slate-500);
+    font-size: 13px;
+    color: var(--text2);
     font-weight: 500;
   }}
   .stat-sub {{
-    font-size: 0.75rem;
-    color: var(--slate-400, #94A3B8);
-    margin-top: 0.3rem;
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 4px;
   }}
   .score-ring {{
     position: relative;
@@ -385,34 +384,33 @@ def build_html(score, type_counts, total_pages, total_links,
     transform: translate(-50%, -50%);
     text-align: center;
   }}
-  .score-text .num {{ font-size: 2rem; font-weight: 800; }}
-  .score-text .label {{ font-size: 0.75rem; color: var(--slate-500); }}
+  .score-text .num {{ font-size: 28px; font-weight: 600; }}
+  .score-text .label {{ font-size: 11px; color: var(--text3); }}
   .chart-section {{
-    background: var(--glass-bg);
-    backdrop-filter: blur(16px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 1.5rem 2rem;
-    margin: 1.5rem 0;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    margin: 16px 0;
   }}
+  .chart-section:hover {{ box-shadow: var(--shadow-1); }}
   .chart-row {{
     display: flex;
-    gap: 2rem;
+    gap: 24px;
     align-items: center;
     flex-wrap: wrap;
   }}
   .legend-items {{
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 8px;
   }}
   .legend-item {{
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    font-size: 0.9rem;
-    color: var(--slate-700);
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text);
   }}
   .legend-dot {{
     width: 12px;
@@ -425,26 +423,26 @@ def build_html(score, type_counts, total_pages, total_links,
     padding: 0;
   }}
   .issues-section li {{
-    padding: 0.4rem 0;
-    border-bottom: 1px solid var(--slate-100, #F1F5F9);
-    font-size: 0.9rem;
-    color: var(--slate-700);
+    padding: 6px 0;
+    border-bottom: 1px solid var(--bg);
+    font-size: 13px;
+    color: var(--text);
   }}
   .issue-type {{
-    font-size: 0.75rem;
-    padding: 0.1rem 0.4rem;
+    font-size: 11px;
+    padding: 2px 6px;
     border-radius: 4px;
-    background: var(--slate-100, #F1F5F9);
-    color: var(--slate-500);
+    background: var(--bg);
+    color: var(--text2);
   }}
   .activity-section {{
     overflow-x: auto;
   }}
   .timestamp {{
-    font-size: 0.75rem;
-    color: var(--slate-400, #94A3B8);
+    font-size: 11px;
+    color: var(--text3);
     text-align: right;
-    margin-top: 1rem;
+    margin-top: 12px;
   }}
 </style>
 </head>
@@ -465,7 +463,7 @@ def build_html(score, type_counts, total_pages, total_links,
     <div class="stat-card">
       <div class="score-ring">
         <svg width="120" height="120" viewBox="0 0 120 120">
-          <circle cx="60" cy="60" r="52" fill="none" stroke="#E2E8F0" stroke-width="8"/>
+          <circle cx="60" cy="60" r="52" fill="none" stroke="#dadce0" stroke-width="8"/>
           <circle cx="60" cy="60" r="52" fill="none" stroke="{sc}" stroke-width="8"
                   stroke-dasharray="{score / 100 * 327:.0f} 327"
                   stroke-linecap="round"/>
@@ -478,11 +476,11 @@ def build_html(score, type_counts, total_pages, total_links,
       <div class="stat-label">Health Score</div>
     </div>
     <div class="stat-card">
-      <div class="stat-value" style="color:var(--purple)">{total_pages}</div>
+      <div class="stat-value" style="color:var(--blue)">{total_pages}</div>
       <div class="stat-label">Total Pages</div>
     </div>
     <div class="stat-card">
-      <div class="stat-value" style="color:var(--indigo)">{total_links}</div>
+      <div class="stat-value" style="color:var(--blue)">{total_links}</div>
       <div class="stat-label">Knowledge Links</div>
     </div>
     <div class="stat-card">

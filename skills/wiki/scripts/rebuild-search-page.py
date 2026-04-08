@@ -21,134 +21,133 @@ def build_search_html() -> str:
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="_pagefind/pagefind-ui.css">
 <style>
-  .search-container { margin: 2rem 0; }
+  .search-container { margin: 24px 0; }
   /* Pagefind UI customization */
   :root {
     --pagefind-ui-scale: 1;
-    --pagefind-ui-primary: #8B5CF6;
-    --pagefind-ui-text: #334155;
-    --pagefind-ui-background: rgba(255,255,255,0.6);
-    --pagefind-ui-border: #E2E8F0;
-    --pagefind-ui-tag: #F5F3FF;
+    --pagefind-ui-primary: #1a73e8;
+    --pagefind-ui-text: #202124;
+    --pagefind-ui-background: #ffffff;
+    --pagefind-ui-border: #dadce0;
+    --pagefind-ui-tag: #e8f0fe;
     --pagefind-ui-border-width: 1px;
-    --pagefind-ui-border-radius: 12px;
-    --pagefind-ui-image-border-radius: 8px;
+    --pagefind-ui-border-radius: 4px;
+    --pagefind-ui-image-border-radius: 4px;
     --pagefind-ui-image-box-ratio: 0;
-    --pagefind-ui-font: 'Inter', 'Noto Sans SC', sans-serif;
+    --pagefind-ui-font: 'Google Sans', 'Noto Sans SC', 'Roboto', sans-serif;
   }
-  /* Search input — thin border, soft shadow */
+  /* Search input */
   .pagefind-ui__search-input {
-    font-size: 1rem !important;
-    padding: 0.8rem 1.2rem !important;
-    border: 1px solid #E2E8F0 !important;
-    border-radius: 12px !important;
-    background: rgba(255,255,255,0.7) !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.04) !important;
+    font-size: 14px !important;
+    padding: 10px 12px !important;
+    border: 1px solid #dadce0 !important;
+    border-radius: 4px !important;
+    background: #ffffff !important;
     transition: border-color 0.2s, box-shadow 0.2s !important;
   }
   .pagefind-ui__search-input:focus {
-    border-color: #8B5CF6 !important;
-    box-shadow: 0 0 0 3px rgba(139,92,246,0.1) !important;
+    border-color: #1a73e8 !important;
+    box-shadow: 0 0 0 2px #e8f0fe !important;
     outline: none !important;
   }
   /* Search clear button */
   .pagefind-ui__search-clear {
-    border-radius: 8px !important;
-    background: #F1F5F9 !important;
-    color: #64748B !important;
+    border-radius: 4px !important;
+    background: #f1f3f4 !important;
+    color: #5f6368 !important;
     border: none !important;
   }
-  .pagefind-ui__search-clear:hover { background: #E2E8F0 !important; }
-  /* Filter panel — glassmorphism card */
+  .pagefind-ui__search-clear:hover { background: #dadce0 !important; }
+  /* Filter panel */
   .pagefind-ui__filter-panel {
-    background: rgba(255,255,255,0.5) !important;
-    backdrop-filter: blur(12px) !important;
-    border: 1px solid rgba(255,255,255,0.3) !important;
-    border-radius: 12px !important;
-    padding: 1rem 1.2rem !important;
-    margin-bottom: 1rem !important;
+    background: #ffffff !important;
+    border: 1px solid #dadce0 !important;
+    border-radius: 8px !important;
+    padding: 12px 16px !important;
+    margin-bottom: 12px !important;
   }
   .pagefind-ui__filter-name {
-    font-weight: 600 !important;
-    color: #334155 !important;
+    font-weight: 500 !important;
+    color: #202124 !important;
     text-transform: uppercase !important;
-    font-size: 0.75rem !important;
-    letter-spacing: 0.05em !important;
+    font-size: 11px !important;
+    letter-spacing: 0.5px !important;
   }
   .pagefind-ui__filter-value {
-    border-radius: 8px !important;
-    padding: 0.25rem 0.6rem !important;
-    font-size: 0.8rem !important;
+    border-radius: 4px !important;
+    padding: 4px 8px !important;
+    font-size: 12px !important;
   }
-  .pagefind-ui__filter-value:hover { background: #F5F3FF !important; }
+  .pagefind-ui__filter-value:hover { background: #e8f0fe !important; }
   .pagefind-ui__filter-value.pagefind-ui__filter-value--selected {
-    background: #8B5CF6 !important;
+    background: #1a73e8 !important;
     color: white !important;
   }
   /* Result styling */
   .pagefind-ui__result {
-    border-bottom: 1px solid #F1F5F9 !important;
-    padding: 1rem 0 !important;
+    border-bottom: 1px solid #f1f3f4 !important;
+    padding: 12px 0 !important;
   }
   .pagefind-ui__result-link {
     color: var(--pagefind-ui-primary) !important;
-    font-weight: 600 !important;
+    font-weight: 500 !important;
   }
   .pagefind-ui__result-excerpt {
-    color: #475569 !important;
+    color: #3c4043 !important;
     line-height: 1.6 !important;
   }
   .pagefind-ui__result-tag {
-    background: #F5F3FF !important;
-    color: #7C3AED !important;
-    border-radius: 6px !important;
-    font-size: 0.75rem !important;
+    background: #e8f0fe !important;
+    color: #1a73e8 !important;
+    border-radius: 4px !important;
+    font-size: 11px !important;
   }
   /* Highlight marks */
   mark {
-    background: rgba(139,92,246,0.15) !important;
+    background: rgba(26,115,232,0.15) !important;
     color: inherit !important;
     border-radius: 2px;
     padding: 0 2px;
   }
   /* Message / loading */
   .pagefind-ui__message {
-    color: #64748B !important;
-    font-size: 0.85rem !important;
+    color: #5f6368 !important;
+    font-size: 13px !important;
   }
   /* Load more button */
   .pagefind-ui__button {
-    background: #8B5CF6 !important;
+    background: #1a73e8 !important;
     color: white !important;
     border: none !important;
-    border-radius: 10px !important;
-    padding: 0.6rem 1.5rem !important;
+    border-radius: 4px !important;
+    padding: 8px 20px !important;
     font-weight: 500 !important;
     cursor: pointer !important;
+    font-family: 'Google Sans', sans-serif !important;
   }
-  .pagefind-ui__button:hover { background: #7C3AED !important; }
+  .pagefind-ui__button:hover { background: #1765cc !important; }
   .search-tips {
-    margin-top: 1.5rem;
-    padding: 1rem 1.5rem;
-    background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
-    border-radius: 12px;
-    font-size: 0.85rem;
-    color: #64748B;
+    margin-top: 20px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13px;
+    color: #5f6368;
   }
-  .search-tips code { font-size: 0.8rem; }
+  .search-tips code { font-size: 12px; }
   .search-shortcut {
     position: fixed;
-    bottom: 2rem;
-    right: 2rem;
+    bottom: 24px;
+    right: 24px;
     background: var(--pagefind-ui-primary);
     color: white;
     border: none;
-    border-radius: 12px;
-    padding: 0.6rem 1rem;
-    font-size: 0.8rem;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-size: 12px;
     cursor: pointer;
-    box-shadow: 0 4px 12px rgba(139,92,246,0.3);
+    box-shadow: var(--shadow-1);
     display: none;
   }
 </style>

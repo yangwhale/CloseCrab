@@ -140,32 +140,32 @@ def build_index_html(pages: list[dict]) -> str:
 <title>Index — CC Wiki</title>
 <link rel="stylesheet" href="style.css">
 <style>
-  .idx-stats {{ display: flex; gap: 1.5rem; margin: 1rem 0; flex-wrap: wrap; }}
-  .idx-stat {{ background: rgba(255,255,255,0.6); border: 1px solid rgba(255,255,255,0.3); border-radius: 12px; padding: 0.8rem 1.2rem; cursor: pointer; transition: all 0.15s; }}
-  .idx-stat:hover {{ border-color: rgba(139,92,246,0.3); }}
-  .idx-stat.active {{ border-color: #8B5CF6; box-shadow: 0 0 0 2px rgba(139,92,246,0.15); }}
-  .idx-stat .num {{ font-size: 1.8rem; font-weight: 800; }}
-  .idx-stat .label {{ font-size: 0.8rem; color: #64748B; }}
-  .idx-search-row {{ display: flex; gap: 0.8rem; margin: 1rem 0; align-items: center; }}
-  .idx-search {{ flex: 1; padding: 0.8rem 1.2rem; border: 1px solid #E2E8F0; border-radius: 12px; font-size: 1rem; background: rgba(255,255,255,0.6); }}
-  .idx-search:focus {{ outline: none; border-color: #8B5CF6; box-shadow: 0 0 0 3px rgba(139,92,246,0.1); }}
-  .idx-fullsearch {{ padding: 0.8rem 1.2rem; border: 1px solid #8B5CF6; border-radius: 12px; font-size: 0.85rem; background: #8B5CF6; color: white; text-decoration: none; white-space: nowrap; font-weight: 500; transition: background 0.15s; }}
-  .idx-fullsearch:hover {{ background: #7C3AED; }}
-  .idx-tag-filters {{ display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 0.5rem 0 1rem; }}
-  .idx-filter-tag {{ display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: 500; background: #F5F3FF; color: #7C3AED; border: 1px solid transparent; cursor: pointer; transition: all 0.15s; }}
-  .idx-filter-tag:hover {{ border-color: rgba(139,92,246,0.3); }}
-  .idx-filter-tag.active {{ background: #8B5CF6; color: white; }}
-  .idx-filter-count {{ font-size: 0.65rem; opacity: 0.7; }}
-  .idx-section {{ margin: 2rem 0; }}
-  .idx-table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
-  .idx-table th {{ text-align: left; padding: 0.6rem 1rem; background: rgba(139,92,246,0.06); color: #7C3AED; font-weight: 600; border-bottom: 2px solid rgba(139,92,246,0.15); }}
-  .idx-table td {{ padding: 0.6rem 1rem; border-bottom: 1px solid #E2E8F0; }}
-  .idx-table tr:hover td {{ background: rgba(139,92,246,0.03); }}
-  .idx-tag {{ display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; background: #F5F3FF; color: #7C3AED; margin-right: 0.2rem; cursor: pointer; }}
-  .idx-tag:hover {{ background: #EDE9FE; }}
-  .idx-kbd {{ display: inline-block; padding: 0.1rem 0.4rem; border: 1px solid #CBD5E1; border-radius: 4px; font-size: 0.7rem; color: #64748B; margin-left: 0.3rem; }}
-  .idx-new {{ display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 700; background: #10B981; color: white; margin-left: 0.4rem; letter-spacing: 0.05em; vertical-align: middle; }}
-  .idx-health {{ display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.5rem; font-size: 0.85rem; font-weight: 600; }}
+  .idx-stats {{ display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }}
+  .idx-stat {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; cursor: pointer; transition: all 0.15s; }}
+  .idx-stat:hover {{ box-shadow: var(--shadow-1); }}
+  .idx-stat.active {{ border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }}
+  .idx-stat .num {{ font-size: 24px; font-weight: 600; }}
+  .idx-stat .label {{ font-size: 12px; color: var(--text3); }}
+  .idx-search-row {{ display: flex; gap: 8px; margin: 16px 0; align-items: center; }}
+  .idx-search {{ flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 14px; background: var(--surface); font-family: 'Google Sans', sans-serif; }}
+  .idx-search:focus {{ outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }}
+  .idx-fullsearch {{ padding: 10px 16px; border: none; border-radius: 4px; font-size: 13px; background: var(--blue); color: white; text-decoration: none; white-space: nowrap; font-weight: 500; transition: background 0.15s; font-family: 'Google Sans', sans-serif; }}
+  .idx-fullsearch:hover {{ background: var(--blue-hover); }}
+  .idx-tag-filters {{ display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 16px; }}
+  .idx-filter-tag {{ display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 16px; font-size: 12px; font-weight: 500; background: var(--blue-light); color: var(--blue); border: 1px solid transparent; cursor: pointer; transition: all 0.15s; }}
+  .idx-filter-tag:hover {{ border-color: rgba(26,115,232,0.3); }}
+  .idx-filter-tag.active {{ background: var(--blue); color: white; }}
+  .idx-filter-count {{ font-size: 10px; opacity: 0.7; }}
+  .idx-section {{ margin: 24px 0; }}
+  .idx-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  .idx-table th {{ text-align: left; padding: 8px 16px; background: var(--surface-hover); color: var(--text2); font-weight: 500; border-bottom: 1px solid var(--border); }}
+  .idx-table td {{ padding: 8px 16px; border-bottom: 1px solid var(--bg); }}
+  .idx-table tr:hover td {{ background: var(--surface-hover); }}
+  .idx-tag {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: var(--blue-light); color: var(--blue); margin-right: 2px; cursor: pointer; }}
+  .idx-tag:hover {{ background: #d2e3fc; }}
+  .idx-kbd {{ display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 11px; color: var(--text3); margin-left: 4px; }}
+  .idx-new {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; background: var(--green); color: white; margin-left: 6px; letter-spacing: 0.5px; vertical-align: middle; }}
+  .idx-health {{ display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 14px; font-weight: 500; }}
   .idx-health-dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
 </style>
 </head>
@@ -178,8 +178,8 @@ def build_index_html(pages: list[dict]) -> str:
   <a href="health.html">Health</a>
 </nav>
 <article class="wiki-content">
-  <h1>CC Wiki Index{f' <span class="idx-health"><span class="idx-health-dot" style="background:{"#10B981" if (health_score or 0) >= 80 else ("#F59E0B" if (health_score or 0) >= 60 else "#F43F5E")}"></span>{health_score}/100</span>' if health_score else ''}</h1>
-  <p class="wiki-summary">Total: {total} pages · Last rebuilt: {now} · <a href="health.html" style="color:#8B5CF6">Health Dashboard</a></p>
+  <h1>CC Wiki Index{f' <span class="idx-health"><span class="idx-health-dot" style="background:{"#1e8e3e" if (health_score or 0) >= 80 else ("#f9ab00" if (health_score or 0) >= 60 else "#d93025")}"></span>{health_score}/100</span>' if health_score else ''}</h1>
+  <p class="wiki-summary">Total: {total} pages · Last rebuilt: {now} · <a href="health.html" style="color:var(--blue)">Health Dashboard</a></p>
 
   <div class="idx-stats">
     {"".join(f'<div class="idx-stat" data-type="{t}" onclick="toggleType(this)"><div class="num" style="color:{TYPE_COLORS.get(t,"#64748B")}">{len(by_type.get(t,[]))}</div><div class="label">{TYPE_LABELS.get(t,t)}</div></div>' for t in TYPE_ORDER)}
