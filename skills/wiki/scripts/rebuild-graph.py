@@ -14,7 +14,7 @@ from html.parser import HTMLParser
 # Allow running from any directory
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from wiki_utils import WikiMetaParser, SKIP_FILES, TYPE_COLORS
+from wiki_utils import WikiMetaParser, SKIP_FILES
 
 WIKI_REPO = Path(os.environ.get("WIKI_REPO", os.path.expanduser("~/my-wiki")))
 WIKI_DIR = WIKI_REPO / "wiki"
@@ -30,8 +30,8 @@ class LinkExtractor(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag == "a":
             d = dict(attrs)
-            cls = d.get("class", "")
-            href = d.get("href", "")
+            cls = d.get("class") or ""
+            href = d.get("href") or ""
             if "wiki-link" in cls and href:
                 # Extract slug from path like ../concepts/rag.html
                 match = re.search(r'(\w[\w-]*)\.html$', href)
@@ -150,10 +150,9 @@ def inject_backlinks(nodes, links):
         content = page_path.read_text(encoding="utf-8")
 
         # Remove existing backlinks section
-        import re as _re
-        cleaned = _re.sub(
+        cleaned = re.sub(
             r'<section class="wiki-backlinks"[^>]*>.*?</section>',
-            '', content, flags=_re.DOTALL
+            '', content, flags=re.DOTALL
         ).rstrip()
 
         # Insert backlinks after </main>

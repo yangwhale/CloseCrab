@@ -134,12 +134,18 @@ def rebuild_and_sync(slug: str, title: str, page_type: str = "source"):
 
 def cmd_pdf(args):
     """Ingest a PDF file."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("extract_pdf", SCRIPT_DIR / "extract-pdf.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    extract_pdf = mod.extract_pdf
-    get_pdf_metadata = mod.get_pdf_metadata
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("extract_pdf", SCRIPT_DIR / "extract-pdf.py")
+        if not spec or not spec.loader:
+            raise ImportError("Cannot load extract-pdf.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        extract_pdf = mod.extract_pdf
+        get_pdf_metadata = mod.get_pdf_metadata
+    except (ImportError, AttributeError) as e:
+        print(json.dumps({"status": "error", "message": f"Failed to load extract-pdf.py: {e}"}))
+        sys.exit(1)
 
     pdf_path = os.path.expanduser(args.pdf_path)
     if not os.path.isfile(pdf_path):

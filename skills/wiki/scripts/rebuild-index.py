@@ -58,7 +58,7 @@ def build_index_html(pages: list[dict]) -> str:
 
     # Load health score
     health_score = None
-    graph_path = Path(os.environ.get("WIKI_REPO", os.path.expanduser("~/my-wiki"))) / "wiki-data" / "graph.json"
+    graph_path = WIKI_REPO / "wiki-data" / "graph.json"
     if graph_path.exists():
         try:
             g = json.loads(graph_path.read_text())
@@ -67,7 +67,7 @@ def build_index_html(pages: list[dict]) -> str:
             for link in g.get("links", []):
                 inbound[link["target"]] += 1
             orphans = sum(1 for n in g.get("nodes", []) if inbound[n["id"]] == 0)
-            health_score = max(0, min(100, round(100 - orphans * 0.5 + 2)))
+            health_score = max(0, min(100, round(100 - orphans * 0.5)))
         except Exception:
             pass
 

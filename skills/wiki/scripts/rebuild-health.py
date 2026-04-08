@@ -9,6 +9,7 @@ to produce a visual health dashboard with:
   - Issues summary
   - Knowledge discovery suggestions
 """
+import html
 import json
 import math
 import os
@@ -275,8 +276,8 @@ def build_html(score, type_counts, total_pages, total_links,
     if orphans:
         issues_html += f'<h3>Orphan Pages ({len(orphans)})</h3><ul>\n'
         for o in orphans[:15]:
-            issues_html += (f'<li><a class="wiki-link" href="{o["path"]}">{o["title"]}</a> '
-                            f'<span class="issue-type">{o["type"]}</span></li>\n')
+            issues_html += (f'<li><a class="wiki-link" href="{o["path"]}">{html.escape(o["title"])}</a> '
+                            f'<span class="issue-type">{html.escape(o["type"])}</span></li>\n')
         if len(orphans) > 15:
             issues_html += f'<li>... and {len(orphans) - 15} more</li>\n'
         issues_html += '</ul>\n'
@@ -286,7 +287,7 @@ def build_html(score, type_counts, total_pages, total_links,
         issues_html += f'<h3>Content Issues ({len(short_pages)})</h3><ul>\n'
         for s in short_pages[:10]:
             reason = "Missing file" if s["reason"] == "missing" else f'{s.get("size", 0)}B'
-            issues_html += f'<li><code>{s["id"]}</code> — {reason}</li>\n'
+            issues_html += f'<li><code>{html.escape(s["id"])}</code> — {html.escape(reason)}</li>\n'
         issues_html += '</ul>\n'
         total_issues += len(short_pages)
 
@@ -295,7 +296,7 @@ def build_html(score, type_counts, total_pages, total_links,
         if bl:
             issues_html += f'<h3>Broken Links ({len(bl)})</h3><ul>\n'
             for b in bl[:10]:
-                issues_html += f'<li><code>{b["page"]}</code> → {b["href"]}</li>\n'
+                issues_html += f'<li><code>{html.escape(b["page"])}</code> → {html.escape(b["href"])}</li>\n'
             issues_html += '</ul>\n'
             total_issues += len(bl)
 
@@ -307,9 +308,9 @@ def build_html(score, type_counts, total_pages, total_links,
     if stale_pages:
         stale_html = f'<h3>Stale Pages (&gt;30 days, showing top 10)</h3><ul>\n'
         for s in stale_pages[:10]:
-            stale_html += (f'<li><code>{s["id"]}</code> '
-                           f'<span class="issue-type">{s["type"]}</span> '
-                           f'last updated {s["updated"]}</li>\n')
+            stale_html += (f'<li><code>{html.escape(s["id"])}</code> '
+                           f'<span class="issue-type">{html.escape(s["type"])}</span> '
+                           f'last updated {html.escape(s["updated"])}</li>\n')
         stale_html += '</ul>\n'
 
     # Recent activity
@@ -320,7 +321,7 @@ def build_html(score, type_counts, total_pages, total_links,
             ts = e.get("timestamp", "")[:10]
             action = e.get("action", e.get("operation", "?"))
             title = e.get("title", e.get("slug", ""))[:60]
-            recent_html += f'<tr><td>{ts}</td><td>{action}</td><td>{title}</td></tr>\n'
+            recent_html += f'<tr><td>{html.escape(ts)}</td><td>{html.escape(action)}</td><td>{html.escape(title)}</td></tr>\n'
         recent_html += '</tbody></table>\n'
 
     # Manifest stats

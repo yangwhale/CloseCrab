@@ -141,14 +141,20 @@ def find_stale_pages(graph, days=30):
     for n in graph.get("nodes", []):
         updated = n.get("updated", n.get("created", ""))
         if updated and updated < cutoff:
+            try:
+                if "T" in updated:
+                    dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                else:
+                    dt = datetime.fromisoformat(updated + "T00:00:00+00:00")
+                days_stale = (datetime.now(timezone.utc) - dt).days
+            except (ValueError, TypeError):
+                continue
             stale.append({
                 "id": n["id"],
                 "title": n["title"],
                 "type": n["type"],
                 "last_updated": updated,
-                "days_stale": (datetime.now(timezone.utc) - datetime.fromisoformat(
-                    updated + "T00:00:00+00:00" if "T" not in updated else updated
-                )).days,
+                "days_stale": days_stale,
             })
 
     stale.sort(key=lambda x: x.get("days_stale", 0), reverse=True)

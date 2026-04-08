@@ -157,7 +157,9 @@ def wiki_query(question: str, top_k: int = 5) -> str:
     page_chunks = defaultdict(list)
     page_info = {}
     for cid, score in chunk_results:
-        c = chunk_map[cid]
+        c = chunk_map.get(cid)
+        if not c:
+            continue
         pid = c["page_id"]
         page_scores[pid] += score
         page_chunks[pid].append(c["text"][:300])

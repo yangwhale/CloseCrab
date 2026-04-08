@@ -56,8 +56,8 @@ def main():
         print("Error: graph.json not found")
         return
 
-    nodes = graph["nodes"]
-    links = graph["links"]
+    nodes = graph.get("nodes", [])
+    links = graph.get("links", [])
     type_counts = defaultdict(int)
     tag_counts = defaultdict(int)
     for n in nodes:
