@@ -162,7 +162,7 @@ class BotCore:
         def _format_step(d: dict) -> list[str]:
             """从原始 stream-json 事件提取 step 文本，返回新增的 step 列表。
 
-            进度卡片只需简洁的"正在做什么"指示，不需要详细内容。
+            保留完整路径和关键信息，但不展示 raw 文件内容（行号、diff 原文）。
             详细日志通过 on_log 回调写入日志频道和 Firestore。
             """
             new_steps = []
@@ -171,43 +171,61 @@ class BotCore:
                 for block in d.get("message", {}).get("content", []):
                     bt = block.get("type", "")
                     if bt == "text" and block.get("text", "").strip():
-                        first_line = block['text'].strip().split('\n')[0][:80]
-                        new_steps.append(f"💬 {first_line}")
+                        # 保留前两行，截断 150 字符
+                        lines = block['text'].strip().split('\n')[:2]
+                        preview = '\n'.join(lines)[:150]
+                        new_steps.append(f"💬 {preview}")
                     elif bt == "tool_use":
                         name = block.get("name", "")
                         inp = block.get("input", {})
                         emoji = _STEP_EMOJI.get(name, "🔧")
                         if name in ("Read", "Write", "Edit") and "file_path" in inp:
-                            fname = Path(inp['file_path']).name
-                            new_steps.append(f"{emoji} {name}: `{fname}`")
+                            fpath = inp['file_path']
+                            if name == "Edit" and "old_string" in inp:
+                                # 显示路径 + 变更行数概要，不展示 raw 内容
+                                old_lines = inp['old_string'].count('\n') + 1
+                                new_lines = inp.get('new_string', '').count('\n') + 1
+                                new_steps.append(f"{emoji} Edit: `{fpath}` ({old_lines}→{new_lines} 行)")
+                            else:
+                                new_steps.append(f"{emoji} {name}: `{fpath}`")
                         elif name == "Bash" and "command" in inp:
-                            cmd = inp['command'].split('\n')[0][:80]
+                            cmd = inp['command'].split('\n')[0][:150]
                             new_steps.append(f"{emoji} Bash: `{cmd}`")
                         elif name == "Grep" and "pattern" in inp:
-                            pat = inp['pattern'][:40]
-                            path = Path(inp['path']).name if inp.get("path") else ''
-                            detail = f"/{pat}/"
-                            if path:
-                                detail += f" in {path}"
+                            detail = f"/{inp['pattern'][:60]}/"
+                            if inp.get("path"):
+                                detail += f" in {inp['path']}"
                             new_steps.append(f"{emoji} Grep: {detail}")
                         elif name == "Glob" and "pattern" in inp:
                             detail = inp['pattern']
-                            path = Path(inp['path']).name if inp.get("path") else ''
-                            if path:
-                                detail += f" in {path}"
+                            if inp.get("path"):
+                                detail += f" in {inp['path']}"
                             new_steps.append(f"{emoji} Glob: {detail}")
                         elif name == "Agent":
-                            detail = (inp.get('description', '') or inp.get('prompt', '')[:60])[:60]
+                            detail = (inp.get('description', '') or inp.get('prompt', '')[:80])[:80]
                             new_steps.append(f"{emoji} Agent: {detail}")
                         elif name == "WebSearch":
-                            new_steps.append(f"{emoji} WebSearch: {inp.get('query', '')[:80]}")
+                            new_steps.append(f"{emoji} WebSearch: {inp.get('query', '')[:100]}")
                         elif name == "WebFetch":
-                            new_steps.append(f"{emoji} WebFetch: {inp.get('url', '')[:80]}")
+                            new_steps.append(f"{emoji} WebFetch: {inp.get('url', '')[:100]}")
                         else:
-                            new_steps.append(f"{emoji} {name}")
+                            params = ", ".join(f"{k}={str(v)[:60]}" for k, v in list(inp.items())[:3])
+                            new_steps.append(f"{emoji} {name}: {params}" if params else f"{emoji} {name}")
             elif t == "user":
-                # 完全隐藏 tool_result — 进度卡片不需要展示工具返回值
-                pass
+                # tool_result: 只显示简短状态，不展示 raw 内容（行号、文件全文等）
+                msg_content = d.get("message", {}).get("content", "")
+                raw = None
+                if isinstance(msg_content, str) and msg_content.strip():
+                    raw = msg_content
+                elif isinstance(msg_content, list):
+                    for block in msg_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            raw = block.get("content", "")
+                            break
+                if raw and isinstance(raw, str) and raw.strip():
+                    # 只取第一行，最多 100 字符，跳过行号前缀
+                    first = raw.strip().split('\n')[0][:100]
+                    new_steps.append(f"   ↳ {first}")
             return new_steps
 
         async def _on_step(d: dict):
