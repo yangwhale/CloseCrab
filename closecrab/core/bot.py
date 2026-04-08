@@ -160,61 +160,54 @@ class BotCore:
         }
 
         def _format_step(d: dict) -> list[str]:
-            """从原始 stream-json 事件提取 step 文本，返回新增的 step 列表。"""
+            """从原始 stream-json 事件提取 step 文本，返回新增的 step 列表。
+
+            进度卡片只需简洁的"正在做什么"指示，不需要详细内容。
+            详细日志通过 on_log 回调写入日志频道和 Firestore。
+            """
             new_steps = []
             t = d.get("type", "")
             if t == "assistant":
                 for block in d.get("message", {}).get("content", []):
                     bt = block.get("type", "")
                     if bt == "text" and block.get("text", "").strip():
-                        new_steps.append(f"💬 {block['text']}")
+                        first_line = block['text'].strip().split('\n')[0][:80]
+                        new_steps.append(f"💬 {first_line}")
                     elif bt == "tool_use":
                         name = block.get("name", "")
                         inp = block.get("input", {})
                         emoji = _STEP_EMOJI.get(name, "🔧")
                         if name in ("Read", "Write", "Edit") and "file_path" in inp:
-                            detail = inp['file_path']
-                            if name == "Edit" and "old_string" in inp:
-                                detail += f"\n  old: {inp['old_string'][:200]}\n  new: {inp.get('new_string', '')[:200]}"
-                            new_steps.append(f"{emoji} {name}: {detail}")
+                            fname = Path(inp['file_path']).name
+                            new_steps.append(f"{emoji} {name}: `{fname}`")
                         elif name == "Bash" and "command" in inp:
-                            new_steps.append(f"{emoji} Bash: {inp['command'][:1000]}")
+                            cmd = inp['command'].split('\n')[0][:80]
+                            new_steps.append(f"{emoji} Bash: `{cmd}`")
                         elif name == "Grep" and "pattern" in inp:
-                            detail = f"/{inp['pattern']}/"
-                            if inp.get("path"):
-                                detail += f" in {inp['path']}"
-                            if inp.get("glob"):
-                                detail += f" glob={inp['glob']}"
-                            if inp.get("output_mode"):
-                                detail += f" mode={inp['output_mode']}"
+                            pat = inp['pattern'][:40]
+                            path = Path(inp['path']).name if inp.get("path") else ''
+                            detail = f"/{pat}/"
+                            if path:
+                                detail += f" in {path}"
                             new_steps.append(f"{emoji} Grep: {detail}")
                         elif name == "Glob" and "pattern" in inp:
                             detail = inp['pattern']
-                            if inp.get("path"):
-                                detail += f" in {inp['path']}"
+                            path = Path(inp['path']).name if inp.get("path") else ''
+                            if path:
+                                detail += f" in {path}"
                             new_steps.append(f"{emoji} Glob: {detail}")
                         elif name == "Agent":
-                            detail = inp.get('description', '') or inp.get('prompt', '')[:500]
+                            detail = (inp.get('description', '') or inp.get('prompt', '')[:60])[:60]
                             new_steps.append(f"{emoji} Agent: {detail}")
                         elif name == "WebSearch":
-                            new_steps.append(f"{emoji} WebSearch: {inp.get('query', '')}")
+                            new_steps.append(f"{emoji} WebSearch: {inp.get('query', '')[:80]}")
                         elif name == "WebFetch":
-                            new_steps.append(f"{emoji} WebFetch: {inp.get('url', '')[:500]}")
+                            new_steps.append(f"{emoji} WebFetch: {inp.get('url', '')[:80]}")
                         else:
-                            params = ", ".join(f"{k}={str(v)[:100]}" for k, v in list(inp.items())[:5])
-                            new_steps.append(f"{emoji} {name}: {params}" if params else f"{emoji} {name}")
+                            new_steps.append(f"{emoji} {name}")
             elif t == "user":
-                msg_content = d.get("message", {}).get("content", "")
-                raw = None
-                if isinstance(msg_content, str) and msg_content.strip():
-                    raw = msg_content
-                elif isinstance(msg_content, list):
-                    for block in msg_content:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            raw = block.get("content", "")
-                            break
-                if raw and isinstance(raw, str) and raw.strip():
-                    new_steps.append(f"   ↳ {raw[:2000]}")
+                # 完全隐藏 tool_result — 进度卡片不需要展示工具返回值
+                pass
             return new_steps
 
         async def _on_step(d: dict):
