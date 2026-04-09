@@ -44,6 +44,22 @@ def main():
 
     entries = data.get("entries", [])
 
+    # Validate slug corresponds to an existing page
+    if slug and action in ("ingest", "create", "update"):
+        type_subdirs = {"source": "sources", "entity": "entities", "concept": "concepts", "analysis": "analyses"}
+        subdir = type_subdirs.get(page_type, "sources")
+        expected_file = WIKI_REPO / "wiki" / subdir / f"{slug}.html"
+        if not expected_file.exists():
+            # Also check other subdirs in case type is wrong
+            found = False
+            for sd in type_subdirs.values():
+                if (WIKI_REPO / "wiki" / sd / f"{slug}.html").exists():
+                    found = True
+                    print(f"Warning: {slug}.html not in {subdir}/ but found in {sd}/", file=sys.stderr)
+                    break
+            if not found:
+                print(f"Warning: No page found for slug '{slug}' in any wiki subdirectory", file=sys.stderr)
+
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "action": action,

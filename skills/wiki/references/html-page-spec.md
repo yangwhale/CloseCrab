@@ -29,12 +29,7 @@ Bot 生成或更新 Wiki 页面时，遵循以下 HTML 结构规范。
   <link rel="stylesheet" href="../style.css">
 </head>
 <body>
-  <nav class="wiki-nav">
-    <a href="../index.html">Index</a>
-    <a href="../search.html">Search</a>
-    <a href="../graph.html">Graph</a>
-    <a href="../log.html">Log</a>
-  </nav>
+  <script src="../wiki-shell.js"></script>
 
   <article class="wiki-content">
     <header data-pagefind-ignore>
@@ -74,11 +69,9 @@ Bot 生成或更新 Wiki 页面时，遵循以下 HTML 结构规范。
     </section>
   </article>
 
-  <footer class="wiki-footer">
-    CC Wiki · Maintained by CloseCrab Bot
-  </footer>
   <!-- 局部图谱 JS（从共享文件加载） -->
   <script src="../local-graph.js"></script>
+  <!-- nav + footer 由 wiki-shell.js 自动注入，不要硬编码 -->
 </body>
 </html>
 ```

@@ -125,6 +125,10 @@ def rebuild_and_sync(slug: str, title: str, page_type: str = "source"):
     r = run_script("add-log-entry.py", ["ingest", slug, title, page_type])
     steps.append(("add-log-entry", r.returncode == 0))
 
+    # Rebuild log.html
+    r = run_script("rebuild-log.py", [])
+    steps.append(("rebuild-log", r.returncode == 0))
+
     # Sync to GCS
     r = run_script("sync-to-gcs.py", [])
     steps.append(("sync-to-gcs", r.returncode == 0))

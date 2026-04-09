@@ -149,6 +149,12 @@ python3 ingest-pipeline.py post-ingest --slug existing-slug --title "Title" --ty
 Pipeline 自动完成：保存 raw → 生成骨架 source 页面 → rebuild index/graph/search → 追加 log → 同步 GCS。
 Bot 只需关注：**填充 source 页面详细内容** + **识别和创建 entity/concept 页面**。
 
+**⚠️ slug 一致性规则（必须遵守）：**
+- `log.json` 中记录的 `slug` **必须**和实际 HTML 文件名一致（不含 `.html` 后缀）
+- 例如：slug 为 `karpathy-llm-wiki-20260407`，文件必须是 `sources/karpathy-llm-wiki-20260407.html`
+- 手动创建页面时，先确定文件名，再用**相同的值**作为 `--slug` 参数传给 pipeline
+- Operation Log 页面的 "View page" 链接是根据 slug 拼接的，slug 不一致会导致 404
+
 **手动步骤（Pipeline 不覆盖的部分）：**
 
 1. **获取内容**：URL → WebFetch 抓取；PDF → `extract-pdf.py` 提取；文本 → 直接使用
@@ -157,7 +163,14 @@ Bot 只需关注：**填充 source 页面详细内容** + **识别和创建 enti
 4. **填充 source 页面详细内容**：**必须包含详细结构化内容**（见下方 Source 页面内容要求）
 5. **创建/更新 entity 和 concept 页面**（Bot LLM 判断）
 6. Pipeline 已自动执行 rebuild + sync
-7. 如果 Bot 额外修改了页面，再跑一次 `post-ingest`
+7. **⚠️ 如果 Bot 额外修改了页面或手动创建了页面，必须跑 `post-ingest`**：
+   ```bash
+   python3 ingest-pipeline.py post-ingest --slug <slug> --title "<title>" --type <source|entity|concept>
+   ```
+   这一步不是可选的——它负责更新 index/graph/search/log/log.html 并同步 GCS。跳过会导致：
+   - Operation Log 页面缺条目
+   - 搜索索引不包含新页面
+   - 知识图谱缺少节点和链接
 8. **回复用户**：附上新页面的 URL
 
 ### Source 页面内容要求
@@ -252,7 +265,7 @@ python3 ~/.claude/skills/wiki/scripts/status.py
 | `rebuild-index.py` | 重建 index.html | ingest 后 |
 | `rebuild-graph.py` | 重建 graph.json + graph.html + backlinks | ingest 后 |
 | `rebuild-search-page.py` | 生成 search.html | 修改搜索页时 |
-| `rebuild-log.py` | 重建 log.html | rebuild-all 自动调用 |
+| `rebuild-log.py` | 重建 log.html | ingest pipeline + rebuild-all |
 | `rebuild-search.sh` | 构建 Pagefind 搜索索引 | ingest 后 |
 | `rebuild-all.sh` | 一键 rebuild 全套 + lint + sync（12 步） | 批量操作后 |
 | `sync-to-gcs.py` | 同步到 GCS | 每次操作后 |

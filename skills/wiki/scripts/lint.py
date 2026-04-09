@@ -28,6 +28,7 @@ GRAPH_PATH = WIKI_REPO / "wiki-data" / "graph.json"
 CC_PAGES = Path(os.environ.get("CC_PAGES_WEB_ROOT", os.path.expanduser("~/gcs-mount/cc-pages"))) / "pages"
 
 SUBDIRS = ["sources", "entities", "concepts", "analyses"]
+LOG_PATH = WIKI_REPO / "wiki-data" / "log.json"
 
 
 def load_graph():
@@ -162,6 +163,40 @@ def check_tags(nodes):
     return dict(tag_counts), similar
 
 
+def check_log_consistency():
+    """Check that log.json slugs correspond to actual HTML files."""
+    if not LOG_PATH.exists():
+        return []
+    data = json.loads(LOG_PATH.read_text())
+    entries = data.get("entries", []) if isinstance(data, dict) else data
+    type_subdirs = {"source": "sources", "entity": "entities", "concept": "concepts", "analysis": "analyses"}
+
+    issues = []
+    for entry in entries:
+        slug = entry.get("slug", "")
+        action = entry.get("action", "")
+        if not slug or action in ("lint", "rebuild"):
+            continue
+        page_type = entry.get("type", "source")
+        subdir = type_subdirs.get(page_type, "sources")
+        expected = WIKI_DIR / subdir / f"{slug}.html"
+        if not expected.exists():
+            # Check other subdirs
+            found_in = None
+            for _, sd in type_subdirs.items():
+                if (WIKI_DIR / sd / f"{slug}.html").exists():
+                    found_in = sd
+                    break
+            issues.append({
+                "slug": slug,
+                "expected_path": f"{subdir}/{slug}.html",
+                "found_in": found_in,
+                "title": entry.get("title", ""),
+                "action": action,
+            })
+    return issues
+
+
 def scan_uningested():
     """Find CC Pages HTML files not yet in Wiki sources."""
     if not CC_PAGES.exists():
@@ -218,6 +253,7 @@ def main():
     short_pages = check_content_quality(nodes)
     tag_counts, similar_tags = check_tags(nodes)
     uningested = scan_uningested()
+    log_issues = check_log_consistency()
 
     # Print results
     issues = 0
@@ -255,6 +291,14 @@ def main():
     for s in similar_tags:
         print(f"   '{s['tag1']}' ({s['count1']}) vs '{s['tag2']}' ({s['count2']})")
 
+    print(f"\n📋 Log slug issues: {len(log_issues)}")
+    for li in log_issues:
+        if li["found_in"]:
+            print(f"   [{li['slug']}] expected in {li['expected_path']}, found in {li['found_in']}/")
+        else:
+            print(f"   [{li['slug']}] NO FILE FOUND — {li['title']}")
+    issues += len(log_issues)
+
     print(f"\n📥 Uningested CC Pages: {len(uningested)}")
     for u in uningested:
         size_kb = u["size"] / 1024
@@ -279,6 +323,7 @@ def main():
         "missing_backlinks": len(missing_bl),
         "content_issues": short_pages,
         "similar_tags": similar_tags,
+        "log_slug_issues": log_issues,
         "uningested": uningested,
         "total_issues": issues,
     }

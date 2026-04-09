@@ -33,6 +33,20 @@ export BOT_NAME
 # Bot secrets 全部从 Firestore 读取，不再需要 .env
 # 机器级环境变量（CC_PAGES_*等）由 ~/.claude/settings.json 或 ~/.zshrc 管理
 
+# ── gcsfuse 挂载检测 ─────────────────────────────────────────
+# gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失
+# 在 Bot 启动前自动检测并恢复，确保 CC Pages 和 shared memory 可用
+GCS_MOUNT="${CC_PAGES_GCS_MOUNT:-$HOME/gcs-mount}"
+GCS_BUCKET_NAME="${CC_PAGES_GCS_BUCKET_NAME:-chris-pgp-host-asia}"
+if command -v gcsfuse &>/dev/null && ! mountpoint -q "$GCS_MOUNT" 2>/dev/null; then
+    if [ -d "$GCS_MOUNT" ]; then
+        echo "[$(date)] gcsfuse not mounted, remounting $GCS_BUCKET_NAME → $GCS_MOUNT ..."
+        gcsfuse --implicit-dirs "$GCS_BUCKET_NAME" "$GCS_MOUNT" 2>/dev/null && \
+            echo "[$(date)] gcsfuse mounted." || \
+            echo "[$(date)] gcsfuse mount failed (sync will fallback to gsutil)."
+    fi
+fi
+
 # ── Bot 重启循环 ──────────────────────────────────────────────
 
 FAIL_COUNT=0
