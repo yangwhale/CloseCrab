@@ -74,10 +74,20 @@ class ClaudeCodeWorker(Worker):
             "turns": 0,
             "cost_usd": 0.0,
         }
+        # 持续 reader task + event queue 架构
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._reader_task: Optional[asyncio.Task] = None
+        self._waiting = False  # True when send() is consuming from queue
+        self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
+        self._saw_bg_task_notification = False
 
     @property
     def session_id(self) -> Optional[str]:
         return self._session_id
+
+    def set_bg_result_callback(self, callback: Optional[Callable[[str], Awaitable[None]]]):
+        """设置后台任务结果回调，reader task 在无人等待时调用。"""
+        self._bg_result_callback = callback
 
     async def start(self, session_id: Optional[str] = None) -> str:
         """启动 Claude 持久进程，返回 session_id。"""
@@ -88,6 +98,17 @@ class ClaudeCodeWorker(Worker):
 
     async def _start_process(self, _retry: bool = False):
         """内部启动逻辑，支持重试。"""
+        # Clean up previous reader task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            self._reader_task = None
+        self._interrupted = False
+        self._waiting = False
+
         parent_stdin, child_stdin = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         parent_stdout, child_stdout = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
 
@@ -129,10 +150,24 @@ class ClaudeCodeWorker(Worker):
         self.sock_out.setblocking(True)
         self.sock_out.settimeout(1.0)  # 线程池 recv 超时
 
-        # 等初始化并消费初始消息
-        await self._drain(timeout=10)
+        # Start reader task immediately — 对齐 VS Code pattern，
+        # 从进程创建那一刻起就消费所有事件（含 startup 消息）。
+        self._event_queue = asyncio.Queue()
+        self._reader_task = asyncio.create_task(self._reader_loop())
+        log.info("Reader task started")
+
+        # Brief wait for process startup / crash detection
+        await asyncio.sleep(1)
 
         if not self.is_alive():
+            # 进程启动就挂了，清理 reader task
+            if self._reader_task and not self._reader_task.done():
+                self._reader_task.cancel()
+                try:
+                    await self._reader_task
+                except asyncio.CancelledError:
+                    pass
+                self._reader_task = None
             stderr_content = ""
             try:
                 with open(self._stderr_path) as f:
@@ -162,38 +197,6 @@ class ClaudeCodeWorker(Worker):
             return b""
         except OSError:
             return b""
-
-    async def _drain(self, timeout: float = 10):
-        """异步消费 socket 中所有待读数据。在线程池中执行 recv，不阻塞 event loop。"""
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        while loop.time() < deadline:
-            data = await loop.run_in_executor(None, self._blocking_recv)
-            if not data:
-                break
-
-    def _drain_nonblocking(self) -> bytes:
-        """非阻塞读取 socket 缓冲区所有数据并返回。不会等待。"""
-        if not self.sock_out:
-            return b""
-        collected = b""
-        old_timeout = self.sock_out.gettimeout()
-        self.sock_out.setblocking(False)
-        try:
-            while True:
-                try:
-                    data = self.sock_out.recv(65536)
-                    if not data:
-                        break
-                    collected += data
-                except BlockingIOError:
-                    break
-                except OSError:
-                    break
-        finally:
-            self.sock_out.setblocking(True)
-            self.sock_out.settimeout(old_timeout)
-        return collected
 
     @staticmethod
     def _is_task_notification_content(d: dict) -> bool:
@@ -231,44 +234,109 @@ class ClaudeCodeWorker(Worker):
             for line in lines
         )
 
-    def _flush_stale_results(self, on_stale_result=None):
-        """清空 socket 缓冲区，解析其中的 result 事件并通过回调发给用户。
+    def _handle_background_event(self, d: dict):
+        """处理无人等待时的后台事件（background task results 等）。
 
-        跳过后台任务通知（task-notification）触发的 result，这些是系统内部事件，
-        不应转发给用户。
+        注意：control_request 已在 _reader_loop 层处理，不会到达此方法。
         """
-        raw = self._drain_nonblocking()
-        if not raw:
+        if self._is_task_notification_content(d):
+            self._saw_bg_task_notification = True
             return
-        log.info(f"Flushing {len(raw)} stale bytes from socket buffer")
-        saw_task_notification = False
-        for line in raw.split(b"\n"):
-            if not line.strip():
-                continue
-            try:
-                d = json.loads(line.decode(errors="replace"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            # 检测 task-notification 注入的 user 消息
-            if self._is_task_notification_content(d):
-                saw_task_notification = True
-                log.info("Stale buffer contains task-notification, suppressing results")
-                continue
-            if d.get("type") == "result":
-                stale_text = d.get("result", "")
-                if saw_task_notification or self._is_stale_dismiss_result(stale_text):
-                    # task-notification 的自动回复，静默丢弃
-                    saw_task_notification = False
-                    log.info(f"Suppressed task-notification result in flush "
-                             f"(len={len(stale_text)}): {stale_text[:80]}")
+        if d.get("type") == "result":
+            text = d.get("result", "")
+            if self._saw_bg_task_notification or self._is_stale_dismiss_result(text):
+                self._saw_bg_task_notification = False
+                log.debug(f"Background: suppressed dismiss/notification result ({len(text)}c)")
+                return
+            if text.strip() and self._bg_result_callback:
+                log.info(f"Background result delivered ({len(text)}c)")
+                try:
+                    asyncio.create_task(self._bg_result_callback(text))
+                except Exception as e:
+                    log.error(f"bg_result_callback failed: {e}")
+
+    async def _reader_loop(self):
+        """持续从 sock_out 读取事件，按 VS Code extension 的模式分发。
+
+        控制消息（control_request / keep_alive / control_cancel_request）在此层
+        直接处理，绝不入队——对齐 VS Code extension readMessages() 的行为。
+        普通事件按 _waiting 标志分发到 queue（send() 消费）或 background handler。
+        """
+        loop = asyncio.get_event_loop()
+        buf = b""
+        try:
+            while True:
+                if self._interrupted:
+                    break
+                try:
+                    chunk = await loop.run_in_executor(None, self._blocking_recv)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if not self.is_alive():
+                        break
                     continue
-                if stale_text and on_stale_result:
-                    log.info(f"Delivering stale result from buffer (len={len(stale_text)})")
+
+                if not chunk:
+                    if not self.is_alive() or self._interrupted:
+                        break
+                    continue
+
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
                     try:
-                        asyncio.get_event_loop().create_task(
-                            on_stale_result(stale_text))
-                    except Exception as e:
-                        log.error(f"on_stale_result callback failed: {e}")
+                        d = json.loads(line.decode(errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+
+                    evt_type = d.get("type", "")
+
+                    # ── VS Code pattern: control messages at reader level ──
+                    if evt_type == "keep_alive":
+                        continue
+
+                    if evt_type == "control_cancel_request":
+                        log.info(f"control_cancel_request: {d.get('request_id', '?')}")
+                        continue
+
+                    if evt_type == "control_request":
+                        ctrl = self._extract_control_request(d)
+                        if ctrl:
+                            tool_name = ctrl["tool"]
+                            is_interactive = tool_name in self._INTERACTIVE_TOOLS
+                            if is_interactive and self._waiting:
+                                # 交互式工具 + send() 活跃 → 入队让 send() 转发给用户
+                                await self._event_queue.put(d)
+                            else:
+                                # 非交互式 OR 无人等待 → reader 层直接 auto-approve
+                                log.info(
+                                    f"Reader auto-approve: {tool_name} "
+                                    f"(interactive={is_interactive}, "
+                                    f"waiting={self._waiting}, "
+                                    f"req={ctrl['request_id'][:8]})")
+                                resp = self._build_control_response(
+                                    ctrl["request_id"], tool_name,
+                                    ctrl["input"], "继续")
+                                try:
+                                    self.sock_in.sendall(resp.encode())
+                                except Exception as e:
+                                    log.error(f"Failed to send control_response: {e}")
+                        continue
+
+                    # ── Normal events ──
+                    if self._waiting:
+                        await self._event_queue.put(d)
+                    else:
+                        self._handle_background_event(d)
+        except asyncio.CancelledError:
+            log.info("Reader task cancelled")
+        finally:
+            try:
+                self._event_queue.put_nowait({"type": "_eof"})
+            except Exception:
+                pass
+            log.info("Reader task exited")
 
     def is_alive(self) -> bool:
         if self.proc is None:
@@ -532,112 +600,73 @@ class ClaudeCodeWorker(Worker):
         text: str,
         on_event: Optional[Callable[[str], Awaitable[None]]] = None,
         on_input_needed: Optional[Callable[[dict], Awaitable[Optional[str]]]] = None,
-        on_stale_result: Optional[Callable[[str], Awaitable[None]]] = None,
         on_log: Optional[Callable[[str], Awaitable[None]]] = None,
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
+        **_kwargs,  # 向后兼容（旧调用方可能传 on_stale_result）
     ) -> str:
         """发送消息并等待完整回复。
 
-        使用 loop.sock_recv() 代替 busy-poll，让 event loop 在等待 Claude 输出时
-        保持空闲，避免阻塞 Discord heartbeat。
+        对齐 VS Code extension 的行为：第一个非 dismiss 的 result 事件就是回复。
+        不检查 system:init，因为 Claude 可能合并后台任务和用户消息到同一轮。
 
         Args:
             text: 发送给 Claude 的文本
             on_event: 可选的异步回调，收到中间事件时调用 on_event(progress_text)
             on_input_needed: 可选的异步回调，检测到 ExitPlanMode/AskUserQuestion 时
-                调用 on_input_needed(event_info) -> 用户回复文本。回调负责将提示
-                转发到 Discord 并等待用户输入。
-            on_stale_result: 可选的异步回调，上一轮残留的 result 通过此回调发给用户
-                而不是丢弃。签名: on_stale_result(result_text) -> None
+                调用 on_input_needed(event_info) -> 用户回复文本
         """
         async with self._lock:
             if not self.is_alive():
                 await self._start_process()
 
-            # 清空上一轮残留在 socket 缓冲区的数据
-            # 但要解析其中的 result 事件，通过回调发给用户
-            self._flush_stale_results(on_stale_result)
+            self._waiting = True
+            try:
+                msg = json.dumps({
+                    "type": "user",
+                    "message": {"role": "user", "content": text}
+                }) + "\n"
+                self.sock_in.sendall(msg.encode())
 
-            msg = json.dumps({
-                "type": "user",
-                "message": {"role": "user", "content": text}
-            }) + "\n"
-            self.sock_in.sendall(msg.encode())
+                saw_task_notification = False
 
-            buf = b""
-            loop = asyncio.get_event_loop()
-            last_activity = loop.time()
-            seen_init = False  # 是否已收到本轮的 system:init
-            saw_task_notification = False  # 是否检测到 task-notification 注入
-            while loop.time() - last_activity < self._timeout:
-                chunk = await loop.run_in_executor(None, self._blocking_recv)
+                while True:
+                    try:
+                        d = await asyncio.wait_for(
+                            self._event_queue.get(), timeout=self._timeout
+                        )
+                    except asyncio.TimeoutError:
+                        return f"[Timeout] Claude Code idle for {self._timeout}s (no output)"
 
-                # 急刹车：interrupt() 被调用，进程已被杀死
-                if self._interrupted:
-                    self._interrupted = False
-                    if self.sock_in:
-                        self.sock_in.close()
-                        self.sock_in = None
-                    if self.sock_out:
-                        self.sock_out.close()
-                        self.sock_out = None
-                    log.info("send() interrupted, returning empty result")
-                    return ""
-
-                if not chunk:
-                    # 空 = socket timeout 或进程退出
-                    if not self.is_alive():
+                    # Sentinel: reader task 退出或 interrupt()
+                    if d.get("type") in ("_eof", "_interrupted"):
+                        if self._interrupted:
+                            self._interrupted = False
+                            log.info("send() interrupted, returning empty result")
+                            return ""
                         log.warning("Claude process exited unexpectedly")
                         self.proc = None
                         return "[Error] Claude process exited"
-                    continue  # socket timeout，继续等
-
-                buf += chunk
-                last_activity = loop.time()
-
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    try:
-                        d = json.loads(line.decode(errors="replace"))
-                    except json.JSONDecodeError:
-                        continue
 
                     # 检测 task-notification 注入的 user 消息
                     if self._is_task_notification_content(d):
                         saw_task_notification = True
                         log.info("Detected task-notification in stream, will suppress its result")
 
-                    # 检测 system:init — Claude 开始处理本轮用户消息的标志
-                    if d.get("type") == "system" and d.get("subtype") == "init":
-                        seen_init = True
-                        saw_task_notification = False  # init 后重置
-
+                    # ── result 处理（VS Code pattern: 第一个非 dismiss 的 result 就是回复）──
+                    # VS Code 不检查 system:init，直接接受 result。
+                    # Claude 可能合并后台任务和用户消息到同一轮，不发 system:init。
                     if d.get("type") == "result":
-                        if not seen_init:
-                            stale_text = d.get("result", "")
-                            if saw_task_notification or self._is_stale_dismiss_result(stale_text):
-                                # task-notification 的自动回复，静默丢弃
-                                saw_task_notification = False
-                                log.info(f"Suppressed task-notification result before init "
-                                         f"(len={len(stale_text)}): {stale_text[:80]}")
-                                continue
-                            # system:init 之前收到的 result 是上一轮的后台任务输出
-                            # 不丢弃，发给用户
-                            log.info(f"Stale result before system:init (len={len(stale_text)}), "
-                                     f"forwarding to user")
-                            if stale_text and on_stale_result:
-                                try:
-                                    asyncio.get_event_loop().create_task(
-                                        on_stale_result(stale_text))
-                                except Exception as e:
-                                    log.error(f"on_stale_result callback failed: {e}")
+                        result_text = d.get("result", "")
+                        if saw_task_notification or self._is_stale_dismiss_result(result_text):
+                            # task-notification 的自动 dismiss 回复，跳过
+                            saw_task_notification = False
+                            log.info(f"Suppressed task-notification dismiss result "
+                                     f"({len(result_text)}c): {result_text[:80]}")
                             continue
                         self._session_id = d.get("session_id", self._session_id)
-                        # 累计 usage
                         self._usage["turns"] += 1
                         if "cost_usd" in d:
                             self._usage["cost_usd"] += d["cost_usd"]
-                        result_text = d.get("result", "")
                         if not result_text:
                             log.warning(f"Claude returned empty result. is_error={d.get('is_error')}, "
                                         f"session={self._session_id}, duration={d.get('duration_ms')}")
@@ -679,7 +708,6 @@ class ClaudeCodeWorker(Worker):
                             request_id, tool_name,
                             ctrl["input"], user_response)
                         self.sock_in.sendall(resp_line.encode())
-                        last_activity = loop.time()
                         log.info(f"Sent control_response for {tool_name}: "
                                  f"answer={user_response[:80] if user_response else 'None'}")
 
@@ -722,7 +750,8 @@ class ClaudeCodeWorker(Worker):
                         except Exception as e:
                             log.debug(f"on_step callback failed: {e}")
 
-            return f"[Timeout] Claude Code idle for {self._timeout}s (no output)"
+            finally:
+                self._waiting = False
 
     def get_context_usage(self) -> dict:
         """返回当前 session 的 context 使用情况。"""
@@ -747,8 +776,8 @@ class ClaudeCodeWorker(Worker):
         """中断当前执行（急刹车）。
 
         杀死进程但保留 session_id，下次 send() 会自动 --resume 恢复。
-        不需要持有 lock，直接操作进程。send() 的 recv 循环会检测
-        _interrupted flag 并释放 lock。
+        不需要持有 lock，直接操作进程。send() 通过 queue 接收
+        _interrupted sentinel 并释放 lock。
         """
         if not self.is_alive():
             return False
@@ -757,11 +786,24 @@ class ClaudeCodeWorker(Worker):
             self.proc.kill()
             self.proc.wait()
         self.proc = None
+        # 立即通知 send() 退出（reader task 也会发 _eof，双保险）
+        try:
+            self._event_queue.put_nowait({"type": "_interrupted"})
+        except Exception:
+            pass
         log.info(f"Claude session interrupted (session_id preserved): {self._session_id}")
         return True
 
     async def stop(self):
         """停止 Claude 进程。"""
+        # Cancel reader task first
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            self._reader_task = None
         if self.sock_in:
             self.sock_in.close()
             self.sock_in = None
@@ -769,8 +811,13 @@ class ClaudeCodeWorker(Worker):
             self.sock_out.close()
             self.sock_out = None
         if self.proc and self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait()
+            self.proc.terminate()  # SIGTERM first (graceful, VS Code pattern)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning(f"Claude process didn't exit after SIGTERM, sending SIGKILL")
+                self.proc.kill()
+                self.proc.wait()
         log.info(f"Claude session stopped: {self._session_id}")
 
     @property

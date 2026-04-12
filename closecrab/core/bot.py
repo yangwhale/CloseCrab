@@ -19,7 +19,6 @@ and holds shared dependencies (Auth, SessionManager).
 """
 
 import asyncio
-import json
 import logging
 import shutil
 from pathlib import Path
@@ -83,13 +82,11 @@ class BotCore:
         self._locks: dict[str, asyncio.Lock] = {}
         # Channel 实例引用（on_channel_ready 时设置）
         self._channel: Optional["Channel"] = None
-        self._buffer_poller_task: Optional[asyncio.Task] = None
 
     async def on_channel_ready(self, channel: "Channel"):
         """Channel 就绪时的回调。"""
         self._channel = channel
-        self._buffer_poller_task = asyncio.create_task(self._buffer_poller_loop())
-        log.info("BotCore: channel ready, buffer poller started")
+        log.info("BotCore: channel ready")
 
     async def handle_message(self, msg: UnifiedMessage) -> str:
         """处理来自 Channel 的消息，路由到对应 Worker。
@@ -117,15 +114,6 @@ class BotCore:
             log.info("Dirty restart detected, prefixed user message with stale context warning")
 
         on_input_needed = msg.metadata.get("on_input_needed")
-
-        # 上一轮残留的 result 通过此回调补发给用户
-        async def _on_stale(stale_text: str):
-            if self._channel and stale_text.strip():
-                try:
-                    await self._channel.send_to_user(user_key, stale_text)
-                    log.info(f"Delivered stale result to user {user_key} (len={len(stale_text)})")
-                except Exception as e:
-                    log.error(f"Failed to deliver stale result: {e}")
 
         on_log = msg.metadata.get("on_log")
 
@@ -258,7 +246,6 @@ class BotCore:
         try:
             result = await worker.send(content, on_event=on_progress,
                                        on_input_needed=on_input_needed,
-                                       on_stale_result=_on_stale,
                                        on_log=on_log,
                                        on_step=_on_step)
         except Exception:
@@ -355,6 +342,11 @@ class BotCore:
 
         # 启动目标 session
         worker = self._create_worker(session_id=target_session_id)
+        if self._channel:
+            async def _bg_cb(text, uk=user_key):
+                if text.strip():
+                    await self._channel.send_to_user(uk, text)
+            worker.set_bg_result_callback(_bg_cb)
         await worker.start()
         self._workers[user_key] = worker
         self._save_active_sessions()
@@ -385,8 +377,6 @@ class BotCore:
     async def shutdown(self):
         """停止所有 worker，清理资源。"""
         log.info(f"BotCore shutting down, stopping {len(self._workers)} worker(s)...")
-        if self._buffer_poller_task and not self._buffer_poller_task.done():
-            self._buffer_poller_task.cancel()
         for user_key, worker in list(self._workers.items()):
             try:
                 await worker.stop()
@@ -394,75 +384,6 @@ class BotCore:
                 log.error(f"Error stopping worker for {user_key}: {e}")
         self._workers.clear()
         log.info("BotCore shutdown complete")
-
-    async def _buffer_poller_loop(self):
-        """1 秒轮询 worker socket buffer，主动投递后台任务的 result。
-
-        解决 run_in_background 完成后 session idle 无法主动回复用户的问题。
-        用 FIONREAD 获取 buffer 总大小，MSG_PEEK 预览，
-        只有看到 "type":"result" 才 drain 并投递。
-        """
-        import fcntl
-        import socket as _socket
-        import struct
-        import termios
-        while True:
-            try:
-                await asyncio.sleep(1)
-                for user_key, worker in list(self._workers.items()):
-                    if not worker.is_alive() or worker.is_busy:
-                        continue
-                    if not worker.sock_out:
-                        continue
-                    try:
-                        buf_size = struct.unpack(
-                            'i', fcntl.ioctl(worker.sock_out, termios.FIONREAD, b'\x00\x00\x00\x00')
-                        )[0]
-                    except OSError:
-                        continue
-                    if buf_size == 0:
-                        continue
-                    old_timeout = worker.sock_out.gettimeout()
-                    try:
-                        worker.sock_out.setblocking(False)
-                        peeked = worker.sock_out.recv(buf_size, _socket.MSG_PEEK)
-                    except (BlockingIOError, OSError):
-                        peeked = b""
-                    finally:
-                        worker.sock_out.setblocking(True)
-                        worker.sock_out.settimeout(old_timeout)
-                    if not peeked:
-                        continue
-                    if b'"type":"result"' not in peeked and b'"type": "result"' not in peeked:
-                        continue
-                    log.info(f"BufferPoller: result found ({buf_size}B) for {user_key}, draining")
-                    raw = worker._drain_nonblocking()
-                    if raw:
-                        self._deliver_buffer_result(user_key, raw)
-            except asyncio.CancelledError:
-                log.info("BufferPoller stopped")
-                break
-            except Exception as e:
-                log.error(f"BufferPoller error: {e}", exc_info=True)
-
-    def _deliver_buffer_result(self, user_key: str, raw: bytes):
-        """解析 buffer 中的 result 事件并投递给用户。"""
-        for line in raw.split(b"\n"):
-            if not line.strip():
-                continue
-            try:
-                d = json.loads(line.decode(errors="replace"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if d.get("type") != "result":
-                continue
-            text = d.get("result", "")
-            if ClaudeCodeWorker._is_stale_dismiss_result(text):
-                log.debug(f"BufferPoller: suppressed dismiss result ({len(text)}c)")
-                continue
-            if text.strip() and self._channel:
-                log.info(f"BufferPoller: delivering {len(text)}c to {user_key}")
-                asyncio.create_task(self._channel.send_to_user(user_key, text))
 
     async def _log_conversation(
         self,
@@ -527,6 +448,12 @@ class BotCore:
                     pass
 
             worker = self._create_worker(session_id=session_id)
+            # 设置后台结果回调，reader task 会在 idle 时自动投递给用户
+            if self._channel:
+                async def _bg_cb(text, uk=user_key):
+                    if self._channel and text.strip():
+                        await self._channel.send_to_user(uk, text)
+                worker.set_bg_result_callback(_bg_cb)
             await worker.start()
             self._workers[user_key] = worker
             log.info(f"Worker created: session_id={worker.session_id}, "
