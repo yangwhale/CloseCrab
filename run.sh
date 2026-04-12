@@ -20,6 +20,9 @@
 
 cd "$(dirname "$0")"
 
+# 确保 claude binary 在 PATH 中（nohup/cron 等非交互环境不加载 .zshrc）
+export PATH="$HOME/.local/bin:$HOME/google-cloud-sdk/bin:$PATH"
+
 # 第一个参数作为 bot name（必需）
 BOT_NAME="$1"
 if [ -z "$BOT_NAME" ]; then
