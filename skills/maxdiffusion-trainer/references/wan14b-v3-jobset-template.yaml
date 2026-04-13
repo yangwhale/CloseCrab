@@ -1,0 +1,148 @@
+# Wan 2.1 14B Training on TPU v7 (Ironwood) — v3 Branch
+# Replace: JOB_NAME, DATASET_DIR, MAX_TRAIN_STEPS
+# Topology: 4x4x4 = 64 chips = 128 devices = 16 VMs
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: JOB_NAME
+  annotations:
+    alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  ttlSecondsAfterFinished: 43200
+  failurePolicy:
+    rules:
+      - action: FailJobSet
+        onJobFailureReasons:
+        - PodFailurePolicy
+    maxRestarts: 0
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          parallelism: 16        # 16 VMs for 4x4x4 topology
+          completions: 16
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+                cloud.google.com/gke-tpu-topology: 4x4x4
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              containers:
+              - name: jax-tpu
+                image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/tpu/jax_nightly:latest
+                ports:
+                - containerPort: 8471
+                - containerPort: 8080
+                securityContext:
+                  privileged: true
+                env:
+                - name: ENABLE_PATHWAYS_PERSISTENCE
+                  value: "1"
+                - name: JAX_PLATFORMS
+                  value: "tpu,cpu"
+                - name: ENABLE_PJRT_COMPATIBILITY
+                  value: "true"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: TPU_STDERR_LOG_LEVEL
+                  value: "3"
+                - name: TPU_MIN_LOG_LEVEL
+                  value: "3"
+                - name: TF_CPP_MIN_LOG_LEVEL
+                  value: "3"
+                - name: LIBTPU_INIT_ARGS
+                  value: >-
+                    --xla_enable_async_all_gather=true
+                    --xla_tpu_enable_async_collective_fusion=true
+                    --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true
+                    --xla_enable_async_all_reduce=true
+                    --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true
+                    --xla_max_concurrent_async_all_gathers=4
+                    --xla_tpu_enable_async_all_to_all=true
+                    --xla_latency_hiding_scheduler_rerun=5
+                    --xla_tpu_rwb_fusion=false
+                    --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false
+                    --xla_tpu_impure_enable_packed_bf16_math_ops=false
+                    --xla_tpu_enable_sparse_core_reduce_scatter_v2=true
+                    --xla_tpu_enable_sparse_core_collective_offload_all_gather=true
+                    --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true
+                    --xla_tpu_enable_all_gather_offload_tracing=true
+                    --xla_tpu_use_tc_device_shape_on_sc=true
+                    --xla_tpu_prefer_async_allgather_to_allreduce=true
+                    --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true
+                    --xla_tpu_scoped_vmem_limit_kib=65536
+                    --xla_tpu_enable_tpu_custom_call_scoped_vmem_adjustments=true
+                    --xla_enable_transpose_trace=false
+                command:
+                - bash
+                - -c
+                - |
+                  echo "Start: $(date)"
+                  _sigterm() { kill -SIGTERM $! 2>/dev/null; }
+                  trap _sigterm SIGTERM
+                  (
+                    set -e
+                    cd /tmp
+                    git clone -q https://github.com/AI-Hypercomputer/maxdiffusion.git
+                    cd maxdiffusion
+                    git checkout v3
+                    pip install -q chex accelerate
+                    pip install -q -r requirements_with_jax_ai_image.txt
+                    pip install -q .
+
+                    DATASET_DIR="DATASET_DIR"  # Replace with gs://bucket/path/to/tfrecords
+
+                    HF_HUB_CACHE=/dev/shm python3 -m src.maxdiffusion.train_wan \
+                      src/maxdiffusion/configs/base_wan_14b.yml \
+                      model_name=wan2.1 \
+                      attention=flash \
+                      weights_dtype=bfloat16 \
+                      activations_dtype=bfloat16 \
+                      guidance_scale=5.0 \
+                      flow_shift=5.0 \
+                      fps=16 \
+                      skip_jax_distributed_system=False \
+                      output_dir=/tmp/wan-output \
+                      train_data_dir=${DATASET_DIR} \
+                      load_tfrecord_cached=True \
+                      cache_latents_text_encoder_outputs=True \
+                      dataset_type=tfrecord \
+                      dataset_save_location=${DATASET_DIR} \
+                      height=1280 \
+                      width=720 \
+                      num_frames=81 \
+                      max_train_steps=MAX_TRAIN_STEPS \
+                      enable_profiler=False \
+                      remat_policy=FULL \
+                      flash_min_seq_length=0 \
+                      seed=123456789 \
+                      per_device_batch_size=0.25 \
+                      ici_data_parallelism=32 \
+                      ici_fsdp_parallelism=4 \
+                      ici_tensor_parallelism=1 \
+                      allow_split_physical_axes=True \
+                      base_output_directory=/tmp/wan-output \
+                      run_name=JOB_NAME
+                  ) & PID=$!
+                  while kill -0 $PID 2>/dev/null; do sleep 5; done
+                  wait $PID
+                  EXIT_CODE=$?
+                  echo "End: $(date), EXIT_CODE=$EXIT_CODE"
+                  exit $EXIT_CODE
+                resources:
+                  limits:
+                    google.com/tpu: 4
+                volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm-2
+              tolerations:
+              - operator: "Exists"
+                key: google.com/tpu
+              volumes:
+              - emptyDir:
+                  medium: Memory
+                name: dshm-2

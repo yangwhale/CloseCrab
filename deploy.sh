@@ -444,6 +444,32 @@ install_cc() {
     fi
 
     # ----------------------------------------------------------------
+    # 1.5. Sandbox 依赖（bwrap）
+    # ----------------------------------------------------------------
+    echo "[1.5/11] 检查 sandbox 依赖..."
+    if ! command -v bwrap &>/dev/null; then
+        echo "  安装 bubblewrap..."
+        sudo apt-get install -y -qq bubblewrap 2>/dev/null || echo "  ⚠ bubblewrap 安装失败（非 Debian 系统？）"
+    fi
+    # Ubuntu 24.04+ AppArmor 限制 unprivileged user namespaces，会导致 bwrap 报错
+    if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+        val=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)
+        if [[ "$val" == "1" ]]; then
+            echo "  解除 AppArmor unprivileged userns 限制..."
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null
+            echo "kernel.apparmor_restrict_unprivileged_userns=0" | sudo tee /etc/sysctl.d/99-bwrap.conf >/dev/null
+            echo "  AppArmor userns 限制已解除并持久化"
+        fi
+    fi
+    if command -v bwrap &>/dev/null; then
+        if bwrap --ro-bind / / --dev /dev --proc /proc echo test &>/dev/null; then
+            echo "  ✓ bwrap sandbox 正常"
+        else
+            echo "  ⚠ bwrap 已安装但验证失败，Claude Code sandbox 可能异常"
+        fi
+    fi
+
+    # ----------------------------------------------------------------
     # 2. GCP 认证
     # ----------------------------------------------------------------
     echo "[2/11] GCP 认证..."

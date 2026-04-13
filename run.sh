@@ -18,7 +18,11 @@
 # exit code 130/137 = SIGINT/SIGKILL，不重启
 # exit code 1 = 配置错误，不重启
 
-cd "$(dirname "$0")"
+# 工作目录设为 HOME，这样 Claude Code 继承 ~/CLAUDE.md 等配置
+# PYTHONPATH 指向 CloseCrab 目录，让 python3 -m closecrab 能找到模块
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+cd "$HOME"
 
 # 确保 claude binary 在 PATH 中（nohup/cron 等非交互环境不加载 .zshrc）
 export PATH="$HOME/.local/bin:$HOME/google-cloud-sdk/bin:$PATH"

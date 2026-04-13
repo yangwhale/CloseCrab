@@ -230,6 +230,19 @@ def build_system_prompt(bot_name: str = "default", team: dict | None = None, cha
             ]
             prompt += "\n".join(lines)
 
+    # Wiki 知识感知
+    prompt += (
+        "\n\n## Wiki 知识感知（自动行为）\n"
+        "你有一个 180+ 页面的知识 Wiki（https://cc.higcp.com/wiki-v2/），"
+        "覆盖 AI/ML 基础设施、TPU/GPU 训练、推理优化等主题。\n\n"
+        "**每次对话自动执行：**\n"
+        "1. 用户提问技术知识时，先用 `wiki_query` MCP tool 搜索 Wiki，有则引用已编译知识，避免重新推导\n"
+        "2. 对话中发现有长期参考价值的内容（文章、论文、技术讨论），主动建议录入 Wiki\n"
+        "3. 对话产生了有持久价值的分析（对比、综合、新洞察），建议回存为 Wiki 页面\n\n"
+        "**MCP Tools 可用：** wiki_query / wiki_page / wiki_search / wiki_list / "
+        "wiki_status / wiki_graph_neighbors / wiki_graph_path"
+    )
+
     return prompt
 
 

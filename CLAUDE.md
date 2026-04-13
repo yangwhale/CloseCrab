@@ -116,18 +116,19 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 - 私有 skills：`install-private-skills.sh` 从 ClosedCrab（私有 repo）安装
 - 新建 skill：用 `skill-creator` skill，不要手动创建文件
 
-## CC Wiki（知识感知层）
+## CC Wiki v2（知识感知层）
 
-你有一个持续维护的个人知识 Wiki，路径 `~/my-wiki/`，在线访问 `cc.higcp.com/wiki/`。
+你有一个持续维护的个人知识 Wiki（基于 Quartz），路径 `~/my-wiki-v2/`，在线访问 `cc.higcp.com/wiki-v2/`。
 
 **日常行为规则（每次 session 生效，不需要触发 /wiki skill）：**
 
 1. **识别知识价值**：用户分享文章、论文、技术讨论时，如果内容有长期参考价值，主动问"要不要录入 Wiki？"。不要每次都问——只在内容确实有知识沉淀价值时提议
-2. **查 Wiki 再回答**：回答知识性问题（技术对比、概念解释、历史背景）前，先检查 `~/my-wiki/wiki-data/graph.json` 看 Wiki 是否已有相关页面。有则引用，避免重新推导已编译过的知识
-3. **好回答建议回存**：如果你生成了有持久价值的分析（对比、综合、新洞察），建议用户"这个分析要不要存到 Wiki？"
+2. **查 Wiki 再回答**：回答知识性问题前，先用 `python3 ~/my-wiki-v2/scripts/query.py "关键词"` 或 MCP wiki_query 搜索。有则引用，避免重新推导已编译过的知识
+3. **好回答建议回存**：如果你生成了有持久价值的分析，建议用户"这个分析要不要存到 Wiki？"
 4. **Lint 提醒**：每 10 次 ingest 或距上次 lint 超过一周时，提醒用户跑 `/wiki lint`
+5. **对话结束评估**：当一次对话涉及技术分析、方案对比、问题排查时，在最后回复中评估——是否产生了跨来源的综合结论或 Wiki 中尚未记录的新关联？如果是，附一句"这个分析可以存到 Wiki，要录入吗？"。简单问答或操作性任务不触发
 
-**具体 Wiki 操作（ingest/query/lint/init）的规则和模板在 wiki skill 的 SKILL.md 里。**
+**具体 Wiki 操作（ingest/query/lint/status）的规则和模板在 wiki skill 的 SKILL.md 里。**
 
 ## 编码规范
 
