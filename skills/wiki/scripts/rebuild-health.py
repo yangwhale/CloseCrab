@@ -22,7 +22,7 @@ from wiki_utils import WIKI_REPO, TYPE_COLORS, TYPE_ORDER
 
 WIKI_DIR = WIKI_REPO / "wiki"
 DATA_DIR = WIKI_REPO / "wiki-data"
-WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "https://cc.higcp.com") + "/wiki"
+WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
 
 
 def load_json(path):

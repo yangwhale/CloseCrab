@@ -131,8 +131,9 @@ def main():
     # Disk usage
     wiki_size = sum(f.stat().st_size for f in WIKI_DIR.rglob("*") if f.is_file())
     print(f"\n💾 Wiki size: {wiki_size / 1024 / 1024:.1f} MB")
-    print(f"   URL: https://cc.higcp.com/wiki/index.html")
-    print(f"   Health: https://cc.higcp.com/wiki/health.html")
+    wiki_url = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
+    print(f"   URL: {wiki_url}/index.html")
+    print(f"   Health: {wiki_url}/health.html")
     print("=" * 40)
 
 

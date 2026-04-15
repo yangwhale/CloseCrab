@@ -129,5 +129,5 @@ done
 
 ## Detailed Docs
 
-- End-to-end guide: https://cc.higcp.com/assets/wan21-reproduce-guide-public.html
-- Benchmark report: https://cc.higcp.com/pages/wan21-benchmark-20260402.html
+- End-to-end guide: `$CC_PAGES_URL_PREFIX/assets/wan21-reproduce-guide-public.html`
+- Benchmark report: `$CC_PAGES_URL_PREFIX/pages/wan21-benchmark-20260402.html`

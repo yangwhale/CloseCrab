@@ -120,10 +120,10 @@ else
 
     echo ""
     echo "[12/12] Uploading wiki-data via gsutil..."
-    gsutil -q cp "$WIKI_REPO/wiki-data/graph.json" gs://chris-pgp-host-asia/cc-pages/wiki-data/graph.json 2>/dev/null || true
-    gsutil -q cp "$WIKI_REPO/wiki-data/log.json" gs://chris-pgp-host-asia/cc-pages/wiki-data/log.json 2>/dev/null || true
+    gsutil -q cp "$WIKI_REPO/wiki-data/graph.json" "gs://${CC_PAGES_GCS_BUCKET:-}/cc-pages/wiki-data/graph.json" 2>/dev/null || true
+    gsutil -q cp "$WIKI_REPO/wiki-data/log.json" "gs://${CC_PAGES_GCS_BUCKET:-}/cc-pages/wiki-data/log.json" 2>/dev/null || true
 fi
 
 echo ""
 echo "=== Done ==="
-echo "Wiki: https://cc.higcp.com/wiki/index.html"
+echo "Wiki: ${CC_PAGES_URL_PREFIX:-}/wiki/index.html"

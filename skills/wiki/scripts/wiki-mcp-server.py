@@ -28,7 +28,7 @@ from wiki_utils import WIKI_REPO, TextExtractor
 
 DATA_DIR = WIKI_REPO / "wiki-data"
 WIKI_DIR = WIKI_REPO / "wiki"
-WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "https://cc.higcp.com") + "/wiki"
+WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
 
 # ── Data loading (cached in memory) ──
 

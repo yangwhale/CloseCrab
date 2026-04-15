@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from wiki_utils import WIKI_REPO
 
 DATA_DIR = WIKI_REPO / "wiki-data"
-WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "https://cc.higcp.com") + "/wiki"
+WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
 
 
 # ── Tokenizer (no external dependencies) ──

@@ -41,7 +41,7 @@ from wiki_utils import WIKI_REPO
 
 SCRIPT_DIR_V1 = Path(__file__).parent.parent / "scripts"
 RAW_DIR = WIKI_REPO / "raw"
-WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "https://cc.higcp.com") + "/wiki"
+WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
 
 
 def run_v1(name: str, args: list[str]) -> subprocess.CompletedProcess:

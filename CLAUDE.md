@@ -1,30 +1,6 @@
-# Chris 的 Claude Code 全局偏好
-
-## 语言和沟通
-- 用中文回复，技术术语保留英文原文
-- 直接给结论，不要啰嗦
-- 不确定的时候先调查再回答，不要猜
-
-## 工作流程
-- 复杂任务（多步骤、架构设计、新功能）必须先出方案，讨论确认后再动手写代码。不要上来就干
-- 用 Plan Mode 列想法，等用户明确说"开干"、"可以了"、"开始吧"等明确指示后才能开始写代码
-- 没有收到明确的开始指令之前，绝对不要动手实现
-
-## 工作环境
-- 机器: GCP VM (ubuntu, zsh + oh-my-zsh)
-- 主要工作: GPU/TPU 基础设施管理、ML 模型训练和推理
-- 详细环境信息见 auto memory 的 topic 文件
-
-## CC Pages (Web 内容发布)
-- 架构: GCS (`gs://chris-pgp-host-asia/cc-pages/`) + hk-jmp gcsfuse 反代，所有机器统一
-- Web root: 环境变量 `CC_PAGES_WEB_ROOT` (gcsfuse 挂载点，gLinux: `~/gcs-mount/cc-pages`，VMs: `/gcs/cc-pages`)
-- URL 前缀: `CC_PAGES_URL_PREFIX=https://cc.higcp.com`（所有机器统一，无 `/g1/` `/c1/` 前缀）
-- 生成文件写到 `$CC_PAGES_WEB_ROOT/pages/` 或 `$CC_PAGES_WEB_ROOT/assets/`
-- 发送链接时用 `$CC_PAGES_URL_PREFIX/pages/xxx.html` 或 `$CC_PAGES_URL_PREFIX/assets/xxx.png`
-
----
-
 # CloseCrab — Claude Code Bot Framework
+
+> 通用偏好（语言、工作流程、环境、CC Pages、Wiki）见全局 `~/.claude/CLAUDE.md`，以下只包含 CloseCrab 项目专属规则。
 
 ## 项目概述
 CloseCrab 将 Claude Code CLI 包装为多平台 AI Bot（Discord/飞书/钉钉）。每个 bot 是独立进程，通过 Unix socketpair 与 Claude Code CLI 通信，Firestore 存配置和日志。
@@ -118,17 +94,14 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 
 ## CC Wiki v2（知识感知层）
 
-你有一个持续维护的个人知识 Wiki（基于 Quartz），路径 `~/my-wiki-v2/`，在线访问 `cc.higcp.com/wiki-v2/`。
+> Wiki 优先原则和查询触发场景见全局 `~/.claude/CLAUDE.md`。以下是 Wiki 操作相关的补充规则。
 
-**日常行为规则（每次 session 生效，不需要触发 /wiki skill）：**
-
-1. **识别知识价值**：用户分享文章、论文、技术讨论时，如果内容有长期参考价值，主动问"要不要录入 Wiki？"。不要每次都问——只在内容确实有知识沉淀价值时提议
-2. **查 Wiki 再回答**：回答知识性问题前，先用 `python3 ~/my-wiki-v2/scripts/query.py "关键词"` 或 MCP wiki_query 搜索。有则引用，避免重新推导已编译过的知识
-3. **好回答建议回存**：如果你生成了有持久价值的分析，建议用户"这个分析要不要存到 Wiki？"
-4. **Lint 提醒**：每 10 次 ingest 或距上次 lint 超过一周时，提醒用户跑 `/wiki lint`
-5. **对话结束评估**：当一次对话涉及技术分析、方案对比、问题排查时，在最后回复中评估——是否产生了跨来源的综合结论或 Wiki 中尚未记录的新关联？如果是，附一句"这个分析可以存到 Wiki，要录入吗？"。简单问答或操作性任务不触发
-
-**具体 Wiki 操作（ingest/query/lint/status）的规则和模板在 wiki skill 的 SKILL.md 里。**
+- Wiki 路径 `~/my-wiki-v2/`，在线地址由 `WIKI_URL` 环境变量配置
+- **识别知识价值**：用户分享文章、论文、技术讨论时，如果内容有长期参考价值，主动问"要不要录入 Wiki？"
+- **好回答建议回存**：如果你生成了有持久价值的分析，建议用户"这个分析要不要存到 Wiki？"
+- **Lint 提醒**：每 10 次 ingest 或距上次 lint 超过一周时，提醒用户跑 `/wiki lint`
+- **对话结束评估**：当一次对话涉及技术分析、方案对比、问题排查时，评估是否产生了 Wiki 中尚未记录的新关联，如果是，附一句"要录入 Wiki 吗？"
+- **具体 Wiki 操作**（ingest/query/lint/status）的规则和模板在 wiki skill 的 SKILL.md 里
 
 ## 编码规范
 

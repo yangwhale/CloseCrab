@@ -15,7 +15,7 @@ from pathlib import Path
 
 WIKI_REPO = Path(os.environ.get("WIKI_REPO", os.path.expanduser("~/my-wiki")))
 GCS_ROOT = Path(os.environ.get("CC_PAGES_WEB_ROOT", os.path.expanduser("~/gcs-mount/cc-pages")))
-GCS_BUCKET = os.environ.get("CC_PAGES_GCS_BUCKET", "gs://chris-pgp-host-asia/cc-pages")
+GCS_BUCKET = os.environ.get("CC_PAGES_GCS_BUCKET", "")
 
 SYNC_DIRS = ["wiki", "wiki-data"]
 
@@ -100,7 +100,7 @@ def sync():
             sync_via_gsutil(src, f"{GCS_BUCKET}/{dir_name}")
 
     print("Sync complete.")
-    url_prefix = os.environ.get("CC_PAGES_URL_PREFIX", "https://cc.higcp.com")
+    url_prefix = os.environ.get("CC_PAGES_URL_PREFIX", "")
     print(f"Wiki URL: {url_prefix}/wiki/index.html")
 
 

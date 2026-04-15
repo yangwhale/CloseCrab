@@ -44,8 +44,8 @@ export BOT_NAME
 # gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失
 # 在 Bot 启动前自动检测并恢复，确保 CC Pages 和 shared memory 可用
 GCS_MOUNT="${CC_PAGES_GCS_MOUNT:-$HOME/gcs-mount}"
-GCS_BUCKET_NAME="${CC_PAGES_GCS_BUCKET_NAME:-chris-pgp-host-asia}"
-if command -v gcsfuse &>/dev/null && ! mountpoint -q "$GCS_MOUNT" 2>/dev/null; then
+GCS_BUCKET_NAME="${CC_PAGES_GCS_BUCKET_NAME:-}"
+if command -v gcsfuse &>/dev/null && [ -n "$GCS_BUCKET_NAME" ] && ! mountpoint -q "$GCS_MOUNT" 2>/dev/null; then
     if [ -d "$GCS_MOUNT" ]; then
         echo "[$(date)] gcsfuse not mounted, remounting $GCS_BUCKET_NAME → $GCS_MOUNT ..."
         gcsfuse --implicit-dirs "$GCS_BUCKET_NAME" "$GCS_MOUNT" 2>/dev/null && \

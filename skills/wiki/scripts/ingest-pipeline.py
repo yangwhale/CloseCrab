@@ -38,7 +38,7 @@ from wiki_utils import WIKI_REPO
 SCRIPT_DIR = Path(__file__).parent
 WIKI_DIR = WIKI_REPO / "wiki"
 RAW_DIR = WIKI_REPO / "raw"
-WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "https://cc.higcp.com") + "/wiki"
+WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
 
 
 def run_script(name: str, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
