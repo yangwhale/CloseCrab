@@ -1095,3 +1095,113 @@ class TiltEffect {
 6. User picks a style
 7. Skill generates HTML presentation with preserved assets
 8. Final presentation delivered
+
+---
+
+## Phase 6: Editable PPTX Generation
+
+When the user wants a native, editable PowerPoint file (not just HTML):
+
+### Prerequisites
+
+```bash
+pip install python-pptx  # Usually pre-installed
+# LibreOffice is pre-installed on gLinux for preview
+```
+
+### Workflow
+
+1. **HTML first** — Create the HTML slides as visual "gold standard" (1280x720 fixed size)
+2. **Generate PPTX** — Write a Python script using `python-pptx` to recreate the layout
+3. **Preview** — `libreoffice --headless --convert-to pdf --outdir /tmp/preview file.pptx`
+4. **Iterate** — Fix issues, re-generate, re-preview
+5. **Upload** — `gsutil cp file.pptx gs://...` for reliable delivery
+
+### CRITICAL: Text Must Be Inside Shapes
+
+**NEVER** create separate `add_textbox()` shapes overlaid on `add_shape()` rectangles. This causes misalignment in Google Slides and other renderers.
+
+**WRONG (causes misalignment):**
+```python
+# DON'T DO THIS
+rect(slide, l, t, w, h, bg_color, border)  # Background rectangle
+tx(slide, l+0.15, t+0.08, w-0.3, 0.3, title)  # Separate text overlay — WILL MISALIGN
+```
+
+**CORRECT (text inside shape):**
+```python
+# DO THIS
+sh = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(l), Inches(t), Inches(w), Inches(h))
+sh.fill.solid(); sh.fill.fore_color.rgb = bg_color
+sh.line.color.rgb = border; sh.line.width = Pt(1.5)
+tf = sh.text_frame; tf.word_wrap = True
+tf.margin_left = Inches(0.15); tf.margin_right = Inches(0.15)
+# Write text directly into the shape's text frame
+p = tf.paragraphs[0]
+run = p.add_run(); run.text = title
+run.font.size = Pt(14); run.font.bold = True
+```
+
+### PPTX Setup Boilerplate
+
+```python
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
+
+prs = Presentation()
+prs.slide_width  = Inches(13.333)  # 16:9 widescreen
+prs.slide_height = Inches(7.5)
+BLANK = prs.slide_layouts[6]  # Blank layout
+```
+
+### Common Patterns
+
+**Metric card (value + label inside colored shape):**
+```python
+def metric(slide, l, t, w, h, value, label, bg=RED, txt=WHITE):
+    sh = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(l), Inches(t), Inches(w), Inches(h))
+    sh.fill.solid(); sh.fill.fore_color.rgb = bg
+    sh.line.fill.background()
+    try: sh.adjustments[0] = 0.12
+    except: pass
+    tf = sh.text_frame; tf.word_wrap = True
+    tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+    p = tf.paragraphs[0]
+    run = p.add_run(); run.text = value
+    run.font.size = Pt(28); run.font.color.rgb = txt; run.font.bold = True
+    p2 = tf.add_paragraph(); p2.alignment = PP_ALIGN.CENTER
+    run2 = p2.add_run(); run2.text = label
+    run2.font.size = Pt(11); run2.font.color.rgb = txt
+```
+
+**Callout box (title + body inside rounded rectangle):**
+```python
+def callout(slide, l, t, w, h, title, body, bg, border):
+    sh = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(l), Inches(t), Inches(w), Inches(h))
+    sh.fill.solid(); sh.fill.fore_color.rgb = bg
+    sh.line.color.rgb = border; sh.line.width = Pt(1.5)
+    tf = sh.text_frame; tf.word_wrap = True
+    tf.margin_left = Inches(0.15); tf.margin_right = Inches(0.15)
+    p = tf.paragraphs[0]
+    run = p.add_run(); run.text = title
+    run.font.size = Pt(14); run.font.bold = True
+    p2 = tf.add_paragraph()
+    run2 = p2.add_run(); run2.text = body
+    run2.font.size = Pt(12); run2.font.color.rgb = RGBColor(0x5F, 0x63, 0x68)
+```
+
+### Gotchas
+
+- **Yellow background + white text = invisible** → Use black text on yellow
+- **Table header**: Set `c.fill.solid(); c.fill.fore_color.rgb = RED` per cell, add white bold text
+- **Alternating rows**: `if i % 2 == 1: c.fill.solid(); c.fill.fore_color.rgb = BG_LGRAY`
+- **Rounded corners**: `sh.adjustments[0] = 0.06` (callouts) to `0.12` (metric cards)
+- **LibreOffice `--convert-to png`** only exports first slide; use PDF for all pages
+- **Google Workspace MCP** supports Docs only, NOT Slides API — can't create Google Slides programmatically
+
+### Reference Template
+
+Full working example: `~/gcs-mount/cc-pages/assets/gen-pptx-v3.py` (10-slide GPU→TPU deck)
