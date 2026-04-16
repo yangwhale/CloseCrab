@@ -1,11 +1,11 @@
 ---
 name: imagen-generator
-description: Generate images using Google Imagen 4 on Vertex AI. Use when the user says "生成图片", "画一张", "generate image", "帮我画", "生成一张图", "create an image", "图片生成", or when you need to create visual content to explain concepts.
+description: Generate images using Gemini 3 Pro Image (Nano Banana) on Vertex AI. Use when the user says "生成图片", "画一张", "generate image", "帮我画", "生成一张图", "create an image", "图片生成", or when you need to create visual content to explain concepts.
 ---
 
-# Imagen 4 Image Generator
+# Gemini Image Generator (Nano Banana)
 
-Generate images from text prompts using Imagen 4 on Vertex AI, save to CC Pages, and send to Discord.
+Generate images from text prompts using Gemini 3 Pro Image (gemini-3-pro-image-preview) on Vertex AI, save to CC Pages, and share.
 
 ## Usage
 
@@ -18,29 +18,26 @@ Call the generation script directly:
 ### Options
 
 ```bash
-# Basic generation (1 image, 1:1 aspect ratio, fast model)
+# Basic generation (1 image, 1:1 aspect ratio, 1K resolution)
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "a cute cat sitting on a GPU server"
 
-# Custom aspect ratio: 1:1, 3:4, 4:3, 16:9, 9:16
+# Custom aspect ratio: 1:1, 3:4, 4:3, 16:9, 9:16, 3:2, 2:3, 4:5, 5:4, 21:9, 4:1, 1:4, 8:1, 1:8
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "TPU pod in a datacenter" --aspect 16:9
 
-# Multiple images (1-4)
+# Multiple images (1-4, generated sequentially)
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "neural network visualization" --count 2
 
-# Model tier: fast (default, $0.02), standard ($0.04), ultra ($0.06)
-~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "detailed architecture diagram" --model standard
-
-# High resolution (2K/4K, only standard and ultra models)
-~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "landscape photo" --model standard --resolution 2048x2048
+# Resolution: 512, 1K (default), 2K, 4K
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "landscape photo" --resolution 2K
 
 # Custom output filename
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "logo design" --output my-logo
 
-# Disable prompt rewriter (use exact prompt)
-~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "minimal line drawing" --no-rewrite
+# Override model (default: gemini-3-pro-image-preview)
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "photo" --model gemini-3.1-flash-image-preview
 
 # Combine options
-~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "B200 GPU rack in datacenter, photorealistic" --aspect 16:9 --model standard --count 2
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "B200 GPU rack in datacenter, photorealistic" --aspect 16:9 --resolution 2K --count 2
 ```
 
 ### Output
@@ -59,30 +56,25 @@ URL=$(~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "your prompt"
 ~/.claude/scripts/send-to-discord.sh --plain "$URL"
 ```
 
-Or just run the script — it prints the URL which you can share.
+## Model
 
-## Models
-
-- **`imagen-4.0-fast-generate-001`** (default) — Fast, $0.02/image, 1K resolution, 150 QPM
-- **`imagen-4.0-generate-001`** (standard) — Best quality, $0.04/image, up to 4K resolution, 75 QPM
-- **`imagen-4.0-ultra-generate-001`** (ultra) — Highest quality, $0.06/image, up to 4K resolution, 30 QPM
+- **`gemini-3-pro-image-preview`** (default) — Gemini 3 Pro Image, best quality, supports text+image generation
+- **`gemini-3.1-flash-image-preview`** — Nano Banana 2, faster, good price-performance
 
 ## Supported Aspect Ratios
 
-All models: `1:1`, `3:4`, `4:3`, `16:9`, `9:16`
+`1:1`, `3:4`, `4:3`, `16:9`, `9:16`, `3:2`, `2:3`, `4:5`, `5:4`, `21:9`, `4:1`, `1:4`, `8:1`, `1:8`
 
 ## Supported Resolutions
 
-- **fast**: 1024x1024, 896x1280, 1280x896, 768x1408, 1408x768
-- **standard/ultra**: Above + 2048x2048, 1792x2560, 2560x1792, 1536x2816, 2816x1536
+`512`, `1K`, `2K`, `4K`
 
 ## Prompt Tips
 
 - Be specific and descriptive: "a red sports car on a mountain road at sunset, photorealistic" > "car"
-- Imagen 4 has a built-in prompt rewriter that enhances your prompt (enabled by default)
 - Supports Chinese prompts natively (simplified & traditional)
 - For technical diagrams, add style keywords: "technical illustration", "blueprint style", "infographic"
-- To disable prompt enhancement, use `--no-rewrite`
+- Gemini models can also generate text within images (e.g., signs, labels, infographics)
 
 ## Prerequisites
 
