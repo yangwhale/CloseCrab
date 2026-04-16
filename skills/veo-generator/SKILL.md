@@ -18,7 +18,7 @@ Call the generation script directly:
 ### Options
 
 ```bash
-# Basic generation (1 video, 16:9, 8s, fast model, 720p)
+# Basic generation (1 video, 16:9, 8s, standard model, 720p)
 ~/.claude/skills/veo-generator/scripts/veo-generate.sh "a cat playing with a laser pointer"
 
 # Portrait video for mobile
@@ -27,8 +27,8 @@ Call the generation script directly:
 # Shorter clip
 ~/.claude/skills/veo-generator/scripts/veo-generate.sh "ocean waves at sunset" --duration 6
 
-# Higher quality model (slower, more expensive)
-~/.claude/skills/veo-generator/scripts/veo-generate.sh "cinematic drone shot over mountains" --model standard
+# Faster model (lower quality but quicker)
+~/.claude/skills/veo-generator/scripts/veo-generate.sh "cinematic drone shot over mountains" --model fast
 
 # 1080p resolution
 ~/.claude/skills/veo-generator/scripts/veo-generate.sh "product showcase" --resolution 1080p
@@ -98,8 +98,9 @@ The script handles all of this automatically. Default poll interval is 10s, time
 
 ## Models
 
-- **`veo-3.1-fast-generate-preview`** (fast, default) — Faster generation, good quality
-- **`veo-3.1-generate-preview`** (standard) — Best quality, slower
+- **`veo-3.1-generate-001`** (standard, default) — Best quality, GA
+- **`veo-3.1-fast-generate-001`** (fast) — Faster generation, good quality, GA
+- **`veo-3.1-lite-generate-001`** (lite) — Lightest, supports audio generation, Preview
 
 ### Older Models (available but not default)
 
@@ -128,7 +129,8 @@ The script handles all of this automatically. Default poll interval is 10s, time
 
 ## Prerequisites
 
-- gcloud CLI with valid credentials
+- `google-genai` Python SDK (`pip install google-genai`)
+- Application Default Credentials configured (`gcloud auth application-default login`)
 - Vertex AI API enabled on the GCP project
 - CC Pages (GCS-backed via `$CC_PAGES_WEB_ROOT`)
 
@@ -136,7 +138,8 @@ The script handles all of this automatically. Default poll interval is 10s, time
 
 ```
 ~/.claude/skills/veo-generator/scripts/
-└── veo-generate.sh                  # Video generation script
+├── veo-generate.sh                  # Entry point (exec wrapper)
+└── veo-generate.py                  # Core logic (google-genai SDK)
 
 $CC_PAGES_WEB_ROOT/assets/veo/      # Generated videos (web-accessible)
 ```
