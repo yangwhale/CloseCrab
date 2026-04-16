@@ -78,7 +78,8 @@ URL=$(~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "your prompt"
 
 ## Prerequisites
 
-- gcloud CLI with valid credentials
+- `google-genai` Python SDK (`pip install google-genai`)
+- Application Default Credentials configured (`gcloud auth application-default login`)
 - Vertex AI API enabled on the GCP project
 - CC Pages (GCS-backed via `$CC_PAGES_WEB_ROOT`)
 
@@ -86,7 +87,8 @@ URL=$(~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "your prompt"
 
 ```
 ~/.claude/skills/imagen-generator/scripts/
-└── imagen-generate.sh                  # Image generation script
+├── imagen-generate.sh                  # Entry point (exec wrapper)
+└── imagen-generate.py                  # Core logic (google-genai SDK)
 
 $CC_PAGES_WEB_ROOT/assets/imagen/      # Generated images (web-accessible)
 ```
