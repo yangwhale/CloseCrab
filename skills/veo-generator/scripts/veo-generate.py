@@ -53,7 +53,7 @@ def generate_video(args):
         if not image_path.exists():
             print(f"Error: Image file not found: {args.image}", file=sys.stderr)
             sys.exit(1)
-        source.image = types.Image.from_file(str(image_path))
+        source.image = types.Image.from_file(location=str(image_path))
 
     # Build config
     config = types.GenerateVideosConfig(
@@ -79,7 +79,7 @@ def generate_video(args):
                 print(f"Error: Reference image not found: {ref_path}", file=sys.stderr)
                 sys.exit(1)
             ref_images.append(types.VideoGenerationReferenceImage(
-                image=types.Image.from_file(ref_path),
+                image=types.Image.from_file(location=ref_path),
                 reference_type="asset",
             ))
         config.reference_images = ref_images
@@ -89,7 +89,7 @@ def generate_video(args):
         if not Path(args.last_frame).exists():
             print(f"Error: Last frame image not found: {args.last_frame}", file=sys.stderr)
             sys.exit(1)
-        config.last_frame = types.Image.from_file(args.last_frame)
+        config.last_frame = types.Image.from_file(location=args.last_frame)
 
     # Submit generation
     print("Submitting video generation request...", file=sys.stderr)
