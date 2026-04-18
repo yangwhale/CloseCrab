@@ -204,7 +204,13 @@ collect_secrets() {
             echo ""
             echo "  提示: secrets 已保存到 Firestore，下次部署其他机器自动拉取"
         else
-            echo "  提示: 请以交互模式运行 deploy.sh 输入缺失的环境变量，或直接写入 Firestore config/secrets"
+            echo ""
+            echo "  ============================================"
+            echo "  ⚠⚠⚠ 关键 secrets 缺失！"
+            echo "  gcsfuse 挂载和部分 MCP 功能将不可用"
+            echo "  请以交互模式重新运行: ./deploy.sh"
+            echo "  或写入 Firestore config/secrets 后重新部署"
+            echo "  ============================================"
         fi
     fi
 
@@ -250,17 +256,11 @@ except Exception:
 # ====================================================================
 
 setup_gcsfuse() {
-    local bucket="${GCS_BUCKET:-}"
-    if [[ -z "$bucket" ]]; then
-        echo "  GCS_BUCKET 未设置，跳过 gcsfuse 挂载"
-        return
-    fi
-
     # 判断是否有 sudo
     local has_sudo=false
     sudo -n true 2>/dev/null && has_sudo=true
 
-    # 1. 安装 gcsfuse
+    # 1. 安装 gcsfuse（不依赖 GCS_BUCKET，确保二进制可用）
     if command -v gcsfuse &>/dev/null; then
         echo "  gcsfuse 已安装: $(gcsfuse --version 2>/dev/null | head -1)"
     elif $has_sudo && command -v apt-get &>/dev/null; then
@@ -299,7 +299,14 @@ setup_gcsfuse() {
         return
     fi
 
-    # 2. 确定挂载点（整个 bucket）
+    # 2. 检查 GCS_BUCKET（挂载需要，安装不需要）
+    local bucket="${GCS_BUCKET:-}"
+    if [[ -z "$bucket" ]]; then
+        echo "  ⚠ GCS_BUCKET 未设置，gcsfuse 已安装但跳过挂载（后续可手动挂载或重新 deploy）"
+        return
+    fi
+
+    # 3. 确定挂载点（整个 bucket）
     local mount_parent
     if $has_sudo; then
         mount_parent="/gcs"
@@ -364,6 +371,9 @@ setup_gcsfuse() {
 
     echo "  gcsfuse 设置完成: CC_PAGES_WEB_ROOT=$mount_parent/cc-pages"
 }
+
+# 先加载已有环境变量（之前成功 deploy 可能已写入 ~/.zshenv）
+[[ -f "$HOME/.zshenv" ]] && source "$HOME/.zshenv"
 
 collect_secrets
 echo "=== CloseCrab Deploy (mode: $MODE) ==="
