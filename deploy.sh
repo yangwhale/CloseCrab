@@ -373,7 +373,10 @@ setup_gcsfuse() {
 }
 
 # 先加载已有环境变量（之前成功 deploy 可能已写入 ~/.zshenv）
-[[ -f "$HOME/.zshenv" ]] && source "$HOME/.zshenv"
+# set +u: ~/.zshenv 可能引用未定义变量（zsh 插件等），在 set -u 下会报错
+if [[ -f "$HOME/.zshenv" ]]; then
+    set +u; source "$HOME/.zshenv" 2>/dev/null || true; set -u
+fi
 
 collect_secrets
 echo "=== CloseCrab Deploy (mode: $MODE) ==="
