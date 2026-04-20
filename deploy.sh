@@ -261,6 +261,11 @@ except Exception:
 # ====================================================================
 
 setup_gcsfuse() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "  macOS 检测到，跳过 gcsfuse（macOS 用 gsutil 或 Cloud Storage FUSE 替代）"
+        return
+    fi
+
     # 判断是否有 sudo
     local has_sudo=false
     sudo -n true 2>/dev/null && has_sudo=true
@@ -468,7 +473,9 @@ install_cc() {
     # 1.5. Sandbox 依赖（bwrap）
     # ----------------------------------------------------------------
     echo "[1.5/11] 检查 sandbox 依赖..."
-    if ! command -v bwrap &>/dev/null; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "  macOS 检测到，跳过 bwrap（macOS 不需要 Linux sandbox）"
+    elif ! command -v bwrap &>/dev/null; then
         echo "  安装 bubblewrap..."
         sudo apt-get install -y -qq bubblewrap 2>/dev/null || echo "  ⚠ bubblewrap 安装失败（非 Debian 系统？）"
     fi
