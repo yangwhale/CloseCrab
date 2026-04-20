@@ -162,16 +162,19 @@ collect_secrets() {
     [[ -t 0 ]] && interactive=true
 
     # 变量描述（交互模式下显示帮助）
-    declare -A var_desc=(
-        [ANTHROPIC_VERTEX_PROJECT_ID]="Vertex AI 项目 ID（必填，用于调用 Claude 模型）"
-        [GCS_BUCKET]="GCS 桶名（CC Pages 和共享 Memory 需要，如 my-bucket）"
-        [CC_PAGES_URL_PREFIX]="CC Pages 公网 URL（如 https://cc.example.com）"
-        [GITHUB_PERSONAL_ACCESS_TOKEN]="GitHub PAT（GitHub MCP Server 需要）"
-        [GEMINI_API_KEY]="Gemini API Key（Gemini CLI 需要）"
-        [CONTEXT7_API_KEY]="Context7 API Key（Context7 MCP Server）"
-        [JINA_API_KEY]="Jina AI API Key（Jina MCP Server）"
-        [TAVILY_API_KEY]="Tavily API Key（Tavily MCP Server）"
-    )
+    # 用函数代替 declare -A，兼容 bash 3.2（macOS 自带）
+    _var_desc() {
+        case "$1" in
+            ANTHROPIC_VERTEX_PROJECT_ID) echo "Vertex AI 项目 ID（必填，用于调用 Claude 模型）" ;;
+            GCS_BUCKET) echo "GCS 桶名（CC Pages 和共享 Memory 需要，如 my-bucket）" ;;
+            CC_PAGES_URL_PREFIX) echo "CC Pages 公网 URL（如 https://cc.example.com）" ;;
+            GITHUB_PERSONAL_ACCESS_TOKEN) echo "GitHub PAT（GitHub MCP Server 需要）" ;;
+            GEMINI_API_KEY) echo "Gemini API Key（Gemini CLI 需要）" ;;
+            CONTEXT7_API_KEY) echo "Context7 API Key（Context7 MCP Server）" ;;
+            JINA_API_KEY) echo "Jina AI API Key（Jina MCP Server）" ;;
+            TAVILY_API_KEY) echo "Tavily API Key（Tavily MCP Server）" ;;
+        esac
+    }
 
     # CC 相关 secrets (从 config/env.sh 的 CC_SECRETS 数组读取)
     for var in "${CC_SECRETS[@]}"; do
@@ -181,9 +184,11 @@ collect_secrets() {
         else
             has_missing=true
             if $interactive; then
+                local desc
+                desc=$(_var_desc "$var")
                 echo ""
                 echo "  ✗ $var 未设置"
-                [[ -n "${var_desc[$var]:-}" ]] && echo "    ${var_desc[$var]}"
+                [[ -n "$desc" ]] && echo "    $desc"
                 read -rp "    请输入 ${var} (直接回车跳过): " input
                 if [[ -n "$input" ]]; then
                     persist_to_zshenv "$var" "$input"
