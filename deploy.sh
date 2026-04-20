@@ -449,7 +449,10 @@ install_cc() {
         fi
         if ! $installed; then
             # npm fallback（或 --npm 模式）
-            if sudo npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; then
+            # 先试不带 sudo（Homebrew/nvm 环境），失败再 sudo
+            if npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; then
+                installed=true
+            elif sudo -n true 2>/dev/null && sudo npm install -g @anthropic-ai/claude-code 2>&1 | tail -3; then
                 installed=true
             fi
         fi
