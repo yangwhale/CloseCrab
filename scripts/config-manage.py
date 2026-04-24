@@ -39,7 +39,7 @@ def _detect_claude_bin() -> str:
     return shutil.which("claude") or "~/.local/bin/claude"
 
 DEFAULT_CONFIG = {
-    "model": "claude-opus-4-6@default",
+    "model": "claude-opus-4-7@default",
     "claude_bin": _detect_claude_bin(),
     "work_dir": "~/",
     "timeout": 600,

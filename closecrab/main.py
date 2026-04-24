@@ -88,7 +88,7 @@ def _resolve_config(bot_name: str) -> dict:
         "description": cfg.get("description", ""),
         "channel": channel_type,
         "token": cfg.get("token", ""),
-        "model": cfg.get("model", "claude-opus-4-6@default"),
+        "model": cfg.get("model", "claude-opus-4-7@default"),
         "claude_bin": os.path.expanduser(cfg.get("claude_bin", shutil.which("claude") or "~/.local/bin/claude")),
         "work_dir": os.path.expanduser(cfg.get("work_dir", "~/")),
         "timeout": int(cfg.get("timeout", 600)),

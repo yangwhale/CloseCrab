@@ -96,7 +96,7 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
         "name": bot_name,
         "description": data.get("description", ""),
         "channel": active_channel,
-        "model": data.get("model", "claude-opus-4-6@default"),
+        "model": data.get("model", "claude-opus-4-7@default"),
         "claude_bin": _resolve_claude_bin(data.get("claude_bin", "")),
         "work_dir": data.get("work_dir", "~/"),
         "timeout": data.get("timeout", 600),

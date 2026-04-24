@@ -119,7 +119,7 @@ gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT_ID
 > **GCE VM 用户**：如果 VM 的 Service Account 有 `cloud-platform` scope，不需要手动 `gcloud auth login` 和 `gcloud auth application-default login`，ADC 通过 metadata server 自动提供。
 
 **启用 Claude 模型**：进入 [Vertex AI Model Garden](https://console.cloud.google.com/vertex-ai/model-garden)，搜索 `Claude`，点击 `Enable`。需要启用的模型：
-- `claude-opus-4-6`（默认，最强推理能力）
+- `claude-opus-4-7`（默认，最强推理能力）
 - `claude-sonnet-4-6`（可选，速度更快）
 - `claude-haiku-4-5`（可选，用作 fast model）
 
@@ -369,7 +369,7 @@ FIRESTORE_DATABASE=closecrab
 ```json
 {
   "active_channel": "discord",
-  "model": "claude-opus-4-6@default",
+  "model": "claude-opus-4-7@default",
   "claude_bin": "~/.local/bin/claude",
   "work_dir": "~/",
   "timeout": 600,
@@ -419,7 +419,7 @@ FIRESTORE_DATABASE=closecrab
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `active_channel` | ✅ | `discord` / `feishu` / `lark` / `dingtalk` |
-| `model` | — | Claude 模型，默认 `claude-opus-4-6@default` |
+| `model` | — | Claude 模型，默认 `claude-opus-4-7@default` |
 | `claude_bin` | — | Claude CLI 路径，默认自动检测（`which claude`） |
 | `work_dir` | — | 工作目录，默认 `~/` |
 | `timeout` | — | 单次对话超时（秒），默认 600 |
