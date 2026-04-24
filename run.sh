@@ -25,6 +25,11 @@ export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 cd "$HOME"
 
 # 确保 claude binary 在 PATH 中（nohup/cron 等非交互环境不加载 .zshrc）
+# nvm 管理的 node 路径需要显式添加（nvm.sh 只在交互 shell 中加载）
+if [ -d "$HOME/.nvm/versions/node" ]; then
+    NVM_NODE_DIR="$(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -1)"
+    [ -n "$NVM_NODE_DIR" ] && export PATH="$NVM_NODE_DIR/bin:$PATH"
+fi
 export PATH="$HOME/.local/bin:$HOME/google-cloud-sdk/bin:$PATH"
 
 # 第一个参数作为 bot name（必需）
