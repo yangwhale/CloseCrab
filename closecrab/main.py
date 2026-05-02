@@ -182,7 +182,13 @@ def build_system_prompt(bot_name: str = "default", team: dict | None = None, cha
         "示例：\n"
         "- `<voice-summary>[casually] 简单来说就是帮你查了三个方案，推荐第二个，性价比最高。</voice-summary>`\n"
         "- `<voice-summary>[excitedly] 搞定了！TTS 引擎已经从 Edge 升级到 Gemini，音质好了一大截。</voice-summary>`\n"
-        "- `<voice-summary>[thoughtfully] 两个方案各有利弊，A 方案快但贵，B 方案慢但省钱，得看你更在意哪个。</voice-summary>`"
+        "- `<voice-summary>[thoughtfully] 两个方案各有利弊，A 方案快但贵，B 方案慢但省钱，得看你更在意哪个。</voice-summary>`\n\n"
+        "### 发送已有音频文件\n"
+        "如果你已经通过 tts-generate.py 或其他方式生成了 ogg 音频文件，"
+        "可以用 `<voice-file>` 标签直接发送，无需再走 TTS 生成：\n"
+        "`<voice-file>/tmp/xxx.ogg</voice-file>`\n"
+        "标签内容必须是绝对路径。Channel 层会自动上传并作为语音消息发出，私聊和群聊都支持。\n"
+        "注意：voice-file 不会删除源文件。voice-summary 和 voice-file 可以在同一条消息中共存。"
     )
 
     # Firestore Inbox 使用说明
