@@ -123,10 +123,11 @@ def _build_prompt(text: str) -> str:
 
 
 def _ensure_gemini_api_key():
-    """Ensure GEMINI_API_KEY is in env; load from ~/.zshenv if missing."""
+    """Ensure GEMINI_API_KEY is in env; load from ~/.zshenv or ~/.claude/settings.json if missing."""
     for var in ("GEMINI_API_KEY", "GOOGLE_GENAI_API_KEY", "GOOGLE_API_KEY"):
         if os.environ.get(var):
             return
+    # Try ~/.zshenv
     zshenv = os.path.expanduser("~/.zshenv")
     if os.path.exists(zshenv):
         with open(zshenv) as f:
@@ -137,6 +138,20 @@ def _ensure_gemini_api_key():
                     if val:
                         os.environ["GEMINI_API_KEY"] = val
                         return
+    # Try ~/.claude/settings.json (bot process may not inherit Claude Code env)
+    import json
+    settings_path = os.path.expanduser("~/.claude/settings.json")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path) as f:
+                settings = json.load(f)
+            env = settings.get("env", {})
+            for var in ("GEMINI_API_KEY", "GOOGLE_GENAI_API_KEY", "GOOGLE_API_KEY"):
+                if env.get(var):
+                    os.environ[var] = env[var]
+                    return
+        except Exception:
+            pass
 
 
 def generate_gemini(text: str, voice: str) -> str:
