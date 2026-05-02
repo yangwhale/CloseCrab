@@ -1052,10 +1052,13 @@ class FeishuChannel(Channel):
             except Exception:
                 pass
 
-        # 提取语音总结 + 发送结果
+        # 提取语音文件/语音总结 + 发送结果
         if result:
+            result, voice_file = self._extract_voice_file(result)
             result, voice_text = self._extract_voice_summary(result)
             await reply_fn(result)
+            if voice_file:
+                asyncio.create_task(self._send_voice_file(chat_id, voice_file))
             if voice_text:
                 asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
 
@@ -1206,8 +1209,11 @@ class FeishuChannel(Channel):
                     pass
 
             if result:
+                result, voice_file = self._extract_voice_file(result)
                 result, voice_text = self._extract_voice_summary(result)
                 await self._send_long(chat_id, result)
+                if voice_file:
+                    asyncio.create_task(self._send_voice_file(chat_id, voice_file))
                 if voice_text:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
 
@@ -1648,8 +1654,11 @@ class FeishuChannel(Channel):
                     pass
 
             if result:
+                result, voice_file = self._extract_voice_file(result)
                 result, voice_text = self._extract_voice_summary(result)
                 await reply_fn(result)
+                if voice_file:
+                    asyncio.create_task(self._send_voice_file(chat_id, voice_file))
                 if voice_text:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
 
@@ -1806,6 +1815,17 @@ class FeishuChannel(Channel):
             return clean_text, voice_text
         return text, None
 
+    @staticmethod
+    def _extract_voice_file(text: str) -> tuple:
+        """提取 <voice-file> 标签内容，返回 (clean_text, file_path)。"""
+        match = re.search(r"<voice-file>\s*(/[^\s<>]+?)\s*</voice-file>", text)
+        if match:
+            file_path = match.group(1)
+            clean_text = text[:match.start()].rstrip() + text[match.end():]
+            clean_text = clean_text.strip()
+            return clean_text, file_path
+        return text, None
+
     async def _send_voice_summary(self, chat_id: str, text: str):
         """生成 TTS 语音并作为飞书语音消息发送。"""
         ogg_path = None
@@ -1814,13 +1834,15 @@ class FeishuChannel(Channel):
 
             # 生成 ogg opus 文件
             proc = await asyncio.create_subprocess_exec(
-                "python3", tts_script, text,
+                "python3", tts_script, text, "--voice", "orus",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            if stderr:
+                log.info(f"TTS stderr: {stderr.decode().strip()}")
             if proc.returncode != 0:
-                log.warning(f"TTS generation failed: {stderr.decode()}")
+                log.warning(f"TTS generation failed (rc={proc.returncode})")
                 return
             ogg_path = stdout.decode().strip()
             if not ogg_path or not os.path.exists(ogg_path):
@@ -1889,6 +1911,65 @@ class FeishuChannel(Channel):
                     os.unlink(ogg_path)
                 except OSError:
                     pass
+
+    async def _send_voice_file(self, chat_id: str, file_path: str):
+        """上传已有 ogg 文件并作为飞书语音消息发送。"""
+        try:
+            if not os.path.exists(file_path):
+                log.warning(f"Voice file not found: {file_path}")
+                return
+
+            duration = 10000
+            try:
+                dur_proc = await asyncio.create_subprocess_exec(
+                    "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                    "-of", "csv=p=0", file_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                dur_out, _ = await dur_proc.communicate()
+                duration = int(float(dur_out.decode().strip()) * 1000)
+            except Exception:
+                pass
+
+            loop = asyncio.get_running_loop()
+            with open(file_path, "rb") as f:
+                body = CreateFileRequestBody.builder() \
+                    .file_type("opus") \
+                    .file_name("voice.ogg") \
+                    .duration(duration) \
+                    .file(f) \
+                    .build()
+                req = CreateFileRequest.builder() \
+                    .request_body(body) \
+                    .build()
+                resp = await loop.run_in_executor(
+                    None, self._client.im.v1.file.create, req
+                )
+
+            if not resp.success() or not resp.data or not resp.data.file_key:
+                log.warning(f"Upload voice file failed: {resp.code} {resp.msg}")
+                return
+
+            msg_body = CreateMessageRequestBody.builder() \
+                .receive_id(chat_id) \
+                .msg_type("audio") \
+                .content(json.dumps({"file_key": resp.data.file_key})) \
+                .build()
+            msg_req = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(msg_body) \
+                .build()
+            msg_resp = await loop.run_in_executor(
+                None, self._client.im.v1.message.create, msg_req
+            )
+            if not msg_resp.success():
+                log.warning(f"Send voice file failed: {msg_resp.code} {msg_resp.msg}")
+                return
+
+            log.info(f"Voice file sent to {chat_id}: {file_path}")
+        except Exception as e:
+            log.warning(f"Voice file send failed: {e}")
 
     async def _process_audio(self, message) -> str:
         """下载并转写语音消息。"""

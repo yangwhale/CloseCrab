@@ -168,8 +168,21 @@ def build_system_prompt(bot_name: str = "default", team: dict | None = None, cha
         "当你的回复包含复杂技术内容（表格、代码块、多步骤分析、长列表、对比报告）时，"
         "在回复末尾添加 `<voice-summary>` 标签，用 2-3 句大白话口语化总结你的回复要点。\n"
         "语音总结应该像朋友聊天一样自然，避免念出技术细节，用通俗说法概括。\n"
-        "简单回复（一两句话、确认、问候、进度汇报）不需要语音总结。\n"
-        "示例：`<voice-summary>简单来说就是我帮你查了三个方案，推荐用第二个，性价比最高。</voice-summary>`"
+        "简单回复（一两句话、确认、问候、进度汇报）不需要语音总结。\n\n"
+        "### 情绪标签\n"
+        "语音总结使用 Gemini TTS 合成，支持情绪标签控制语气。"
+        "在 voice-summary 开头加一个情绪标签，让语音更自然生动：\n"
+        "- `[casually]` — 日常汇报、普通总结（最常用）\n"
+        "- `[excitedly]` — 好消息、任务完成、性能提升\n"
+        "- `[thoughtfully]` — 分析、对比、需要权衡的建议\n"
+        "- `[seriously]` — 警告、重要注意事项、安全问题\n"
+        "- `[cheerfully]` — 问候、轻松话题\n"
+        "- `[calmly]` — 长篇技术解读的平和总结\n"
+        "根据内容语境自然选择，不要每次都用同一个。不确定时用 `[casually]`。\n\n"
+        "示例：\n"
+        "- `<voice-summary>[casually] 简单来说就是帮你查了三个方案，推荐第二个，性价比最高。</voice-summary>`\n"
+        "- `<voice-summary>[excitedly] 搞定了！TTS 引擎已经从 Edge 升级到 Gemini，音质好了一大截。</voice-summary>`\n"
+        "- `<voice-summary>[thoughtfully] 两个方案各有利弊，A 方案快但贵，B 方案慢但省钱，得看你更在意哪个。</voice-summary>`"
     )
 
     # Firestore Inbox 使用说明

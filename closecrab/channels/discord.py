@@ -1055,10 +1055,14 @@ class DiscordChannel(Channel):
                     pass
 
             if result:
-                # 提取 <voice-summary> 标签（如果有）
+                # 提取语音文件/语音总结标签
+                result, voice_file = self._extract_voice_file(result)
                 result, voice_text = self._extract_voice_summary(result)
                 await reply_fn(result)
-                # 异步发送语音总结（不阻塞文字回复）
+                if voice_file:
+                    asyncio.create_task(
+                        self._send_voice_file(voice_file, message.channel.id)
+                    )
                 if voice_text:
                     asyncio.create_task(
                         self._send_voice_summary(voice_text, message.channel.id)
@@ -1140,6 +1144,17 @@ class DiscordChannel(Channel):
             return clean_text, voice_text
         return text, None
 
+    @staticmethod
+    def _extract_voice_file(text: str) -> tuple:
+        """提取 <voice-file> 标签内容，返回 (clean_text, file_path)。"""
+        match = re.search(r"<voice-file>\s*(/[^\s<>]+?)\s*</voice-file>", text)
+        if match:
+            file_path = match.group(1)
+            clean_text = text[:match.start()].rstrip() + text[match.end():]
+            clean_text = clean_text.strip()
+            return clean_text, file_path
+        return text, None
+
     async def _send_voice_summary(self, text: str, channel_id: int):
         """生成 TTS 语音并作为 Discord Voice Message 发送。"""
         try:
@@ -1148,7 +1163,7 @@ class DiscordChannel(Channel):
 
             # 生成 ogg 文件
             proc = await asyncio.create_subprocess_exec(
-                "python3", tts_script, text,
+                "python3", tts_script, text, "--voice", "orus",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -1183,6 +1198,28 @@ class DiscordChannel(Channel):
             log.info(f"Voice summary sent to channel {channel_id}")
         except Exception as e:
             log.warning(f"Voice summary failed: {e}")
+
+    async def _send_voice_file(self, file_path: str, channel_id: int):
+        """上传已有 ogg 文件作为 Discord Voice Message 发送。"""
+        try:
+            if not os.path.exists(file_path):
+                log.warning(f"Voice file not found: {file_path}")
+                return
+            send_script = os.path.expanduser("~/.claude/scripts/send-to-discord.sh")
+            env = os.environ.copy()
+            env["DISCORD_CHANNEL_ID"] = str(channel_id)
+            proc = await asyncio.create_subprocess_exec(
+                "bash", send_script, "--voice", file_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                log.warning(f"Voice file send failed: {stderr.decode()}")
+            log.info(f"Voice file sent to channel {channel_id}: {file_path}")
+        except Exception as e:
+            log.warning(f"Voice file send failed: {e}")
 
     async def _send_long(self, channel, content: str):
         """发送长消息，自动按换行符分割。"""
