@@ -1158,7 +1158,7 @@ class DiscordChannel(Channel):
     async def _send_voice_summary(self, text: str, channel_id: int):
         """生成 TTS 语音并作为 Discord Voice Message 发送。"""
         try:
-            tts_script = os.path.expanduser("~/.claude/scripts/tts-generate.py")
+            tts_script = os.path.expanduser("~/.claude/skills/tts-generator/scripts/tts-generate.py")
             send_script = os.path.expanduser("~/.claude/scripts/send-to-discord.sh")
 
             # 生成 ogg 文件

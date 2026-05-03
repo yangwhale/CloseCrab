@@ -1830,7 +1830,7 @@ class FeishuChannel(Channel):
         """生成 TTS 语音并作为飞书语音消息发送。"""
         ogg_path = None
         try:
-            tts_script = os.path.expanduser("~/.claude/scripts/tts-generate.py")
+            tts_script = os.path.expanduser("~/.claude/skills/tts-generator/scripts/tts-generate.py")
 
             # 生成 ogg opus 文件
             proc = await asyncio.create_subprocess_exec(
