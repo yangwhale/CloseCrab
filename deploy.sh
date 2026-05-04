@@ -746,6 +746,18 @@ elif jina_key:
     print('  jina-ai MCP 配置已注入')
 else:
     print('  jina-ai MCP 跳过 (JINA_API_KEY 未设置)')
+# pipecat MCP (optional voice I/O)
+pipecat_url = os.environ.get('PIPECAT_MCP_URL', '')
+if 'pipecat' in cfg['mcpServers']:
+    print('  pipecat MCP 配置已存在, 跳过')
+elif pipecat_url:
+    cfg['mcpServers']['pipecat'] = {
+        'type': 'streamable-http',
+        'url': pipecat_url,
+    }
+    print(f'  pipecat MCP 配置已注入 ({pipecat_url})')
+else:
+    print('  pipecat MCP 跳过 (PIPECAT_MCP_URL 未设置)')
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
 "
