@@ -11,6 +11,11 @@ Group=__USER__
 WorkingDirectory=__HOME__/livekit-frontend
 Environment=NODE_ENV=production
 Environment=PORT=3000
+# PATH 必须包含 node 和 pnpm 所在目录. nvm 安装的 node 不在系统 PATH 里,
+# pnpm spawn 子进程会找不到 node 报 ENOENT. 由 install-livekit.sh 注入实际值.
+Environment=PATH=__NODE_BIN_DIR__:__PNPM_BIN_DIR__:/usr/local/bin:/usr/bin:/bin
+# 让 nvm/pnpm 的 home-relative 配置文件能被读到 (.npmrc 等)
+Environment=HOME=__HOME__
 ExecStart=__PNPM_BIN__ start
 Restart=on-failure
 RestartSec=5

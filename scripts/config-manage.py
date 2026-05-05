@@ -192,6 +192,15 @@ def cmd_set(args):
         print(f"Bot '{args.bot_name}' not found")
         sys.exit(1)
 
+    # 防呆: 直接 set 整个 livekit 字段会抹掉 bot 启动时回写的 hmac_secret,
+    # 导致 frontend 验签失败. 强制走 set-livekit 子命令.
+    if args.field == "livekit":
+        print("ERROR: 不要用 'set livekit' 整体覆盖 livekit 字段 (会抹掉 bot 回写的 hmac_secret).")
+        print("       改用 'set-livekit' 子命令, 它会保留 hmac_secret. 例:")
+        print("       python3 scripts/config-manage.py set-livekit", args.bot_name,
+              "--auto-detect --frontend-url https://... --vertex-project ... --enable")
+        sys.exit(1)
+
     # Try to parse as JSON for complex values, otherwise use as string
     try:
         value = json.loads(args.value)
@@ -229,7 +238,8 @@ def cmd_set_livekit(args):
             sys.exit(1)
         api_key = key_file.read_text().strip()
         api_secret = secret_file.read_text().strip()
-        print(f"自动检测到 API key: {api_key}")
+        # 不打印 api_key 全文 (会进 shell history / SSH 日志). 显示前 8 字符即可.
+        print(f"自动检测到 API key: {api_key[:8]}... (已读自 {key_file})")
     else:
         if not args.api_key or not args.api_secret:
             print("必须指定 --auto-detect 或 (--api-key + --api-secret)")
@@ -261,7 +271,9 @@ def cmd_set_livekit(args):
     doc_ref.update({"livekit": livekit_cfg})
 
     print(f"\n已写入 bots/{args.bot_name}.livekit:")
-    masked = {k: ("***" if "secret" in k else v) for k, v in livekit_cfg.items()}
+    # 显式 mask 敏感字段 (不能用 'in k' 判断: api_key 不含 "secret" 但同样敏感)
+    SENSITIVE_FIELDS = {"api_key", "api_secret", "hmac_secret"}
+    masked = {k: ("***" if k in SENSITIVE_FIELDS else v) for k, v in livekit_cfg.items()}
     print(json.dumps(masked, indent=2, ensure_ascii=False))
     if args.enable:
         print(f"\nVoice 已启用. 重启 bot 后, 在飞书私聊发 /voice 验证.")

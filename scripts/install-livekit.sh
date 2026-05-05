@@ -262,18 +262,25 @@ install_caddy() {
 
 install_systemd_units() {
     log "[4b/4] systemd unit 文件..."
-    local pnpm_bin
+    local pnpm_bin node_bin
     pnpm_bin="$(command -v pnpm)"
+    node_bin="$(command -v node)"
     [[ -n "$pnpm_bin" ]] || die "pnpm 不在 PATH"
+    [[ -n "$node_bin" ]] || die "node 不在 PATH"
+    local pnpm_dir node_dir
+    pnpm_dir="$(dirname "$pnpm_bin")"
+    node_dir="$(dirname "$node_bin")"
+    log "  PATH: node=$node_dir pnpm=$pnpm_dir"
     # server unit
     local tmp
     tmp="$(mktemp)"
     render_template "$INFRA_DIR/livekit-server.service.tmpl" "$tmp" \
         "USER=$USER" "HOME=$HOME"
     sudo install -m 0644 "$tmp" /etc/systemd/system/livekit-server.service
-    # frontend unit
+    # frontend unit (注入 node + pnpm 实际路径, 避免 nvm/非系统 node 找不到)
     render_template "$INFRA_DIR/livekit-frontend.service.tmpl" "$tmp" \
-        "USER=$USER" "HOME=$HOME" "PNPM_BIN=$pnpm_bin"
+        "USER=$USER" "HOME=$HOME" "PNPM_BIN=$pnpm_bin" \
+        "NODE_BIN_DIR=$node_dir" "PNPM_BIN_DIR=$pnpm_dir"
     sudo install -m 0644 "$tmp" /etc/systemd/system/livekit-frontend.service
     rm -f "$tmp"
     sudo systemctl daemon-reload

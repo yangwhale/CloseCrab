@@ -949,9 +949,17 @@ case "$MODE" in
         ;;
 esac
 
-# Voice 是个独立维度, 任何 mode 都可叠加 (cc-only + voice 也行, 不阻塞)
+# Voice 是个独立维度, 任何 mode 都可叠加, 但 --cc-only 会跳过 install_bot,
+# 这意味着 voice Python deps (livekit-agents 等) 不会装. 提前提示.
 if [[ "$INSTALL_VOICE" == "true" ]]; then
-    echo ""
+    if [[ "$MODE" == "cc-only" ]]; then
+        echo ""
+        echo "[Voice] WARN: --cc-only 模式只装 CC 环境, 不会装 voice Python 依赖"
+        echo "         (livekit-agents / livekit-plugins-silero)."
+        echo "         LiveKit infra 会装好, 但 bot 跑 voice 会 ImportError."
+        echo "         之后必须再跑 ./deploy.sh --bot --voice 补 Python 依赖."
+        echo ""
+    fi
     install_voice
 fi
 
