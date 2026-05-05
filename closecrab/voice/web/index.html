@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>CloseCrab Voice</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.17.2/dist/livekit-client.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --fg: #e6edf3;
+    --dim: #8b949e;
+    --accent: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --card: #161b22;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", system-ui, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    gap: 24px;
+  }
+  .card {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 32px 28px;
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: var(--dim);
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  .status {
+    font-size: 14px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+    margin-bottom: 20px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dim);
+    flex-shrink: 0;
+  }
+  .dot.connecting { background: var(--warn); animation: pulse 1.5s infinite; }
+  .dot.live { background: var(--accent); animation: pulse 2s infinite; }
+  .dot.error { background: var(--err); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  button {
+    width: 100%;
+    padding: 14px 20px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.05s;
+    -webkit-appearance: none;
+  }
+  button:hover { background: #16a34a; }
+  button:active { transform: scale(0.98); }
+  button:disabled {
+    background: #333;
+    color: var(--dim);
+    cursor: not-allowed;
+  }
+  button.danger { background: var(--err); }
+  button.danger:hover { background: #dc2626; }
+  .meta {
+    margin-top: 16px;
+    font-size: 11px;
+    color: var(--dim);
+    word-break: break-all;
+    line-height: 1.5;
+  }
+  .err-detail {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--err);
+    text-align: left;
+    word-break: break-word;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>CloseCrab Voice</h1>
+    <div class="subtitle">tianmaojingling 语音通话</div>
+    <div id="status" class="status">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">准备中…</span>
+    </div>
+    <button id="actionBtn" disabled>等待初始化</button>
+    <div class="meta" id="meta"></div>
+    <div id="errDetail" class="err-detail" style="display:none"></div>
+  </div>
+  <audio id="agentAudio" autoplay playsinline></audio>
+
+<script>
+(() => {
+  const { Room, RoomEvent, Track } = LivekitClient;
+
+  const $ = (id) => document.getElementById(id);
+  const dot = $('dot'), statusText = $('statusText');
+  const btn = $('actionBtn'), meta = $('meta'), errDetail = $('errDetail');
+  const audioEl = $('agentAudio');
+
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token') || '';
+  const wsUrl = params.get('url') || 'wss://livekit.higcp.com';
+
+  if (!token) {
+    setStatus('error', '缺少 token 参数');
+    showErr('URL 必须带 ?token=xxx — 这个链接由飞书 /voice 命令生成');
+    return;
+  }
+
+  // 解 JWT 显示房间名 (不验证签名,纯展示)
+  let claims = {};
+  try {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    claims = JSON.parse(atob(payload));
+  } catch (e) {
+    setStatus('error', 'token 格式无效');
+    showErr(String(e));
+    return;
+  }
+  meta.textContent = `room: ${claims.video?.room || '?'}\nidentity: ${claims.sub || '?'}`;
+
+  // Room 必须每次新建 —— LiveKit JS SDK 的 Room 实例 disconnect 之后不能可靠重连。
+  // 复用旧实例会导致第二次 connect 后 mic track 不被 publish, server 端 STT 收不到音频。
+  let room = null;
+  let connected = false;
+
+  function bindRoomEvents(r) {
+    r.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
+      if (track.kind === Track.Kind.Audio) {
+        track.attach(audioEl);
+        console.log('audio track attached from', participant.identity);
+      }
+    });
+    r.on(RoomEvent.ParticipantConnected, (p) => {
+      if (p.identity?.startsWith('agent') || p.identity?.includes('closecrab')) {
+        setStatus('live', `通话中 · agent 已加入`);
+      }
+    });
+    r.on(RoomEvent.Disconnected, (reason) => {
+      connected = false;
+      setStatus('idle', `通话结束${reason ? ' · ' + reason : ''}`);
+      btn.textContent = '重新接通';
+      btn.classList.remove('danger');
+      btn.disabled = false;
+    });
+    r.on(RoomEvent.ConnectionStateChanged, (s) => {
+      console.log('conn state:', s);
+    });
+  }
+
+  async function connect() {
+    btn.disabled = true;
+    setStatus('connecting', '连接中…');
+    errDetail.style.display = 'none';
+    try {
+      room = new Room({ adaptiveStream: true, dynacast: true });
+      bindRoomEvents(room);
+      await room.connect(wsUrl, token);
+      await room.localParticipant.setMicrophoneEnabled(true);
+      connected = true;
+      setStatus('live', '已接通 · 等待 agent…');
+      btn.textContent = '挂断';
+      btn.classList.add('danger');
+      btn.disabled = false;
+    } catch (e) {
+      setStatus('error', '连接失败');
+      showErr(e?.message || String(e));
+      btn.textContent = '重试';
+      btn.disabled = false;
+      if (room) {
+        try { await room.disconnect(); } catch (_) {}
+        room = null;
+      }
+    }
+  }
+
+  async function disconnect() {
+    btn.disabled = true;
+    if (room) {
+      try { await room.disconnect(); } catch (_) {}
+      room = null;
+    }
+  }
+
+  btn.onclick = () => connected ? disconnect() : connect();
+
+  function setStatus(state, text) {
+    dot.className = 'dot ' + (state === 'idle' ? '' : state);
+    statusText.textContent = text;
+  }
+  function showErr(msg) {
+    errDetail.style.display = 'block';
+    errDetail.textContent = msg;
+  }
+
+  // 默认 idle, 等用户点击
+  setStatus('idle', '准备就绪');
+  btn.textContent = '接通';
+  btn.disabled = false;
+})();
+</script>
+</body>
+</html>

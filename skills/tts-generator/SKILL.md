@@ -41,22 +41,55 @@ rm -f "$OGG"
 
 ## Emotion Tags (Gemini only)
 
-Gemini TTS supports inline audio tags for emotion and style control:
+Gemini TTS 支持 inline audio tags 控制情感和风格。**有两种工作模式**，行为不同：
+
+### 模式 A：单标签（director instruction）
+
+只有一个开头标签时，脚本把它翻译成 director 指令喂给 Gemini：`"[casually] 你好"` → `"Say the following in Chinese, casually:\n你好"`。**这种模式下任意词都能用**（因为 Gemini 把它当自然语言指令理解），所以下面这些"自创"标签都能工作：
 
 ```bash
-# 常用情绪
-"[casually] 今天的进度还不错"
-"[excitedly] 实验通过了！"
-"[thoughtfully] 这个方案有两个权衡点"
-"[seriously] 注意这个安全隐患"
-"[cheerfully] 早上好！"
-"[calmly] 总结一下今天的工作"
+"[casually] 今天的进度还不错"        # 随意
+"[excitedly] 实验通过了！"           # 兴奋
+"[thoughtfully] 这个方案有两个权衡点" # 思考
+"[seriously] 注意这个安全隐患"        # 严肃
+"[cheerfully] 早上好！"              # 愉快
+"[calmly] 总结一下今天的工作"         # 平静
+```
 
-# 特殊效果
-"[whispers] 这是个秘密"
-"[laughs] 没问题"
-"[sighs] 又要加班了"
-"[surprised] 真的吗？"
+### 模式 B：多个 inline 标签（raw passthrough）
+
+文本里有 ≥2 个标签时，脚本不动它，原样 pass 给 Gemini。Gemini **只认它训练时见过的官方词**，自创词会被静默丢弃。一段话里想多次切换情绪（推荐用法，更生动）必须用下面的官方词：
+
+**思考类**：`[thinking] [contemplative] [analysis] [focus] [reflection] [planning] [speculation] [pensive] [curiosity]`
+
+**积极类**：`[excitement] [enthusiasm] [joy] [happy] [pleased] [optimism] [playful] [amusement] [friendly] [triumph] [satisfaction]`
+
+**中性类**：`[neutral] [contentment] [serenity] [relaxation] [certainty]`
+
+**严肃类**：`[seriousness] [urgency] [warning] [concern] [caution] [emphasis]`
+
+**惊讶类**：`[surprise] [amazement] [realization] [confusion] [uncertainty] [doubt] [disbelief]`
+
+**消极类**：`[disappointment] [frustration] [regret] [exhaustion] [weariness]`
+
+**幽默类**：`[humor] [sarcasm] [amused] [self-deprecation]`
+
+**自信类**：`[confidence] [determination] [assertive] [pride]`
+
+**特效类**：`[whispers] [laughs] [sighs] [slow] [fast]`
+
+**说明类**：`[informative] [explaining] [summary] [instruction] [suggestion]`
+
+**多标签例子（好）**：
+```
+[curiosity] 我先看下日志。[realization] 哦原来是端口冲突。
+[amused] 这种小坑最烦了。[suggestion] 你 kill 8080 那个就行。
+```
+
+**多标签例子（差）**：
+```
+[casually] 我看了日志发现端口冲突 你 kill 8080 就行
+# 整段一个标签，且 [casually] 不是官方词，多标签场景下还会被丢
 ```
 
 ## Edge TTS Voices (fallback)

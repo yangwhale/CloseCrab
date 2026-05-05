@@ -117,6 +117,22 @@ class BotCore:
 
         on_log = msg.metadata.get("on_log")
 
+        # voice 路径专用: 每次 Claude 触发一个 tool_use 时调一句, 让 voice
+        # 模式可以"边跑边话痨" (例如调 Bash → 念"命令跑起来啦"给用户)。
+        # callback 签名: async (tool_name: str, tool_input: dict) -> None
+        # Channel 自己负责选模板 + 跨 loop 推 ChatChunk + 去重, BotCore 只
+        # 负责精准在 tool_use 时刻 fire。
+        on_tool_use = msg.metadata.get("on_tool_use")
+
+        # voice 路径专用: Claude 在第一个 tool_use 之前输出的第一段 text
+        # (开场白如"好我去查")立刻 fire callback, voice 让 TTS 抢先念。
+        # 这是物理上比 tool hint 更早的信号 (Claude 总是先文字后 tool),
+        # 用户体验上接近"立刻应答"。
+        # callback 签名: async (text: str) -> None
+        # 触发条件: 任何 tool_use 出现 *前* 的第一段非空 text, 仅一次。
+        on_voice_opening_text = msg.metadata.get("on_voice_opening_text")
+        _voice_open_state = {"text_pushed": False, "tool_use_seen": False}
+
         # 收集中间步骤用于 Firestore 日志
         steps: list[str] = []
 
@@ -218,6 +234,38 @@ class BotCore:
             return new_steps
 
         async def _on_step(d: dict):
+            # voice hook: 在 d 还是 raw 的时候, 同时处理两个 voice 信号:
+            #   (1) 第一个 tool_use 之前的第一段 text → opening 立即推 TTS
+            #   (2) 每个 tool_use → tool hint 立即推 TTS
+            # 都在 _format_step 之前 fire, 这样即使 step 因为某些原因没生成
+            # (如格式化时被过滤), voice 提示也不会丢。
+            # 同一 d 可能同时含 text + tool_use (Claude 一次输出多个 block),
+            # 必须按 block 顺序处理才能正确判定 "tool_use 之前"。
+            if d.get("type") == "assistant":
+                for block in d.get("message", {}).get("content", []):
+                    bt = block.get("type", "")
+                    if bt == "text":
+                        if (on_voice_opening_text
+                                and not _voice_open_state["text_pushed"]
+                                and not _voice_open_state["tool_use_seen"]):
+                            text = (block.get("text", "") or "").strip()
+                            if text:
+                                _voice_open_state["text_pushed"] = True
+                                try:
+                                    await on_voice_opening_text(text)
+                                except Exception as e:
+                                    log.debug(f"on_voice_opening_text callback failed: {e}")
+                    elif bt == "tool_use":
+                        _voice_open_state["tool_use_seen"] = True
+                        if on_tool_use:
+                            tname = block.get("name", "")
+                            tinput = block.get("input", {}) or {}
+                            if tname:
+                                try:
+                                    await on_tool_use(tname, tinput)
+                                except Exception as e:
+                                    log.debug(f"on_tool_use callback failed for {tname}: {e}")
+
             new_steps = _format_step(d)
             if not new_steps:
                 return

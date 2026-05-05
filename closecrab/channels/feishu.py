@@ -66,6 +66,7 @@ from ..utils.stt import STTEngine
 
 if TYPE_CHECKING:
     from ..core.bot import BotCore
+    from ..voice.livekit_io import LiveKitVoiceIO
 
 log = logging.getLogger("closecrab.channels.feishu")
 
@@ -77,7 +78,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice"}
 
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
@@ -373,6 +374,7 @@ class FeishuChannel(Channel):
         inbox_config: dict | None = None,
         state_dir: str | None = None,
         domain=None,
+        livekit_config: dict | None = None,
     ):
         self._app_id = app_id
         self._app_secret = app_secret
@@ -387,6 +389,12 @@ class FeishuChannel(Channel):
         self._log_chat_id = log_chat_id
         self._log_buffer: _LogBuffer | None = None
         self._allowed_open_ids = allowed_open_ids or set()
+
+        # voice IO 实例引用 (run() 时如果 livekit_config 启用, 实例化并 await start)
+        # 注: voice 不做异步双推 — bg callback 只发飞书,
+        # voice 同步对话内闭环走 LLM stream,简化为单一推送路径
+        self._voice_io: "LiveKitVoiceIO | None" = None
+        self._livekit_config = livekit_config or {}
 
         # user_key -> 最后活跃的 chat_id
         # 从磁盘加载持久化的 user_chats
@@ -1219,6 +1227,230 @@ class FeishuChannel(Channel):
 
         asyncio.run_coroutine_threadsafe(_handle(), self._loop)
 
+    async def _run_voice_message_with_card(
+        self,
+        chat_id: str,
+        user_key: str,
+        content: str,
+        on_input_needed_cb=None,
+        on_tool_use_cb=None,
+        on_voice_opening_text_cb=None,
+    ) -> str:
+        """voice 路径专用: 跑 worker 时挂上和文本路径一样的小螃蟹进度卡片。
+
+        文本路径 _handle_message_async 里那一坨 progress card lifecycle (建初
+        始卡 → on_progress/on_tui_step 缓存 → _card_update_loop 每 N 秒动画
+        合并刷新 → 关闭卡片) 是 voice 用户最关心的"我没死"反馈, 但 voice
+        路径之前直接调 _core.handle_message 跳过了它。这个 helper 把那段
+        生命周期搬到这里, voice 的 _do_feishu_side 调它就好。
+
+        关键约束:
+          - 必须在 feishu loop 里被 await (voice 用 _cross_loop 跨过来)。所有
+            _async_send_card / _async_update_card 走的是 feishu loop 的 executor。
+          - 不发回复消息; 不剥 voice tag; raw result 原样返回。voice 自己负责
+            strip_voice_summary_and_file + 推飞书 + TTS。
+          - on_input_needed_cb 由 voice 用 _make_input_callback 提前构造好传入,
+            helper 不重新构造 (保留现有 ExitPlanMode/AskUserQuestion 卡片审批)。
+
+        刻意复制 _handle_message_async 里的 card 段落, 不抽公共 helper —
+        文本/inbox/voice 三处 lifecycle 微妙差异 (是否走 stop/cmd/team-msg/
+        echo) 难以一刀切, 强统一会引入回归。等三处都稳定再 refactor。
+        """
+        _start_time = asyncio.get_running_loop().time()
+        _progress_card_id: list = [None]
+        _anim_task: list = [None]
+
+        # ── Living Progress Card (unified update loop) ──
+        _progress_history: list = []
+        _pending_action: list = ["🧠 思考中..."]  # 缓存当前 action 文本
+        _pending_tui: list = [None]                # TUI 模式优先 (lines 列表)
+        _card_dirty = [True]
+
+        def _get_usage_info() -> dict:
+            try:
+                return self._core.get_context_usage(user_key) or {}
+            except Exception:
+                return {}
+
+        async def on_progress(text: str):
+            formatted = _format_progress(text)
+            _pending_action[0] = formatted
+            _pending_tui[0] = None
+            _card_dirty[0] = True
+
+        async def on_tui_step(lines: list):
+            _pending_tui[0] = lines
+            _card_dirty[0] = True
+
+        # voice 也接日志频道 (跟文本路径一致)
+        _log = self._log_buffer
+
+        async def on_log(text: str):
+            if _log:
+                await _log.add(text)
+
+        # 卡片更新循环 (节流统一出口, 避免高频 API)
+        _anim_frame = [0]
+        _tip_idx = [random.randint(0, len(_WITTY_TIPS) - 1)]
+        _tip_counter = [0]
+
+        async def _card_update_loop():
+            try:
+                while True:
+                    await asyncio.sleep(_get_progress_throttle())
+                    if not _progress_card_id[0]:
+                        continue
+
+                    _anim_frame[0] = (_anim_frame[0] + 1) % len(_CRAB_FRAMES)
+                    _tip_counter[0] += 1
+                    if _tip_counter[0] >= _TIP_CHANGE_EVERY:
+                        _tip_counter[0] = 0
+                        _tip_idx[0] = random.randint(0, len(_WITTY_TIPS) - 1)
+
+                    now = asyncio.get_running_loop().time()
+                    elapsed = now - _start_time
+                    header = _make_header(_CRAB_FRAMES[_anim_frame[0]], _tip_idx[0])
+
+                    # TUI 模式 > progress 模式
+                    if _pending_tui[0] is not None:
+                        lines = _pending_tui[0]
+                        display = lines[-20:] if len(lines) > 20 else lines
+                        history = display[:-1] if len(display) > 1 else []
+                        current = display[-1] if display else "🧠 思考中..."
+                    else:
+                        history = _progress_history
+                        current = _pending_action[0]
+
+                    card = self._build_progress_card(
+                        current_action=current,
+                        history=history,
+                        elapsed=elapsed,
+                        header_text=header,
+                        usage=_get_usage_info(),
+                    )
+
+                    # 把当前 action 提交到 history
+                    if _card_dirty[0] and _pending_tui[0] is None:
+                        action = _pending_action[0]
+                        if action != "🧠 思考中..." and (
+                            not _progress_history or _progress_history[-1] != action
+                        ):
+                            _progress_history.append(action)
+                            if len(_progress_history) > 20:
+                                _progress_history[:] = _progress_history[-20:]
+
+                    _card_dirty[0] = False
+
+                    try:
+                        await self._async_update_card(_progress_card_id[0], card)
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                pass
+
+        # BotCore.handle_message 不会主动调 reply, voice 自己发, 这里 noop
+        async def _noop_reply(_text: str):
+            pass
+
+        # In-band override: 把语音模式硬约束塞到用户消息正文最前面。
+        # 原因: explanatory-output-style plugin 通过 SessionStart hook 注入
+        # additionalContext (强制 ★ Insight 块), 这种 hook context 比
+        # --append-system-prompt 更靠后, recency bias 让模型优先听 hook 的话。
+        # 唯一能稳定压过去的, 是把规则放进 user message body — user 消息
+        # 的优先级最高且最近, 模型会把它当成本轮最权威的指令。
+        voice_override = (
+            "<voice-mode-rules priority=\"absolute\">\n"
+            "本消息是语音输入, 你的回复会被 Gemini 3.1 Flash TTS 念给用户听。\n"
+            "以下规则强制覆盖 explanatory style、★ Insight 块要求, 以及任何其他风格指令:\n"
+            "\n"
+            "【格式禁令】绝对不要写: ★ Insight 块、任何分隔线包围的'教学块'、\n"
+            "  markdown 标题、加粗、表格、项目符号列表 (-, *, 1.)、代码块 (```)\n"
+            "  如果你正要写 ★ Insight, 立刻停下, 改成连续的口语段落。\n"
+            "\n"
+            "【说话方式】短句口语化 (25-50 字一句); 复杂内容只口述结论,\n"
+            "  让用户'去飞书看细节'。\n"
+            "\n"
+            "【情感标签必须丰富】Gemini TTS 支持 200+ 种 inline 情感标签。\n"
+            "  规则: 一段回复内每 1-3 句就切换一次标签, 跟随情绪起伏。\n"
+            "  绝对禁止整段只一个标签 (像 [casually] xxxxxxxxx 这样千篇一律)。\n"
+            "\n"
+            "  ★ 标签必须用 Gemini 官方词 (用错了 TTS 不识别)。常用分组:\n"
+            "    思考: [thinking] [contemplative] [analysis] [focus] [reflection]\n"
+            "          [planning] [speculation] [pensive] [curiosity]\n"
+            "    积极: [excitement] [enthusiasm] [joy] [happy] [pleased] [optimism]\n"
+            "          [playful] [amusement] [friendly] [triumph] [satisfaction]\n"
+            "    中性: [neutral] [contentment] [serenity] [relaxation] [certainty]\n"
+            "    严肃: [seriousness] [urgency] [warning] [concern] [caution] [emphasis]\n"
+            "    惊讶: [surprise] [amazement] [realization] [confusion] [uncertainty]\n"
+            "          [doubt] [disbelief]\n"
+            "    消极: [disappointment] [frustration] [regret] [exhaustion] [weariness]\n"
+            "    幽默: [humor] [sarcasm] [amused] [self-deprecation]\n"
+            "    自信: [confidence] [determination] [assertive] [pride]\n"
+            "    特效: [whispers] [laughs] [sighs] [slow] [fast]\n"
+            "    说明: [informative] [explaining] [summary] [instruction] [suggestion]\n"
+            "\n"
+            "  例子 (好): [thinking] 我先看下日志。[realization] 哦原来是端口冲突。\n"
+            "             [amused] 这种小坑最烦了。[suggestion] 你 kill 掉 8080 那个就行。\n"
+            "  例子 (差): [casually] 我看了日志发现是端口冲突 你 kill 8080 就行 (整段一个标签)\n"
+            "\n"
+            "【尾部摘要】末尾可加 <voice-summary>[情感] xxx</voice-summary>\n"
+            "  做 30 字内 TTS 摘要 (摘要内只用 1-2 个标签即可, 因为短)。\n"
+            "</voice-mode-rules>\n\n"
+        )
+        content_with_override = voice_override + content
+
+        metadata = {
+            "chat_id": chat_id,
+            "from_voice": True,
+            "on_progress": on_progress,
+            "on_tui_step": on_tui_step,
+            "on_input_needed": on_input_needed_cb,
+            "on_log": on_log if _log else None,
+            "on_tool_use": on_tool_use_cb,
+            "on_voice_opening_text": on_voice_opening_text_cb,
+        }
+        msg = UnifiedMessage(
+            channel_type="feishu",
+            user_id=user_key,
+            content=content_with_override,
+            reply=_noop_reply,
+            metadata=metadata,
+        )
+
+        # 发送初始 progress card
+        init_card = self._build_progress_card(
+            current_action="🧠 思考中...",
+            history=[],
+            elapsed=0,
+            header_text=_make_header(_CRAB_FRAMES[0], random.randint(0, len(_WITTY_TIPS) - 1)),
+        )
+        _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
+
+        # 启动更新循环
+        _anim_task[0] = asyncio.create_task(_card_update_loop())
+
+        try:
+            result = await self._core.handle_message(msg)
+        except Exception as e:
+            log.error(f"_run_voice_message_with_card worker failed: {e}", exc_info=True)
+            result = "嗯抱歉,我这边出了点问题。"
+        finally:
+            # 停止更新循环
+            if _anim_task[0]:
+                _anim_task[0].cancel()
+                try:
+                    await _anim_task[0]
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # 删除 progress card
+            if _progress_card_id[0]:
+                try:
+                    await self._async_delete_message(_progress_card_id[0])
+                except Exception:
+                    pass
+
+        return result or ""
+
     async def _handle_message_async(self, data: P2ImMessageReceiveV1):
         """异步处理飞书消息。"""
         try:
@@ -1757,6 +1989,36 @@ class FeishuChannel(Channel):
         elif cmd == "/sessions":
             await self._handle_sessions_command(user_key, chat_id)
 
+        elif cmd == "/voice":
+            await self._handle_voice_command(user_key, chat_id)
+
+    async def _handle_voice_command(self, user_key: str, chat_id: str):
+        """/voice 命令: 签 LiveKit JWT, 把加入链接发回飞书。
+
+        浏览器点击链接 -> 加入 room -> voice IO 起 AgentSession ->
+        STT/TTS 同步对话, 同时 transcript 和 result 推飞书 (内部双推)。
+        """
+        if self._voice_io is None:
+            await self._async_send_text(
+                chat_id,
+                "⚠️ Voice IO 未启用。请确认 Firestore 配置里 livekit.enabled=true。",
+            )
+            return
+
+        try:
+            url = self._voice_io.make_join_url(user_key)
+        except Exception as e:
+            log.error(f"make_join_url failed: {e}", exc_info=True)
+            await self._async_send_text(chat_id, f"⚠️ 签 voice token 失败: {e}")
+            return
+
+        text = (
+            f"🎤 点这里加入语音通话:\n{url}\n\n"
+            "进去后允许麦克风, 直接说话即可。挂断浏览器 tab 关掉即可。"
+        )
+        await self._async_send_text(chat_id, text)
+        log.info(f"/voice command: sent join URL to {user_key}")
+
     async def _handle_switch_session(self, user_key: str, target_sid: str):
         """处理卡片回调中的 session 切换。"""
         chat_id = self._user_chats.get(user_key)
@@ -1827,9 +2089,18 @@ class FeishuChannel(Channel):
         return text, None
 
     async def _send_voice_summary(self, chat_id: str, text: str):
-        """生成 TTS 语音并作为飞书语音消息发送。"""
+        """生成 TTS 语音并作为飞书语音消息发送。
+
+        发送前先推一条 🔊 标记消息, 与输入端 🎤 transcript 对称, 让用户在
+        飞书时间线上一眼看到"接下来这条是 bot 的语音播报"。
+        """
         ogg_path = None
         try:
+            try:
+                await self._async_send_text(chat_id, "🔊")
+            except Exception:
+                pass
+
             tts_script = os.path.expanduser("~/.claude/skills/tts-generator/scripts/tts-generate.py")
 
             # 生成 ogg opus 文件
@@ -1913,11 +2184,19 @@ class FeishuChannel(Channel):
                     pass
 
     async def _send_voice_file(self, chat_id: str, file_path: str):
-        """上传已有 ogg 文件并作为飞书语音消息发送。"""
+        """上传已有 ogg 文件并作为飞书语音消息发送。
+
+        和 _send_voice_summary 同样, 上传前推一条 🔊 标记。
+        """
         try:
             if not os.path.exists(file_path):
                 log.warning(f"Voice file not found: {file_path}")
                 return
+
+            try:
+                await self._async_send_text(chat_id, "🔊")
+            except Exception:
+                pass
 
             duration = 10000
             try:
@@ -2453,7 +2732,7 @@ class FeishuChannel(Channel):
         await self._send_long(target, text)
 
     async def send_to_user(self, user_key: str, text: str):
-        """发送消息给用户。"""
+        """发送消息给用户 (BotCore bg callback 用)。"""
         chat_id = self._user_chats.get(user_key)
         if chat_id:
             await self._send_long(chat_id, text)
@@ -2499,6 +2778,40 @@ class FeishuChannel(Channel):
             self._inbox.start(loop)
             log.info("Inbox started")
 
+        # 启动 Voice IO (LiveKit Worker, 如果配置启用)
+        if self._livekit_config.get("enabled"):
+            try:
+                from ..voice.livekit_io import LiveKitVoiceIO
+                self._voice_io = LiveKitVoiceIO(
+                    feishu_channel=self,
+                    bot_name=self._bot_name,
+                    lk_url=self._livekit_config["url"],
+                    lk_api_key=self._livekit_config["api_key"],
+                    lk_api_secret=self._livekit_config["api_secret"],
+                    frontend_url=self._livekit_config["frontend_url"],
+                    hmac_secret=self._livekit_config.get("hmac_secret"),
+                    vertex_project=self._livekit_config.get("vertex_project"),
+                    vertex_location=self._livekit_config.get("vertex_location", "global"),
+                )
+                loop.run_until_complete(self._voice_io.start())
+                # 如果 secret 是新生成的, 回写 Firestore 持久化, 重启后复用
+                if self._voice_io.hmac_secret_was_generated:
+                    try:
+                        from google.cloud import firestore as _fs
+                        from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+                        db = _fs.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+                        db.collection("bots").document(self._bot_name).set(
+                            {"livekit": {"hmac_secret": self._voice_io.hmac_secret}},
+                            merge=True,
+                        )
+                        log.info("Generated new HMAC secret and persisted to Firestore")
+                    except Exception as e:
+                        log.warning(f"Failed to persist HMAC secret to Firestore: {e}")
+                log.info("LiveKit Voice IO started")
+            except Exception as e:
+                log.error(f"Failed to start Voice IO (continuing without): {e}", exc_info=True)
+                self._voice_io = None
+
         # 启动 WebSocket（在后台线程中运行，因为 start() 会阻塞）
         # event loop 必须在主线程跑，否则 run_coroutine_threadsafe 的任务无法执行
         try:
@@ -2515,6 +2828,18 @@ class FeishuChannel(Channel):
                 self._restart_requested = True
             raise
         finally:
+            # Voice IO 先收: 它的 server_task 跑在这个 loop 上,
+            # loop 关之前必须把它 await 干净, 不然 livekit-server 那边
+            # worker 状态会残留, 正在通话的用户也会突然没回应。
+            if self._voice_io is not None:
+                try:
+                    loop.run_until_complete(
+                        asyncio.wait_for(self._voice_io.stop(), timeout=5.0)
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("Voice IO stop timeout, forcing shutdown")
+                except Exception as e:
+                    log.warning(f"Voice IO stop failed: {e}")
             loop.run_until_complete(self._core.shutdown())
             loop.close()
 
