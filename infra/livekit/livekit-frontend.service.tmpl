@@ -1,0 +1,19 @@
+[Unit]
+Description=LiveKit Frontend (agent-starter-react, CloseCrab fork)
+Documentation=https://github.com/yangwhale/agent-starter-react
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__HOME__/livekit-frontend
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=__PNPM_BIN__ start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

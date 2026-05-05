@@ -1,6 +1,12 @@
-# LiveKit 中文语音助手部署指南
+# LiveKit 中文语音助手部署指南（Phase 1 PoC 历史档案）
 
-> 不是 CloseCrab 的子项目，但部署/运维都在自己机器上。这里记录怎么从 0 起一台 VM 跑起来，以及日常启停/调试。
+> **⚠️ 本文档是 Phase 1 PoC 阶段的部署记录，仅作历史参考。**
+>
+> Phase 2 后 LLM 已并入 bot 进程内（`closecrab/voice/livekit_io.py`），`livekit-agent.service` 不再使用。
+> **一站式部署看** [voice-deploy-quickstart.md](./voice-deploy-quickstart.md)。
+>
+> 本文档保留是因为：(1) Caddy / livekit-server / frontend 部分的手动步骤仍然有效，是
+> `scripts/install-livekit.sh` 的实现参考；(2) 排查老机器上的 PoC 残留时需要它。
 
 **线上地址**: <https://live.higcp.com>（前端） + `wss://livekit.higcp.com`（LiveKit signaling + RTC）
 **当前实例**: GCP `closecrab-live`，asia-east2-c（HK），外网 IP `35.220.227.219`

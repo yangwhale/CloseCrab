@@ -1,0 +1,13 @@
+# LiveKit Frontend env — CloseCrab voice IO
+# 由 scripts/install-livekit.sh 渲染. 落盘到 ~/livekit-frontend/.env.local (mode 0600), 不要进 git.
+#
+# LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET 必须和 ~/livekit-server/config.yaml 对齐
+# (frontend Next.js API route 用同一对 key 签 JWT).
+# NEXT_PUBLIC_LIVEKIT_URL 是浏览器侧 wss URL, 走 Caddy 反代到 livekit-server.
+# AGENT_NAME 是 demo fallback (URL 没带 ?bot= 时用), 实际 routing 走 ?bot= 派生 closecrab-voice-{bot}.
+
+LIVEKIT_URL=ws://127.0.0.1:7880
+LIVEKIT_API_KEY=__API_KEY__
+LIVEKIT_API_SECRET=__API_SECRET__
+NEXT_PUBLIC_LIVEKIT_URL=__PUBLIC_WSS_URL__
+AGENT_NAME=__DEFAULT_AGENT_NAME__

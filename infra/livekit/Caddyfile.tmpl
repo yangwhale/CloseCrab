@@ -1,0 +1,18 @@
+# Caddyfile — CloseCrab voice IO 反代
+# 由 scripts/install-livekit.sh 渲染并 install 到 /etc/caddy/Caddyfile.
+# __FRONTEND_DOMAIN__ : 前端域名 (浏览器访问的 voice UI)
+# __SIGNALING_DOMAIN__: livekit-server signaling 域名 (浏览器 wss 走这个)
+# __ADMIN_EMAIL__     : Let's Encrypt 注册邮箱
+
+{
+    email __ADMIN_EMAIL__
+}
+
+__FRONTEND_DOMAIN__ {
+    encode gzip
+    reverse_proxy localhost:3000
+}
+
+__SIGNALING_DOMAIN__ {
+    reverse_proxy localhost:7880
+}

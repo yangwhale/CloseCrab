@@ -148,6 +148,41 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 - 升级流程：`git pull` → 重启 bot 进程（kill run.sh PID 或 `/restart` 命令）
 - GKE Pod 必须挂载 SA key 访问 Firestore（Workload Identity principal:// 对 Firestore 不生效）
 
+## Voice IO（飞书 LiveKit 通话）
+
+飞书 channel 支持通过 `/voice` 命令唤起 LiveKit 浏览器通话。架构：bot 内嵌 LiveKit worker，Gemini STT → BotCore (Claude) → Gemini TTS。所有 voice infra（livekit-server / livekit-frontend / Caddy / systemd unit / 证书）由 `scripts/install-livekit.sh` 一键装。
+
+**部署详见** [docs/voice-deploy-quickstart.md](./docs/voice-deploy-quickstart.md)，简要：
+
+```bash
+# 新机器从零 (CC + Bot + Voice)
+./deploy.sh --voice \
+    --voice-frontend-domain  live.example.com \
+    --voice-signaling-domain livekit.example.com \
+    --voice-email            you@example.com
+
+# 已有 bot 增量加 voice
+./deploy.sh --voice --voice-frontend-domain ... --voice-signaling-domain ... --voice-email ...
+
+# 给 bot 配 voice 凭据 (auto-detect 从本机文件读)
+python3 scripts/config-manage.py set-livekit <bot> --auto-detect \
+    --frontend-url https://live.example.com --enable
+
+# 验证 infra
+./scripts/voice-healthcheck.sh
+```
+
+**关键点**：
+- voice Python 依赖（`livekit-agents`, `livekit-plugins-silero`）只在 `--voice` 时装，默认 deploy 不装（约 200MB）
+- 多 bot 共享一台机器一份 LiveKit infra，靠 URL `?bot=` 参数路由 + per-bot HMAC key 文件 `~/.closecrab-voice-hmac-{bot}.key` 验签
+- HMAC key 文件由 bot 启动时自动生成，并回写 Firestore `bots/{name}.livekit.hmac_secret` 持久化（重启不丢）
+- Frontend 是 fork repo `yangwhale/agent-starter-react`，install-livekit.sh 自动 clone + pnpm build
+- Caddy 自动签 LE 证书（前提：DNS A 记录指向本机 + 防火墙开 80/443）
+- LiveKit Server RTC 端口范围 UDP 50000-60000 必须在防火墙放开，否则浏览器会回退 TCP（差体验）
+- Vertex AI 的 service account 要有 `roles/aiplatform.user`（Gemini STT/TTS 走 Vertex）
+
+**Phase 1 PoC 残留**：旧机器可能有 `livekit-agent.service`（独立 LLM agent，已废弃）。跑 `./scripts/cleanup-livekit-poc.sh` 清掉。
+
 ## Troubleshooting
 - **Bot 不响应**: 先 `ps aux | grep closecrab` 看进程在不在，再查 `~/.claude/closecrab/{name}/bot.log`
 - **Claude CLI 卡住**: 检查 `~/.claude/closecrab/{name}/` 下的 stderr 文件，看 API 错误

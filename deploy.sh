@@ -19,6 +19,12 @@
 #   ./deploy.sh              # 完整安装: Claude Code 环境 + Skills + Bot
 #   ./deploy.sh --cc-only    # 只装 Claude Code 环境 + Skills
 #   ./deploy.sh --bot        # 补装 Bot（已有 CC 环境后追加）
+#   ./deploy.sh --voice      # 安装 / 升级 Voice IO 依赖 (Python 包 + LiveKit infra)
+#                            # 需配合 --voice-frontend-domain / --voice-signaling-domain / --voice-email
+#
+# 组合示例:
+#   ./deploy.sh --bot --voice --voice-frontend-domain live.example.com \
+#               --voice-signaling-domain livekit.example.com --voice-email admin@example.com
 #
 # 前提: Claude Code CLI 已安装 (curl -fsSL https://claude.ai/install.sh | bash)
 
@@ -28,21 +34,50 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config/env.sh"
 MODE="full"
 USE_NPM=false
+INSTALL_VOICE=false
+VOICE_FRONTEND_DOMAIN=""
+VOICE_SIGNALING_DOMAIN=""
+VOICE_ADMIN_EMAIL=""
 
-for arg in "$@"; do
-    case "$arg" in
-        --cc-only) MODE="cc-only" ;;
-        --bot)     MODE="bot" ;;
-        --npm)     USE_NPM=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --cc-only) MODE="cc-only"; shift ;;
+        --bot)     MODE="bot"; shift ;;
+        --npm)     USE_NPM=true; shift ;;
+        --voice)   INSTALL_VOICE=true; shift ;;
+        --voice-frontend-domain)  VOICE_FRONTEND_DOMAIN="$2"; shift 2 ;;
+        --voice-signaling-domain) VOICE_SIGNALING_DOMAIN="$2"; shift 2 ;;
+        --voice-email)            VOICE_ADMIN_EMAIL="$2"; shift 2 ;;
         --help|-h)
-            echo "用法: ./deploy.sh [--cc-only | --bot] [--npm]"
-            echo ""
-            echo "  (无参数)    完整安装: Claude Code 环境 + Skills + Bot"
-            echo "  --cc-only   只装 Claude Code 环境 + Skills"
-            echo "  --bot       补装 Bot（需要先装过 CC 环境）"
-            echo "  --npm       用 npm 安装 Claude Code (默认用官方 install.sh)"
+            cat <<'HELP'
+用法: ./deploy.sh [--cc-only | --bot] [--npm] [--voice ...]
+
+  (无参数)    完整安装: Claude Code 环境 + Skills + Bot
+  --cc-only   只装 Claude Code 环境 + Skills
+  --bot       补装 Bot（需要先装过 CC 环境）
+  --npm       用 npm 安装 Claude Code (默认用官方 install.sh)
+
+Voice IO (LiveKit) 选项 (任何 mode 都可叠加):
+  --voice                          启用 voice 安装 (Python 依赖 + LiveKit infra)
+  --voice-frontend-domain DOMAIN   前端域名 (如 live.example.com)
+  --voice-signaling-domain DOMAIN  Signaling 域名 (如 livekit.example.com)
+  --voice-email EMAIL              Let's Encrypt 邮箱
+
+示例 (新机器从零部署带 voice 的 bot):
+  ./deploy.sh --voice \
+      --voice-frontend-domain live.example.com \
+      --voice-signaling-domain livekit.example.com \
+      --voice-email admin@example.com
+
+示例 (已有 bot 增量加 voice):
+  ./deploy.sh --voice \
+      --voice-frontend-domain live.example.com \
+      --voice-signaling-domain livekit.example.com \
+      --voice-email admin@example.com
+HELP
             exit 0
             ;;
+        *) echo "未知参数: $1"; echo "运行 $0 --help 查看用法"; exit 1 ;;
     esac
 done
 
@@ -804,6 +839,13 @@ install_bot() {
         # 钉钉
         dingtalk-stream
     )
+    # Voice IO (LiveKit) 依赖, 仅在 --voice 时追加 (~200MB, 默认不装)
+    if [[ "$INSTALL_VOICE" == "true" ]]; then
+        DEPS+=(
+            livekit-agents
+            livekit-plugins-silero
+        )
+    fi
     if $PIP install --break-system-packages -q "${DEPS[@]}" 2>&1 | tail -3; then
         echo "  Python 依赖安装完成 (${#DEPS[@]} 个包)"
     else
@@ -861,6 +903,35 @@ print(f"  可用 channels: {ok}")
 }
 
 # ====================================================================
+# install_voice — 安装 LiveKit voice infra (server + frontend + caddy)
+# ====================================================================
+
+install_voice() {
+    echo "[Voice] 安装 LiveKit voice infra..."
+    # 检查必填参数 (install-livekit.sh 自己也会检查, 这里提前 fail fast)
+    local missing=()
+    [[ -z "$VOICE_FRONTEND_DOMAIN"  ]] && missing+=("--voice-frontend-domain")
+    [[ -z "$VOICE_SIGNALING_DOMAIN" ]] && missing+=("--voice-signaling-domain")
+    [[ -z "$VOICE_ADMIN_EMAIL"      ]] && missing+=("--voice-email")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "  ERROR: --voice 模式缺以下参数:"
+        for arg in "${missing[@]}"; do
+            echo "    $arg"
+        done
+        echo "  例如:"
+        echo "    ./deploy.sh --voice \\"
+        echo "        --voice-frontend-domain  live.example.com \\"
+        echo "        --voice-signaling-domain livekit.example.com \\"
+        echo "        --voice-email            admin@example.com"
+        exit 1
+    fi
+    "$SCRIPT_DIR/scripts/install-livekit.sh" \
+        --frontend-domain  "$VOICE_FRONTEND_DOMAIN" \
+        --signaling-domain "$VOICE_SIGNALING_DOMAIN" \
+        --admin-email      "$VOICE_ADMIN_EMAIL"
+}
+
+# ====================================================================
 # 主逻辑
 # ====================================================================
 
@@ -877,6 +948,12 @@ case "$MODE" in
         install_bot
         ;;
 esac
+
+# Voice 是个独立维度, 任何 mode 都可叠加 (cc-only + voice 也行, 不阻塞)
+if [[ "$INSTALL_VOICE" == "true" ]]; then
+    echo ""
+    install_voice
+fi
 
 echo ""
 echo "=== 部署完成 ==="

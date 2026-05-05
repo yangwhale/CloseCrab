@@ -1,0 +1,15 @@
+# LiveKit Server config — CloseCrab voice IO
+# 由 scripts/install-livekit.sh 渲染. __API_KEY__ / __API_SECRET__ 是脚本生成的随机值.
+# 这份文件会落盘到 ~/livekit-server/config.yaml (mode 0600), 不要进 git.
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+keys:
+  __API_KEY__: __API_SECRET__
+log_level: info

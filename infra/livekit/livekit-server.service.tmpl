@@ -1,0 +1,21 @@
+[Unit]
+Description=LiveKit Server (CloseCrab voice IO)
+Documentation=https://docs.livekit.io/realtime/self-hosting/deployment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__HOME__/livekit-server
+ExecStart=/usr/local/bin/livekit-server --config __HOME__/livekit-server/config.yaml
+Restart=on-failure
+RestartSec=5
+
+# Hardening (LiveKit needs UDP binding so we can't lock down too tight)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

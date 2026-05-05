@@ -202,6 +202,73 @@ def cmd_set(args):
     print(f"Set {args.field}={value} for '{args.bot_name}'")
 
 
+def cmd_set_livekit(args):
+    """Write bots/{bot_name}.livekit field for voice IO.
+
+    Two ways to provide credentials:
+      1. --auto-detect: read from ~/livekit-server/.api_key / .api_secret (set by install-livekit.sh)
+      2. --api-key / --api-secret: explicit values
+
+    HMAC secret is NOT set here — bot generates it on first start and writes back to Firestore.
+    """
+    from pathlib import Path
+
+    db = get_db()
+    doc_ref = db.collection("bots").document(args.bot_name)
+    if not doc_ref.get().exists:
+        print(f"Bot '{args.bot_name}' not found")
+        sys.exit(1)
+
+    # 拿 API key/secret
+    if args.auto_detect:
+        key_file = Path.home() / "livekit-server" / ".api_key"
+        secret_file = Path.home() / "livekit-server" / ".api_secret"
+        if not key_file.exists() or not secret_file.exists():
+            print(f"--auto-detect 失败: {key_file} 或 {secret_file} 不存在")
+            print("先在本机跑 ./scripts/install-livekit.sh 装 LiveKit infra")
+            sys.exit(1)
+        api_key = key_file.read_text().strip()
+        api_secret = secret_file.read_text().strip()
+        print(f"自动检测到 API key: {api_key}")
+    else:
+        if not args.api_key or not args.api_secret:
+            print("必须指定 --auto-detect 或 (--api-key + --api-secret)")
+            sys.exit(1)
+        api_key = args.api_key
+        api_secret = args.api_secret
+
+    # url (signaling) 默认从 frontend domain 推 (live.x.com → wss://livekit.x.com 或 ws://127.0.0.1:7880)
+    url = args.url or "ws://127.0.0.1:7880"
+
+    livekit_cfg = {
+        "url": url,
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "frontend_url": args.frontend_url,
+        "enabled": args.enable,
+    }
+    if args.vertex_project:
+        livekit_cfg["vertex_project"] = args.vertex_project
+    if args.vertex_location:
+        livekit_cfg["vertex_location"] = args.vertex_location
+
+    # merge — 不覆盖已存在的 hmac_secret (bot 启动时生成的, 不要踩)
+    existing = doc_ref.get().to_dict().get("livekit", {}) or {}
+    if "hmac_secret" in existing:
+        livekit_cfg["hmac_secret"] = existing["hmac_secret"]
+        print(f"保留已有 hmac_secret (前 8 字符: {existing['hmac_secret'][:8]}...)")
+
+    doc_ref.update({"livekit": livekit_cfg})
+
+    print(f"\n已写入 bots/{args.bot_name}.livekit:")
+    masked = {k: ("***" if "secret" in k else v) for k, v in livekit_cfg.items()}
+    print(json.dumps(masked, indent=2, ensure_ascii=False))
+    if args.enable:
+        print(f"\nVoice 已启用. 重启 bot 后, 在飞书私聊发 /voice 验证.")
+        if "hmac_secret" not in livekit_cfg:
+            print(f"(首次启动时 bot 会自动生成 hmac_secret 并回写 Firestore)")
+
+
 def cmd_delete(args):
     db = get_db()
     doc_ref = db.collection("bots").document(args.bot_name)
@@ -257,6 +324,29 @@ def main():
     p_set.add_argument("field")
     p_set.add_argument("value")
 
+    # set-livekit (voice IO 配置)
+    p_lk = subparsers.add_parser(
+        "set-livekit",
+        help="Configure voice IO (LiveKit) for a bot — writes bots/{name}.livekit"
+    )
+    p_lk.add_argument("bot_name")
+    p_lk.add_argument("--frontend-url", required=True,
+                      help="Frontend URL, e.g. https://live.example.com (用户飞书 /voice 命令拿到的链接 host)")
+    p_lk.add_argument("--auto-detect", action="store_true",
+                      help="从本机 ~/livekit-server/.api_key / .api_secret 自动读取凭据 "
+                           "(推荐, 避免人工拷贝长字符串)")
+    p_lk.add_argument("--api-key", help="LiveKit API key (--auto-detect 时不用)")
+    p_lk.add_argument("--api-secret", help="LiveKit API secret (--auto-detect 时不用)")
+    p_lk.add_argument("--url", default="",
+                      help="Server signaling URL, 默认 ws://127.0.0.1:7880 "
+                           "(bot 和 livekit-server 同机时用 localhost 即可)")
+    p_lk.add_argument("--vertex-project", default="",
+                      help="GCP Vertex AI project (Gemini STT/TTS 用), 默认从 GOOGLE_CLOUD_PROJECT 推")
+    p_lk.add_argument("--vertex-location", default="",
+                      help="Vertex region, 默认 global")
+    p_lk.add_argument("--enable", action="store_true",
+                      help="启用 voice IO (bot 启动时会拉起 LiveKit worker)")
+
     # delete
     p_del = subparsers.add_parser("delete", help="Delete a bot")
     p_del.add_argument("bot_name")
@@ -271,6 +361,7 @@ def main():
         "add-channel": cmd_add_channel,
         "set-channel": cmd_set_channel,
         "set": cmd_set,
+        "set-livekit": cmd_set_livekit,
         "delete": cmd_delete,
     }
     commands[args.command](args)
