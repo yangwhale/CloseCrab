@@ -417,6 +417,25 @@ def main():
     db = _firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
 
     worker_type = cfg.get("worker_type", "claude")
+
+    # Gemini worker: inject MEMORY.md into system prompt
+    # (Claude Code loads memory automatically; Gemini CLI does not)
+    if worker_type == "gemini":
+        project_name = os.path.expanduser("~").replace("/", "-")
+        memory_dir = Path.home() / ".claude" / "projects" / project_name / "memory"
+        memory_index = memory_dir / "MEMORY.md"
+        if memory_index.exists():
+            try:
+                memory_content = memory_index.read_text(encoding="utf-8")
+                system_prompt += (
+                    f"\n\n## Auto Memory (shared with other bots)\n"
+                    f"以下是持久化记忆索引。需要详细信息时用 read_file 读取 "
+                    f"`{memory_dir}/` 下的具体文件。\n\n"
+                    f"{memory_content}"
+                )
+                log.info(f"  Injected MEMORY.md ({len(memory_content)} chars) into Gemini system prompt")
+            except Exception as e:
+                log.warning(f"  Failed to read MEMORY.md: {e}")
     log.info(f"  worker_type: {worker_type}")
 
     core = BotCore(

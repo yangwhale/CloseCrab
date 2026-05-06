@@ -28,7 +28,7 @@ from .auth import Auth
 from .session import SessionManager
 from .types import UnifiedMessage
 from ..workers.claude_code import ClaudeCodeWorker
-from ..workers.gemini_cli import GeminiCLIWorker
+from ..workers.gemini_acp import GeminiACPWorker
 from ..workers.base import Worker
 
 if TYPE_CHECKING:
@@ -535,7 +535,7 @@ class BotCore:
     def _create_worker(self, session_id: Optional[str] = None) -> Worker:
         """创建 Worker 实例（不启动），根据 worker_type 选择实现。"""
         if self._worker_type == "gemini":
-            return GeminiCLIWorker(
+            return GeminiACPWorker(
                 gemini_bin=shutil.which("gemini") or "gemini",
                 work_dir=self._work_dir,
                 timeout=self._timeout,

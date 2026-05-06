@@ -1,4 +1,5 @@
 ---
+name: paper-explainer
 description: 大白话论文解读 - 将学术论文翻译成通俗易懂的中文解读文档，配有图解、示例代码和知识点补充
 globs: ["*.pdf"]
 mcp:

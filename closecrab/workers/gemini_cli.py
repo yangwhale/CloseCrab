@@ -133,6 +133,31 @@ class GeminiCLIWorker(Worker):
         except Exception as e:
             log.error(f"Failed to write GEMINI.md: {e}")
 
+    @staticmethod
+    def _detect_session_corruption(stderr_data: str) -> bool:
+        """Check if Gemini session is corrupted (API rejected the history)."""
+        corruption_signals = [
+            "function response turn comes immediately after",
+            "INVALID_ARGUMENT",
+            "malformed function call",
+        ]
+        if any(sig in stderr_data for sig in corruption_signals):
+            return True
+        # Also check recent error logs from Gemini CLI
+        import glob
+        now = time.time()
+        for f in glob.glob("/tmp/claude-*/gemini-client-error-*.json"):
+            try:
+                if now - os.path.getmtime(f) > 120:
+                    continue
+                with open(f) as fh:
+                    content = fh.read(2000)
+                if any(sig in content for sig in corruption_signals):
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _build_command(self, text: str) -> list[str]:
         """Build gemini CLI command for a single turn."""
         cmd = [
@@ -359,9 +384,17 @@ class GeminiCLIWorker(Worker):
                 self._proc = None
 
             final_text = "".join(accumulated_text).strip()
+
+            if stderr_data:
+                log.warning(f"Gemini stderr: {stderr_data}")
+
+            if not final_text and self._detect_session_corruption(stderr_data):
+                log.warning("Session corruption detected, resetting for next turn")
+                self._has_sent = False
+                self._session_id = None
+                return "(Session 状态异常，已自动重置。请再说一次)"
+
             if not final_text:
-                if stderr_data:
-                    log.warning(f"Gemini stderr: {stderr_data}")
                 return "(Gemini 处理完成但未生成文字回复)"
 
             return final_text

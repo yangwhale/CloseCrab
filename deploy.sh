@@ -625,6 +625,23 @@ install_cc() {
     cp -a "$SCRIPT_DIR/skills/"* ~/.claude/skills/ 2>/dev/null || true
     echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个)"
 
+    # Gemini CLI skills linking (if gemini CLI is available)
+    if command -v gemini &>/dev/null; then
+        echo "  检测到 Gemini CLI，链接 Skills..."
+        local GEMINI_SKIP="bwrap-bypass session-handoff skill-creator vscode-reference"
+        local gemini_linked=0
+        for skill_dir in "$SCRIPT_DIR/skills/"*/; do
+            local skill_name=$(basename "$skill_dir")
+            if echo "$GEMINI_SKIP" | grep -qw "$skill_name"; then
+                continue
+            fi
+            if [[ -f "$skill_dir/SKILL.md" ]]; then
+                gemini skills link "$skill_dir" --consent 2>/dev/null && ((gemini_linked++)) || true
+            fi
+        done
+        echo "  Gemini Skills 已链接 ($gemini_linked 个)"
+    fi
+
     # ----------------------------------------------------------------
     # 5. Helper Scripts 部署
     # ----------------------------------------------------------------
