@@ -315,6 +315,11 @@ class DiscordChannel(Channel):
                 self._inbox.start(asyncio.get_running_loop())
                 log.info("Firestore Inbox listener started")
 
+            # 启动 Registry 心跳
+            from ..utils.registry import heartbeat_loop
+            inbox_cfg = {"project": self._inbox._project, "database": self._inbox._database} if self._inbox else {}
+            asyncio.ensure_future(heartbeat_loop(self._bot_name, inbox_cfg.get("project"), inbox_cfg.get("database")))
+
         @self._bot.event
         async def on_message(message):
             try:

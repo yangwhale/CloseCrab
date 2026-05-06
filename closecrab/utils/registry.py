@@ -15,10 +15,10 @@
 """Bot self-registration to Firestore bot_registry.
 
 On startup, each bot collects local machine info and updates its record
-in the shared registry. This keeps the registry always up-to-date
-with actual runtime state.
+in the shared registry. Periodic heartbeat keeps last_seen fresh.
 """
 
+import asyncio
 import datetime
 import logging
 import os
@@ -29,6 +29,8 @@ import socket
 import subprocess
 
 log = logging.getLogger("closecrab.registry")
+
+HEARTBEAT_INTERVAL = 600  # update last_seen every 10 minutes
 
 
 def _collect_machine_info(bot_name: str, cfg: dict) -> dict:
@@ -248,3 +250,27 @@ def _register_firestore(bot_name: str, cfg: dict, inbox_cfg: dict):
         log.info(f"Registry updated (Firestore): {bot_name} @ {info['hostname']} ({info['accelerator']})")
     except Exception as e:
         log.warning(f"Firestore registry update error: {e}")
+
+
+async def heartbeat_loop(bot_name: str, project: str = None, database: str = None):
+    """Periodically update last_seen in Firestore registry."""
+    try:
+        from google.cloud import firestore
+    except ImportError:
+        return
+
+    from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+    project = project or FIRESTORE_PROJECT
+    database = database or FIRESTORE_DATABASE
+
+    db = firestore.Client(project=project, database=database)
+    ref = db.collection("registry").document(bot_name)
+
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        try:
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            ref.set({"last_seen": now, "status": "online"}, merge=True)
+            log.debug(f"Heartbeat: {bot_name} last_seen={now}")
+        except Exception as e:
+            log.warning(f"Heartbeat update failed: {e}")

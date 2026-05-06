@@ -32,6 +32,8 @@ from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
 
 log = logging.getLogger(__name__)
 
+RESUBSCRIBE_INTERVAL = 3600  # re-subscribe every 1 hour to prevent silent gRPC disconnect
+
 
 class FirestoreInbox:
     """Bot-to-bot inbox backed by Firestore with real-time snapshot listener.
@@ -61,6 +63,7 @@ class FirestoreInbox:
         self._listener = None  # snapshot listener unsubscribe handle
         self._loop: asyncio.AbstractEventLoop | None = None
         self._processed_docs: collections.deque[str] = collections.deque(maxlen=1000)
+        self._resubscribe_task: asyncio.Task | None = None
 
     def set_handler(self, handler):
         """Set callback: async fn(from_bot, instruction, doc_id, task_id)"""
@@ -71,17 +74,38 @@ class FirestoreInbox:
         if self._listener:
             return
         self._loop = loop
+        self._subscribe()
+        self._resubscribe_task = asyncio.run_coroutine_threadsafe(
+            self._periodic_resubscribe(), loop
+        )
+        log.info(f"FirestoreInbox started: bot={self._bot_name}, db={self._database}")
 
+    def _subscribe(self):
+        """Subscribe to Firestore on_snapshot for pending messages."""
         query = (
             self._messages
             .where("to", "==", self._bot_name)
             .where("status", "==", "pending")
         )
         self._listener = query.on_snapshot(self._on_snapshot)
-        log.info(f"FirestoreInbox started: bot={self._bot_name}, db={self._database}")
+
+    async def _periodic_resubscribe(self):
+        """Periodically re-subscribe to guard against silent gRPC stream disconnect."""
+        while True:
+            await asyncio.sleep(RESUBSCRIBE_INTERVAL)
+            try:
+                if self._listener:
+                    self._listener.unsubscribe()
+                self._subscribe()
+                log.info("FirestoreInbox re-subscribed (periodic)")
+            except Exception as e:
+                log.error(f"FirestoreInbox re-subscribe failed: {e}")
 
     def stop(self):
-        """Unsubscribe the snapshot listener."""
+        """Unsubscribe the snapshot listener and cancel periodic task."""
+        if self._resubscribe_task and not self._resubscribe_task.done():
+            self._resubscribe_task.cancel()
+            self._resubscribe_task = None
         if self._listener:
             self._listener.unsubscribe()
             self._listener = None
