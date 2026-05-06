@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live2D Emotion Demo</title>
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Noto+Sans+SC:wght@400;500&family=Roboto+Mono:wght@400&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Google Sans', 'Noto Sans SC', system-ui, sans-serif;
+            background: #f8f9fa;
+            color: #202124;
+            min-height: 100vh;
+        }
+        header {
+            background: linear-gradient(135deg, #1a73e8 0%, #6c47ff 100%);
+            color: white;
+            padding: 16px 24px;
+            text-align: center;
+        }
+        header h1 { font-size: 20px; font-weight: 500; }
+        header p { font-size: 12px; opacity: 0.8; margin-top: 2px; }
+        main { max-width: 780px; margin: 0 auto; padding: 20px 16px 40px; }
+
+        .canvas-wrapper {
+            position: relative;
+            width: 100%;
+            height: 560px;
+            background: linear-gradient(160deg, #e0f2f1 0%, #e8eaf6 50%, #e3f2fd 100%);
+            transition: background 0.6s ease;
+            border-radius: 16px 16px 0 0;
+            overflow: hidden;
+        }
+        #live2d-canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+
+        .loading-overlay {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background: rgba(255,255,255,0.85); backdrop-filter: blur(4px);
+            transition: opacity 0.6s ease; z-index: 10;
+        }
+        .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid #dadce0; border-top-color: #1a73e8;
+            border-radius: 50%; animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loading-text { margin-top: 12px; color: #5f6368; font-size: 13px; }
+
+        .emotion-bar {
+            display: flex; align-items: center; justify-content: center;
+            gap: 6px; padding: 12px 16px;
+            background: white; border-bottom: 1px solid #e8eaed; flex-wrap: wrap;
+        }
+        .emotion-icon { font-size: 26px; transition: transform 0.3s; }
+        .emotion-icon.bounce { animation: bounce 0.5s ease; }
+        @keyframes bounce { 0%,100%{transform:scale(1)} 50%{transform:scale(1.3)} }
+        .emotion-name { font-size: 15px; font-weight: 500; color: #1a73e8; margin-left: 4px; }
+        .tts-tag {
+            font-family: 'Roboto Mono', monospace; font-size: 11px;
+            padding: 2px 8px; background: #e8f0fe; color: #1967d2;
+            border-radius: 100px; margin-left: 6px;
+        }
+
+        .controls {
+            padding: 12px 16px; background: white;
+            display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+            border-radius: 0 0 16px 16px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+        }
+        .emotion-btn {
+            padding: 7px 12px; border: 2px solid #dadce0; border-radius: 100px;
+            background: white; color: #3c4043; font-size: 12px;
+            font-family: inherit; cursor: pointer; transition: all 0.2s;
+            user-select: none; white-space: nowrap;
+        }
+        .emotion-btn:hover { border-color: #1a73e8; color: #1a73e8; background: #e8f0fe; }
+        .emotion-btn.active { border-color: #1a73e8; background: #1a73e8; color: white; }
+
+        .tag-input-card {
+            margin-top: 20px; padding: 20px; background: white;
+            border-radius: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+        }
+        .tag-input-card h2 {
+            font-size: 15px; font-weight: 500; margin-bottom: 10px;
+        }
+        .tag-input-card h2::before {
+            content: ''; display: inline-block;
+            width: 4px; height: 14px; background: #1a73e8;
+            border-radius: 2px; margin-right: 8px; vertical-align: middle;
+        }
+        .tag-input-row { display: flex; gap: 8px; }
+        .tag-input-row input {
+            flex: 1; padding: 8px 14px; border: 1px solid #dadce0;
+            border-radius: 8px; font-family: 'Roboto Mono', monospace;
+            font-size: 13px; outline: none;
+        }
+        .tag-input-row input:focus { border-color: #1a73e8; }
+        .tag-input-row button {
+            padding: 8px 18px; background: #1a73e8; color: white;
+            border: none; border-radius: 8px; font-size: 13px;
+            font-family: inherit; cursor: pointer;
+        }
+        .tag-input-row button:hover { background: #1557b0; }
+        .tag-result { margin-top: 8px; font-size: 12px; color: #5f6368; min-height: 18px; }
+
+        .error-banner {
+            margin: 16px 0; padding: 14px; background: #fce8e6;
+            border-radius: 8px; color: #c5221f; font-size: 13px; display: none;
+        }
+
+        footer {
+            text-align: center; padding: 24px 16px; color: #9aa0a6; font-size: 11px;
+        }
+        footer a { color: #1a73e8; text-decoration: none; }
+
+        @media (max-width: 480px) {
+            .canvas-wrapper { height: 400px; }
+            .emotion-btn { padding: 6px 10px; font-size: 11px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Live2D Emotion System Demo</h1>
+        <p>引用本地 live2d-emotion.js 模块 &middot; 模型资源自托管</p>
+    </header>
+
+    <main>
+        <div class="canvas-wrapper" id="canvasWrapper">
+            <canvas id="live2d-canvas"></canvas>
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="spinner"></div>
+                <div class="loading-text" id="loadingText">正在加载 Live2D 引擎...</div>
+            </div>
+        </div>
+
+        <div class="emotion-bar" id="emotionBar">
+            <span class="emotion-icon" id="emotionIcon">⏳</span>
+            <span class="emotion-name" id="emotionName">加载中</span>
+            <span class="tts-tag" id="ttsTag" style="display:none"></span>
+        </div>
+
+        <div class="controls" id="controls"></div>
+
+        <div class="error-banner" id="errorBanner"></div>
+
+        <div class="tag-input-card">
+            <h2>TTS Tag 测试</h2>
+            <p style="font-size:12px;color:#5f6368;margin-bottom:10px;">
+                输入 Gemini TTS 文本（如 <code>[excited] 太棒了！</code>），模拟 Agent 推送情绪
+            </p>
+            <div class="tag-input-row">
+                <input type="text" id="tagInput" placeholder="[happy] 你好呀" />
+                <button id="tagBtn">发送</button>
+            </div>
+            <div class="tag-result" id="tagResult"></div>
+        </div>
+    </main>
+
+    <footer>
+        Model: Jin Natori &copy; <a href="https://www.live2d.com/en/learn/sample/" target="_blank">Live2D Inc.</a>
+        &middot; <a href="https://github.com/guansss/pixi-live2d-display" target="_blank">pixi-live2d-display</a>
+    </footer>
+
+    <!-- Dependencies (order matters) -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+    <script>window.PIXI = PIXI;</script>
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+    <!-- Our module -->
+    <script src="live2d-emotion.js"></script>
+
+    <script>
+    (async function() {
+        'use strict';
+
+        // Model URL: relative path to self-hosted assets
+        // In production, point to your CDN or local server
+        const MODEL_URL = '../../assets/live2d/natori/Natori.model3.json';
+
+        const canvas  = document.getElementById('live2d-canvas');
+        const wrapper = document.getElementById('canvasWrapper');
+        const overlay = document.getElementById('loadingOverlay');
+        const loadingText = document.getElementById('loadingText');
+        const emotionIcon = document.getElementById('emotionIcon');
+        const emotionName = document.getElementById('emotionName');
+        const ttsTagEl    = document.getElementById('ttsTag');
+        const errorBanner = document.getElementById('errorBanner');
+        const controlsEl  = document.getElementById('controls');
+
+        // Build emotion buttons dynamically from module
+        const emotions = window.LIVE2D_EMOTIONS;
+        for (const [key, emo] of Object.entries(emotions)) {
+            const btn = document.createElement('button');
+            btn.className = 'emotion-btn' + (key === 'calm' ? ' active' : '');
+            btn.dataset.emotion = key;
+            btn.textContent = `${emo.icon} ${emo.name}`;
+            controlsEl.appendChild(btn);
+        }
+
+        try {
+            loadingText.textContent = '下载 Natori 模型...';
+
+            const live2d = new Live2DEmotion(canvas, wrapper, MODEL_URL);
+
+            live2d.onEmotionChange = (key, emo) => {
+                emotionIcon.textContent = emo.icon;
+                emotionName.textContent = emo.name;
+                ttsTagEl.textContent = emo.ttsTags.join(' ');
+                ttsTagEl.style.display = 'inline-block';
+
+                emotionIcon.classList.remove('bounce');
+                void emotionIcon.offsetWidth;
+                emotionIcon.classList.add('bounce');
+
+                document.querySelectorAll('.emotion-btn').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.emotion === key);
+                });
+            };
+
+            await live2d.init();
+            overlay.classList.add('hidden');
+
+            // Button clicks
+            document.querySelectorAll('.emotion-btn').forEach(btn => {
+                btn.addEventListener('click', () => live2d.setEmotion(btn.dataset.emotion));
+            });
+
+            // Tag input test
+            const tagInput = document.getElementById('tagInput');
+            const tagBtn   = document.getElementById('tagBtn');
+            const tagResult = document.getElementById('tagResult');
+
+            function handleTagInput() {
+                const text = tagInput.value.trim();
+                if (!text) return;
+                const key = live2d.extractAndSetEmotion(text);
+                const emo = live2d.getEmotionConfig(key);
+                tagResult.textContent = `→ 解析到 [${key}]，切换表情: ${emo.expression}`;
+            }
+
+            tagBtn.addEventListener('click', handleTagInput);
+            tagInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') handleTagInput();
+            });
+
+        } catch (err) {
+            console.error('Live2D init failed:', err);
+            overlay.classList.add('hidden');
+            errorBanner.style.display = 'block';
+            errorBanner.textContent = 'Live2D 加载失败: ' + err.message;
+        }
+    })();
+    </script>
+</body>
+</html>

@@ -6,6 +6,15 @@
 **角色**: Jin Natori（男性，Cubism 4）
 **更新**: 2026-05-06
 
+### 项目内文件
+
+| 文件 | 用途 |
+|---|---|
+| `closecrab/voice/web/live2d-emotion.js` | 可复用的 JS 模块（`Live2DEmotion` 类） |
+| `closecrab/voice/web/live2d-demo.html` | 引用本地模块的工作 Demo |
+| `assets/live2d/natori/` | Natori 模型资源（自托管，不依赖外部 CDN） |
+| `scripts/download-live2d-models.sh` | 模型下载脚本（支持下载其他角色） |
+
 ---
 
 ## 1. 架构
