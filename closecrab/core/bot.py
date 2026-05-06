@@ -129,9 +129,17 @@ class BotCore:
         # 这是物理上比 tool hint 更早的信号 (Claude 总是先文字后 tool),
         # 用户体验上接近"立刻应答"。
         # callback 签名: async (text: str) -> None
-        # 触发条件: 任何 tool_use 出现 *前* 的第一段非空 text, 仅一次。
+        #
+        # 触发条件: 缓存第一段 text, *仅* 在后续真的见到 tool_use 时才 fire。
+        # 关键: 没 tool_use 的简单问答场景 (例如"现在几点"), 整段回复就是 final,
+        # 不该 fire opening — 否则 voice 会先念 opening 再念 final 一次, 重复。
+        # 由 final chunk (step 5) 唯一负责推 TTS。
         on_voice_opening_text = msg.metadata.get("on_voice_opening_text")
-        _voice_open_state = {"text_pushed": False, "tool_use_seen": False}
+        _voice_open_state = {
+            "text_pushed": False,        # opening 已 fire (避免重复 fire)
+            "tool_use_seen": False,      # 标记已经见到 tool_use
+            "pending_opening": "",       # 缓存的第一段 text, 等 tool_use 来才 fire
+        }
 
         # 收集中间步骤用于 Firestore 日志
         steps: list[str] = []
@@ -245,17 +253,27 @@ class BotCore:
                 for block in d.get("message", {}).get("content", []):
                     bt = block.get("type", "")
                     if bt == "text":
+                        # 缓存第一段 text (不 fire), 等真的见到 tool_use 再 fire。
+                        # 没 tool_use 时 pending_opening 永远不会被消费, final
+                        # chunk 单独推, 不重复。
                         if (on_voice_opening_text
                                 and not _voice_open_state["text_pushed"]
-                                and not _voice_open_state["tool_use_seen"]):
+                                and not _voice_open_state["tool_use_seen"]
+                                and not _voice_open_state["pending_opening"]):
                             text = (block.get("text", "") or "").strip()
                             if text:
-                                _voice_open_state["text_pushed"] = True
-                                try:
-                                    await on_voice_opening_text(text)
-                                except Exception as e:
-                                    log.debug(f"on_voice_opening_text callback failed: {e}")
+                                _voice_open_state["pending_opening"] = text
                     elif bt == "tool_use":
+                        # 见到 tool_use, 把缓存的 opening 推出去 (一次性)。
+                        if (on_voice_opening_text
+                                and not _voice_open_state["text_pushed"]
+                                and _voice_open_state["pending_opening"]):
+                            _voice_open_state["text_pushed"] = True
+                            opening = _voice_open_state["pending_opening"]
+                            try:
+                                await on_voice_opening_text(opening)
+                            except Exception as e:
+                                log.debug(f"on_voice_opening_text callback failed: {e}")
                         _voice_open_state["tool_use_seen"] = True
                         if on_tool_use:
                             tname = block.get("name", "")

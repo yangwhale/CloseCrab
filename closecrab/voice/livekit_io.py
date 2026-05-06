@@ -491,13 +491,43 @@ class _CloseCrabStream(llm.LLMStream):
         # 剥掉 opening: 如果开场白已经在 progressive 阶段被推过 TTS,
         # final speech_text 开头那段就是重复的, 念两次很尬。
         # opening_state 在 _do_feishu_side closure 里被填, 这里读到。
-        # 用 lstrip 容差 (空白) + startswith 精确匹配剥离。
+        #
+        # 容差: BotCore 给的 opening 已经 strip 过, feishu_text 开头可能有 \n 或
+        # 多余空白。Claude 也可能在 opening 末尾自带句号但 worker 拼装时去掉,
+        # 所以两边末尾标点也可能不一致。用归一化的方式比较: 去空白 + 末尾连续句末
+        # 标点合并成一个再做 startswith。
         opening = opening_state.get("pushed_text", "")
         if opening:
+            def _norm(s: str) -> str:
+                # 去掉所有空白 (含 \n \r \t 全角空格)
+                s = re.sub(r"\s+", "", s)
+                # 末尾连续句末标点合并 (`。。` -> `。`, `？！` -> `？`)
+                s = re.sub(r"[。.？?！!]+$", "。", s) if s else s
+                return s
+
+            norm_opening = _norm(opening)
             stripped = speech_text.lstrip()
-            if stripped.startswith(opening):
-                speech_text = stripped[len(opening):].lstrip()
-                log.info(f"voice: stripped opening prefix ({len(opening)} chars) from final")
+            norm_stripped = _norm(stripped)
+            if norm_opening and norm_stripped.startswith(norm_opening):
+                # 在 raw stripped 里向前推进 N 个非空白字符 (+ 跳过末尾标点容差)
+                # 直到匹配 norm_opening 长度. 这样能正确处理含空白/标点差异的位置。
+                target_len = len(norm_opening)
+                count = 0
+                cut = 0
+                for i, ch in enumerate(stripped):
+                    if not ch.isspace():
+                        count += 1
+                    if count >= target_len:
+                        cut = i + 1
+                        break
+                if cut > 0:
+                    speech_text = stripped[cut:].lstrip()
+                    log.info(f"voice: stripped opening prefix ({cut} chars raw, "
+                             f"{target_len} chars normalized) from final")
+            else:
+                log.info(f"voice: opening prefix mismatch — opening_norm[:60]="
+                         f"{norm_opening[:60]!r} speech_norm[:60]={norm_stripped[:60]!r}, "
+                         f"will push full final (may duplicate)")
 
         if not speech_text.strip():
             # opening 推过 + 没有更多内容 → 别再 push 一个空 chunk,
@@ -765,6 +795,18 @@ async def _voice_entrypoint(ctx: JobContext):
 
     await session.start(agent=agent, room=ctx.room)
     # 不主动打招呼 — 等用户说话
+
+    # 兜底显式 publish lk.agent.state="listening" 到 local_participant attribute。
+    # SDK 内部 AgentSession.start() 完成会 emit "agent_state_changed" event,
+    # RoomIO 监听后调 set_attributes —— 但实测前端的 useAgent hook 在 20s 内常
+    # 收不到 (timing 不稳, SDK 1.5.x 已知现象)。frontend 没收到就显示
+    # "Agent state warning: did not complete initializing"。
+    # 这里多 publish 一次, set_attributes 是覆盖语义所以无害。
+    try:
+        await ctx.room.local_participant.set_attributes({"lk.agent.state": "listening"})
+        log.info("voice: published lk.agent.state=listening (manual fallback)")
+    except Exception as e:
+        log.warning(f"voice: failed to publish agent state attribute: {e}")
 
     # 阻塞 entrypoint 直到 participant 断开 (LiveKit 1.5.x 合约)
     log.info(f"Voice job holding for disconnect: {identity}")
