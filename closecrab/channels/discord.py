@@ -338,7 +338,7 @@ class DiscordChannel(Channel):
             embed.add_field(name="Status", value="Online", inline=True)
             embed.add_field(name="Active Workers", value=str(info.get("active_workers", 0)), inline=True)
             embed.add_field(name="Model", value=str(info.get("backbone_model", "unknown")), inline=True)
-            embed.add_field(name="STT Engine", value=str(info.get("stt_engine", "unknown")), inline=True)
+            embed.add_field(name="Worker", value=str(info.get("worker_type", "claude")), inline=True)
             embed.set_footer(text=f"Checked at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             await ctx.respond(embed=embed)
 

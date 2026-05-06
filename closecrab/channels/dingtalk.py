@@ -477,7 +477,7 @@ class DingTalkChannel(Channel):
                 f"**Status:** Online\n"
                 f"**Workers:** {info.get('active_workers', 0)}\n"
                 f"**Model:** {info.get('backbone_model', '?')}\n"
-                f"**STT:** {info.get('stt_engine', '?')}\n\n"
+                f"**Worker:** {info.get('worker_type', 'claude')}\n\n"
                 f"---\nChecked at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
             await self._async_reply_markdown(msg, "Status", status_md)

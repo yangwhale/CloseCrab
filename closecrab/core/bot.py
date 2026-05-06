@@ -28,6 +28,8 @@ from .auth import Auth
 from .session import SessionManager
 from .types import UnifiedMessage
 from ..workers.claude_code import ClaudeCodeWorker
+from ..workers.gemini_cli import GeminiCLIWorker
+from ..workers.base import Worker
 
 if TYPE_CHECKING:
     from ..channels.base import Channel
@@ -63,6 +65,7 @@ class BotCore:
         bot_name: str = "default",
         state_dir: str | None = None,
         db: Optional["FirestoreClient"] = None,
+        worker_type: str = "claude",
     ):
         self.auth = auth
         self.session_mgr = session_mgr
@@ -75,9 +78,10 @@ class BotCore:
         self._stt_engine_name = stt_engine_name
         self._backbone_model = backbone_model
         self._db = db
+        self._worker_type = worker_type
 
-        # user_key -> ClaudeCodeWorker
-        self._workers: dict[str, ClaudeCodeWorker] = {}
+        # user_key -> Worker (ClaudeCodeWorker or GeminiCLIWorker)
+        self._workers: dict[str, Worker] = {}
         # user_key -> asyncio.Lock (防并发 get_or_create)
         self._locks: dict[str, asyncio.Lock] = {}
         # Channel 实例引用（on_channel_ready 时设置）
@@ -431,6 +435,7 @@ class BotCore:
             "stt_engine": self._stt_engine_name,
             "claude_bin": self._claude_bin,
             "work_dir": self._work_dir,
+            "worker_type": self._worker_type,
         }
 
     def get_context_usage(self, user_key: str) -> Optional[dict]:
@@ -488,7 +493,7 @@ class BotCore:
 
     # -- 内部方法 --
 
-    async def _get_or_create_worker(self, user_key: str) -> ClaudeCodeWorker:
+    async def _get_or_create_worker(self, user_key: str) -> Worker:
         """获取或创建用户的 Worker（线程安全）。"""
         if user_key not in self._locks:
             self._locks[user_key] = asyncio.Lock()
@@ -514,21 +519,29 @@ class BotCore:
                     pass
 
             worker = self._create_worker(session_id=session_id)
-            # 设置后台结果回调，reader task 会在 idle 时自动投递给用户
-            if self._channel:
+            if self._channel and hasattr(worker, "set_bg_result_callback"):
                 async def _bg_cb(text, uk=user_key):
                     if self._channel and text.strip():
                         await self._channel.send_to_user(uk, text)
                 worker.set_bg_result_callback(_bg_cb)
             await worker.start()
             self._workers[user_key] = worker
-            log.info(f"Worker created: session_id={worker.session_id}, "
+            log.info(f"Worker created: type={self._worker_type}, "
+                     f"session_id={worker.session_id}, "
                      f"alive={worker.is_alive()}, resume={'yes' if session_id else 'no'}")
 
             return worker
 
-    def _create_worker(self, session_id: Optional[str] = None) -> ClaudeCodeWorker:
-        """创建 Worker 实例（不启动）。"""
+    def _create_worker(self, session_id: Optional[str] = None) -> Worker:
+        """创建 Worker 实例（不启动），根据 worker_type 选择实现。"""
+        if self._worker_type == "gemini":
+            return GeminiCLIWorker(
+                gemini_bin=shutil.which("gemini") or "gemini",
+                work_dir=self._work_dir,
+                timeout=self._timeout,
+                system_prompt=self._system_prompt,
+                session_id=session_id,
+            )
         return ClaudeCodeWorker(
             claude_bin=self._claude_bin,
             work_dir=self._work_dir,

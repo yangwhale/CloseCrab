@@ -112,6 +112,7 @@ def _resolve_config(bot_name: str) -> dict:
         "auto_respond_chats": set(str(x) for x in cfg.get("auto_respond_chats", [])),
         "log_chat_id": cfg.get("log_chat_id", ""),
         "accelerator_override": cfg.get("accelerator_override", ""),
+        "worker_type": cfg.get("worker_type", "claude"),
         # LiveKit voice IO 配置 (仅飞书 channel 用): {url, api_key, api_secret, frontend_url, enabled}
         "livekit": cfg.get("livekit") or {},
     }
@@ -415,6 +416,9 @@ def main():
     from google.cloud import firestore as _firestore
     db = _firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
 
+    worker_type = cfg.get("worker_type", "claude")
+    log.info(f"  worker_type: {worker_type}")
+
     core = BotCore(
         auth=auth,
         session_mgr=session_mgr,
@@ -427,6 +431,7 @@ def main():
         bot_name=bot_name,
         state_dir=cfg["state_dir"],
         db=db,
+        worker_type=worker_type,
     )
 
     # 根据 channel 类型实例化 Channel

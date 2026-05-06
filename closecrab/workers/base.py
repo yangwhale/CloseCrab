@@ -32,10 +32,25 @@ class Worker(ABC):
         ...
 
     @abstractmethod
+    async def interrupt(self) -> bool:
+        """中断当前执行，保留 session"""
+        ...
+
+    @abstractmethod
     def is_alive(self) -> bool:
         ...
 
     @property
     @abstractmethod
+    def is_busy(self) -> bool:
+        ...
+
+    @property
+    @abstractmethod
     def session_id(self) -> Optional[str]:
+        ...
+
+    @abstractmethod
+    def get_context_usage(self) -> dict:
+        """返回 context/token 用量"""
         ...

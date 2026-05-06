@@ -107,6 +107,7 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
         "inbox": data.get("inbox"),
         "email": data.get("email"),
         "accelerator_override": data.get("accelerator_override", ""),
+        "worker_type": data.get("worker_type", "claude"),
         # LiveKit voice IO 配置 (顶层, 跟 channel 解耦):
         # {url, api_key, api_secret, frontend_url, enabled}
         "livekit": data.get("livekit") or {},

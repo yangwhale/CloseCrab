@@ -2432,7 +2432,7 @@ class FeishuChannel(Channel):
                         {"is_short": True, "text": {"tag": "lark_md", "content": f"**Status:** Online"}},
                         {"is_short": True, "text": {"tag": "lark_md", "content": f"**Workers:** {info.get('active_workers', 0)}"}},
                         {"is_short": True, "text": {"tag": "lark_md", "content": f"**Model:** {info.get('backbone_model', '?')}"}},
-                        {"is_short": True, "text": {"tag": "lark_md", "content": f"**STT:** {info.get('stt_engine', '?')}"}},
+                        {"is_short": True, "text": {"tag": "lark_md", "content": f"**Worker:** {info.get('worker_type', 'claude')}"}},
                     ],
                 },
                 {"tag": "hr"},
