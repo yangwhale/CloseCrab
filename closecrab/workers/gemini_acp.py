@@ -904,7 +904,12 @@ class GeminiACPWorker(Worker):
         if not self._system_prompt:
             return
         gemini_md = Path(self._work_dir) / "GEMINI.md"
-        injected = f"{self._GEMINI_MD_BEGIN}\n{self._system_prompt}\n{self._GEMINI_MD_END}"
+        injected = (
+            f"{self._GEMINI_MD_BEGIN}\n"
+            f"<!-- 此区域由 CloseCrab 自动管理，每次启动自动更新。请勿手动编辑。 -->\n"
+            f"{self._system_prompt}\n"
+            f"{self._GEMINI_MD_END}"
+        )
         try:
             if gemini_md.exists():
                 existing = gemini_md.read_text(encoding="utf-8")
