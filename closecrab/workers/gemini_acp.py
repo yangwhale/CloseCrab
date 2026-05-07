@@ -532,6 +532,14 @@ class GeminiACPWorker(Worker):
                         self._usage["cache_read_input_tokens"] = tc.get(
                             "cache_read_input_tokens", 0)
                     self._usage["turns"] += 1
+
+                    # Extract text from final response as fallback
+                    result_content = result.get("content", [])
+                    if result_content:
+                        result_text = self._extract_content_text(result_content)
+                        if result_text and result_text.strip():
+                            accumulated_text.append(result_text)
+
                     log.info(f"ACP prompt done: stop={result.get('stopReason')}, "
                              f"in={tc.get('input_tokens', 0)}, "
                              f"out={tc.get('output_tokens', 0)}")
@@ -568,6 +576,8 @@ class GeminiACPWorker(Worker):
 
             final_text = "".join(accumulated_text).strip()
             if not final_text:
+                log.warning("ACP prompt completed with no accumulated text "
+                            f"(turns={self._usage['turns']})")
                 return "(Gemini 处理完成但未生成文字回复)"
             return final_text
 
@@ -611,9 +621,9 @@ class GeminiACPWorker(Worker):
         update = params.get("update", params)
         update_type = update.get("sessionUpdate", "")
         content = update.get("content", {})
-        text = content.get("text", "") if isinstance(content, dict) else ""
+        text = self._extract_content_text(content)
 
-        if update_type == "agent_message_chunk":
+        if update_type in ("agent_message_chunk", "agent_message"):
             if text:
                 accumulated_text.append(text)
                 cc_event = self._translate_text_event(text)
@@ -627,7 +637,7 @@ class GeminiACPWorker(Worker):
                     if preview.strip():
                         await self._safe_callback(on_log, f"💬 {preview}", name="on_log")
 
-        elif update_type == "agent_thought_chunk":
+        elif update_type in ("agent_thought_chunk", "agent_thought"):
             if on_event and text:
                 await self._safe_callback(on_event, f"thinking: {text[:60]}", name="on_event")
 
