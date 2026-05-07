@@ -156,35 +156,85 @@ def _ensure_gemini_api_key():
             pass
 
 
-def generate_gemini(text: str, voice: str) -> str:
-    """Generate OGG Opus audio via Gemini 3.1 Flash TTS."""
-    from google import genai
-    from google.genai import types
+def _generate_gemini_sdk(text: str, voice_name: str, api_key: str) -> bytes | None:
+    """Try generating audio via Python genai SDK. Returns raw PCM bytes or None."""
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-tts-preview",
+            contents=text,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice_name,
+                        )
+                    )
+                ),
+            ),
+        )
+        part = response.candidates[0].content.parts[0]
+        if part.inline_data and part.inline_data.data:
+            data = part.inline_data.data
+            return base64.b64decode(data) if isinstance(data, str) else data
+    except Exception:
+        pass
+    return None
 
+
+def _generate_gemini_curl(text: str, voice_name: str, api_key: str) -> bytes | None:
+    """Fallback: generate audio via curl REST API (bypasses ECP proxy)."""
+    import subprocess, json
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": voice_name}
+                }
+            }
+        }
+    })
+    try:
+        result = subprocess.run(
+            ["curl", "-s",
+             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent",
+             "-H", f"x-goog-api-key: {api_key}",
+             "-H", "Content-Type: application/json",
+             "-d", payload],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            return None
+        resp = json.loads(result.stdout)
+        b64_data = resp["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        return base64.b64decode(b64_data)
+    except Exception:
+        return None
+
+
+def generate_gemini(text: str, voice: str) -> str:
+    """Generate OGG Opus audio via Gemini 3.1 Flash TTS.
+    Tries Python SDK first; falls back to curl if SDK returns text (ECP proxy issue).
+    """
     _ensure_gemini_api_key()
     api_key = os.environ.get("GEMINI_API_KEY", "")
-    client = genai.Client(api_key=api_key)
     voice_name = GEMINI_VOICES.get(voice, voice.capitalize())
     prompt = _build_prompt(text)
 
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-tts-preview",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice_name,
-                    )
-                )
-            ),
-        ),
-    )
+    # Try SDK first (works on VMs without ECP proxy)
+    data = _generate_gemini_sdk(prompt, voice_name, api_key)
 
-    data = response.candidates[0].content.parts[0].inline_data.data
-    if isinstance(data, str):
-        data = base64.b64decode(data)
+    # Fallback to curl REST API (bypasses gLinux ECP proxy)
+    if data is None:
+        data = _generate_gemini_curl(prompt, voice_name, api_key)
+
+    if data is None:
+        raise RuntimeError("Gemini TTS failed via both SDK and curl")
 
     wav_path = tempfile.mktemp(suffix=".wav", prefix="tts-")
     _wav_write(wav_path, data)
