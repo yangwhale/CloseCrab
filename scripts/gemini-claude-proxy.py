@@ -10,15 +10,16 @@ Env vars:
     VERTEX_LOCATION  Vertex AI location (default: global)
     PROXY_PORT       Listen port (default: 8888)
 
-Model mapping (Gemini CLI model name → Claude model):
-    gemini-2.5-pro   → claude-opus-4-6
-    gemini-2.5-flash → claude-sonnet-4-6
+Model mapping (fuzzy substring match, priority order):
+    *pro*   → claude-opus-4-6    (main reasoning)
+    *flash* → claude-sonnet-4-6  (helper / agent delegation)
+    default → claude-sonnet-4-6
 
 Usage:
     python3 gemini-claude-proxy.py &
-    GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8888" GEMINI_API_KEY=dummy gemini -m gemini-2.5-pro
+    GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8888" GEMINI_API_KEY=dummy gemini
 """
-import json, http.server, urllib.request, ssl, sys, re, os, traceback
+import json, http.server, urllib.request, ssl, sys, re, os, time, traceback
 import google.auth
 import google.auth.transport.requests
 
@@ -26,15 +27,28 @@ PROJECT = os.environ.get("VERTEX_PROJECT", "chris-pgp-host")
 LOCATION = os.environ.get("VERTEX_LOCATION", "global")
 PORT = int(os.environ.get("PROXY_PORT", "8888"))
 
-MODEL_MAP = {
-    "gemini-2.5-pro": "claude-opus-4-6",
-    "gemini-2.5-flash": "claude-sonnet-4-6",
-}
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+TOOL_WARN_THRESHOLD = 80
 
 ssl_ctx = ssl.create_default_context()
 _creds = None
 _auth_req = None
+
+
+def map_model(gemini_model: str) -> str:
+    """Map Gemini model name to Claude model via substring matching.
+
+    Gemini CLI uses versioned names internally:
+      gemini-3.1-pro-preview, gemini-3.1-pro-preview-customtools → opus
+      gemini-3-flash-preview, gemini-2.5-flash-lite              → sonnet
+    """
+    name = gemini_model.lower()
+    if "pro" in name:
+        return "claude-opus-4-6"
+    if "flash" in name:
+        return "claude-sonnet-4-6"
+    return DEFAULT_MODEL
 
 
 def get_token():
@@ -73,14 +87,9 @@ def convert_tools(gemini_tools):
 # ── Gemini contents → Claude messages ────────────────────────────────
 
 def convert_contents(contents):
-    """Convert Gemini contents (with functionCall/functionResponse) → Claude messages.
-
-    Returns (messages, call_id_map) where call_id_map tracks functionCall name→id
-    for matching functionResponse → tool_result.
-    """
+    """Convert Gemini contents (with functionCall/functionResponse) → Claude messages."""
     messages = []
     call_counter = 0
-    # Stack of (id, name) for matching functionResponse to tool_use_id
     pending_calls = []
 
     for content in contents:
@@ -108,7 +117,6 @@ def convert_contents(contents):
 
             elif "functionResponse" in part:
                 fr = part["functionResponse"]
-                # Find matching call_id by name
                 matched_id = None
                 for i, (cid, cname) in enumerate(pending_calls):
                     if cname == fr["name"]:
@@ -133,7 +141,6 @@ def convert_contents(contents):
         if not claude_content:
             continue
 
-        # Claude requires tool_result blocks in user messages
         has_tool_result = any(b.get("type") == "tool_result" for b in claude_content)
         has_tool_use = any(b.get("type") == "tool_use" for b in claude_content)
 
@@ -144,7 +151,6 @@ def convert_contents(contents):
         else:
             msg_role = role
 
-        # Merge consecutive same-role messages (Claude requires alternating roles)
         if messages and messages[-1]["role"] == msg_role:
             prev = messages[-1]["content"]
             if isinstance(prev, str):
@@ -154,7 +160,6 @@ def convert_contents(contents):
         else:
             messages.append({"role": msg_role, "content": claude_content})
 
-    # Simplify single-text-block content to string
     for msg in messages:
         if isinstance(msg["content"], list) and len(msg["content"]) == 1 and msg["content"][0].get("type") == "text":
             msg["content"] = msg["content"][0]["text"]
@@ -185,7 +190,6 @@ def to_anthropic(req, gemini_tools):
     if system:
         body["system"] = system
 
-    # Add converted tools
     claude_tools = convert_tools(gemini_tools) if gemini_tools else []
     if claude_tools:
         body["tools"] = claude_tools
@@ -195,7 +199,6 @@ def to_anthropic(req, gemini_tools):
         body["temperature"] = gc["temperature"]
     if "maxOutputTokens" in gc:
         body["max_tokens"] = gc["maxOutputTokens"]
-    # Drop topP, topK, thinkingConfig — Claude doesn't support these
 
     return body
 
@@ -203,10 +206,7 @@ def to_anthropic(req, gemini_tools):
 # ── Claude response → Gemini response ───────────────────────────────
 
 def from_anthropic(resp, gemini_model):
-    """Convert Anthropic Messages API response → Gemini API response.
-
-    Handles both text and tool_use content blocks.
-    """
+    """Convert Anthropic Messages API response → Gemini API response."""
     parts = []
     for block in resp.get("content", []):
         if block.get("type") == "text":
@@ -271,7 +271,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         gemini_model = m.group(1)
         is_stream = m.group(2) == "stream"
-        claude_model = MODEL_MAP.get(gemini_model, DEFAULT_MODEL)
+        claude_model = map_model(gemini_model)
 
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         body = json.loads(raw)
@@ -285,56 +285,90 @@ class Handler(http.server.BaseHTTPRequestHandler):
             any(b.get("type") in ("tool_use", "tool_result") for b in m["content"])
             for m in anthropic_body["messages"]
         )
+        heavy = " ⚠️HEAVY" if n_tools > TOOL_WARN_THRESHOLD else ""
         sys.stderr.write(
             f"[proxy] {gemini_model} → {claude_model}"
             f" msgs={n_msgs} tools={n_tools}"
-            f"{' +tool_use' if has_tc else ''}\n"
+            f"{' +tool_use' if has_tc else ''}{heavy}\n"
         )
         sys.stderr.flush()
 
-        try:
-            token = get_token()
-            url = vertex_url(claude_model)
-            data = json.dumps(anthropic_body).encode()
-            req = urllib.request.Request(url, data, {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-            })
-            resp_raw = urllib.request.urlopen(req, timeout=120, context=ssl_ctx).read()
-            resp = json.loads(resp_raw)
-            gem = from_anthropic(resp, gemini_model)
+        # Timeout: Opus gets 300s, others 120s
+        api_timeout = 300 if "opus" in claude_model else 120
 
-            # Log response type
-            resp_types = [list(p.keys())[0] for p in gem["candidates"][0]["content"]["parts"]]
-            usage = gem["usageMetadata"]
-            sys.stderr.write(
-                f"[proxy] ✓ {resp_types}"
-                f" ({usage['promptTokenCount']}+{usage['candidatesTokenCount']} tok)\n"
-            )
-            sys.stderr.flush()
+        max_retries = 2
+        last_err = None
 
-            if is_stream:
-                out = b"data: " + json.dumps(gem, ensure_ascii=False).encode() + b"\r\n\r\n"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Content-Length", str(len(out)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(out)
-                self.wfile.flush()
-            else:
-                self._send(200, "application/json", json.dumps(gem).encode())
+        for attempt in range(max_retries):
+            try:
+                token = get_token()
+                url = vertex_url(claude_model)
+                data = json.dumps(anthropic_body).encode()
+                req = urllib.request.Request(url, data, {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                })
+                resp_raw = urllib.request.urlopen(
+                    req, timeout=api_timeout, context=ssl_ctx
+                ).read()
+                resp = json.loads(resp_raw)
+                gem = from_anthropic(resp, gemini_model)
 
-        except urllib.error.HTTPError as e:
-            err = e.read().decode()
-            sys.stderr.write(f"[proxy] Vertex AI {e.code}: {err[:500]}\n"); sys.stderr.flush()
-            self._send(500, "application/json",
-                       json.dumps({"error": {"message": err[:500], "code": e.code}}).encode())
-        except Exception as e:
-            sys.stderr.write(f"[proxy] Exception: {traceback.format_exc()}\n"); sys.stderr.flush()
-            self._send(500, "application/json",
-                       json.dumps({"error": {"message": str(e), "code": 500}}).encode())
+                resp_types = [list(p.keys())[0] for p in gem["candidates"][0]["content"]["parts"]]
+                usage = gem["usageMetadata"]
+                sys.stderr.write(
+                    f"[proxy] ✓ {resp_types}"
+                    f" ({usage['promptTokenCount']}+{usage['candidatesTokenCount']} tok)\n"
+                )
+                sys.stderr.flush()
+
+                if is_stream:
+                    out = b"data: " + json.dumps(gem, ensure_ascii=False).encode() + b"\r\n\r\n"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Content-Length", str(len(out)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(out)
+                    self.wfile.flush()
+                else:
+                    self._send(200, "application/json", json.dumps(gem).encode())
+                return
+
+            except urllib.error.HTTPError as e:
+                err = e.read().decode()
+                last_err = (e.code, err[:500])
+                if e.code in (500, 503, 529) and attempt < max_retries - 1:
+                    wait = 2 * (attempt + 1)
+                    sys.stderr.write(
+                        f"[proxy] ⚠️ Vertex {e.code}, retry in {wait}s "
+                        f"(attempt {attempt+1}/{max_retries})\n"
+                    )
+                    sys.stderr.flush()
+                    time.sleep(wait)
+                    continue
+                sys.stderr.write(f"[proxy] ✗ Vertex {e.code}: {err[:500]}\n")
+                sys.stderr.flush()
+                self._send(e.code, "application/json",
+                           json.dumps({"error": {"message": err[:500], "code": e.code}}).encode())
+                return
+
+            except Exception as e:
+                last_err = (500, str(e))
+                if attempt < max_retries - 1:
+                    wait = 2 * (attempt + 1)
+                    sys.stderr.write(
+                        f"[proxy] ⚠️ Exception, retry in {wait}s: {e}\n"
+                    )
+                    sys.stderr.flush()
+                    time.sleep(wait)
+                    continue
+                sys.stderr.write(f"[proxy] ✗ Exception: {traceback.format_exc()}\n")
+                sys.stderr.flush()
+                self._send(500, "application/json",
+                           json.dumps({"error": {"message": str(e), "code": 500}}).encode())
+                return
 
     def do_GET(self):
         self._send(200, "application/json", b'{"status":"ok"}')
@@ -350,10 +384,14 @@ if __name__ == "__main__":
         sys.stderr.write(f" WARN: {e}\n")
     sys.stderr.flush()
 
-    server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
+    # ThreadingHTTPServer: handle concurrent requests from Gemini CLI
+    # (main model + helper model + agent delegation run in parallel)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server.daemon_threads = True
     sys.stderr.write(
         f"Proxy on :{PORT} ({PROJECT}/{LOCATION})\n"
-        f"Model map: {MODEL_MAP}\n"
+        f"Model: *pro* → opus, *flash* → sonnet, default → {DEFAULT_MODEL}\n"
+        f"Timeout: opus=300s, others=120s | Retry: 1x on 5xx\n"
     )
     sys.stderr.flush()
     server.serve_forever()
