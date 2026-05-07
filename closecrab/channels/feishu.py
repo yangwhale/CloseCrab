@@ -2034,6 +2034,15 @@ class FeishuChannel(Channel):
 
     async def _handle_sessions_command(self, user_key: str, chat_id: str):
         """处理 /sessions 命令 — 用卡片展示 session 列表。"""
+        is_gemini = self._core._worker_type == "gemini"
+
+        if is_gemini:
+            await self._handle_sessions_command_gemini(user_key, chat_id)
+        else:
+            await self._handle_sessions_command_claude(user_key, chat_id)
+
+    async def _handle_sessions_command_claude(self, user_key: str, chat_id: str):
+        """Claude worker 的 /sessions — 扫描 .jsonl 文件。"""
         active = self._core.session_mgr.get_active(user_key)
         mgr = self._core.session_mgr
         all_sessions = mgr.get_all_sessions(limit=25)
@@ -2058,7 +2067,48 @@ class FeishuChannel(Channel):
             summary = s["summary"]
             label = summary[:50] if len(summary) <= 50 else f"{summary[:47]}..."
             lines.append(f"{i+1}. `{sid[:8]}…` `{tag}` — {summary}")
-            if len(options) < 10:  # 飞书 select 最多显示合理数量
+            if len(options) < 10:
+                options.append({"text": label, "value": sid})
+
+        card = self._build_sessions_card(lines, options)
+        await self._async_send_card(chat_id, card)
+
+    async def _handle_sessions_command_gemini(self, user_key: str, chat_id: str):
+        """Gemini worker 的 /sessions — 通过 ACP session/list 查询。"""
+        worker = self._core._workers.get(user_key)
+        active = self._core.session_mgr.get_active(user_key)
+
+        gemini_sessions = []
+        if worker and hasattr(worker, "list_sessions") and worker.is_alive():
+            try:
+                gemini_sessions = await worker.list_sessions(limit=25)
+            except Exception as e:
+                log.warning(f"Gemini list_sessions failed: {e}")
+
+        if not gemini_sessions and not active:
+            await self._async_send_text(chat_id, "No sessions found.")
+            return
+
+        lines = []
+        if active:
+            summary = ""
+            for s in gemini_sessions:
+                if s["id"] == active:
+                    summary = s.get("summary", "")
+                    break
+            if not summary:
+                summary = self._core.session_mgr.get_summary(active)
+            lines.append(f"**Active:** `{active[:8]}…` — {summary or '(current session)'}")
+
+        options = []
+        for i, s in enumerate(gemini_sessions):
+            sid = s["id"]
+            if sid == active:
+                continue
+            summary = s.get("summary", "") or s.get("title", "") or "(no title)"
+            label = summary[:50] if len(summary) <= 50 else f"{summary[:47]}..."
+            lines.append(f"{i+1}. `{sid[:8]}…` — {summary}")
+            if len(options) < 10:
                 options.append({"text": label, "value": sid})
 
         card = self._build_sessions_card(lines, options)

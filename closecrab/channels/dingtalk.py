@@ -526,20 +526,42 @@ class DingTalkChannel(Channel):
 
         elif cmd == "/sessions":
             active = self._core.session_mgr.get_active(user_key)
-            all_sessions = self._core.session_mgr.get_all_sessions(limit=25)
-            bot_ids = self._core.session_mgr.get_bot_session_ids()
+            is_gemini = self._core._worker_type == "gemini"
+
+            if is_gemini:
+                worker = self._core._workers.get(user_key)
+                all_sessions = []
+                if worker and hasattr(worker, "list_sessions") and worker.is_alive():
+                    try:
+                        gemini_sessions = await worker.list_sessions(limit=25)
+                        all_sessions = [
+                            {"id": s["id"], "summary": s.get("summary") or s.get("title") or "(no title)"}
+                            for s in gemini_sessions
+                        ]
+                    except Exception as e:
+                        log.warning(f"Gemini list_sessions failed: {e}")
+                bot_ids = set()
+            else:
+                all_sessions = self._core.session_mgr.get_all_sessions(limit=25)
+                bot_ids = self._core.session_mgr.get_bot_session_ids()
 
             lines = []
             if active:
-                tag = "[bot]" if active in bot_ids else "[cli]"
-                summary = self._core.session_mgr.get_summary(active)
-                lines.append(f"**Active:** `{active[:8]}…` `{tag}` — {summary}")
+                tag = "[bot]" if active in bot_ids else ("[gemini]" if is_gemini else "[cli]")
+                summary = ""
+                for s in all_sessions:
+                    if s["id"] == active:
+                        summary = s.get("summary", "")
+                        break
+                if not summary:
+                    summary = self._core.session_mgr.get_summary(active)
+                lines.append(f"**Active:** `{active[:8]}…` `{tag}` — {summary or '(current session)'}")
 
             for i, s in enumerate(all_sessions):
                 sid = s["id"]
                 if sid == active:
                     continue
-                tag = "[bot]" if sid in bot_ids else "[cli]"
+                tag = "[bot]" if sid in bot_ids else ("[gemini]" if is_gemini else "[cli]")
                 lines.append(f"{i+1}. `{sid[:8]}…` `{tag}` — {s['summary']}")
 
             text = "\n".join(lines) if lines else "No sessions found."

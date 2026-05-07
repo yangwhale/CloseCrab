@@ -422,26 +422,49 @@ class DiscordChannel(Channel):
             try:
                 user_key = str(ctx.author.id)
                 active = self._core.session_mgr.get_active(user_key)
-                mgr = self._core.session_mgr
+                is_gemini = self._core._worker_type == "gemini"
 
-                all_sessions = mgr.get_all_sessions(limit=25)
+                if is_gemini:
+                    # Gemini: list sessions via ACP session/list
+                    worker = self._core._workers.get(user_key)
+                    all_sessions = []
+                    if worker and hasattr(worker, "list_sessions") and worker.is_alive():
+                        try:
+                            gemini_sessions = await worker.list_sessions(limit=25)
+                            all_sessions = [
+                                {"id": s["id"], "summary": s.get("summary") or s.get("title") or "(no title)"}
+                                for s in gemini_sessions
+                            ]
+                        except Exception as e:
+                            log.warning(f"Gemini list_sessions failed: {e}")
+                else:
+                    # Claude: scan .jsonl files
+                    mgr = self._core.session_mgr
+                    all_sessions = mgr.get_all_sessions(limit=25)
+
                 if not all_sessions and not active:
                     await ctx.respond("No sessions found.")
                     return
 
-                bot_ids = mgr.get_bot_session_ids()
+                bot_ids = self._core.session_mgr.get_bot_session_ids() if not is_gemini else set()
                 lines = []
                 if active:
-                    tag = "[bot]" if active in bot_ids else "[cli]"
-                    summary = mgr.get_summary(active)
-                    lines.append(f"**Active:** `{active[:8]}…` `{tag}` — {summary}")
+                    tag = "[bot]" if active in bot_ids else ("[gemini]" if is_gemini else "[cli]")
+                    summary = ""
+                    for s in all_sessions:
+                        if s["id"] == active:
+                            summary = s.get("summary", "")
+                            break
+                    if not summary:
+                        summary = self._core.session_mgr.get_summary(active)
+                    lines.append(f"**Active:** `{active[:8]}…` `{tag}` — {summary or '(current session)'}")
 
                 options = []
                 for i, s in enumerate(all_sessions):
                     sid = s["id"]
                     if sid == active:
                         continue
-                    tag = "[bot]" if sid in bot_ids else "[cli]"
+                    tag = "[bot]" if sid in bot_ids else ("[gemini]" if is_gemini else "[cli]")
                     summary = s["summary"]
                     label_text = summary[:50] if len(summary) <= 50 else f"{summary[:47]}..."
                     label_text = label_text or f"Session {i+1}"

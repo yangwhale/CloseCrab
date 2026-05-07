@@ -99,7 +99,7 @@ class GeminiACPWorker(Worker):
         self._work_dir = work_dir or str(Path.home())
         self._timeout = timeout
         self._system_prompt = system_prompt
-        self._session_id: Optional[str] = session_id or f"gemini-{uuid.uuid4().hex[:12]}"
+        self._session_id: Optional[str] = session_id
         self._acp_session_id: Optional[str] = None
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
@@ -137,8 +137,6 @@ class GeminiACPWorker(Worker):
     async def start(self, session_id: Optional[str] = None) -> str:
         if session_id is not None:
             self._session_id = session_id
-        if not self._session_id:
-            self._session_id = f"gemini-{uuid.uuid4().hex[:12]}"
         self._write_gemini_md()
         await self._ensure_process()
         self._started = True
@@ -148,7 +146,7 @@ class GeminiACPWorker(Worker):
         return self._session_id or ""
 
     async def _ensure_process(self, _retry: bool = False):
-        """Spawn the ACP process and run initialize + session/new."""
+        """Spawn the ACP process, initialize, and load/create session."""
         if self._proc and self._proc.returncode is None:
             return
 
@@ -219,19 +217,100 @@ class GeminiACPWorker(Worker):
         log.info(f"ACP initialized: gemini-cli v{version}")
         self._initialized = True
 
-        # Step 2: session/new
-        # ACP requires mcpServers array — load from ~/.gemini/settings.json
+        # Step 2: try to resume existing session, or create new
         mcp_servers = self._load_mcp_servers()
-        resp = await self._rpc("session/new", {
+        resumed = False
+
+        # Try session/load if we have a saved session_id
+        if self._session_id:
+            resumed = await self._try_load_session(self._session_id, mcp_servers)
+
+        # If no saved session_id or load failed, try resuming the latest session
+        if not resumed and not self._session_id:
+            latest_id = await self._find_latest_session()
+            if latest_id:
+                resumed = await self._try_load_session(latest_id, mcp_servers)
+
+        # Fallback: create a new session
+        if not resumed:
+            resp = await self._rpc("session/new", {
+                "cwd": self._work_dir,
+                "mcpServers": mcp_servers,
+            }, timeout=60)
+            if not resp or "error" in resp:
+                err = resp.get("error", {}).get("message", "unknown") if resp else "no response"
+                raise RuntimeError(f"ACP session/new failed: {err}")
+            self._acp_session_id = resp["result"]["sessionId"]
+            self._session_id = self._acp_session_id
+            log.info(f"ACP session created (new): {self._acp_session_id}")
+
+    async def _try_load_session(self, target_id: str, mcp_servers: list) -> bool:
+        """Try to load an existing session via session/load. Returns True on success."""
+        log.info(f"Attempting session/load: {target_id}")
+        resp = await self._rpc("session/load", {
             "cwd": self._work_dir,
             "mcpServers": mcp_servers,
+            "sessionId": target_id,
         }, timeout=60)
-        if not resp or "error" in resp:
-            err = resp.get("error", {}).get("message", "unknown") if resp else "no response"
-            raise RuntimeError(f"ACP session/new failed: {err}")
+        if resp and "error" not in resp:
+            result = resp.get("result", {})
+            loaded_id = result.get("sessionId", target_id)
+            self._acp_session_id = loaded_id
+            self._session_id = loaded_id
+            log.info(f"ACP session resumed (load): {loaded_id}")
+            return True
+        err = resp.get("error", {}).get("message", "?") if resp else "no response"
+        log.warning(f"session/load failed for {target_id}: {err}")
+        return False
 
-        self._acp_session_id = resp["result"]["sessionId"]
-        log.info(f"ACP session created: {self._acp_session_id}")
+    async def _find_latest_session(self) -> Optional[str]:
+        """Call session/list to find the most recent session."""
+        resp = await self._rpc("session/list", {
+            "cwd": self._work_dir,
+        }, timeout=15)
+        if not resp or "error" in resp:
+            return None
+        sessions = resp.get("result", {}).get("sessions", [])
+        if not sessions:
+            return None
+        # Sessions are typically returned in reverse chronological order
+        latest = sessions[0]
+        sid = latest.get("sessionId", "")
+        if sid:
+            log.info(f"Found latest session via session/list: {sid} "
+                     f"title={latest.get('title', '?')[:50]}")
+        return sid or None
+
+    async def list_sessions(self, limit: int = 25) -> list[dict]:
+        """List available sessions via ACP session/list.
+
+        Returns list of {id, title, updated_at, summary} dicts.
+        """
+        if not self._initialized or not self._proc:
+            return []
+        all_sessions = []
+        cursor = None
+        while len(all_sessions) < limit:
+            params: dict = {"cwd": self._work_dir}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await self._rpc("session/list", params, timeout=15)
+            if not resp or "error" in resp:
+                break
+            result = resp.get("result", {})
+            for s in result.get("sessions", []):
+                all_sessions.append({
+                    "id": s.get("sessionId", ""),
+                    "title": s.get("title", ""),
+                    "updated_at": s.get("updatedAt", ""),
+                    "summary": (s.get("title") or "")[:80],
+                })
+                if len(all_sessions) >= limit:
+                    break
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        return all_sessions
 
     def _load_mcp_servers(self) -> list:
         """Load MCP servers from ~/.gemini/settings.json and convert to ACP array format.
