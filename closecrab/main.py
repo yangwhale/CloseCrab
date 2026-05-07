@@ -113,6 +113,7 @@ def _resolve_config(bot_name: str) -> dict:
         "log_chat_id": cfg.get("log_chat_id", ""),
         "accelerator_override": cfg.get("accelerator_override", ""),
         "worker_type": cfg.get("worker_type", "claude"),
+        "claude_proxy_url": cfg.get("claude_proxy_url"),
         # LiveKit voice IO 配置 (仅飞书 channel 用): {url, api_key, api_secret, frontend_url, enabled}
         "livekit": cfg.get("livekit") or {},
     }
