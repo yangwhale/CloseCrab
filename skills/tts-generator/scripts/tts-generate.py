@@ -124,8 +124,10 @@ def _build_prompt(text: str) -> str:
 
 def _ensure_gemini_api_key():
     """Ensure GEMINI_API_KEY is in env; load from ~/.zshenv or ~/.claude/settings.json if missing."""
+    INVALID_VALUES = {"proxy", "", "your-api-key-here"}
     for var in ("GEMINI_API_KEY", "GOOGLE_GENAI_API_KEY", "GOOGLE_API_KEY"):
-        if os.environ.get(var):
+        val = os.environ.get(var, "")
+        if val and val.lower() not in INVALID_VALUES and val.startswith("AIza"):
             return
     # Try ~/.zshenv
     zshenv = os.path.expanduser("~/.zshenv")
@@ -160,7 +162,8 @@ def generate_gemini(text: str, voice: str) -> str:
     from google.genai import types
 
     _ensure_gemini_api_key()
-    client = genai.Client()
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    client = genai.Client(api_key=api_key)
     voice_name = GEMINI_VOICES.get(voice, voice.capitalize())
     prompt = _build_prompt(text)
 
