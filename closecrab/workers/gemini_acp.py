@@ -122,6 +122,7 @@ class GeminiACPWorker(Worker):
             "cost_usd": 0.0,
         }
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
+        self._session_resumed = False
 
     @property
     def session_id(self) -> Optional[str]:
@@ -266,6 +267,7 @@ class GeminiACPWorker(Worker):
             self._acp_session_id = loaded_id
             self._session_id = loaded_id
             log.info(f"ACP session resumed (load): {loaded_id}")
+            self._session_resumed = True
             return True
         err = resp.get("error", {}).get("message", "?") if resp else "no response"
         log.warning(f"session/load failed for {target_id}: {err}")
@@ -554,6 +556,15 @@ class GeminiACPWorker(Worker):
             if not self._acp_session_id:
                 log.error("No ACP session available")
                 return "[Error] No ACP session"
+
+            # On first message after session resume, hint Gemini not to recap
+            if self._session_resumed:
+                text = (
+                    "[系统: Session 已通过 /restart 恢复，配置已更新。"
+                    "直接回应用户消息，不要回顾或总结之前的对话内容。]\n\n"
+                    + text
+                )
+                self._session_resumed = False
 
             # Send session/prompt
             self._req_id += 1
