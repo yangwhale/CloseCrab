@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import shutil
 import tempfile
 import time
@@ -183,6 +184,7 @@ class GeminiACPWorker(Worker):
                 stderr=stderr_fd,
                 cwd=self._work_dir,
                 env=env,
+                start_new_session=True,
             )
         finally:
             os.close(stderr_fd)
@@ -865,6 +867,7 @@ class GeminiACPWorker(Worker):
             self._stderr_task = None
 
         if self._proc and self._proc.returncode is None:
+            pid = self._proc.pid
             # Try to close the session gracefully
             if self._acp_session_id:
                 try:
@@ -881,11 +884,25 @@ class GeminiACPWorker(Worker):
             try:
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                self._proc.kill()
+                # SIGTERM didn't work — kill entire process group to
+                # avoid orphaned child node processes (the gemini CLI
+                # spawns a child node process that won't die with just
+                # self._proc.kill()).
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                    log.info(f"Sent SIGKILL to process group {pid}")
+                except (ProcessLookupError, PermissionError):
+                    self._proc.kill()
                 try:
                     await asyncio.wait_for(self._proc.wait(), timeout=3)
                 except asyncio.TimeoutError:
-                    log.warning("ACP process didn't die after SIGKILL")
+                    log.warning(f"ACP process {pid} didn't die after SIGKILL, "
+                                "force-reaping")
+                    # Last resort: reap to avoid zombie
+                    try:
+                        os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        pass
 
         self._proc = None
         self._started = False
