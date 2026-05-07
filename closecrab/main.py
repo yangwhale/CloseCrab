@@ -436,7 +436,9 @@ def main():
                 log.info(f"  Injected MEMORY.md ({len(memory_content)} chars) into Gemini system prompt")
             except Exception as e:
                 log.warning(f"  Failed to read MEMORY.md: {e}")
-    log.info(f"  worker_type: {worker_type}")
+    claude_proxy_url = cfg.get("claude_proxy_url")
+    log.info(f"  worker_type: {worker_type}"
+             f"{f', claude_proxy: {claude_proxy_url}' if claude_proxy_url else ''}")
 
     core = BotCore(
         auth=auth,
@@ -451,6 +453,7 @@ def main():
         state_dir=cfg["state_dir"],
         db=db,
         worker_type=worker_type,
+        claude_proxy_url=claude_proxy_url,
     )
 
     # 根据 channel 类型实例化 Channel

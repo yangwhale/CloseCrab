@@ -66,6 +66,7 @@ class BotCore:
         state_dir: str | None = None,
         db: Optional["FirestoreClient"] = None,
         worker_type: str = "claude",
+        claude_proxy_url: Optional[str] = None,
     ):
         self.auth = auth
         self.session_mgr = session_mgr
@@ -79,6 +80,7 @@ class BotCore:
         self._backbone_model = backbone_model
         self._db = db
         self._worker_type = worker_type
+        self._claude_proxy_url = claude_proxy_url
 
         # user_key -> Worker (ClaudeCodeWorker or GeminiCLIWorker)
         self._workers: dict[str, Worker] = {}
@@ -541,6 +543,7 @@ class BotCore:
                 timeout=self._timeout,
                 system_prompt=self._system_prompt,
                 session_id=session_id,
+                claude_proxy_url=self._claude_proxy_url,
             )
         return ClaudeCodeWorker(
             claude_bin=self._claude_bin,

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Gemini API → Vertex AI Claude proxy.
+Gemini API → Vertex AI Claude proxy with function calling support.
 
 Lets Gemini CLI talk to Claude models on Vertex AI by translating
-Gemini API requests to Anthropic Messages API format.
+Gemini API requests (including tool use) to Anthropic Messages API format.
 
 Env vars:
     VERTEX_PROJECT   GCP project (default: chris-pgp-host)
@@ -15,13 +15,8 @@ Model mapping (Gemini CLI model name → Claude model):
     gemini-2.5-flash → claude-sonnet-4-6
 
 Usage:
-    # Start proxy
     python3 gemini-claude-proxy.py &
-
-    # Use Gemini CLI with Claude backend
-    GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8888" \\
-    GEMINI_API_KEY=dummy \\
-    gemini -m gemini-2.5-pro
+    GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8888" GEMINI_API_KEY=dummy gemini -m gemini-2.5-pro
 """
 import json, http.server, urllib.request, ssl, sys, re, os, traceback
 import google.auth
@@ -59,8 +54,116 @@ def vertex_url(model):
             f"/publishers/anthropic/models/{model}:rawPredict")
 
 
-def to_anthropic(req):
-    """Convert Gemini API request → Anthropic Messages API body."""
+# ── Gemini tools → Claude tools ──────────────────────────────────────
+
+def convert_tools(gemini_tools):
+    """Convert Gemini functionDeclarations → Claude tools format."""
+    claude_tools = []
+    for tool_group in gemini_tools:
+        for fd in tool_group.get("functionDeclarations", []):
+            schema = fd.get("parametersJsonSchema") or fd.get("parameters") or {"type": "object", "properties": {}}
+            claude_tools.append({
+                "name": fd["name"],
+                "description": fd.get("description", ""),
+                "input_schema": schema,
+            })
+    return claude_tools
+
+
+# ── Gemini contents → Claude messages ────────────────────────────────
+
+def convert_contents(contents):
+    """Convert Gemini contents (with functionCall/functionResponse) → Claude messages.
+
+    Returns (messages, call_id_map) where call_id_map tracks functionCall name→id
+    for matching functionResponse → tool_result.
+    """
+    messages = []
+    call_counter = 0
+    # Stack of (id, name) for matching functionResponse to tool_use_id
+    pending_calls = []
+
+    for content in contents:
+        role = "assistant" if content.get("role") == "model" else "user"
+        parts = content.get("parts", [])
+        claude_content = []
+
+        for part in parts:
+            if "text" in part:
+                text = part["text"]
+                if text.strip():
+                    claude_content.append({"type": "text", "text": text})
+
+            elif "functionCall" in part:
+                fc = part["functionCall"]
+                call_id = f"toolu_{call_counter:04d}"
+                call_counter += 1
+                pending_calls.append((call_id, fc["name"]))
+                claude_content.append({
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": fc["name"],
+                    "input": fc.get("args", {}),
+                })
+
+            elif "functionResponse" in part:
+                fr = part["functionResponse"]
+                # Find matching call_id by name
+                matched_id = None
+                for i, (cid, cname) in enumerate(pending_calls):
+                    if cname == fr["name"]:
+                        matched_id = cid
+                        pending_calls.pop(i)
+                        break
+                if not matched_id:
+                    matched_id = f"toolu_{call_counter:04d}"
+                    call_counter += 1
+
+                resp_data = fr.get("response", {})
+                if isinstance(resp_data, str):
+                    resp_str = resp_data
+                else:
+                    resp_str = json.dumps(resp_data, ensure_ascii=False)
+                claude_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": matched_id,
+                    "content": resp_str,
+                })
+
+        if not claude_content:
+            continue
+
+        # Claude requires tool_result blocks in user messages
+        has_tool_result = any(b.get("type") == "tool_result" for b in claude_content)
+        has_tool_use = any(b.get("type") == "tool_use" for b in claude_content)
+
+        if has_tool_use:
+            msg_role = "assistant"
+        elif has_tool_result:
+            msg_role = "user"
+        else:
+            msg_role = role
+
+        # Merge consecutive same-role messages (Claude requires alternating roles)
+        if messages and messages[-1]["role"] == msg_role:
+            prev = messages[-1]["content"]
+            if isinstance(prev, str):
+                messages[-1]["content"] = [{"type": "text", "text": prev}] + claude_content
+            else:
+                messages[-1]["content"].extend(claude_content)
+        else:
+            messages.append({"role": msg_role, "content": claude_content})
+
+    # Simplify single-text-block content to string
+    for msg in messages:
+        if isinstance(msg["content"], list) and len(msg["content"]) == 1 and msg["content"][0].get("type") == "text":
+            msg["content"] = msg["content"][0]["text"]
+
+    return messages
+
+
+def to_anthropic(req, gemini_tools):
+    """Convert full Gemini API request → Anthropic Messages API body."""
     system = None
     if "systemInstruction" in req:
         text = " ".join(
@@ -70,15 +173,7 @@ def to_anthropic(req):
         if text.strip():
             system = text
 
-    messages = []
-    for c in req.get("contents", []):
-        role = "assistant" if c.get("role") == "model" else "user"
-        text = " ".join(
-            p.get("text", "") for p in c.get("parts", []) if "text" in p
-        )
-        if not text.strip():
-            continue
-        messages.append({"role": role, "content": text})
+    messages = convert_contents(req.get("contents", []))
     if not messages:
         messages = [{"role": "user", "content": "hello"}]
 
@@ -90,27 +185,57 @@ def to_anthropic(req):
     if system:
         body["system"] = system
 
+    # Add converted tools
+    claude_tools = convert_tools(gemini_tools) if gemini_tools else []
+    if claude_tools:
+        body["tools"] = claude_tools
+
     gc = req.get("generationConfig", {})
     if "temperature" in gc:
         body["temperature"] = gc["temperature"]
     if "maxOutputTokens" in gc:
         body["max_tokens"] = gc["maxOutputTokens"]
-    # Claude rejects temperature + top_p together; drop top_p
+    # Drop topP, topK, thinkingConfig — Claude doesn't support these
+
     return body
 
 
+# ── Claude response → Gemini response ───────────────────────────────
+
 def from_anthropic(resp, gemini_model):
-    """Convert Anthropic Messages API response → Gemini API response."""
-    text = "".join(
-        b.get("text", "") for b in resp.get("content", [])
-        if b.get("type") == "text"
-    )
+    """Convert Anthropic Messages API response → Gemini API response.
+
+    Handles both text and tool_use content blocks.
+    """
+    parts = []
+    for block in resp.get("content", []):
+        if block.get("type") == "text":
+            text = block.get("text", "")
+            if text:
+                parts.append({"text": text})
+        elif block.get("type") == "tool_use":
+            parts.append({
+                "functionCall": {
+                    "name": block["name"],
+                    "args": block.get("input", {}),
+                }
+            })
+
+    if not parts:
+        parts = [{"text": ""}]
+
+    stop_reason = resp.get("stop_reason", "end_turn")
+    finish = "STOP" if stop_reason == "end_turn" else "STOP"
+    if stop_reason == "tool_use":
+        finish = "STOP"
+
     usage = resp.get("usage", {})
     inp, out = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+
     return {
         "candidates": [{
-            "content": {"parts": [{"text": text}], "role": "model"},
-            "finishReason": "STOP",
+            "content": {"parts": parts, "role": "model"},
+            "finishReason": finish,
             "index": 0,
         }],
         "usageMetadata": {
@@ -121,6 +246,8 @@ def from_anthropic(resp, gemini_model):
         "modelVersion": gemini_model,
     }
 
+
+# ── HTTP Handler ─────────────────────────────────────────────────────
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -148,12 +275,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         body = json.loads(raw)
-        anthropic_body = to_anthropic(body)
+        gemini_tools = body.get("tools", [])
+        anthropic_body = to_anthropic(body, gemini_tools)
 
+        n_tools = sum(len(t.get("functionDeclarations", [])) for t in gemini_tools)
+        n_msgs = len(anthropic_body["messages"])
+        has_tc = any(
+            isinstance(m.get("content"), list) and
+            any(b.get("type") in ("tool_use", "tool_result") for b in m["content"])
+            for m in anthropic_body["messages"]
+        )
         sys.stderr.write(
             f"[proxy] {gemini_model} → {claude_model}"
-            f" ({'stream' if is_stream else 'unary'})"
-            f" msgs={len(anthropic_body['messages'])}\n"
+            f" msgs={n_msgs} tools={n_tools}"
+            f"{' +tool_use' if has_tc else ''}\n"
         )
         sys.stderr.flush()
 
@@ -168,11 +303,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             resp_raw = urllib.request.urlopen(req, timeout=120, context=ssl_ctx).read()
             resp = json.loads(resp_raw)
             gem = from_anthropic(resp, gemini_model)
-            text_len = len(gem["candidates"][0]["content"]["parts"][0]["text"])
+
+            # Log response type
+            resp_types = [list(p.keys())[0] for p in gem["candidates"][0]["content"]["parts"]]
             usage = gem["usageMetadata"]
+            sys.stderr.write(
+                f"[proxy] ✓ {resp_types}"
+                f" ({usage['promptTokenCount']}+{usage['candidatesTokenCount']} tok)\n"
+            )
+            sys.stderr.flush()
 
             if is_stream:
-                # Gemini SDK expects SSE: data: {json}\r\n\r\n
                 out = b"data: " + json.dumps(gem, ensure_ascii=False).encode() + b"\r\n\r\n"
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -185,21 +326,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._send(200, "application/json", json.dumps(gem).encode())
 
-            sys.stderr.write(
-                f"[proxy] ✓ {text_len} chars"
-                f" ({usage['promptTokenCount']}+{usage['candidatesTokenCount']} tok)\n"
-            )
-            sys.stderr.flush()
-
         except urllib.error.HTTPError as e:
             err = e.read().decode()
-            sys.stderr.write(f"[proxy] Vertex AI {e.code}: {err[:300]}\n")
-            sys.stderr.flush()
+            sys.stderr.write(f"[proxy] Vertex AI {e.code}: {err[:500]}\n"); sys.stderr.flush()
             self._send(500, "application/json",
                        json.dumps({"error": {"message": err[:500], "code": e.code}}).encode())
         except Exception as e:
-            sys.stderr.write(f"[proxy] Exception: {traceback.format_exc()}\n")
-            sys.stderr.flush()
+            sys.stderr.write(f"[proxy] Exception: {traceback.format_exc()}\n"); sys.stderr.flush()
             self._send(500, "application/json",
                        json.dumps({"error": {"message": str(e), "code": 500}}).encode())
 

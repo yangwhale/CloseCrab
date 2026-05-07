@@ -94,12 +94,14 @@ class GeminiACPWorker(Worker):
         timeout: int = 600,
         system_prompt: str = "",
         session_id: Optional[str] = None,
+        claude_proxy_url: Optional[str] = None,
     ):
         self._gemini_bin = gemini_bin or shutil.which("gemini") or "gemini"
         self._work_dir = work_dir or str(Path.home())
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
+        self._claude_proxy_url = claude_proxy_url
         self._acp_session_id: Optional[str] = None
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
@@ -167,6 +169,11 @@ class GeminiACPWorker(Worker):
         ]
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
+
+        if self._claude_proxy_url:
+            env["GOOGLE_GEMINI_BASE_URL"] = self._claude_proxy_url
+            env["GEMINI_API_KEY"] = "proxy"
+            log.info(f"Claude proxy enabled: {self._claude_proxy_url}")
 
         # Redirect stderr to a temp file for debugging
         stderr_fd, self._stderr_path = tempfile.mkstemp(
