@@ -218,9 +218,11 @@ class GeminiACPWorker(Worker):
         self._initialized = True
 
         # Step 2: session/new
-        # Don't pass mcpServers — let Gemini CLI load from ~/.gemini/settings.json
+        # ACP requires mcpServers array — load from ~/.gemini/settings.json
+        mcp_servers = self._load_mcp_servers()
         resp = await self._rpc("session/new", {
             "cwd": self._work_dir,
+            "mcpServers": mcp_servers,
         }, timeout=60)
         if not resp or "error" in resp:
             err = resp.get("error", {}).get("message", "unknown") if resp else "no response"
@@ -228,6 +230,45 @@ class GeminiACPWorker(Worker):
 
         self._acp_session_id = resp["result"]["sessionId"]
         log.info(f"ACP session created: {self._acp_session_id}")
+
+    def _load_mcp_servers(self) -> list:
+        """Load MCP servers from ~/.gemini/settings.json and convert to ACP array format.
+
+        ACP session/new expects: [{name, command, args: [], env: [{name, value}]}]
+        settings.json has: {mcpServers: {name: {command, args: [], env: {K: V}}}}
+        """
+        settings_path = Path.home() / ".gemini" / "settings.json"
+        if not settings_path.exists():
+            log.info("No ~/.gemini/settings.json found, using empty mcpServers")
+            return []
+        try:
+            with open(settings_path) as f:
+                settings = json.load(f)
+        except Exception as e:
+            log.warning(f"Failed to read {settings_path}: {e}")
+            return []
+
+        servers_obj = settings.get("mcpServers", {})
+        if not servers_obj:
+            return []
+
+        result = []
+        for name, cfg in servers_obj.items():
+            if not isinstance(cfg, dict) or "command" not in cfg:
+                continue
+            env_list = []
+            for k, v in (cfg.get("env") or {}).items():
+                env_list.append({"name": k, "value": str(v)})
+            result.append({
+                "name": name,
+                "command": cfg["command"],
+                "args": cfg.get("args", []),
+                "env": env_list,
+            })
+            log.debug(f"Loaded MCP server: {name}")
+
+        log.info(f"Loaded {len(result)} MCP servers for ACP session")
+        return result
 
     def _read_stderr_tail(self, max_bytes: int = 2000) -> str:
         """Read the last N bytes from the stderr log file."""
