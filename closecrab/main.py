@@ -439,9 +439,14 @@ def main():
             try:
                 memory_content = memory_index.read_text(encoding="utf-8")
                 system_prompt += (
-                    f"\n\n## Auto Memory (shared with other bots)\n"
-                    f"以下是持久化记忆索引。需要详细信息时用 read_file 读取 "
-                    f"`{memory_dir}/` 下的具体文件。\n\n"
+                    f"\n\n## Auto Memory（与其他 bot 共享）\n"
+                    f"以下是持久化记忆索引，由所有 bot 共同维护。\n\n"
+                    f"**读取记忆**：用 `read_file` 读取 `{memory_dir}/` 下的具体文件。"
+                    f"其中 `shared/` 子目录通过 GCS 在所有 bot 间实时共享。\n\n"
+                    f"**写入记忆**：如果对话中产生了值得跨 session 保留的经验，"
+                    f"可以用 `write_file` 或 `edit_file` 写入 `{memory_dir}/shared/` 目录。"
+                    f"文件格式与现有 topic 文件一致（纯 markdown，无 frontmatter）。"
+                    f"写完后在 `{memory_index}` 的对应 section 里加一行索引。\n\n"
                     f"{memory_content}"
                 )
                 log.info(f"  Injected MEMORY.md ({len(memory_content)} chars) into Gemini system prompt")
