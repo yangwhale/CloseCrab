@@ -7,6 +7,7 @@ Usage:
     config-manage.py create <bot_name> --channel <type> [channel options]
     config-manage.py add-channel <bot_name> <channel_type> [channel options]
     config-manage.py set-channel <bot_name> <channel_type>
+    config-manage.py set-worker-type <bot_name> <claude|gemini>
     config-manage.py set <bot_name> <field> <value>
     config-manage.py delete <bot_name>
 
@@ -20,6 +21,7 @@ Examples:
     config-manage.py create newbot --channel discord --token "MTxx..."
     config-manage.py add-channel jarvis feishu --app-id "cli_xxx" --app-secret "xxx"
     config-manage.py set-channel jarvis discord
+    config-manage.py set-worker-type tiemu gemini
     config-manage.py set jarvis model claude-sonnet-4-6@default
 """
 
@@ -66,8 +68,10 @@ def cmd_list(args):
         active = data.get("active_channel", "?")
         model = data.get("model", "?")
         channels = list(data.get("channels", {}).keys())
+        worker = data.get("worker_type", "claude")
         desc = data.get("description", "")
-        print(f"  {doc.id:20s}  active={active:8s}  channels={channels}  model={model[:30]}  {desc}")
+        worker_tag = f"  worker={worker}" if worker != "claude" else ""
+        print(f"  {doc.id:20s}  active={active:8s}  channels={channels}  model={model[:30]}{worker_tag}  {desc}")
 
 
 def cmd_show(args):
@@ -140,11 +144,17 @@ def cmd_create(args):
 
     channel_cfg = _parse_channel_args(args.channel, args)
 
+    worker_type = getattr(args, "worker_type", None) or "claude"
+    if worker_type not in VALID_WORKER_TYPES:
+        print(f"Error: --worker-type must be one of {VALID_WORKER_TYPES}, got '{worker_type}'")
+        sys.exit(1)
+
     doc = {
         **DEFAULT_CONFIG,
         "active_channel": args.channel,
         "description": args.description or "",
         "guild_id": args.guild_id or "",
+        "worker_type": worker_type,
         "channels": {args.channel: channel_cfg},
     }
 
@@ -281,6 +291,30 @@ def cmd_set_livekit(args):
             print(f"(首次启动时 bot 会自动生成 hmac_secret 并回写 Firestore)")
 
 
+VALID_WORKER_TYPES = ("claude", "gemini")
+
+
+def cmd_set_worker_type(args):
+    db = get_db()
+    doc_ref = db.collection("bots").document(args.bot_name)
+    if not doc_ref.get().exists:
+        print(f"Bot '{args.bot_name}' not found")
+        sys.exit(1)
+
+    wt = args.worker_type
+    if wt not in VALID_WORKER_TYPES:
+        print(f"Error: worker_type must be one of {VALID_WORKER_TYPES}, got '{wt}'")
+        sys.exit(1)
+
+    doc_ref.update({"worker_type": wt})
+    print(f"Set worker_type={wt} for '{args.bot_name}'")
+    if wt == "gemini":
+        print("  Note: bot 需要安装 Gemini CLI (`npm i -g @anthropic-ai/gemini-cli` 或 `npx @google/gemini-cli`)")
+        print("  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
+    elif wt == "claude":
+        print("  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
+
+
 def cmd_delete(args):
     db = get_db()
     doc_ref = db.collection("bots").document(args.bot_name)
@@ -315,6 +349,8 @@ def main():
     p_create.add_argument("--channel", required=True, choices=["discord", "feishu", "lark", "dingtalk"])
     p_create.add_argument("--description", default="")
     p_create.add_argument("--guild-id", default="")
+    p_create.add_argument("--worker-type", default="claude", choices=["claude", "gemini"],
+                          help="Worker backend: claude (Claude Code CLI) or gemini (Gemini CLI ACP)")
     # Channel-specific args (shared across create/add-channel)
     for p in [p_create]:
         _add_channel_args(p)
@@ -329,6 +365,11 @@ def main():
     p_switch = subparsers.add_parser("set-channel", help="Switch active channel")
     p_switch.add_argument("bot_name")
     p_switch.add_argument("channel_type")
+
+    # set-worker-type
+    p_wt = subparsers.add_parser("set-worker-type", help="Switch worker backend (claude or gemini)")
+    p_wt.add_argument("bot_name")
+    p_wt.add_argument("worker_type", choices=["claude", "gemini"])
 
     # set
     p_set = subparsers.add_parser("set", help="Set a config field")
@@ -373,6 +414,7 @@ def main():
         "add-channel": cmd_add_channel,
         "set-channel": cmd_set_channel,
         "set": cmd_set,
+        "set-worker-type": cmd_set_worker_type,
         "set-livekit": cmd_set_livekit,
         "delete": cmd_delete,
     }
