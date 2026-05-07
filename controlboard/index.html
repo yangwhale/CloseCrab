@@ -1096,6 +1096,7 @@
           <div class="fleet-kv"><span class="fk">SSH</span><span class="fv">${sshAlias}</span></div>
           <div class="fleet-kv"><span class="fk">Accel</span><span class="fv">${accel}</span></div>
           <div class="fleet-kv"><span class="fk">Channel</span><span class="fv">${channel}</span></div>
+          ${(cfg.worker_type||'claude')==='gemini' ? `<div class="fleet-kv"><span class="fk">Worker</span><span class="fv" style="color:var(--yellow)">gemini</span></div>` : ''}
           <div class="fleet-kv"><span class="fk">CC</span><span class="fv">${reg.cc_version || '—'}</span></div>
           ${ctxHtml}
         </div>`;
@@ -1530,6 +1531,7 @@
         <div class="card">
           <div class="card-title"><span class="material-icons-outlined">settings</span>Configuration</div>
           <div class="kv-row"><span class="kv-label">Channel</span><span class="kv-value"><span class="badge ${channel}">${channel}</span></span></div>
+          <div class="kv-row"><span class="kv-label">Worker</span><span class="kv-value"><span class="badge ${(cfg.worker_type||'claude')==='gemini'?'lark':'discord'}">${cfg.worker_type || 'claude'}</span></span></div>
           <div class="kv-row"><span class="kv-label">Model</span><span class="kv-value">${cfg.model || '—'}</span></div>
           <div class="kv-row"><span class="kv-label">Work Dir</span><span class="kv-value">${cfg.work_dir || '—'}</span></div>
           <div class="kv-row"><span class="kv-label">Timeout</span><span class="kv-value">${cfg.timeout || '—'}s</span></div>
@@ -1560,6 +1562,7 @@
     "claude-sonnet-4-20250514",
   ];
   const STT_ENGINES = ["gemini", "gemini:gemini-2.0-flash", "gemini:gemini-2.5-flash", "whisper"];
+  const WORKER_TYPES = ["claude", "gemini"];
   const CHANNELS = ["discord", "feishu", "lark", "dingtalk"];
   const CHANNEL_ICONS = { discord: "forum", feishu: "chat", lark: "chat", dingtalk: "sms" };
   const TEAM_ROLES = ["standalone", "leader", "teammate"];
@@ -1656,6 +1659,12 @@
               ${cfg.stt_engine && !STT_ENGINES.includes(cfg.stt_engine) ? `<option value="${escHtml(cfg.stt_engine)}" selected>${escHtml(cfg.stt_engine)}</option>` : ''}
             </select>` : `<div class="cfg-display-value">${escHtml(cfg.stt_engine || '—')}</div>`}
           </div>
+        </div>
+        <div class="cfg-field"><label class="cfg-label">Worker Type</label>
+          ${gEdit ? `<select class="cfg-select" id="cfg-worker_type">
+            ${WORKER_TYPES.map(w => `<option value="${w}" ${w === (cfg.worker_type || 'claude') ? 'selected' : ''}>${w === 'claude' ? 'Claude Code CLI' : 'Gemini CLI (ACP)'}</option>`).join('')}
+          </select>
+          <div class="cfg-hint">claude = Claude Code CLI, gemini = Gemini CLI via ACP protocol</div>` : `<div class="cfg-display-value">${(cfg.worker_type || 'claude') === 'gemini' ? 'Gemini CLI (ACP)' : 'Claude Code CLI'}</div>`}
         </div>
         <div class="cfg-field"><label class="cfg-label">Claude CLI Path</label>
           <div class="cfg-display-value">${escHtml(cfg.claude_bin || '~/.local/bin/claude')}</div>
@@ -1843,6 +1852,7 @@
         updates.work_dir = document.getElementById('cfg-work_dir').value;
         updates.timeout = parseInt(document.getElementById('cfg-timeout').value) || 600;
         updates.stt_engine = document.getElementById('cfg-stt_engine').value;
+        updates.worker_type = document.getElementById('cfg-worker_type').value;
       }
 
       if (card === 'channel') {
