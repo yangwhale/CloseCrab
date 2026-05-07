@@ -763,6 +763,64 @@ GEMINI_ENV
         else
             echo "  .env 已存在, 跳过"
         fi
+
+        # Gemini CLI MCP — 注入与 Claude Code 相同的外部 MCP servers
+        python3 -c "
+import json, os
+path = os.path.expanduser('~/.gemini/settings.json')
+with open(path) as f:
+    cfg = json.load(f)
+cfg.setdefault('mcpServers', {})
+changed = False
+# Remove deprecated NotebookLM-API (gLinux-only)
+if 'NotebookLM-API' in cfg['mcpServers']:
+    cmd = cfg['mcpServers']['NotebookLM-API'].get('command', '')
+    if '/google/bin/' in cmd:
+        del cfg['mcpServers']['NotebookLM-API']
+        print('  [gemini] Removed gLinux-only NotebookLM-API MCP')
+        changed = True
+# jina-ai MCP
+jina_key = os.environ.get('JINA_API_KEY', '')
+if 'jina-ai' not in cfg['mcpServers'] and jina_key:
+    cfg['mcpServers']['jina-ai'] = {
+        'command': 'npx',
+        'args': ['-y', 'jina-ai-mcp-server'],
+        'env': {'JINA_API_KEY': jina_key}
+    }
+    print('  [gemini] jina-ai MCP 已注入')
+    changed = True
+elif 'jina-ai' in cfg['mcpServers']:
+    print('  [gemini] jina-ai MCP 已存在, 跳过')
+# chrome-devtools-mcp
+if 'chrome-devtools-mcp' not in cfg['mcpServers']:
+    cfg['mcpServers']['chrome-devtools-mcp'] = {
+        'command': 'npx',
+        'args': ['-y', 'chrome-devtools-mcp@latest', '--browserUrl', 'http://127.0.0.1:9222'],
+        'env': {}
+    }
+    print('  [gemini] chrome-devtools-mcp 已注入')
+    changed = True
+else:
+    print('  [gemini] chrome-devtools-mcp 已存在, 跳过')
+# wiki MCP
+wiki_dir = os.path.expanduser('~/my-wiki-v2')
+if 'wiki' not in cfg['mcpServers'] and os.path.isdir(wiki_dir):
+    cfg['mcpServers']['wiki'] = {
+        'command': 'python3',
+        'args': [os.path.join(wiki_dir, 'mcp-server', 'wiki_mcp.py')],
+        'env': {}
+    }
+    print('  [gemini] wiki MCP 已注入')
+    changed = True
+elif 'wiki' in cfg['mcpServers']:
+    print('  [gemini] wiki MCP 已存在, 跳过')
+if changed:
+    with open(path, 'w') as f:
+        json.dump(cfg, f, indent=2)
+    print('  [gemini] settings.json 已更新')
+else:
+    print('  [gemini] MCP 无变更')
+"
     fi
 
     # ----------------------------------------------------------------
@@ -798,18 +856,10 @@ elif jina_key:
     print('  jina-ai MCP 配置已注入')
 else:
     print('  jina-ai MCP 跳过 (JINA_API_KEY 未设置)')
-# pipecat MCP (optional voice I/O)
-pipecat_url = os.environ.get('PIPECAT_MCP_URL', '')
+# Remove deprecated pipecat MCP if present
 if 'pipecat' in cfg['mcpServers']:
-    print('  pipecat MCP 配置已存在, 跳过')
-elif pipecat_url:
-    cfg['mcpServers']['pipecat'] = {
-        'type': 'streamable-http',
-        'url': pipecat_url,
-    }
-    print(f'  pipecat MCP 配置已注入 ({pipecat_url})')
-else:
-    print('  pipecat MCP 跳过 (PIPECAT_MCP_URL 未设置)')
+    del cfg['mcpServers']['pipecat']
+    print('  Removed deprecated pipecat MCP')
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
 "

@@ -218,9 +218,9 @@ class GeminiACPWorker(Worker):
         self._initialized = True
 
         # Step 2: session/new
+        # Don't pass mcpServers — let Gemini CLI load from ~/.gemini/settings.json
         resp = await self._rpc("session/new", {
             "cwd": self._work_dir,
-            "mcpServers": [],
         }, timeout=60)
         if not resp or "error" in resp:
             err = resp.get("error", {}).get("message", "unknown") if resp else "no response"
