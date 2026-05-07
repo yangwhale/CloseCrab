@@ -896,16 +896,28 @@ class GeminiACPWorker(Worker):
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
+    _GEMINI_MD_BEGIN = "<!-- CloseCrab:BEGIN -->"
+    _GEMINI_MD_END = "<!-- CloseCrab:END -->"
+
     def _write_gemini_md(self):
-        """Write system prompt to GEMINI.md in work_dir."""
+        """Upsert the CloseCrab section in GEMINI.md, preserving all other content."""
         if not self._system_prompt:
             return
         gemini_md = Path(self._work_dir) / "GEMINI.md"
-        marker = "<!-- CloseCrab Bot System Prompt -->"
-        content = f"{marker}\n{self._system_prompt}\n"
+        injected = f"{self._GEMINI_MD_BEGIN}\n{self._system_prompt}\n{self._GEMINI_MD_END}"
         try:
+            if gemini_md.exists():
+                existing = gemini_md.read_text(encoding="utf-8")
+                begin = existing.find(self._GEMINI_MD_BEGIN)
+                end = existing.find(self._GEMINI_MD_END)
+                if begin != -1 and end != -1:
+                    content = existing[:begin] + injected + existing[end + len(self._GEMINI_MD_END):]
+                else:
+                    content = existing.rstrip("\n") + "\n\n" + injected + "\n"
+            else:
+                content = injected + "\n"
             gemini_md.write_text(content, encoding="utf-8")
-            log.info(f"Wrote GEMINI.md ({len(content)} chars) to {gemini_md}")
+            log.info(f"Upserted CloseCrab section in GEMINI.md ({len(self._system_prompt)} chars)")
         except Exception as e:
             log.error(f"Failed to write GEMINI.md: {e}")
 
