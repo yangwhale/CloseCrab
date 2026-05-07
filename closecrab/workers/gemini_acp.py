@@ -582,6 +582,7 @@ class GeminiACPWorker(Worker):
 
             accumulated_text = []
             deadline = time.monotonic() + self._timeout
+            subagent_active = False
 
             while time.monotonic() < deadline:
                 if self._interrupted:
@@ -599,6 +600,8 @@ class GeminiACPWorker(Worker):
                             log.error(f"ACP stderr: {stderr_content[:500]}")
                         self._started = False
                         return "[Error] Gemini ACP process crashed"
+                    if subagent_active:
+                        deadline = max(deadline, time.monotonic() + 120)
                     continue
 
                 # Response to our prompt request → turn complete
@@ -645,10 +648,14 @@ class GeminiACPWorker(Worker):
 
                 # Notification from the agent
                 if "method" in msg:
-                    await self._handle_notification(
+                    is_subagent = await self._handle_notification(
                         msg, accumulated_text,
                         on_event=on_event, on_log=on_log, on_step=on_step,
                     )
+                    if is_subagent is not None:
+                        if is_subagent and not subagent_active:
+                            log.info("Sub-agent started, extending deadline")
+                        subagent_active = is_subagent
                     continue
 
                 # Server-initiated request (permission, etc.)
@@ -702,17 +709,21 @@ class GeminiACPWorker(Worker):
         on_event: Optional[Callable[[str], Awaitable[None]]] = None,
         on_log: Optional[Callable[[str], Awaitable[None]]] = None,
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
-    ):
-        """Process a session/update notification from the ACP agent."""
+    ) -> Optional[bool]:
+        """Process a session/update notification from the ACP agent.
+
+        Returns True/False when a sub-agent starts/finishes (for deadline
+        extension), or None when the notification is unrelated to sub-agents.
+        """
         method = msg.get("method", "")
 
         # Handle non-update methods
         if method == "session/request_permission" and "id" in msg:
             await self._handle_server_request(msg)
-            return
+            return None
         if method != "session/update":
             log.debug(f"ACP notification: {method}")
-            return
+            return None
 
         params = msg.get("params", {})
         # ACP nests the update payload under params.update
@@ -750,6 +761,14 @@ class GeminiACPWorker(Worker):
 
             log.info(f"ACP {update_type}: {cc_name} ({tool_status}) "
                      f"kind={tool_kind} title={tool_title[:80]}")
+
+            # Signal sub-agent lifecycle to caller for deadline extension
+            is_delegation = "delegat" in tool_title.lower() or "subagent" in tool_title.lower()
+            if is_delegation:
+                if tool_status in ("in_progress", "running", "started"):
+                    return True
+                if tool_status in ("completed", "done", "error"):
+                    return False
 
             if tool_status in ("in_progress", "running", "started"):
                 # Build CC-compatible event directly (cc_name is already mapped)
@@ -809,6 +828,8 @@ class GeminiACPWorker(Worker):
 
         else:
             log.debug(f"ACP update: {update_type}")
+
+        return None
 
     @staticmethod
     def _map_tool_kind(kind: str, title: str, update: dict) -> tuple[str, dict]:
