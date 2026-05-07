@@ -80,6 +80,37 @@ _PROGRESS_LABELS = {
 }
 
 
+# ── Context compaction thresholds ──
+_COMPACTION_THRESHOLD = 750_000    # 75% of 1M — trigger compaction
+_COMPACTION_HARD_LIMIT = 950_000   # 95% — bypass cooldown, force compaction
+_COMPACTION_COOLDOWN_S = 60        # min seconds between compactions
+
+_COMPACTION_SUMMARY_PROMPT = """\
+[System: Context Compaction]
+你的上下文即将超过限制。请按以下结构生成对话摘要，用于注入新 session：
+
+### 当前任务
+一句话说明用户在做什么。
+
+### 关键结论
+- 已确定的事实、决策、配置值（保留具体数值、路径、URL）
+
+### 完成状态
+- 已完成：...
+- 待完成：...
+- 文件变更：路径列表
+
+### 近期对话（最后 2-3 轮）
+保留较多细节。
+
+规则：
+- 不要包含工具原始输出（DOM 快照、搜索结果、命令输出）
+- 不要包含无结论的中间探索
+- 保留具体的文件路径、URL、数值
+- 总长度控制在 4000 字符以内
+- 用用户使用的语言书写"""
+
+
 class GeminiACPWorker(Worker):
     """Persistent Gemini CLI worker via ACP (Agent Client Protocol).
 
@@ -123,6 +154,9 @@ class GeminiACPWorker(Worker):
         }
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
         self._session_resumed = False
+        self._needs_compaction = False
+        self._compaction_count = 0
+        self._last_compaction_ts: Optional[float] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -321,6 +355,175 @@ class GeminiACPWorker(Worker):
             if not cursor:
                 break
         return all_sessions
+
+    async def _create_new_session(self) -> bool:
+        """Create a new ACP session on the existing process. Returns True on success."""
+        if not self._proc or self._proc.returncode is not None:
+            return False
+        if not self._initialized:
+            return False
+        mcp_servers = self._load_mcp_servers()
+        resp = await self._rpc("session/new", {
+            "cwd": self._work_dir,
+            "mcpServers": mcp_servers,
+        }, timeout=60)
+        if not resp or "error" in resp:
+            err = resp.get("error", {}).get("message", "unknown") if resp else "no response"
+            log.error(f"_create_new_session failed: {err}")
+            return False
+        self._acp_session_id = resp["result"]["sessionId"]
+        self._session_id = self._acp_session_id
+        log.info(f"New ACP session created: {self._acp_session_id}")
+        return True
+
+    def _check_compaction_needed(self) -> None:
+        """Check input_tokens against thresholds and flag compaction if needed."""
+        input_tokens = self._usage.get("input_tokens", 0)
+        if input_tokens < _COMPACTION_THRESHOLD:
+            return
+
+        now = time.monotonic()
+        if input_tokens >= _COMPACTION_HARD_LIMIT:
+            log.warning(f"Context at hard limit ({input_tokens} tokens), forcing compaction")
+            self._needs_compaction = True
+            return
+
+        if (self._last_compaction_ts is not None
+                and (now - self._last_compaction_ts) < _COMPACTION_COOLDOWN_S):
+            log.debug("Compaction needed but cooldown active, skipping")
+            return
+
+        log.info(f"Context at {input_tokens} tokens (threshold {_COMPACTION_THRESHOLD}), "
+                 f"scheduling compaction")
+        self._needs_compaction = True
+
+    async def _perform_compaction(
+        self,
+        on_event: Optional[Callable] = None,
+        on_log: Optional[Callable] = None,
+    ) -> Optional[str]:
+        """Compress context by summarizing current session and starting a new one.
+
+        Returns the summary text on success, None on failure.
+        """
+        self._needs_compaction = False
+        log.info(f"Starting context compaction (count={self._compaction_count}, "
+                 f"input_tokens={self._usage.get('input_tokens', 0)})")
+
+        if on_log:
+            await on_log("context_compaction", "compressing context...")
+
+        # Step 1: Ask current session to summarize itself
+        self._req_id += 1
+        summary_id = self._req_id
+        await self._send_json({
+            "jsonrpc": "2.0",
+            "id": summary_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": self._acp_session_id,
+                "prompt": [{"type": "text", "text": _COMPACTION_SUMMARY_PROMPT}],
+            },
+        })
+        log.info(f"Compaction summary prompt sent (id={summary_id})")
+
+        # Step 2: Collect summary response
+        summary_parts: list[str] = []
+        deadline = time.monotonic() + 120
+        old_session_id = self._acp_session_id
+
+        while time.monotonic() < deadline:
+            try:
+                remaining = max(1, deadline - time.monotonic())
+                line = await asyncio.wait_for(
+                    self._proc.stdout.readline(), timeout=min(remaining, 30)
+                )
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                log.error(f"Compaction read error: {e}")
+                break
+
+            if not line:
+                log.error("Compaction: EOF from CLI process")
+                break
+
+            try:
+                msg = json.loads(line.decode("utf-8", errors="replace").strip())
+            except json.JSONDecodeError:
+                continue
+
+            method = msg.get("method", "")
+
+            # Streaming text from summary
+            if method == "session/update":
+                params = msg.get("params", {})
+                content = params.get("content", [])
+                for part in content:
+                    if part.get("type") == "text" and part.get("text"):
+                        summary_parts.append(part["text"])
+                continue
+
+            # Response to our summary prompt
+            if "id" in msg and msg.get("id") == summary_id:
+                if "error" in msg:
+                    err_msg = msg["error"].get("message", "unknown")
+                    log.error(f"Compaction summary failed: {err_msg}")
+                    break
+                # Extract text from final result
+                result = msg.get("result", {})
+                result_content = result.get("content", [])
+                for part in result_content:
+                    if part.get("type") == "text" and part.get("text"):
+                        summary_parts.append(part["text"])
+                break
+
+        summary_text = "".join(summary_parts).strip()
+        if not summary_text:
+            log.error("Compaction produced empty summary, aborting")
+            return None
+
+        log.info(f"Compaction summary collected: {len(summary_text)} chars")
+
+        # Step 3: Close old session (best-effort)
+        try:
+            self._req_id += 1
+            await self._send_json({
+                "jsonrpc": "2.0",
+                "id": self._req_id,
+                "method": "session/close",
+                "params": {"sessionId": old_session_id},
+            })
+            # Read response but don't block long
+            try:
+                resp_line = await asyncio.wait_for(
+                    self._proc.stdout.readline(), timeout=10
+                )
+            except asyncio.TimeoutError:
+                pass
+            log.info(f"Old session {old_session_id} closed")
+        except Exception as e:
+            log.warning(f"session/close failed (non-fatal): {e}")
+
+        # Step 4: Create new session on same process
+        if not await self._create_new_session():
+            log.error("Compaction: failed to create new session, trying to recover")
+            # Try loading an existing session
+            if not await self._try_load_session():
+                log.error("Compaction: recovery failed completely")
+                return None
+
+        # Step 5: Update state
+        self._compaction_count += 1
+        self._last_compaction_ts = time.monotonic()
+        # Reset token counter since new session starts fresh
+        self._usage["input_tokens"] = 0
+        self._usage["output_tokens"] = 0
+
+        log.info(f"Compaction complete (#{self._compaction_count}): "
+                 f"new session={self._acp_session_id}, "
+                 f"summary={len(summary_text)} chars")
+        return summary_text
 
     def _load_mcp_servers(self) -> list:
         """Load MCP servers from ~/.gemini/settings.json and convert to ACP array format.
@@ -566,6 +769,20 @@ class GeminiACPWorker(Worker):
                 )
                 self._session_resumed = False
 
+            # Context compaction: if flagged, compress before sending
+            if self._needs_compaction and self._acp_session_id:
+                summary = await self._perform_compaction(on_event, on_log)
+                if summary:
+                    text = (
+                        "[系统: Context 已压缩，以下是之前对话摘要。"
+                        "直接回应用户新消息，不要复述摘要。]\n\n"
+                        f"<conversation-summary>\n{summary}\n</conversation-summary>\n\n"
+                        f"---\n用户消息:\n{text}"
+                    )
+                if not self._acp_session_id:
+                    log.error("No ACP session after compaction")
+                    return "[Error] Context compaction failed, no session"
+
             # Send session/prompt
             self._req_id += 1
             prompt_id = self._req_id
@@ -620,10 +837,12 @@ class GeminiACPWorker(Worker):
                             self._acp_session_id = None
                             return "(Session 状态异常，已自动重置。请再说一次)"
 
-                        # Context overflow: auto-reset session
+                        # Context overflow: try compaction first, fallback to hard reset
                         if "too long" in err_msg.lower() or "too many tokens" in err_msg.lower():
-                            log.warning("ACP context overflow, resetting session")
-                            self._acp_session_id = None
+                            log.warning("ACP context overflow at error time, attempting emergency compaction")
+                            self._needs_compaction = True
+                            if not await self._create_new_session():
+                                self._acp_session_id = None
                             return "(对话上下文超过 Gemini 1M token 上限，已自动开启新会话。请再说一次)"
 
                         return f"[Error] {err_msg}"
@@ -640,6 +859,7 @@ class GeminiACPWorker(Worker):
                         self._usage["cache_read_input_tokens"] = tc.get(
                             "cache_read_input_tokens", 0)
                     self._usage["turns"] += 1
+                    self._check_compaction_needed()
 
                     # Extract text from final response as fallback
                     result_content = result.get("content", [])
@@ -990,6 +1210,8 @@ class GeminiACPWorker(Worker):
             u["session_duration_s"] = 0
         if self._start_wall:
             u["session_start_ts"] = self._start_wall
+        u["compaction_count"] = self._compaction_count
+        u["compaction_pending"] = self._needs_compaction
         return u
 
     def is_alive(self) -> bool:
