@@ -187,6 +187,7 @@ class GeminiACPWorker(Worker):
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr_fd,
+                limit=16 * 1024 * 1024,
                 cwd=self._work_dir,
                 env=env,
                 start_new_session=True,
