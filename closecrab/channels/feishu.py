@@ -2881,7 +2881,6 @@ class FeishuChannel(Channel):
             if e.code == 42:
                 log.info("Restart requested")
                 self._restart_requested = True
-            raise
         finally:
             # Voice IO 先收: 它的 server_task 跑在这个 loop 上,
             # loop 关之前必须把它 await 干净, 不然 livekit-server 那边

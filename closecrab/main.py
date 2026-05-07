@@ -144,12 +144,14 @@ def build_system_prompt(
     team: dict | None = None,
     channel_type: str = "discord",
     livekit_enabled: bool = False,
+    worker_type: str = "claude",
 ) -> str:
     """构造 system prompt = channel style + safety rule + team info。
 
     Args:
         livekit_enabled: 飞书是否启用了 voice IO。启用时会注入 voice 风格指令,
             告诉 Claude 看到 [来自语音通话] 前缀的消息时切口语风格。
+        worker_type: Worker 类型 ("claude" 或 "gemini")。Gemini worker 注入额外行为指导。
     """
     if channel_type in ("feishu", "lark"):
         from .channels.feishu import load_feishu_style
@@ -309,6 +311,14 @@ def build_system_prompt(
             "wiki_status / wiki_graph_neighbors / wiki_graph_path"
         )
 
+    # Gemini worker 行为指导（从模板文件加载）
+    if worker_type == "gemini":
+        _guide_path = Path(__file__).parent / "prompts" / "gemini-worker-guide.md"
+        try:
+            prompt += "\n\n" + _guide_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+
     return prompt
 
 
@@ -399,11 +409,13 @@ def main():
 
     livekit_cfg = cfg.get("livekit") or {}
     livekit_enabled = bool(livekit_cfg.get("enabled")) and channel_type in ("feishu", "lark")
+    worker_type = cfg.get("worker_type", "claude")
     system_prompt = build_system_prompt(
         bot_name,
         team=cfg.get("team"),
         channel_type=channel_type,
         livekit_enabled=livekit_enabled,
+        worker_type=worker_type,
     )
 
     stt = STTEngine(
@@ -416,8 +428,6 @@ def main():
     # Firestore client（对话日志用）
     from google.cloud import firestore as _firestore
     db = _firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
-
-    worker_type = cfg.get("worker_type", "claude")
 
     # Gemini worker: inject MEMORY.md into system prompt
     # (Claude Code loads memory automatically; Gemini CLI does not)

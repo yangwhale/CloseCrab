@@ -10,16 +10,17 @@ Env vars:
     VERTEX_LOCATION  Vertex AI location (default: global)
     PROXY_PORT       Listen port (default: 8888)
 
-Model mapping (fuzzy substring match, priority order):
-    *pro*   → claude-opus-4-6    (main reasoning)
-    *flash* → claude-sonnet-4-6  (helper / agent delegation)
-    default → claude-sonnet-4-6
+Model mapping (prefix match, priority order):
+    gemini-*-pro*   → claude-opus-4-6    (max_tokens=65536)
+    gemini-*-flash* → claude-sonnet-4-6  (max_tokens=16384)
+    default         → claude-sonnet-4-6
 
 Usage:
     python3 gemini-claude-proxy.py &
     GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8888" GEMINI_API_KEY=dummy gemini
 """
-import json, http.server, urllib.request, ssl, sys, re, os, time, traceback
+import collections, json, http.server, urllib.request, ssl, sys, re, os
+import signal, time, threading, traceback, logging
 import google.auth
 import google.auth.transport.requests
 
@@ -27,28 +28,41 @@ PROJECT = os.environ.get("VERTEX_PROJECT", "chris-pgp-host")
 LOCATION = os.environ.get("VERTEX_LOCATION", "global")
 PORT = int(os.environ.get("PROXY_PORT", "8888"))
 
+MODEL_MAP = [
+    ("pro",   "claude-opus-4-6",   128000),
+    ("flash", "claude-sonnet-4-6",  64000),
+]
 DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MAX_TOKENS = 64000
+
+CLAUDE_HARD_LIMIT = {
+    "claude-opus-4-6": 128000,
+    "claude-sonnet-4-6": 64000,
+}
 
 TOOL_WARN_THRESHOLD = 80
+RETRYABLE_CODES = {429, 500, 503, 529}
+MAX_RETRIES = 2
+
+LOG = logging.getLogger("proxy")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [proxy] %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
 
 ssl_ctx = ssl.create_default_context()
 _creds = None
 _auth_req = None
 
 
-def map_model(gemini_model: str) -> str:
-    """Map Gemini model name to Claude model via substring matching.
-
-    Gemini CLI uses versioned names internally:
-      gemini-3.1-pro-preview, gemini-3.1-pro-preview-customtools → opus
-      gemini-3-flash-preview, gemini-2.5-flash-lite              → sonnet
-    """
+def map_model(gemini_model: str) -> tuple:
     name = gemini_model.lower()
-    if "pro" in name:
-        return "claude-opus-4-6"
-    if "flash" in name:
-        return "claude-sonnet-4-6"
-    return DEFAULT_MODEL
+    for keyword, claude_model, max_tok in MODEL_MAP:
+        if keyword in name:
+            return claude_model, max_tok
+    return DEFAULT_MODEL, DEFAULT_MAX_TOKENS
 
 
 def get_token():
@@ -71,7 +85,6 @@ def vertex_url(model):
 # ── Gemini tools → Claude tools ──────────────────────────────────────
 
 def convert_tools(gemini_tools):
-    """Convert Gemini functionDeclarations → Claude tools format."""
     claude_tools = []
     for tool_group in gemini_tools:
         for fd in tool_group.get("functionDeclarations", []):
@@ -87,10 +100,21 @@ def convert_tools(gemini_tools):
 # ── Gemini contents → Claude messages ────────────────────────────────
 
 def convert_contents(contents):
-    """Convert Gemini contents (with functionCall/functionResponse) → Claude messages."""
+    """Two-pass conversion: first register all call IDs, then build messages."""
+    # Pass 1: assign stable IDs to every functionCall
+    call_registry = {}
+    counter = 0
+    for content in contents:
+        for part in content.get("parts", []):
+            if "functionCall" in part:
+                name = part["functionCall"]["name"]
+                call_id = f"toolu_{counter:04d}"
+                counter += 1
+                call_registry.setdefault(name, collections.deque()).append(call_id)
+
+    # Pass 2: build Claude messages, matching functionResponse to registered IDs
     messages = []
-    call_counter = 0
-    pending_calls = []
+    build_counter = 0
 
     for content in contents:
         role = "assistant" if content.get("role") == "model" else "user"
@@ -105,9 +129,8 @@ def convert_contents(contents):
 
             elif "functionCall" in part:
                 fc = part["functionCall"]
-                call_id = f"toolu_{call_counter:04d}"
-                call_counter += 1
-                pending_calls.append((call_id, fc["name"]))
+                call_id = f"toolu_{build_counter:04d}"
+                build_counter += 1
                 claude_content.append({
                     "type": "tool_use",
                     "id": call_id,
@@ -117,21 +140,15 @@ def convert_contents(contents):
 
             elif "functionResponse" in part:
                 fr = part["functionResponse"]
-                matched_id = None
-                for i, (cid, cname) in enumerate(pending_calls):
-                    if cname == fr["name"]:
-                        matched_id = cid
-                        pending_calls.pop(i)
-                        break
-                if not matched_id:
-                    matched_id = f"toolu_{call_counter:04d}"
-                    call_counter += 1
+                name = fr["name"]
+                if name in call_registry and call_registry[name]:
+                    matched_id = call_registry[name].popleft()
+                else:
+                    matched_id = f"toolu_orphan_{build_counter:04d}"
+                    build_counter += 1
 
                 resp_data = fr.get("response", {})
-                if isinstance(resp_data, str):
-                    resp_str = resp_data
-                else:
-                    resp_str = json.dumps(resp_data, ensure_ascii=False)
+                resp_str = resp_data if isinstance(resp_data, str) else json.dumps(resp_data, ensure_ascii=False)
                 claude_content.append({
                     "type": "tool_result",
                     "tool_use_id": matched_id,
@@ -167,8 +184,7 @@ def convert_contents(contents):
     return messages
 
 
-def to_anthropic(req, gemini_tools):
-    """Convert full Gemini API request → Anthropic Messages API body."""
+def to_anthropic(req, gemini_tools, claude_model, default_max_tokens):
     system = None
     if "systemInstruction" in req:
         text = " ".join(
@@ -185,7 +201,7 @@ def to_anthropic(req, gemini_tools):
     body = {
         "anthropic_version": "vertex-2023-10-16",
         "messages": messages,
-        "max_tokens": 8192,
+        "max_tokens": default_max_tokens,
     }
     if system:
         body["system"] = system
@@ -198,7 +214,14 @@ def to_anthropic(req, gemini_tools):
     if "temperature" in gc:
         body["temperature"] = gc["temperature"]
     if "maxOutputTokens" in gc:
-        body["max_tokens"] = gc["maxOutputTokens"]
+        hard_limit = CLAUDE_HARD_LIMIT.get(claude_model, 64000)
+        body["max_tokens"] = min(gc["maxOutputTokens"], hard_limit)
+    if "topP" in gc:
+        body["top_p"] = gc["topP"]
+    if "topK" in gc:
+        body["top_k"] = gc["topK"]
+    if "stopSequences" in gc:
+        body["stop_sequences"] = gc["stopSequences"]
 
     return body
 
@@ -206,7 +229,6 @@ def to_anthropic(req, gemini_tools):
 # ── Claude response → Gemini response ───────────────────────────────
 
 def from_anthropic(resp, gemini_model):
-    """Convert Anthropic Messages API response → Gemini API response."""
     parts = []
     for block in resp.get("content", []):
         if block.get("type") == "text":
@@ -224,18 +246,13 @@ def from_anthropic(resp, gemini_model):
     if not parts:
         parts = [{"text": ""}]
 
-    stop_reason = resp.get("stop_reason", "end_turn")
-    finish = "STOP" if stop_reason == "end_turn" else "STOP"
-    if stop_reason == "tool_use":
-        finish = "STOP"
-
     usage = resp.get("usage", {})
     inp, out = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
 
     return {
         "candidates": [{
             "content": {"parts": parts, "role": "model"},
-            "finishReason": finish,
+            "finishReason": "STOP",
             "index": 0,
         }],
         "usageMetadata": {
@@ -255,15 +272,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, ctype, body):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _safe_send(self, code, ctype, body):
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_POST(self):
+        try:
+            self._handle_post()
+        except (BrokenPipeError, ConnectionResetError):
+            LOG.warning("Client disconnected (BrokenPipe)")
+
+    def _handle_post(self):
         m = re.search(r'/models/([^/:]+):(stream)?[gG]enerateContent', self.path)
         if not m:
             self.send_error(404, f"Unknown path: {self.path}")
@@ -271,12 +303,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         gemini_model = m.group(1)
         is_stream = m.group(2) == "stream"
-        claude_model = map_model(gemini_model)
+        claude_model, default_max_tokens = map_model(gemini_model)
 
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         body = json.loads(raw)
         gemini_tools = body.get("tools", [])
-        anthropic_body = to_anthropic(body, gemini_tools)
+        anthropic_body = to_anthropic(body, gemini_tools, claude_model, default_max_tokens)
 
         n_tools = sum(len(t.get("functionDeclarations", [])) for t in gemini_tools)
         n_msgs = len(anthropic_body["messages"])
@@ -285,21 +317,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             any(b.get("type") in ("tool_use", "tool_result") for b in m["content"])
             for m in anthropic_body["messages"]
         )
+        max_tok = anthropic_body["max_tokens"]
         heavy = " ⚠️HEAVY" if n_tools > TOOL_WARN_THRESHOLD else ""
-        sys.stderr.write(
-            f"[proxy] {gemini_model} → {claude_model}"
-            f" msgs={n_msgs} tools={n_tools}"
-            f"{' +tool_use' if has_tc else ''}{heavy}\n"
-        )
-        sys.stderr.flush()
+        LOG.info("%s → %s msgs=%d tools=%d max_tok=%d%s%s",
+                 gemini_model, claude_model, n_msgs, n_tools, max_tok,
+                 " +tc" if has_tc else "", heavy)
 
-        # Timeout: Opus gets 300s, others 120s
         api_timeout = 300 if "opus" in claude_model else 120
+        t0 = time.monotonic()
 
-        max_retries = 2
-        last_err = None
-
-        for attempt in range(max_retries):
+        for attempt in range(MAX_RETRIES):
             try:
                 token = get_token()
                 url = vertex_url(claude_model)
@@ -314,84 +341,103 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 resp = json.loads(resp_raw)
                 gem = from_anthropic(resp, gemini_model)
 
+                elapsed = time.monotonic() - t0
                 resp_types = [list(p.keys())[0] for p in gem["candidates"][0]["content"]["parts"]]
                 usage = gem["usageMetadata"]
-                sys.stderr.write(
-                    f"[proxy] ✓ {resp_types}"
-                    f" ({usage['promptTokenCount']}+{usage['candidatesTokenCount']} tok)\n"
-                )
-                sys.stderr.flush()
+                stop = resp.get("stop_reason", "?")
+                truncated = " ⚠️TRUNCATED" if stop == "max_tokens" else ""
+                LOG.info("✓ %s %d+%d tok %.1fs %s%s",
+                         resp_types, usage["promptTokenCount"],
+                         usage["candidatesTokenCount"], elapsed, stop, truncated)
 
                 if is_stream:
                     out = b"data: " + json.dumps(gem, ensure_ascii=False).encode() + b"\r\n\r\n"
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Content-Length", str(len(out)))
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    self.wfile.write(out)
-                    self.wfile.flush()
+                    self._safe_send_stream(out)
                 else:
-                    self._send(200, "application/json", json.dumps(gem).encode())
+                    self._safe_send(200, "application/json", json.dumps(gem).encode())
                 return
 
             except urllib.error.HTTPError as e:
                 err = e.read().decode()
-                last_err = (e.code, err[:500])
-                if e.code in (500, 503, 529) and attempt < max_retries - 1:
-                    wait = 2 * (attempt + 1)
-                    sys.stderr.write(
-                        f"[proxy] ⚠️ Vertex {e.code}, retry in {wait}s "
-                        f"(attempt {attempt+1}/{max_retries})\n"
-                    )
-                    sys.stderr.flush()
+                if e.code in RETRYABLE_CODES and attempt < MAX_RETRIES - 1:
+                    wait = 2 ** (attempt + 1)
+                    LOG.warning("Vertex %d, retry in %ds (attempt %d/%d)",
+                                e.code, wait, attempt + 1, MAX_RETRIES)
                     time.sleep(wait)
                     continue
-                sys.stderr.write(f"[proxy] ✗ Vertex {e.code}: {err[:500]}\n")
-                sys.stderr.flush()
-                self._send(e.code, "application/json",
-                           json.dumps({"error": {"message": err[:500], "code": e.code}}).encode())
+                LOG.error("Vertex %d: %s", e.code, err[:300])
+                self._safe_send(e.code, "application/json",
+                                json.dumps({"error": {"message": err[:500], "code": e.code}}).encode())
+                return
+
+            except (BrokenPipeError, ConnectionResetError):
+                LOG.warning("Client disconnected (BrokenPipe)")
                 return
 
             except Exception as e:
-                last_err = (500, str(e))
-                if attempt < max_retries - 1:
-                    wait = 2 * (attempt + 1)
-                    sys.stderr.write(
-                        f"[proxy] ⚠️ Exception, retry in {wait}s: {e}\n"
-                    )
-                    sys.stderr.flush()
+                if attempt < MAX_RETRIES - 1:
+                    wait = 2 ** (attempt + 1)
+                    LOG.warning("Exception, retry in %ds: %s", wait, e)
                     time.sleep(wait)
                     continue
-                sys.stderr.write(f"[proxy] ✗ Exception: {traceback.format_exc()}\n")
-                sys.stderr.flush()
-                self._send(500, "application/json",
-                           json.dumps({"error": {"message": str(e), "code": 500}}).encode())
+                LOG.error("Exception: %s", traceback.format_exc())
+                self._safe_send(500, "application/json",
+                                json.dumps({"error": {"message": str(e), "code": 500}}).encode())
                 return
 
+    def _safe_send_stream(self, out):
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(out)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(out)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            LOG.warning("Client disconnected during stream send")
+
     def do_GET(self):
-        self._send(200, "application/json", b'{"status":"ok"}')
+        self._safe_send(200, "application/json", b'{"status":"ok"}')
+
+
+# ── Server ───────────────────────────────────────────────────────────
+
+class ProxyServer(http.server.ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 32
+
+
+_shutdown = threading.Event()
+
+
+def _signal_handler(sig, frame):
+    LOG.info("Shutting down (signal %d)...", sig)
+    _shutdown.set()
 
 
 if __name__ == "__main__":
-    sys.stderr.write("[proxy] Auth warmup...")
-    sys.stderr.flush()
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    LOG.info("Auth warmup...")
     try:
         get_token()
-        sys.stderr.write(" OK\n")
+        LOG.info("Auth OK")
     except Exception as e:
-        sys.stderr.write(f" WARN: {e}\n")
-    sys.stderr.flush()
+        LOG.warning("Auth: %s", e)
 
-    # ThreadingHTTPServer: handle concurrent requests from Gemini CLI
-    # (main model + helper model + agent delegation run in parallel)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    server.daemon_threads = True
-    sys.stderr.write(
-        f"Proxy on :{PORT} ({PROJECT}/{LOCATION})\n"
-        f"Model: *pro* → opus, *flash* → sonnet, default → {DEFAULT_MODEL}\n"
-        f"Timeout: opus=300s, others=120s | Retry: 1x on 5xx\n"
-    )
-    sys.stderr.flush()
-    server.serve_forever()
+    model_table = ", ".join(f"*{kw}*→{m}(max={t})" for kw, m, t in MODEL_MAP)
+    LOG.info("Proxy on :%d (%s/%s)", PORT, PROJECT, LOCATION)
+    LOG.info("Models: %s, default=%s(%d)", model_table, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
+    LOG.info("Timeout: opus=300s, others=120s | Retry: %dx on %s", MAX_RETRIES - 1, RETRYABLE_CODES)
+
+    server = ProxyServer(("127.0.0.1", PORT), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    _shutdown.wait()
+    server.shutdown()
+    LOG.info("Proxy stopped.")

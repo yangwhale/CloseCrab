@@ -620,7 +620,6 @@ class DingTalkChannel(Channel):
             if e.code == 42:
                 log.info("Restart requested")
                 self._restart_requested = True
-            raise
         finally:
             loop.run_until_complete(self._core.shutdown())
             loop.close()

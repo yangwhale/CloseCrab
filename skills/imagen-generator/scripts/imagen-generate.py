@@ -97,8 +97,26 @@ def main():
         filename = f"{output_name}{suffix}.png"
         filepath = os.path.join(output_dir, filename)
 
-        with open(filepath, "wb") as f:
+        import tempfile
+        tmp_path = os.path.join(tempfile.gettempdir(), filename)
+        with open(tmp_path, "wb") as f:
             f.write(img_bytes)
+
+        # Upload via gcloud to ensure correct Content-Type and bypass gcsfuse delay
+        gcs_dest = f"gs://chris-pgp-host-asia/cc-pages/assets/imagen/{filename}"
+        try:
+            subprocess.run([
+                "gcloud", "storage", "cp", tmp_path, gcs_dest,
+                "--content-type=image/png"
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Also write to local gcsfuse mount to keep it in sync locally
+            with open(filepath, "wb") as f:
+                f.write(img_bytes)
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to upload to GCS: {e}", file=sys.stderr)
+            # Fallback to just local write
+            with open(filepath, "wb") as f:
+                f.write(img_bytes)
 
         url = f"{base_url}/{filename}"
         print(url)
