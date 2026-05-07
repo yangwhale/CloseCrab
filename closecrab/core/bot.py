@@ -510,9 +510,12 @@ class BotCore:
             if existing and existing.session_id:
                 session_id = existing.session_id
                 log.info(f"Reusing interrupted worker's session_id={session_id}")
-            else:
+            elif self._worker_type != "gemini":
                 session_id = self.session_mgr.get_active(user_key)
                 log.info(f"Loaded session_id from session_mgr: {session_id}")
+            else:
+                session_id = None
+                log.info("Gemini worker: skipping session restore after restart (fresh session)")
 
             if existing:
                 try:
