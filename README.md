@@ -110,7 +110,7 @@ cd CloseCrab
 | 可选 | 说明 |
 |------|------|
 | **GCS 桶** | CC Pages（Web 报告发布）和跨机器共享 Memory 需要。不配也不影响核心功能 |
-| **MCP API Keys** | GitHub、Context7、Jina、Tavily 等第三方 MCP Server 的密钥。不配则对应 MCP 不可用 |
+| **MCP API Keys** | GitHub、Context7、Jina 等第三方 MCP Server 的密钥。不配则对应 MCP 不可用 |
 
 ## 前提条件
 
@@ -217,7 +217,7 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
 | 依赖 | 版本 | 用途 |
 |------|------|------|
 | Python | 3.10+ | Bot 运行时 |
-| Node.js | 20+ | Claude Code CLI、MCP Server |
+| Node.js | 20+ | Claude Code CLI、Gemini CLI、MCP Server |
 | gcloud | - | GCP 认证 |
 
 > `deploy.sh` 会自动检测并安装缺失的 `git`、`nodejs`、`npm`。Node.js 版本不足时自动升级到 20.x。
@@ -265,8 +265,8 @@ bash scripts/launcher.sh start mybot       # 带自动重启
 7. 同步 Auto Memory
 8. 恢复 Plugins
 9. 设置 gcsfuse（自动安装 + 挂载 GCS 桶 + CC Pages 目录 + 共享 Memory）
-10. 安装 Gemini CLI
-11. 配置 MCP Server
+10. 安装 Gemini CLI（+ 配置 `~/.gemini/settings.json` 和 `~/.gemini/.env` + 注入 MCP Server）
+11. 配置 MCP Server（Claude Code 的 `~/.claude.json`）
 
 ### deploy.sh 交互式提示
 
@@ -290,9 +290,6 @@ CONTEXT7_API_KEY — Context7 文档查询 MCP（可选）
 
 JINA_API_KEY — Jina AI MCP（可选）
 > jina_xxxx
-
-TAVILY_API_KEY — Tavily 搜索 MCP（可选）
-> tvly-xxxx
 
 GEMINI_API_KEY — Gemini CLI（可选）
 > AIzaSy-xxxx
@@ -451,31 +448,58 @@ FIRESTORE_DATABASE=closecrab
 
 默认 Worker 是 Claude Code。如果要使用 Gemini CLI 作为后端：
 
+**前提条件**：
+- Node.js 20+（Gemini CLI 的运行依赖）
+- Vertex AI 认证已配好（`gcloud auth application-default login`，GCE VM 自动就绪）
+- `gemini` 命令在 PATH 中可用（不像 `claude_bin` 可以自定义路径，Gemini Worker 固定从 PATH 查找）
+
+**如果已运行过 `deploy.sh`**（推荐）：
+
+deploy.sh 第 9 步已自动完成 Gemini CLI 安装和配置（`~/.gemini/settings.json` + `~/.gemini/.env` + MCP 注入），你只需切换 worker_type：
+
 ```bash
-# 1. 安装 Gemini CLI（deploy.sh 已自动安装，也可手动）
-npm install -g @google/gemini-cli@latest
+# 1. 验证 Gemini CLI 已安装
+gemini --version
+
+# 2. 切换 bot 的 worker_type
+python3 scripts/config-manage.py set-worker-type mybot gemini
+
+# 3. 重启 bot
+# 在聊天里发 /restart，或手动 kill run.sh 让它自动重启
+```
+
+> **注意**：`worker_type` 只接受 `claude` 或 `gemini`。如果拼写错误（如 `geminii`），会静默回退到 Claude Worker，不会报错。
+
+<details>
+<summary><b>手动安装 Gemini CLI（未用 deploy.sh 的情况）</b></summary>
+
+```bash
+# 1. 安装 Gemini CLI（需要 sudo 做全局安装）
+sudo npm install -g @google/gemini-cli@latest
 
 # 2. 配置认证（Vertex AI）
 mkdir -p ~/.gemini
-echo '{"ide":{"hasSeenNudge":true,"enabled":true},"security":{"auth":{"selectedType":"vertex-ai"}}}' > ~/.gemini/settings.json
+cat > ~/.gemini/settings.json <<'JSON'
+{"ide":{"hasSeenNudge":true,"enabled":true},"security":{"auth":{"selectedType":"vertex-ai"}}}
+JSON
 cat > ~/.gemini/.env <<EOF
 GOOGLE_CLOUD_PROJECT="your-project-id"
 GOOGLE_CLOUD_LOCATION="global"
 EOF
 
-# 3. 切换 bot 的 worker_type
-python3 scripts/config-manage.py set-worker-type mybot gemini
-
-# 4. 重启 bot
-# 在聊天里发 /restart，或手动 kill run.sh 让它自动重启
+# 3. 验证
+gemini --version
 ```
+
+> `GEMINI_API_KEY` 是可选的。如果已通过 Vertex AI 认证（ADC），不需要额外配 API key。只有在非 GCP 环境或不走 Vertex AI 时才需要在 `~/.gemini/.env` 中加 `GEMINI_API_KEY="your-key"`。
+
+</details>
 
 **Gemini Worker 的 MCP 配置**
 
-Gemini CLI 的 ACP 模式不会自动读取 `~/.gemini/settings.json` 中的 MCP。CloseCrab 的 `GeminiACPWorker` 在创建 session 时自动读取 settings.json 并注入 MCP，所以你只需要在 settings.json 里配好 MCP 就行：
+Gemini CLI 的 ACP 模式不会自动读取 `~/.gemini/settings.json` 中的 MCP 配置。CloseCrab 的 `GeminiACPWorker` 在创建 session 时自动读取 settings.json 并转换格式后注入，所以你只需在 settings.json 里配好 MCP：
 
 ```json
-// ~/.gemini/settings.json
 {
   "mcpServers": {
     "jina-ai": {
@@ -491,13 +515,31 @@ Gemini CLI 的 ACP 模式不会自动读取 `~/.gemini/settings.json` 中的 MCP
 }
 ```
 
-`deploy.sh` 会自动往 settings.json 注入 jina-ai、chrome-devtools-mcp、wiki 三个 MCP。新增 MCP 时在 settings.json 的 `mcpServers` 里加即可，下次创建 worker 自动生效。
+> `deploy.sh` 会自动往 settings.json 注入 jina-ai、chrome-devtools-mcp、wiki 三个 MCP。新增 MCP 在 settings.json 的 `mcpServers` 里加即可，下次创建 worker 自动生效。
 
 **Gemini CLI 内置能力**（无需配置）：
 - `google_web_search` — Google 搜索（Gemini API grounding，比第三方搜索 MCP 更快）
 - `web_fetch` — 网页抓取
 - 标准工具：`shell`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`
 - gLinux Extensions（如已安装）：Workspace (Google Docs/Sheets/Calendar)、Code Search、Research 等
+
+**验证 Gemini Worker 正常工作**：
+
+```bash
+# 查看 bot 日志，确认 ACP session 创建成功
+tail -f ~/.claude/closecrab/mybot/bot.log | grep -i "acp\|gemini\|mcp"
+# 应该看到类似：
+#   Loaded 3 MCP servers for ACP session
+#   ACP session created: <session-id>
+```
+
+**故障排查**：
+| 现象 | 原因 | 解决 |
+|------|------|------|
+| bot 启动后无响应 | `gemini` 不在 PATH | `which gemini`，如果没有则 `sudo npm i -g @google/gemini-cli@latest` |
+| "ACP session/new failed" | MCP 格式错误或认证失败 | 检查 `~/.gemini/settings.json` 格式，确认 ADC 有效 |
+| 切换了 worker_type 但仍用 Claude | 拼写错误或未重启 | 确认 Firestore 中 `worker_type` 值为 `gemini`（非 `Gemini`），重启 bot |
+| "Internal error" at session creation | `~/.gemini/.env` 缺少 `GOOGLE_CLOUD_PROJECT` | 检查 `~/.gemini/.env` 文件内容 |
 
 ### settings.json（Claude Code 配置）
 
@@ -515,7 +557,6 @@ Gemini CLI 的 ACP 模式不会自动读取 `~/.gemini/settings.json` 中的 MCP
 | `GEMINI_API_KEY` | — | Gemini CLI |
 | `CONTEXT7_API_KEY` | — | Context7 MCP Server |
 | `JINA_API_KEY` | — | Jina AI MCP Server |
-| `TAVILY_API_KEY` | — | Tavily MCP Server |
 
 ### MCP Server API Keys 获取方式
 
@@ -558,19 +599,6 @@ Jina AI MCP Server 提供网页内容提取、事实核查等能力。
 3. 创建新密钥，复制以 `jina_` 开头的 key
 
 > 有免费额度，超出后按用量计费。
-
-</details>
-
-<details>
-<summary><b>Tavily API Key</b></summary>
-
-Tavily MCP Server 提供 AI 优化的网页搜索、内容抓取和深度研究能力。
-
-1. 访问 [Tavily](https://tavily.com) → 注册账号
-2. 登录后进入 [Dashboard → API Keys](https://app.tavily.com/home)
-3. 复制以 `tvly-` 开头的 API Key
-
-> 免费计划每月 1,000 次搜索。
 
 </details>
 
