@@ -619,6 +619,13 @@ class GeminiACPWorker(Worker):
                             log.warning("ACP session lost, will recreate on next send")
                             self._acp_session_id = None
                             return "(Session 状态异常，已自动重置。请再说一次)"
+
+                        # Context overflow: auto-reset session
+                        if "too long" in err_msg.lower() or "too many tokens" in err_msg.lower():
+                            log.warning("ACP context overflow, resetting session")
+                            self._acp_session_id = None
+                            return "(对话上下文超过 Gemini 1M token 上限，已自动开启新会话。请再说一次)"
+
                         return f"[Error] {err_msg}"
 
                     result = msg.get("result", {})
