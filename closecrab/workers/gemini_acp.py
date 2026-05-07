@@ -898,6 +898,7 @@ class GeminiACPWorker(Worker):
 
     _GEMINI_MD_BEGIN = "<!-- CloseCrab:BEGIN -->"
     _GEMINI_MD_END = "<!-- CloseCrab:END -->"
+    _GEMINI_MD_OLD_MARKER = "<!-- CloseCrab Bot System Prompt -->"
 
     def _write_gemini_md(self):
         """Upsert the CloseCrab section in GEMINI.md, preserving all other content."""
@@ -913,12 +914,21 @@ class GeminiACPWorker(Worker):
         try:
             if gemini_md.exists():
                 existing = gemini_md.read_text(encoding="utf-8")
+                # Migrate from old single-marker format (entire file was system prompt)
+                if self._GEMINI_MD_OLD_MARKER in existing:
+                    old_pos = existing.find(self._GEMINI_MD_OLD_MARKER)
+                    existing = existing[:old_pos].rstrip("\n")
+                    if existing:
+                        existing += "\n\n"
+                    log.info("Migrated GEMINI.md from old marker format")
                 begin = existing.find(self._GEMINI_MD_BEGIN)
                 end = existing.find(self._GEMINI_MD_END)
                 if begin != -1 and end != -1:
                     content = existing[:begin] + injected + existing[end + len(self._GEMINI_MD_END):]
-                else:
+                elif existing.strip():
                     content = existing.rstrip("\n") + "\n\n" + injected + "\n"
+                else:
+                    content = injected + "\n"
             else:
                 content = injected + "\n"
             gemini_md.write_text(content, encoding="utf-8")
@@ -1022,15 +1032,30 @@ class GeminiACPWorker(Worker):
         self._initialized = False
         self._acp_session_id = None
 
-        # Clean up GEMINI.md
+        # Remove CloseCrab section from GEMINI.md (preserve Gemini's own content)
         gemini_md = Path(self._work_dir) / "GEMINI.md"
-        marker = "<!-- CloseCrab Bot System Prompt -->"
         try:
             if gemini_md.exists():
                 content = gemini_md.read_text(encoding="utf-8")
-                if content.startswith(marker):
-                    gemini_md.unlink()
-                    log.info("Cleaned up GEMINI.md")
+                begin = content.find(self._GEMINI_MD_BEGIN)
+                end = content.find(self._GEMINI_MD_END)
+                if begin != -1 and end != -1:
+                    remaining = (content[:begin].rstrip("\n")
+                                 + content[end + len(self._GEMINI_MD_END):].lstrip("\n"))
+                    if remaining.strip():
+                        gemini_md.write_text(remaining.strip() + "\n", encoding="utf-8")
+                        log.info("Removed CloseCrab section from GEMINI.md")
+                    else:
+                        gemini_md.unlink()
+                        log.info("Cleaned up empty GEMINI.md")
+                elif self._GEMINI_MD_OLD_MARKER in content:
+                    old_pos = content.find(self._GEMINI_MD_OLD_MARKER)
+                    remaining = content[:old_pos].strip()
+                    if remaining:
+                        gemini_md.write_text(remaining + "\n", encoding="utf-8")
+                    else:
+                        gemini_md.unlink()
+                    log.info("Cleaned up old-format GEMINI.md")
         except Exception as e:
             log.debug(f"GEMINI.md cleanup failed: {e}")
 
