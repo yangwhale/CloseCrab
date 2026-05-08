@@ -1577,9 +1577,11 @@
     if (!wtSel || !mdSel) return;
     const models = wtSel.value === 'gemini' ? GEMINI_MODELS : CLAUDE_MODELS;
     const cur = mdSel.value;
-    mdSel.innerHTML = models.map(m => `<option value="${m}" ${m === cur ? 'selected' : ''}>${m}</option>`).join('');
+    let html = `<option value="" ${!cur ? 'selected' : ''}>(default)</option>`;
+    html += models.map(m => `<option value="${m}" ${m === cur ? 'selected' : ''}>${m}</option>`).join('');
     const allModels = [...CLAUDE_MODELS, ...GEMINI_MODELS];
-    if (cur && !allModels.includes(cur)) mdSel.innerHTML += `<option value="${cur}" selected>${cur}</option>`;
+    if (cur && !allModels.includes(cur)) html += `<option value="${cur}" selected>${cur}</option>`;
+    mdSel.innerHTML = html;
   }
   const CHANNEL_ICONS = { discord: "forum", feishu: "chat", lark: "chat", dingtalk: "sms" };
   const TEAM_ROLES = ["standalone", "leader", "teammate"];
@@ -1663,6 +1665,7 @@
             const models = wt === 'gemini' ? GEMINI_MODELS : CLAUDE_MODELS;
             const allModels = [...CLAUDE_MODELS, ...GEMINI_MODELS];
             return `<select class="cfg-select" id="cfg-model">
+              <option value="" ${!cfg.model ? 'selected' : ''}>(default)</option>
               ${models.map(m => `<option value="${m}" ${m === cfg.model ? 'selected' : ''}>${m}</option>`).join('')}
               ${cfg.model && !allModels.includes(cfg.model) ? `<option value="${escHtml(cfg.model)}" selected>${escHtml(cfg.model)}</option>` : ''}
             </select>`;
@@ -1870,7 +1873,8 @@
 
       if (card === 'general') {
         updates.description = document.getElementById('cfg-description').value;
-        updates.model = document.getElementById('cfg-model').value;
+        const modelVal = document.getElementById('cfg-model').value;
+        updates.model = modelVal || firebase.firestore.FieldValue.delete();
         updates.work_dir = document.getElementById('cfg-work_dir').value;
         updates.timeout = parseInt(document.getElementById('cfg-timeout').value) || 600;
         updates.stt_engine = document.getElementById('cfg-stt_engine').value;
