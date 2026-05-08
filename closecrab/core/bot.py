@@ -544,6 +544,7 @@ class BotCore:
                 system_prompt=self._system_prompt,
                 session_id=session_id,
                 claude_proxy_url=self._claude_proxy_url,
+                model=self._backbone_model,
             )
         return ClaudeCodeWorker(
             claude_bin=self._claude_bin,

@@ -88,7 +88,7 @@ def _resolve_config(bot_name: str) -> dict:
         "description": cfg.get("description", ""),
         "channel": channel_type,
         "token": cfg.get("token", ""),
-        "model": cfg.get("model", "claude-opus-4-7@default"),
+        "model": cfg.get("model", ""),
         "claude_bin": os.path.expanduser(cfg.get("claude_bin", shutil.which("claude") or "~/.local/bin/claude")),
         "work_dir": os.path.expanduser(cfg.get("work_dir", "~/")),
         "timeout": int(cfg.get("timeout", 600)),
@@ -548,9 +548,10 @@ def main():
     if cfg.get("team"):
         role = cfg["team"].get("role", "")
         team_info = f", team_role={role}, known_bots={cfg['known_team_bots']}"
+    model_display = cfg['model'] or f"(default {worker_type})"
     log.info(f"Components assembled: bot={bot_name}, channel={channel_type}, "
-             f"auth={len(cfg['allowed_user_ids'])} users, "
-             f"model={cfg['model']}, stt={stt_engine_name}, claude={cfg['claude_bin']}{team_info}")
+             f"auth={len(cfg['allowed_user_ids'])} users, worker={worker_type}, "
+             f"model={model_display}, stt={stt_engine_name}{team_info}")
 
     # 映射 email 配置到通用环境变量
     email_cfg = cfg.get("email") or {}

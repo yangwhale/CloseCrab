@@ -126,6 +126,7 @@ class GeminiACPWorker(Worker):
         system_prompt: str = "",
         session_id: Optional[str] = None,
         claude_proxy_url: Optional[str] = None,
+        model: str = "",
     ):
         self._gemini_bin = gemini_bin or shutil.which("gemini") or "gemini"
         self._work_dir = work_dir or str(Path.home())
@@ -133,6 +134,7 @@ class GeminiACPWorker(Worker):
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
         self._claude_proxy_url = claude_proxy_url
+        self._model = model
         self._acp_session_id: Optional[str] = None
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
@@ -202,6 +204,9 @@ class GeminiACPWorker(Worker):
             "--sandbox", "false",
             "--skip-trust",
         ]
+        if self._model:
+            cmd.extend(["--model", self._model])
+
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
 

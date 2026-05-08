@@ -41,7 +41,6 @@ def _detect_claude_bin() -> str:
     return shutil.which("claude") or "~/.local/bin/claude"
 
 DEFAULT_CONFIG = {
-    "model": "claude-opus-4-7@default",
     "claude_bin": _detect_claude_bin(),
     "work_dir": "~/",
     "timeout": 600,
@@ -306,12 +305,26 @@ def cmd_set_worker_type(args):
         print(f"Error: worker_type must be one of {VALID_WORKER_TYPES}, got '{wt}'")
         sys.exit(1)
 
-    doc_ref.update({"worker_type": wt})
-    print(f"Set worker_type={wt} for '{args.bot_name}'")
+    updates = {"worker_type": wt}
     if wt == "gemini":
+        # Clean up Claude-specific fields
+        doc = doc_ref.get().to_dict() or {}
+        cleaned = []
+        if "claude_proxy_url" in doc:
+            updates["claude_proxy_url"] = firestore.DELETE_FIELD
+            cleaned.append("claude_proxy_url")
+        if "model" in doc:
+            updates["model"] = firestore.DELETE_FIELD
+            cleaned.append("model")
+        doc_ref.update(updates)
+        print(f"Set worker_type={wt} for '{args.bot_name}'")
+        if cleaned:
+            print(f"  Cleaned Claude-specific fields: {', '.join(cleaned)}")
         print("  Note: bot 需要安装 Gemini CLI (`npm i -g @anthropic-ai/gemini-cli` 或 `npx @google/gemini-cli`)")
         print("  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
-    elif wt == "claude":
+    else:
+        doc_ref.update(updates)
+        print(f"Set worker_type={wt} for '{args.bot_name}'")
         print("  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
 
 
