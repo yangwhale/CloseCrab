@@ -245,19 +245,20 @@ class GeminiACPWorker(Worker):
             log.warning("ACP process died during startup, retrying...")
             return await self._ensure_process(_retry=True)
 
-        # Step 1: initialize
+        # Step 1: initialize (gLinux extensions can take 15-35s to load)
+        t_init = time.monotonic()
         resp = await self._rpc("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {},
             "clientInfo": {"name": "closecrab", "version": "1.0"},
-        }, timeout=30)
+        }, timeout=90)
         if not resp or "error" in resp:
             err = resp.get("error", {}).get("message", "unknown") if resp else "no response"
             stderr_content = self._read_stderr_tail()
             raise RuntimeError(f"ACP initialize failed: {err}. stderr: {stderr_content[:200]}")
 
         version = resp.get("result", {}).get("agentInfo", {}).get("version", "?")
-        log.info(f"ACP initialized: gemini-cli v{version}")
+        log.info(f"ACP initialized: gemini-cli v{version} ({time.monotonic() - t_init:.1f}s)")
         self._initialized = True
 
         # Step 2: try to resume existing session, or create new
