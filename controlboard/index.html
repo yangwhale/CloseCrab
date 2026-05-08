@@ -1553,7 +1553,7 @@
   }
 
   // ── Config Panel ──
-  const MODELS = [
+  const CLAUDE_MODELS = [
     "claude-opus-4-7@default",
     "claude-opus-4-6@default",
     "claude-sonnet-4-6@default",
@@ -1561,9 +1561,26 @@
     "claude-opus-4-20250514",
     "claude-sonnet-4-20250514",
   ];
+  const GEMINI_MODELS = [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-3-pro",
+    "gemini-3-flash",
+  ];
   const STT_ENGINES = ["gemini", "gemini:gemini-2.0-flash", "gemini:gemini-2.5-flash", "whisper"];
   const WORKER_TYPES = ["claude", "gemini"];
   const CHANNELS = ["discord", "feishu", "lark", "dingtalk"];
+
+  function updateModelOptions() {
+    const wtSel = document.getElementById('cfg-worker_type');
+    const mdSel = document.getElementById('cfg-model');
+    if (!wtSel || !mdSel) return;
+    const models = wtSel.value === 'gemini' ? GEMINI_MODELS : CLAUDE_MODELS;
+    const cur = mdSel.value;
+    mdSel.innerHTML = models.map(m => `<option value="${m}" ${m === cur ? 'selected' : ''}>${m}</option>`).join('');
+    const allModels = [...CLAUDE_MODELS, ...GEMINI_MODELS];
+    if (cur && !allModels.includes(cur)) mdSel.innerHTML += `<option value="${cur}" selected>${cur}</option>`;
+  }
   const CHANNEL_ICONS = { discord: "forum", feishu: "chat", lark: "chat", dingtalk: "sms" };
   const TEAM_ROLES = ["standalone", "leader", "teammate"];
 
@@ -1641,10 +1658,15 @@
             : `<div class="cfg-display-value">${escHtml(cfg.description || '') || '—'}</div>`}
         </div>
         <div class="cfg-field"><label class="cfg-label">Model</label>
-          ${gEdit ? `<select class="cfg-select" id="cfg-model">
-            ${MODELS.map(m => `<option value="${m}" ${m === cfg.model ? 'selected' : ''}>${m}</option>`).join('')}
-            ${cfg.model && !MODELS.includes(cfg.model) ? `<option value="${escHtml(cfg.model)}" selected>${escHtml(cfg.model)}</option>` : ''}
-          </select>` : `<div class="cfg-display-value">${escHtml(cfg.model || '—')}</div>`}
+          ${gEdit ? (() => {
+            const wt = cfg.worker_type || 'claude';
+            const models = wt === 'gemini' ? GEMINI_MODELS : CLAUDE_MODELS;
+            const allModels = [...CLAUDE_MODELS, ...GEMINI_MODELS];
+            return `<select class="cfg-select" id="cfg-model">
+              ${models.map(m => `<option value="${m}" ${m === cfg.model ? 'selected' : ''}>${m}</option>`).join('')}
+              ${cfg.model && !allModels.includes(cfg.model) ? `<option value="${escHtml(cfg.model)}" selected>${escHtml(cfg.model)}</option>` : ''}
+            </select>`;
+          })() : `<div class="cfg-display-value">${escHtml(cfg.model || '—')}</div>`}
         </div>
         <div class="cfg-field"><label class="cfg-label">Work Directory</label>
           ${gEdit ? `<input class="cfg-input mono" id="cfg-work_dir" value="${escHtml(cfg.work_dir || '~/')}">` : `<div class="cfg-display-value">${escHtml(cfg.work_dir || '~/')}</div>`}
@@ -1661,7 +1683,7 @@
           </div>
         </div>
         <div class="cfg-field"><label class="cfg-label">Worker Type</label>
-          ${gEdit ? `<select class="cfg-select" id="cfg-worker_type">
+          ${gEdit ? `<select class="cfg-select" id="cfg-worker_type" onchange="updateModelOptions()">
             ${WORKER_TYPES.map(w => `<option value="${w}" ${w === (cfg.worker_type || 'claude') ? 'selected' : ''}>${w === 'claude' ? 'Claude Code CLI' : 'Gemini CLI (ACP)'}</option>`).join('')}
           </select>
           <div class="cfg-hint">claude = Claude Code CLI, gemini = Gemini CLI via ACP protocol</div>` : `<div class="cfg-display-value">${(cfg.worker_type || 'claude') === 'gemini' ? 'Gemini CLI (ACP)' : 'Claude Code CLI'}</div>`}
