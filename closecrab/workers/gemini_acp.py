@@ -206,7 +206,6 @@ class GeminiACPWorker(Worker):
         ]
         if self._model:
             cmd.extend(["--model", self._model])
-
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
 
