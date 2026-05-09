@@ -214,7 +214,6 @@ class KiloWorker(Worker):
 
     def get_context_usage(self) -> dict:
         total = (self._usage["input_tokens"]
-                 + self._usage["output_tokens"]
                  + self._usage["cache_read_input_tokens"]
                  + self._usage["cache_creation_input_tokens"])
         window = 1_000_000
@@ -886,12 +885,12 @@ class KiloWorker(Worker):
                         self._usage["cost_usd"] += float(cost)
                     tokens = info.get("tokens", {})
                     if isinstance(tokens, dict) and tokens.get("input", 0):
-                        self._usage["input_tokens"] += tokens.get("input", 0)
-                        self._usage["output_tokens"] += tokens.get("output", 0)
+                        self._usage["input_tokens"] = tokens.get("input", 0)
+                        self._usage["output_tokens"] = tokens.get("output", 0)
                         cache = tokens.get("cache", {})
                         if isinstance(cache, dict):
-                            self._usage["cache_read_input_tokens"] += cache.get("read", 0)
-                            self._usage["cache_creation_input_tokens"] += cache.get("write", 0)
+                            self._usage["cache_read_input_tokens"] = cache.get("read", 0)
+                            self._usage["cache_creation_input_tokens"] = cache.get("write", 0)
 
                 self._turn_result = result
                 self._turn_event.set()
