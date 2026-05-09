@@ -177,6 +177,8 @@ class BotCore:
             "Bash": "⚡", "Grep": "🔍", "Glob": "🔍",
             "Agent": "🤖", "WebSearch": "🌐", "WebFetch": "🌐",
             "TodoWrite": "📝", "Skill": "🎯",
+            "GitHub": "🐙", "Wiki": "📚", "Jina": "🔍",
+            "Context7": "📖", "Playwright": "🎭",
         }
 
         def _format_step(d: dict) -> list[str]:

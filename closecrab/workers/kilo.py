@@ -539,7 +539,10 @@ class KiloWorker(Worker):
                         output = str(part["state"].get("output", ""))[:500]
                     try:
                         emoji = {"Read": "📖", "Write": "✏️", "Edit": "✏️",
-                                 "Bash": "⚡", "Glob": "🔍", "Grep": "🔍"}.get(tool_name, "🔧")
+                                 "Bash": "⚡", "Glob": "🔍", "Grep": "🔍",
+                                 "GitHub": "🐙", "Wiki": "📚", "Jina": "🔍",
+                                 "Context7": "📖", "Playwright": "🎭",
+                                 }.get(tool_name, "🔧")
                         await on_log(f"{emoji} {tool_name} done\n```\n{output}\n```")
                     except Exception:
                         pass
