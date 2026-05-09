@@ -344,7 +344,8 @@ class KiloWorker(Worker):
 
         config_path = kilo_dir / "kilo.jsonc"
         config_path.write_text(json.dumps(config, indent=2) + "\n")
-        log.debug("Wrote kilo config: %s", config_path)
+        log.debug("Wrote kilo config: %s (instructions=%s)",
+                  config_path, bool(config.get("instructions")))
 
     def _find_memory_md(self) -> Optional[Path]:
         """Find Claude auto-memory MEMORY.md for the current work_dir.
@@ -352,9 +353,11 @@ class KiloWorker(Worker):
         Claude Code stores memory at ~/.claude/projects/{project-hash}/memory/MEMORY.md
         where project-hash is the work_dir path with / replaced by -.
         """
-        project_hash = self._work_dir.replace("/", "-")
+        project_hash = self._work_dir.rstrip("/").replace("/", "-")
         memory_path = Path.home() / ".claude" / "projects" / project_hash / "memory" / "MEMORY.md"
-        return memory_path if memory_path.exists() else None
+        exists = memory_path.exists()
+        log.debug("Memory lookup: hash=%s exists=%s", project_hash, exists)
+        return memory_path if exists else None
 
     async def _ensure_server(self):
         if self._kilo_url:

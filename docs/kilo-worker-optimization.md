@@ -315,10 +315,23 @@ async def _post_with_retry(self, url: str, json_body: dict, retries: int = 2) ->
 
 | 时间 | 优化 | 改动摘要 | Commit |
 |------|------|----------|--------|
-| 2026-05-09 | O1 | 新增 `_ensure_kilo_config()` 生成 `.kilo/kilo.jsonc`（permission auto-allow）；permission.asked 降级为 fallback + debug 日志 | pending |
-| 2026-05-09 | O2 | `_find_memory_md()` 查找 Claude auto-memory；kilo.jsonc 加 `instructions` 注入 MEMORY.md | pending |
-| 2026-05-09 | O3 | SSE 解析 `line[6:]` → `line[len("event:"):]`；JSON decode 失败改 log.warning | pending |
-| 2026-05-09 | O4 | `_seen_tool_starts: set` → `_tool_states: dict`；新增 `_is_new_tool_state()` 状态机方法；去重逻辑从 ~35 行简化到 ~15 行 | pending |
-| 2026-05-09 | O5 | `_on_message_updated()` 加 `if self._turn_event.is_set(): return`，避免覆盖 turn.close 信号 | pending |
-| 2026-05-09 | O6 | 新增 `session.compacted` SSE 分支，log info + on_event 通知 | pending |
-| 2026-05-09 | O7 | 新增 `_post_with_retry()` 方法（2 次重试），用于 question reply POST | pending |
+| 2026-05-09 | O1 | 新增 `_ensure_kilo_config()` 生成 `.kilo/kilo.jsonc`（permission auto-allow）；permission.asked 降级为 fallback + debug 日志 | d86fff4 |
+| 2026-05-09 | O2 | `_find_memory_md()` 查找 Claude auto-memory；kilo.jsonc 加 `instructions` 注入 MEMORY.md | d86fff4 |
+| 2026-05-09 | O2-fix | **Bug fix**: `work_dir` 带尾部斜杠（`/home/chrisya/`）导致 `project_hash` 多了尾部横杠（`-home-chrisya-`），路径不匹配。修复：`.rstrip("/")` 去掉尾部斜杠 | pending |
+| 2026-05-09 | O3 | SSE 解析 `line[6:]` → `line[len("event:"):]`；JSON decode 失败改 log.warning | d86fff4 |
+| 2026-05-09 | O4 | `_seen_tool_starts: set` → `_tool_states: dict`；新增 `_is_new_tool_state()` 状态机方法；去重逻辑从 ~35 行简化到 ~15 行 | d86fff4 |
+| 2026-05-09 | O5 | `_on_message_updated()` 加 `if self._turn_event.is_set(): return`，避免覆盖 turn.close 信号 | d86fff4 |
+| 2026-05-09 | O6 | 新增 `session.compacted` SSE 分支，log info + on_event 通知 | d86fff4 |
+| 2026-05-09 | O7 | 新增 `_post_with_retry()` 方法（2 次重试），用于 question reply POST | d86fff4 |
+
+## 验证记录
+
+| 优化 | 验证方式 | 结果 |
+|------|---------|------|
+| O1 | Bunny 执行工具调用，日志中无 `permission.asked` 事件 | ✅ 通过 |
+| O2 | kilo.jsonc 含 `instructions` 指向 MEMORY.md；Bunny 正常读取 | ✅ 通过（修复 trailing slash 后） |
+| O3 | Bunny 多工具对话，日志中无 SSE JSON decode warning | ✅ 通过 |
+| O4 | Bunny 多工具对话（6 步），无重复工具事件 | ✅ 通过 |
+| O5 | Bunny turn 正常完成，`status=done` | ✅ 通过 |
+| O6 | 防御性代码，需长对话触发 compaction | ⏭️ 待长对话验证 |
+| O7 | 防御性代码，需网络异常触发 | ⏭️ 待异常场景验证 |
