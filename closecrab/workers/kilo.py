@@ -55,15 +55,16 @@ _TOOL_NAME_MAP = {
     "read": "Read",
     "write": "Write",
     "edit": "Edit",
-    "multiedit": "Edit",
-    "patch": "Edit",
+    "apply_patch": "Edit",
     "bash": "Bash",
     "glob": "Glob",
     "grep": "Grep",
-    "fetch": "WebFetch",
+    "webfetch": "WebFetch",
+    "websearch": "WebSearch",
     "task": "Agent",
-    "todoread": "TodoWrite",
-    "todowrite": "TodoWrite",
+    "todo": "TodoWrite",
+    "lsp": "LSP",
+    "skill": "Skill",
 }
 
 _PROGRESS_LABELS = {
@@ -365,6 +366,7 @@ class KiloWorker(Worker):
 
         # Dispatch by event type
         if etype == "message.part.updated":
+            log.debug("SSE part.updated: %s", json.dumps(props, default=str)[:300])
             await self._on_part_updated(props)
         elif etype == "message.updated":
             await self._on_message_updated(props)
@@ -396,8 +398,13 @@ class KiloWorker(Worker):
             if on_step:
                 try:
                     await on_step(cc_event)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("on_step callback error: %s", e)
+            else:
+                log.debug("on_step callback not set, dropping cc_event type=%s", cc_event.get("type"))
+        elif ptype in ("tool", "text"):
+            log.debug("_translate_to_cc_event returned None for ptype=%s part=%s",
+                       ptype, json.dumps(part, default=str)[:200])
 
         if ptype == "text":
             text = part.get("content") or part.get("text", "")
@@ -633,6 +640,14 @@ class KiloWorker(Worker):
                     if p.get("type") == "text":
                         texts.append(p.get("content", p.get("text", "")))
                 result = "\n".join(texts).strip()
+
+                # Extract cost from response
+                info = data.get("info", {})
+                if isinstance(info, dict):
+                    cost = info.get("cost", 0)
+                    if cost:
+                        self._usage["cost_usd"] += float(cost)
+
                 self._turn_result = result
                 self._turn_event.set()
                 return result
