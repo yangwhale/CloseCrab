@@ -443,22 +443,34 @@ class KiloWorker(Worker):
         part = props.get("part", props)
         ptype = part.get("type", "")
 
-        # callID-based deduplication: Kilo sends multiple events per tool call
-        # (pending→running→running→completed). Only emit on_step once per phase.
+        # callID-based deduplication: Kilo sends multiple SSE events per tool
+        # call (pending→running→running→completed).
+        # - "pending": no input yet → fire progress event only, skip on_step
+        # - first "running": has input → fire on_step (the canonical tool_use step)
+        # - subsequent "running": dedup → fire progress event only
+        # - "completed": fire on_step (the tool_result step)
         call_id = part.get("callId", part.get("id", ""))
         state = part.get("state", "")
         status = state.get("status", "") if isinstance(state, dict) else state
 
         if ptype == "tool" and call_id:
-            if status in ("pending", "running"):
-                dedup_key = f"{call_id}:start"
-            else:
-                dedup_key = f"{call_id}:{status}"
-            if dedup_key in self._seen_tool_starts:
-                # Still fire progress events but skip on_step to avoid duplicate steps
+            if status == "pending":
                 tool_raw = part.get("toolName", part.get("tool", ""))
                 tool_name = _resolve_tool_name(tool_raw)
-                if status in ("pending", "running"):
+                label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
+                on_event = self._callbacks.get("on_event")
+                if on_event:
+                    try:
+                        await on_event(label)
+                    except Exception:
+                        pass
+                return
+
+            dedup_key = f"{call_id}:running" if status == "running" else f"{call_id}:{status}"
+            if dedup_key in self._seen_tool_starts:
+                if status == "running":
+                    tool_raw = part.get("toolName", part.get("tool", ""))
+                    tool_name = _resolve_tool_name(tool_raw)
                     label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
                     on_event = self._callbacks.get("on_event")
                     if on_event:
