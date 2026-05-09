@@ -63,8 +63,19 @@ _TOOL_NAME_MAP = {
     "websearch": "WebSearch",
     "task": "Agent",
     "todo": "TodoWrite",
+    "todowrite": "TodoWrite",
     "lsp": "LSP",
     "skill": "Skill",
+}
+
+# MCP tool prefix → (display name, emoji) for "{server}_{tool}" format
+_MCP_PREFIX_MAP = {
+    "github": ("GitHub", "🐙"),
+    "wiki": ("Wiki", "📚"),
+    "jina_ai": ("Jina", "🔍"),
+    "jina-ai": ("Jina", "🔍"),
+    "context7": ("Context7", "📖"),
+    "playwright": ("Playwright", "🎭"),
 }
 
 _PROGRESS_LABELS = {
@@ -77,7 +88,44 @@ _PROGRESS_LABELS = {
     "WebSearch": "searching web",
     "WebFetch": "fetching web page",
     "Agent": "running subtask",
+    "TodoWrite": "updating tasks",
+    "GitHub": "querying GitHub",
+    "Wiki": "querying Wiki",
+    "Jina": "searching with Jina",
+    "Context7": "querying docs",
+    "Playwright": "browser action",
 }
+
+# Kilo camelCase → Claude snake_case key normalization
+_CAMEL_TO_SNAKE = {
+    "filePath": "file_path",
+    "oldString": "old_string",
+    "newString": "new_string",
+    "replaceAll": "replace_all",
+    "outputMode": "output_mode",
+    "headLimit": "head_limit",
+}
+
+
+def _resolve_tool_name(tool_raw: str) -> str:
+    """Resolve Kilo tool name to Claude-style display name.
+
+    Direct map first, then MCP prefix match for '{server}_{tool}' format.
+    """
+    if tool_raw in _TOOL_NAME_MAP:
+        return _TOOL_NAME_MAP[tool_raw]
+    for prefix, (name, _) in _MCP_PREFIX_MAP.items():
+        prefix_u = prefix.replace("-", "_")
+        if tool_raw.startswith(prefix_u + "_"):
+            return name
+    return tool_raw
+
+
+def _normalize_keys(inp: dict) -> dict:
+    """Convert Kilo's camelCase keys to Claude's snake_case for BotCore compat."""
+    if not isinstance(inp, dict):
+        return inp
+    return {_CAMEL_TO_SNAKE.get(k, k): v for k, v in inp.items()}
 
 _SERVER_STARTUP_TIMEOUT = 30  # seconds to wait for kilo serve
 _SSE_RECONNECT_DELAYS = [1, 2, 4, 8, 16, 30]  # backoff seconds
@@ -137,6 +185,7 @@ class KiloWorker(Worker):
             "cost_usd": 0.0,
         }
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
+        self._seen_tool_starts: set[str] = set()  # callID dedup for tool_use steps
 
     # ── Properties ────────────────────────────────────────────────
 
@@ -394,6 +443,32 @@ class KiloWorker(Worker):
         part = props.get("part", props)
         ptype = part.get("type", "")
 
+        # callID-based deduplication: Kilo sends multiple events per tool call
+        # (pending→running→running→completed). Only emit on_step once per phase.
+        call_id = part.get("callId", part.get("id", ""))
+        state = part.get("state", "")
+        status = state.get("status", "") if isinstance(state, dict) else state
+
+        if ptype == "tool" and call_id:
+            if status in ("pending", "running"):
+                dedup_key = f"{call_id}:start"
+            else:
+                dedup_key = f"{call_id}:{status}"
+            if dedup_key in self._seen_tool_starts:
+                # Still fire progress events but skip on_step to avoid duplicate steps
+                tool_raw = part.get("toolName", part.get("tool", ""))
+                tool_name = _resolve_tool_name(tool_raw)
+                if status in ("pending", "running"):
+                    label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
+                    on_event = self._callbacks.get("on_event")
+                    if on_event:
+                        try:
+                            await on_event(label)
+                        except Exception:
+                            pass
+                return
+            self._seen_tool_starts.add(dedup_key)
+
         cc_event = _translate_to_cc_event(part)
         if cc_event:
             on_step = self._callbacks.get("on_step")
@@ -420,16 +495,12 @@ class KiloWorker(Worker):
 
         elif ptype == "tool":
             tool_raw = part.get("toolName", part.get("tool", ""))
-            tool_name = _TOOL_NAME_MAP.get(tool_raw, tool_raw)
-            state = part.get("state", "")
-            if isinstance(state, dict):
-                status = state.get("status", "")
-            else:
-                status = state
+            tool_name = _resolve_tool_name(tool_raw)
 
             if status in ("pending", "running"):
                 label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
                 inp = state.get("input", {}) if isinstance(state, dict) else {}
+                inp = _normalize_keys(inp)
                 detail = ""
                 if tool_name == "Read" and isinstance(inp, dict):
                     detail = f": {inp.get('file_path', '')}"
@@ -566,6 +637,7 @@ class KiloWorker(Worker):
             self._turn_event.clear()
             self._turn_result = None
             self._turn_error = None
+            self._seen_tool_starts.clear()
 
             self._callbacks = {
                 "on_event": on_event,
@@ -689,11 +761,11 @@ def _translate_to_cc_event(part: dict) -> Optional[dict]:
 
     elif ptype == "tool":
         tool_raw = part.get("toolName", part.get("tool", ""))
-        tool_name = _TOOL_NAME_MAP.get(tool_raw, tool_raw)
+        tool_name = _resolve_tool_name(tool_raw)
         state = part.get("state", "")
         status = state.get("status", "") if isinstance(state, dict) else state
-        # Kilo puts tool input inside state.input, not at part top level
         inp = state.get("input", {}) if isinstance(state, dict) else {}
+        inp = _normalize_keys(inp) if isinstance(inp, dict) else {}
 
         if status in ("pending", "running"):
             return {
@@ -702,7 +774,7 @@ def _translate_to_cc_event(part: dict) -> Optional[dict]:
                     "content": [{
                         "type": "tool_use",
                         "name": tool_name,
-                        "input": inp if isinstance(inp, dict) else {},
+                        "input": inp,
                     }],
                 },
             }
