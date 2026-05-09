@@ -210,7 +210,10 @@ class KiloWorker(Worker):
         self._bg_result_callback = cb
 
     def get_context_usage(self) -> dict:
-        total = self._usage["input_tokens"] + self._usage["output_tokens"]
+        total = (self._usage["input_tokens"]
+                 + self._usage["output_tokens"]
+                 + self._usage["cache_read_input_tokens"]
+                 + self._usage["cache_creation_input_tokens"])
         window = 1_000_000
         elapsed = time.time() - self._start_time if self._start_time else 0
         return {
