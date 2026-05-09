@@ -192,6 +192,7 @@ class KiloWorker(Worker):
         }
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
         self._seen_tool_starts: set[str] = set()  # callID dedup for tool_use steps
+        self._last_activity: float = 0.0  # monotonic timestamp of last SSE event
 
     # ── Properties ────────────────────────────────────────────────
 
@@ -453,6 +454,8 @@ class KiloWorker(Worker):
         if etype in ("server.connected", "server.heartbeat"):
             return
 
+        self._last_activity = time.monotonic()
+
         # Filter events to current session
         props = data.get("properties", data)
         event_session = props.get("sessionID") or props.get("session_id", "")
@@ -697,6 +700,7 @@ class KiloWorker(Worker):
             self._turn_result = None
             self._turn_error = None
             self._seen_tool_starts.clear()
+            self._last_activity = time.monotonic()
 
             self._callbacks = {
                 "on_event": on_event,
@@ -725,16 +729,23 @@ class KiloWorker(Worker):
             try:
                 post_task = asyncio.create_task(self._post_message(url, body))
 
-                # Wait for turn completion from SSE or POST response
-                try:
-                    await asyncio.wait_for(
-                        self._wait_for_turn(post_task),
-                        timeout=self._timeout,
-                    )
-                except asyncio.TimeoutError:
-                    log.warning("send() timed out after %ds", self._timeout)
-                    await self.interrupt()
-                    self._turn_error = f"Timed out after {self._timeout}s"
+                # Activity-based timeout: poll _turn_event with short windows.
+                # Only timeout if no SSE events for self._timeout seconds.
+                # This keeps long-running sub-agents alive while producing events.
+                while not (self._turn_event.is_set() or post_task.done()
+                           or self._interrupted):
+                    try:
+                        await asyncio.wait_for(
+                            self._turn_event.wait(), timeout=10.0,
+                        )
+                    except asyncio.TimeoutError:
+                        idle = time.monotonic() - self._last_activity
+                        if idle >= self._timeout:
+                            log.warning("send() idle timeout: no SSE events for %ds", int(idle))
+                            await self.interrupt()
+                            self._turn_error = f"Idle timeout: no activity for {int(idle)}s"
+                            break
+                        continue
 
                 if self._interrupted:
                     reply_text = self._turn_result or ""
@@ -799,16 +810,6 @@ class KiloWorker(Worker):
             self._turn_error = str(e)
             self._turn_event.set()
             return ""
-
-    async def _wait_for_turn(self, post_task: asyncio.Task):
-        event_task = asyncio.create_task(self._turn_event.wait())
-        finished, pending = await asyncio.wait(
-            [event_task, post_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            if t is event_task:
-                t.cancel()
 
 
 # ── Event translation (module-level) ─────────────────────────────
