@@ -152,9 +152,11 @@ class KiloWorker(Worker):
         session_id: Optional[str] = None,
         kilo_url: Optional[str] = None,
         model: str = "",
+        state_dir: str | None = None,
     ):
         self._kilo_bin = kilo_bin or shutil.which("kilo") or "kilo"
         self._work_dir = work_dir or str(Path.home())
+        self._state_dir = state_dir or self._work_dir
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
@@ -264,15 +266,16 @@ class KiloWorker(Worker):
         if self._proc and self._proc.returncode is None:
             log.info("Stopping kilo serve (pid=%d)", self._proc.pid)
             try:
-                self._proc.send_signal(signal.SIGTERM)
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
                 try:
                     await asyncio.wait_for(self._proc.wait(), timeout=5)
                 except asyncio.TimeoutError:
-                    self._proc.kill()
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
                     await self._proc.wait()
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError, OSError):
                 pass
             self._proc = None
+            self._pid_file.unlink(missing_ok=True)
 
     async def interrupt(self) -> bool:
         self._interrupted = True
@@ -288,6 +291,36 @@ class KiloWorker(Worker):
 
     # ── Server process management ─────────────────────────────────
 
+    @property
+    def _pid_file(self) -> Path:
+        return Path(self._state_dir) / ".kilo_serve.pid"
+
+    def _write_pid_file(self, pid: int):
+        try:
+            self._pid_file.write_text(str(pid))
+        except OSError:
+            pass
+
+    def _kill_orphan_kilo(self):
+        """Kill orphan kilo serve from a previous crash (PID file based).
+
+        Uses PGID to kill the entire process group (node wrapper + child).
+        """
+        pf = self._pid_file
+        if not pf.exists():
+            return
+        try:
+            old_pid = int(pf.read_text().strip())
+            try:
+                os.killpg(os.getpgid(old_pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                os.kill(old_pid, signal.SIGTERM)
+            log.info("Killed orphan kilo serve (pid=%d)", old_pid)
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            pass
+        finally:
+            pf.unlink(missing_ok=True)
+
     async def _ensure_server(self):
         if self._kilo_url:
             self._base_url = self._kilo_url.rstrip("/")
@@ -296,6 +329,8 @@ class KiloWorker(Worker):
 
         if self._proc and self._proc.returncode is None:
             return
+
+        self._kill_orphan_kilo()
 
         cmd = [
             self._kilo_bin, "serve",
@@ -309,6 +344,7 @@ class KiloWorker(Worker):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._work_dir,
+            start_new_session=True,
         )
 
         # Parse port from stdout: "kilo server listening on http://127.0.0.1:<port>"
@@ -316,6 +352,7 @@ class KiloWorker(Worker):
         self._port = port
         self._base_url = f"http://127.0.0.1:{port}"
         log.info("Kilo server ready: %s (pid=%d)", self._base_url, self._proc.pid)
+        self._write_pid_file(self._proc.pid)
 
     async def _parse_server_port(self) -> int:
         deadline = time.time() + _SERVER_STARTUP_TIMEOUT

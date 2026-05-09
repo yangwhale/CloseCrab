@@ -557,6 +557,7 @@ class BotCore:
                 system_prompt=self._system_prompt,
                 session_id=session_id,
                 model=self._backbone_model,
+                state_dir=str(self._state_dir),
             )
         return ClaudeCodeWorker(
             claude_bin=self._claude_bin,
