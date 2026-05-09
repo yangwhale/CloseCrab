@@ -29,6 +29,7 @@ from .session import SessionManager
 from .types import UnifiedMessage
 from ..workers.claude_code import ClaudeCodeWorker
 from ..workers.gemini_acp import GeminiACPWorker
+from ..workers.kilo import KiloWorker
 from ..workers.base import Worker
 
 if TYPE_CHECKING:
@@ -544,6 +545,15 @@ class BotCore:
                 system_prompt=self._system_prompt,
                 session_id=session_id,
                 claude_proxy_url=self._claude_proxy_url,
+                model=self._backbone_model,
+            )
+        if self._worker_type == "kilo":
+            return KiloWorker(
+                kilo_bin=shutil.which("kilo") or "kilo",
+                work_dir=self._work_dir,
+                timeout=self._timeout,
+                system_prompt=self._system_prompt,
+                session_id=session_id,
                 model=self._backbone_model,
             )
         return ClaudeCodeWorker(

@@ -290,7 +290,7 @@ def cmd_set_livekit(args):
             print(f"(首次启动时 bot 会自动生成 hmac_secret 并回写 Firestore)")
 
 
-VALID_WORKER_TYPES = ("claude", "gemini")
+VALID_WORKER_TYPES = ("claude", "gemini", "kilo")
 
 
 def cmd_set_worker_type(args):
