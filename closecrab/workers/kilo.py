@@ -182,10 +182,12 @@ class KiloWorker(Worker):
         self._http = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_read=self._timeout + 60),
         )
+        # _started must be True BEFORE SSE task starts, otherwise
+        # the _sse_reader loop condition (self._started or not self._sse_task)
+        # evaluates False when the task first runs → reader exits immediately.
+        self._started = True
         await self._connect_sse()
         await self._create_or_resume_session()
-
-        self._started = True
         log.info("KiloWorker started: url=%s, session=%s, model=%s",
                  self._base_url, self._session_id, self._model or "(default)")
         return self._session_id or ""
@@ -303,7 +305,7 @@ class KiloWorker(Worker):
 
     async def _sse_reader(self):
         reconnect_idx = 0
-        while self._started or not self._sse_task:
+        while self._started:
             try:
                 url = f"{self._base_url}/event"
                 async with self._http.get(url, headers={"Accept": "text/event-stream"}) as resp:
@@ -427,7 +429,7 @@ class KiloWorker(Worker):
 
             if status in ("pending", "running"):
                 label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
-                inp = part.get("input", {})
+                inp = state.get("input", {}) if isinstance(state, dict) else {}
                 detail = ""
                 if tool_name == "Read" and isinstance(inp, dict):
                     detail = f": {inp.get('file_path', '')}"
@@ -688,9 +690,10 @@ def _translate_to_cc_event(part: dict) -> Optional[dict]:
     elif ptype == "tool":
         tool_raw = part.get("toolName", part.get("tool", ""))
         tool_name = _TOOL_NAME_MAP.get(tool_raw, tool_raw)
-        inp = part.get("input", {})
         state = part.get("state", "")
         status = state.get("status", "") if isinstance(state, dict) else state
+        # Kilo puts tool input inside state.input, not at part top level
+        inp = state.get("input", {}) if isinstance(state, dict) else {}
 
         if status in ("pending", "running"):
             return {
