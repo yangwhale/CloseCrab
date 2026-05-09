@@ -311,18 +311,83 @@ async def _post_with_retry(self, url: str, json_body: dict, retries: int = 2) ->
 
 ---
 
+## O8: System Prompt 注入修复（Critical）
+
+### 依据
+
+调查 Kilo Code 源码发现 HTTP POST body 的 `system` 字段是 **no-op**：
+- `session/message-v2.ts` line 972 存储了 `system` 到 session 数据
+- 但 `prompt.ts` line 1596 构建 system prompt 时只用 `[...env, ...instructions, ...(skills ? [skills] : [])]`
+- `system` 字段**从未被读取**
+
+这意味着 Bunny 的 bot 身份、channel style、safety rule、语音总结指令等**全部静默丢失**。
+
+### 目标
+
+通过 `config.instructions` 文件注入 system prompt。
+
+### 步骤
+
+1. `_ensure_kilo_config()` 将 `self._system_prompt` 写入 `.kilo/system-prompt.md`
+2. 将该文件路径加入 `config["instructions"]` 数组
+3. 删除 `send()` 中的 `body["system"] = self._system_prompt`（no-op）
+4. 保留 `self._system_prompt` 属性（用于写文件）
+
+### 验证
+
+- Bunny 回答"你叫什么名字？" → 正确返回 "bunny"（之前 system prompt 丢失时无法确认身份）
+- kilo.jsonc 含 system-prompt.md 路径
+
+### 状态
+
+- [x] 已完成
+
+---
+
+## O9: Auto Memory 写入能力
+
+### 依据
+
+O2 实现了 MEMORY.md 读取（通过 `config.instructions` 注入），但 Kilo bot 没有
+memory 管理指令——不知道如何写入新记忆、文件格式、索引更新规则。
+
+### 目标
+
+注入精简版 auto memory 管理指令，让 Kilo bot 能主动创建 memory 文件。
+
+### 步骤
+
+1. 新建 `closecrab/prompts/kilo-memory-guide.md` 模板（~600 token）
+   - 含 `{memory_dir}` 占位符，运行时替换
+   - 覆盖：memory 类型、什么不该存、文件格式、MEMORY.md 索引、共享记忆
+2. `_ensure_kilo_config()` 加载模板 → 替换占位符 → 写入 `.kilo/memory-guide.md`
+3. 将 memory-guide.md 路径加入 `config["instructions"]` 数组
+
+### 验证
+
+- Bunny 确认有 memory 写入能力
+- Bunny 成功创建 `project_kilo-worker-memory-config.md` 并更新 MEMORY.md 索引
+
+### 状态
+
+- [x] 已完成
+
+---
+
 ## 实施记录
 
 | 时间 | 优化 | 改动摘要 | Commit |
 |------|------|----------|--------|
 | 2026-05-09 | O1 | 新增 `_ensure_kilo_config()` 生成 `.kilo/kilo.jsonc`（permission auto-allow）；permission.asked 降级为 fallback + debug 日志 | d86fff4 |
 | 2026-05-09 | O2 | `_find_memory_md()` 查找 Claude auto-memory；kilo.jsonc 加 `instructions` 注入 MEMORY.md | d86fff4 |
-| 2026-05-09 | O2-fix | **Bug fix**: `work_dir` 带尾部斜杠（`/home/chrisya/`）导致 `project_hash` 多了尾部横杠（`-home-chrisya-`），路径不匹配。修复：`.rstrip("/")` 去掉尾部斜杠 | pending |
+| 2026-05-09 | O2-fix | **Bug fix**: `work_dir` 带尾部斜杠（`/home/chrisya/`）导致 `project_hash` 多了尾部横杠（`-home-chrisya-`），路径不匹配。修复：`.rstrip("/")` 去掉尾部斜杠 | e7c94b5 |
 | 2026-05-09 | O3 | SSE 解析 `line[6:]` → `line[len("event:"):]`；JSON decode 失败改 log.warning | d86fff4 |
 | 2026-05-09 | O4 | `_seen_tool_starts: set` → `_tool_states: dict`；新增 `_is_new_tool_state()` 状态机方法；去重逻辑从 ~35 行简化到 ~15 行 | d86fff4 |
 | 2026-05-09 | O5 | `_on_message_updated()` 加 `if self._turn_event.is_set(): return`，避免覆盖 turn.close 信号 | d86fff4 |
 | 2026-05-09 | O6 | 新增 `session.compacted` SSE 分支，log info + on_event 通知 | d86fff4 |
 | 2026-05-09 | O7 | 新增 `_post_with_retry()` 方法（2 次重试），用于 question reply POST | d86fff4 |
+| 2026-05-09 | O8 | **Critical fix**: Kilo HTTP POST `system` 字段是 no-op（存了但不参与 prompt 构建）。System prompt 改为写文件通过 `config.instructions` 注入 | 1835a12 |
+| 2026-05-09 | O9 | 新增 `_load_memory_guide()` + `kilo-memory-guide.md` 模板，Kilo bot 获得 auto memory 写入能力 | 1835a12 |
 
 ## 验证记录
 
@@ -335,3 +400,5 @@ async def _post_with_retry(self, url: str, json_body: dict, retries: int = 2) ->
 | O5 | Bunny turn 正常完成，`status=done` | ✅ 通过 |
 | O6 | 防御性代码，需长对话触发 compaction | ⏭️ 待长对话验证 |
 | O7 | 防御性代码，需网络异常触发 | ⏭️ 待异常场景验证 |
+| O8 | Bunny 回答"你叫什么名字？"正确返回 bot 身份；kilo.jsonc 含 3 个 instruction 文件 | ✅ 通过 |
+| O9 | Bunny 成功创建 `project_kilo-worker-memory-config.md` 并更新 MEMORY.md 索引 | ✅ 通过 |
