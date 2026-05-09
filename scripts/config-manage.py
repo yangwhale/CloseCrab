@@ -362,8 +362,8 @@ def main():
     p_create.add_argument("--channel", required=True, choices=["discord", "feishu", "lark", "dingtalk"])
     p_create.add_argument("--description", default="")
     p_create.add_argument("--guild-id", default="")
-    p_create.add_argument("--worker-type", default="claude", choices=["claude", "gemini"],
-                          help="Worker backend: claude (Claude Code CLI) or gemini (Gemini CLI ACP)")
+    p_create.add_argument("--worker-type", default="claude", choices=list(VALID_WORKER_TYPES),
+                          help="Worker backend: claude (Claude Code CLI), gemini (Gemini CLI ACP), or kilo (Kilo Code CLI)")
     # Channel-specific args (shared across create/add-channel)
     for p in [p_create]:
         _add_channel_args(p)
@@ -382,7 +382,7 @@ def main():
     # set-worker-type
     p_wt = subparsers.add_parser("set-worker-type", help="Switch worker backend (claude or gemini)")
     p_wt.add_argument("bot_name")
-    p_wt.add_argument("worker_type", choices=["claude", "gemini"])
+    p_wt.add_argument("worker_type", choices=list(VALID_WORKER_TYPES))
 
     # set
     p_set = subparsers.add_parser("set", help="Set a config field")
