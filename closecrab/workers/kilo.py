@@ -325,9 +325,12 @@ class KiloWorker(Worker):
     def _ensure_kilo_config(self):
         """Generate .kilo/kilo.jsonc in work_dir for bot-mode defaults.
 
-        Kilo reads config from $PROJECT/.kilo/kilo.jsonc on startup.
-        - permission auto-allow: eliminates permission.asked SSE round-trips
-        - instructions: points to MEMORY.md for cross-session memory
+        Kilo's HTTP POST `system` field is a no-op (stored but not used in
+        prompt construction). The only way to inject custom instructions is
+        via config.instructions files. We write:
+        1. system-prompt.md — bot identity, channel style, safety rules
+        2. MEMORY.md — cross-session auto-memory index (read)
+        3. memory-guide.md — instructions for writing new memories
         """
         kilo_dir = Path(self._work_dir) / ".kilo"
         kilo_dir.mkdir(exist_ok=True)
@@ -336,16 +339,44 @@ class KiloWorker(Worker):
             "permission": {"*": "allow"},
         }
 
-        # Inject MEMORY.md if it exists (Claude auto-memory for cross-session context)
+        instructions: list[str] = []
+
+        # 1. System prompt → file (bot identity, channel style, safety rules)
+        if self._system_prompt:
+            prompt_path = kilo_dir / "system-prompt.md"
+            prompt_path.write_text(self._system_prompt)
+            instructions.append(str(prompt_path))
+
+        # 2. MEMORY.md — cross-session auto-memory index
         memory_md = self._find_memory_md()
         if memory_md:
-            config["instructions"] = [str(memory_md)]
-            log.debug("Kilo config: injecting memory from %s", memory_md)
+            instructions.append(str(memory_md))
+            # 3. Memory management guide (write capability)
+            memory_dir = str(memory_md.parent)
+            guide_path = kilo_dir / "memory-guide.md"
+            guide_template = self._load_memory_guide()
+            if guide_template:
+                guide_path.write_text(
+                    guide_template.replace("{memory_dir}", memory_dir)
+                )
+                instructions.append(str(guide_path))
+
+        if instructions:
+            config["instructions"] = instructions
 
         config_path = kilo_dir / "kilo.jsonc"
         config_path.write_text(json.dumps(config, indent=2) + "\n")
-        log.debug("Wrote kilo config: %s (instructions=%s)",
-                  config_path, bool(config.get("instructions")))
+        log.info("Kilo config: %d instruction files", len(instructions))
+
+    @staticmethod
+    def _load_memory_guide() -> Optional[str]:
+        """Load the memory management guide template."""
+        guide = Path(__file__).parent.parent / "prompts" / "kilo-memory-guide.md"
+        try:
+            return guide.read_text()
+        except FileNotFoundError:
+            log.warning("Memory guide not found: %s", guide)
+            return None
 
     def _find_memory_md(self) -> Optional[Path]:
         """Find Claude auto-memory MEMORY.md for the current work_dir.
@@ -771,11 +802,12 @@ class KiloWorker(Worker):
             }
 
             # Build request body
+            # Note: Kilo's HTTP POST `system` field is a no-op (stored but
+            # not used in prompt construction). System prompt is injected via
+            # config.instructions files instead (see _ensure_kilo_config).
             body: dict = {
                 "parts": [{"type": "text", "text": text}],
             }
-            if self._system_prompt:
-                body["system"] = self._system_prompt
             if self._model:
                 if "/" in self._model:
                     provider, model_id = self._model.split("/", 1)
