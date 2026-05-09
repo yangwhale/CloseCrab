@@ -548,12 +548,12 @@ class KiloWorker(Worker):
                         pass
 
         elif ptype == "step-finish":
-            usage = part.get("usage", part.get("tokens", {}))
-            if isinstance(usage, dict):
-                self._usage["input_tokens"] += usage.get("input", usage.get("inputTokens", 0))
-                self._usage["output_tokens"] += usage.get("output", usage.get("outputTokens", 0))
-                self._usage["cache_read_input_tokens"] += usage.get("cacheRead", usage.get("cacheReadInputTokens", 0))
-                self._usage["cache_creation_input_tokens"] += usage.get("cacheWrite", usage.get("cacheCreationInputTokens", 0))
+            # Token usage is extracted from POST response info.tokens (in
+            # _post_message) to avoid double-counting. SSE step-finish is
+            # kept only for cost fallback in case POST doesn't include it.
+            cost = part.get("cost", 0)
+            if cost and not self._usage.get("_cost_from_post"):
+                self._usage["cost_usd"] += float(cost)
 
     async def _on_message_updated(self, props: dict):
         msg = props if "role" in props else props.get("message", props)
@@ -734,12 +734,20 @@ class KiloWorker(Worker):
                         texts.append(p.get("content", p.get("text", "")))
                 result = "\n".join(texts).strip()
 
-                # Extract cost from response
+                # Extract cost and tokens from response
                 info = data.get("info", {})
                 if isinstance(info, dict):
                     cost = info.get("cost", 0)
                     if cost:
                         self._usage["cost_usd"] += float(cost)
+                    tokens = info.get("tokens", {})
+                    if isinstance(tokens, dict) and tokens.get("input", 0):
+                        self._usage["input_tokens"] += tokens.get("input", 0)
+                        self._usage["output_tokens"] += tokens.get("output", 0)
+                        cache = tokens.get("cache", {})
+                        if isinstance(cache, dict):
+                            self._usage["cache_read_input_tokens"] += cache.get("read", 0)
+                            self._usage["cache_creation_input_tokens"] += cache.get("write", 0)
 
                 self._turn_result = result
                 self._turn_event.set()
