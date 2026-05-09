@@ -191,7 +191,7 @@ class KiloWorker(Worker):
             "cost_usd": 0.0,
         }
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
-        self._seen_tool_starts: set[str] = set()  # callID dedup for tool_use steps
+        self._tool_states: dict[str, str] = {}  # callID → last emitted status
         self._last_activity: float = 0.0  # monotonic timestamp of last SSE event
 
     # ── Properties ────────────────────────────────────────────────
@@ -322,6 +322,40 @@ class KiloWorker(Worker):
         finally:
             pf.unlink(missing_ok=True)
 
+    def _ensure_kilo_config(self):
+        """Generate .kilo/kilo.jsonc in work_dir for bot-mode defaults.
+
+        Kilo reads config from $PROJECT/.kilo/kilo.jsonc on startup.
+        - permission auto-allow: eliminates permission.asked SSE round-trips
+        - instructions: points to MEMORY.md for cross-session memory
+        """
+        kilo_dir = Path(self._work_dir) / ".kilo"
+        kilo_dir.mkdir(exist_ok=True)
+        config: dict = {
+            "$schema": "https://app.kilo.ai/config.json",
+            "permission": {"*": "allow"},
+        }
+
+        # Inject MEMORY.md if it exists (Claude auto-memory for cross-session context)
+        memory_md = self._find_memory_md()
+        if memory_md:
+            config["instructions"] = [str(memory_md)]
+            log.debug("Kilo config: injecting memory from %s", memory_md)
+
+        config_path = kilo_dir / "kilo.jsonc"
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
+        log.debug("Wrote kilo config: %s", config_path)
+
+    def _find_memory_md(self) -> Optional[Path]:
+        """Find Claude auto-memory MEMORY.md for the current work_dir.
+
+        Claude Code stores memory at ~/.claude/projects/{project-hash}/memory/MEMORY.md
+        where project-hash is the work_dir path with / replaced by -.
+        """
+        project_hash = self._work_dir.replace("/", "-")
+        memory_path = Path.home() / ".claude" / "projects" / project_hash / "memory" / "MEMORY.md"
+        return memory_path if memory_path.exists() else None
+
     async def _ensure_server(self):
         if self._kilo_url:
             self._base_url = self._kilo_url.rstrip("/")
@@ -332,6 +366,7 @@ class KiloWorker(Worker):
             return
 
         self._kill_orphan_kilo()
+        self._ensure_kilo_config()
 
         cmd = [
             self._kilo_bin, "serve",
@@ -436,9 +471,9 @@ class KiloWorker(Worker):
         data_lines = []
         for line in raw.split("\n"):
             if line.startswith("event:"):
-                event_type = line[6:].strip()
+                event_type = line[len("event:"):].strip()
             elif line.startswith("data:"):
-                data_lines.append(line[5:].strip())
+                data_lines.append(line[len("data:"):].lstrip())
 
         if not data_lines:
             return
@@ -446,7 +481,8 @@ class KiloWorker(Worker):
         data_str = "\n".join(data_lines)
         try:
             data = json.loads(data_str)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            log.warning("SSE JSON decode error: %s | raw=%s", e, data_str[:200])
             return
 
         etype = event_type or data.get("type", "")
@@ -469,7 +505,10 @@ class KiloWorker(Worker):
         elif etype == "message.updated":
             await self._on_message_updated(props)
         elif etype == "permission.asked":
+            # Permissions should be auto-allowed via kilo.jsonc config.
+            # This fallback handles the rare case where config wasn't loaded.
             await self._on_permission_asked(props)
+            log.debug("Unexpected permission.asked (config should auto-allow)")
         elif etype == "question.asked":
             await self._on_question_asked(props)
         elif etype == "session.error":
@@ -478,30 +517,46 @@ class KiloWorker(Worker):
             log.error("Kilo session error: %s", msg)
             self._turn_error = msg
             self._turn_event.set()
-        elif etype in ("session.turn.close",):
+        elif etype == "session.turn.close":
             reason = props.get("reason", "")
             if reason == "error" and not self._turn_error:
                 self._turn_error = "Turn closed with error"
             self._turn_event.set()
+        elif etype == "session.compacted":
+            log.info("Session %s context compacted", event_session or self._session_id)
+            on_event = self._callbacks.get("on_event")
+            if on_event:
+                try:
+                    await on_event("context compacted")
+                except Exception:
+                    pass
 
     # ── SSE event handlers ────────────────────────────────────────
+
+    def _is_new_tool_state(self, call_id: str, status: str) -> bool:
+        """State machine for tool event dedup. Returns True on state transition."""
+        prev = self._tool_states.get(call_id)
+        if prev == status:
+            return False
+        self._tool_states[call_id] = status
+        return True
 
     async def _on_part_updated(self, props: dict):
         part = props.get("part", props)
         ptype = part.get("type", "")
 
-        # callID-based deduplication: Kilo sends multiple SSE events per tool
-        # call (pending→running→running→completed).
-        # - "pending": no input yet → fire progress event only, skip on_step
-        # - first "running": has input → fire on_step (the canonical tool_use step)
-        # - subsequent "running": dedup → fire progress event only
-        # - "completed": fire on_step (the tool_result step)
         call_id = part.get("callId", part.get("id", ""))
         state = part.get("state", "")
         status = state.get("status", "") if isinstance(state, dict) else state
 
+        # Tool event dedup via state machine (pending→running→completed).
+        # - pending: progress event only (no input yet)
+        # - first running: on_step (tool_use) + progress
+        # - repeat running: progress only
+        # - completed: on_step (tool_result) + on_log
         if ptype == "tool" and call_id:
-            if status == "pending":
+            is_new = self._is_new_tool_state(call_id, status)
+            if status == "pending" or (status == "running" and not is_new):
                 tool_raw = part.get("toolName", part.get("tool", ""))
                 tool_name = _resolve_tool_name(tool_raw)
                 label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
@@ -512,21 +567,6 @@ class KiloWorker(Worker):
                     except Exception:
                         pass
                 return
-
-            dedup_key = f"{call_id}:running" if status == "running" else f"{call_id}:{status}"
-            if dedup_key in self._seen_tool_starts:
-                if status == "running":
-                    tool_raw = part.get("toolName", part.get("tool", ""))
-                    tool_name = _resolve_tool_name(tool_raw)
-                    label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
-                    on_event = self._callbacks.get("on_event")
-                    if on_event:
-                        try:
-                            await on_event(label)
-                        except Exception:
-                            pass
-                return
-            self._seen_tool_starts.add(dedup_key)
 
         cc_event = _translate_to_cc_event(part)
         if cc_event:
@@ -599,6 +639,9 @@ class KiloWorker(Worker):
                 self._usage["cost_usd"] += float(cost)
 
     async def _on_message_updated(self, props: dict):
+        # Backup turn completion signal. Primary signal is session.turn.close.
+        if self._turn_event.is_set():
+            return
         msg = props if "role" in props else props.get("message", props)
         role = msg.get("role", "")
         t = msg.get("time", {})
@@ -617,6 +660,23 @@ class KiloWorker(Worker):
         except Exception as e:
             log.warning("Permission auto-approve failed: %s", e)
 
+    async def _post_with_retry(self, url: str, json_body: dict,
+                               retries: int = 2) -> int:
+        """POST with simple retry for critical operations (question reply)."""
+        for attempt in range(retries + 1):
+            try:
+                async with self._http.post(url, json=json_body) as resp:
+                    return resp.status
+            except Exception as e:
+                if attempt < retries:
+                    log.debug("POST %s retry %d: %s", url, attempt + 1, e)
+                    await asyncio.sleep(1)
+                else:
+                    log.warning("POST %s failed after %d attempts: %s",
+                                url, retries + 1, e)
+                    raise
+        return 0
+
     async def _on_question_asked(self, props: dict):
         on_input_needed = self._callbacks.get("on_input_needed")
         question_id = props.get("id", "")
@@ -632,16 +692,14 @@ class KiloWorker(Worker):
             try:
                 answer = await on_input_needed(ctrl)
                 if answer is not None and self._http:
-                    # Kilo expects {"answers": [["label"]]} — array of arrays,
-                    # one inner array per question with selected option labels.
                     url = f"{self._base_url}/question/{question_id}/reply"
-                    async with self._http.post(url, json={"answers": [[answer]]}) as resp:
-                        log.debug("Question %s replied: %d", question_id, resp.status)
+                    status = await self._post_with_retry(
+                        url, {"answers": [[answer]]})
+                    log.debug("Question %s replied: %d", question_id, status)
                     return
             except Exception as e:
                 log.warning("Question callback error: %s", e)
 
-        # No callback or callback returned None → reject
         if self._http:
             try:
                 url = f"{self._base_url}/question/{question_id}/reject"
@@ -699,7 +757,7 @@ class KiloWorker(Worker):
             self._turn_event.clear()
             self._turn_result = None
             self._turn_error = None
-            self._seen_tool_starts.clear()
+            self._tool_states.clear()
             self._last_activity = time.monotonic()
 
             self._callbacks = {
