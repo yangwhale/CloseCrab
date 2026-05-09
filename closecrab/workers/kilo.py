@@ -111,12 +111,16 @@ def _resolve_tool_name(tool_raw: str) -> str:
     """Resolve Kilo tool name to Claude-style display name.
 
     Direct map first, then MCP prefix match for '{server}_{tool}' format.
+    Kilo preserves hyphens in server names (e.g. 'jina-ai_search_web'),
+    so we check both the original prefix and its underscore-normalized form.
     """
     if tool_raw in _TOOL_NAME_MAP:
         return _TOOL_NAME_MAP[tool_raw]
     for prefix, (name, _) in _MCP_PREFIX_MAP.items():
+        if tool_raw.startswith(prefix + "_"):
+            return name
         prefix_u = prefix.replace("-", "_")
-        if tool_raw.startswith(prefix_u + "_"):
+        if prefix_u != prefix and tool_raw.startswith(prefix_u + "_"):
             return name
     return tool_raw
 
