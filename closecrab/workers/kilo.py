@@ -372,7 +372,16 @@ class KiloWorker(Worker):
             await self._on_permission_asked(props)
         elif etype == "question.asked":
             await self._on_question_asked(props)
+        elif etype == "session.error":
+            err = props.get("error", {})
+            msg = err.get("message", "") or err.get("name", "unknown error")
+            log.error("Kilo session error: %s", msg)
+            self._turn_error = msg
+            self._turn_event.set()
         elif etype in ("session.turn.close",):
+            reason = props.get("reason", "")
+            if reason == "error" and not self._turn_error:
+                self._turn_error = "Turn closed with error"
             self._turn_event.set()
 
     # ── SSE event handlers ────────────────────────────────────────
@@ -481,8 +490,10 @@ class KiloWorker(Worker):
             try:
                 answer = await on_input_needed(ctrl)
                 if answer is not None and self._http:
+                    # Kilo expects {"answers": [["label"]]} — array of arrays,
+                    # one inner array per question with selected option labels.
                     url = f"{self._base_url}/question/{question_id}/reply"
-                    async with self._http.post(url, json={"answer": answer}) as resp:
+                    async with self._http.post(url, json={"answers": [[answer]]}) as resp:
                         log.debug("Question %s replied: %d", question_id, resp.status)
                     return
             except Exception as e:
@@ -561,13 +572,11 @@ class KiloWorker(Worker):
             if self._system_prompt:
                 body["system"] = self._system_prompt
             if self._model:
-                # model can be "providerID/modelID" or just "modelID"
                 if "/" in self._model:
                     provider, model_id = self._model.split("/", 1)
-                    body["providerID"] = provider
-                    body["modelID"] = model_id
+                    body["model"] = {"providerID": provider, "modelID": model_id}
                 else:
-                    body["modelID"] = self._model
+                    body["model"] = {"modelID": self._model}
 
             # POST message (blocks until turn completes)
             url = f"{self._base_url}/session/{self._session_id}/message"
@@ -636,11 +645,14 @@ class KiloWorker(Worker):
             return ""
 
     async def _wait_for_turn(self, post_task: asyncio.Task):
-        done = {self._turn_event.wait(), post_task}
-        finished, _ = await asyncio.wait(
-            [asyncio.create_task(self._turn_event.wait()), post_task],
+        event_task = asyncio.create_task(self._turn_event.wait())
+        finished, pending = await asyncio.wait(
+            [event_task, post_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        for t in pending:
+            if t is event_task:
+                t.cancel()
 
 
 # ── Event translation (module-level) ─────────────────────────────
