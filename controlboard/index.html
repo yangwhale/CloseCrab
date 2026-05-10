@@ -794,7 +794,7 @@
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
-  import { getAuth, signInWithPopup, signOut, onAuthStateChanged, GoogleAuthProvider }
+  import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, GoogleAuthProvider }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
   import { initializeFirestore, collection, doc, onSnapshot, query, orderBy, limit, where, getDocs, updateDoc, addDoc, Timestamp, deleteField }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
@@ -817,10 +817,15 @@
   let dragSrcName = null;
 
   // ── Auth ──
+  getRedirectResult(auth).catch(() => {});
   window.doLogin = async () => {
     try {
       await signInWithPopup(auth, provider);
     } catch (e) {
+      if (e.code === "auth/popup-blocked" || e.code === "auth/cancelled-popup-request") {
+        signInWithRedirect(auth, provider);
+        return;
+      }
       const errEl = document.getElementById("login-error");
       errEl.textContent = e.message;
       errEl.style.display = "block";
