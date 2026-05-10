@@ -1874,7 +1874,7 @@
   }
 
   window._saveCard = async (card) => {
-    if (!selectedBot || !cfgDirty[card]) return;
+    if (!selectedBot) return;
     const btn = document.getElementById(`cfg-save-${card}`);
     btn.classList.add('saving');
     btn.textContent = 'Saving...';
@@ -1946,6 +1946,15 @@
       }
 
       await updateDoc(doc(db, "bots", selectedBot), updates);
+
+      // Update local data immediately so re-render shows new values
+      if (botsData[selectedBot]) {
+        for (const [k, v] of Object.entries(updates)) {
+          if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object)) {
+            botsData[selectedBot][k] = v;
+          }
+        }
+      }
 
       // If active_channel changed, send restart command via inbox
       if (card === 'channel' && updates.active_channel && updates.active_channel !== cfg.active_channel) {
