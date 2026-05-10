@@ -794,7 +794,7 @@
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
-  import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, GoogleAuthProvider }
+  import { getAuth, signInWithPopup, signOut, onAuthStateChanged, GoogleAuthProvider }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
   import { initializeFirestore, collection, doc, onSnapshot, query, orderBy, limit, where, getDocs, updateDoc, addDoc, Timestamp, deleteField }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
@@ -817,17 +817,10 @@
   let dragSrcName = null;
 
   // ── Auth ──
-  getRedirectResult(auth).catch(() => {});
   window.doLogin = async () => {
     try {
       await signInWithPopup(auth, provider);
     } catch (e) {
-      if (e.code === "auth/popup-blocked" || e.code === "auth/cancelled-popup-request") {
-        const errEl = document.getElementById("login-error");
-        errEl.innerHTML = '此浏览器不支持弹窗登录，请<br><button onclick="navigator.clipboard.writeText(location.href).then(()=>this.textContent=\'已复制!\')" style="margin-top:8px;padding:8px 20px;border-radius:8px;border:1px solid #4285f4;background:#fff;color:#4285f4;cursor:pointer;font-size:14px">复制链接</button><br><span style="font-size:13px;color:#888;margin-top:4px;display:inline-block">在系统浏览器中打开</span>';
-        errEl.style.display = "block";
-        return;
-      }
       const errEl = document.getElementById("login-error");
       errEl.textContent = e.message;
       errEl.style.display = "block";
