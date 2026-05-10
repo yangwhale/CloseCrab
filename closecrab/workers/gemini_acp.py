@@ -553,18 +553,25 @@ class GeminiACPWorker(Worker):
 
         result = []
         for name, cfg in servers_obj.items():
-            if not isinstance(cfg, dict) or "command" not in cfg:
+            if not isinstance(cfg, dict):
                 continue
-            env_list = []
-            for k, v in (cfg.get("env") or {}).items():
-                env_list.append({"name": k, "value": str(v)})
-            result.append({
-                "name": name,
-                "command": cfg["command"],
-                "args": cfg.get("args", []),
-                "env": env_list,
-            })
-            log.debug(f"Loaded MCP server: {name}")
+            if "url" in cfg:
+                entry = {"name": name, "url": cfg["url"]}
+                if cfg.get("timeout"):
+                    entry["timeout"] = cfg["timeout"]
+                result.append(entry)
+                log.debug(f"Loaded MCP server (sse): {name}")
+            elif "command" in cfg:
+                env_list = []
+                for k, v in (cfg.get("env") or {}).items():
+                    env_list.append({"name": k, "value": str(v)})
+                result.append({
+                    "name": name,
+                    "command": cfg["command"],
+                    "args": cfg.get("args", []),
+                    "env": env_list,
+                })
+                log.debug(f"Loaded MCP server (stdio): {name}")
 
         log.info(f"Loaded {len(result)} MCP servers for ACP session")
         return result
