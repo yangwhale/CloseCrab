@@ -552,7 +552,7 @@ class KiloWorker(Worker):
         elif etype == "session.error":
             err = props.get("error") or {}
             msg = err.get("message", "") or err.get("name", "unknown error") if isinstance(err, dict) else str(err)
-            log.error("Kilo session error: %s", msg)
+            log.error("Kilo session error: %s | full: %s", msg, err)
             self._turn_error = msg
             self._turn_event.set()
         elif etype == "session.turn.close":

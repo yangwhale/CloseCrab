@@ -321,6 +321,11 @@ MODEL_PRESETS = {
         "kilo":   "google-vertex/gemini-3.1-pro-preview",
         "gemini": "gemini-3.1-pro-preview",
     },
+    "gemini-3.1-flash-lite": {
+        "claude": None,
+        "kilo":   "google-vertex/gemini-3.1-flash-lite",
+        "gemini": "gemini-3.1-flash-lite",
+    },
 }
 
 

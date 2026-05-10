@@ -517,7 +517,8 @@ class BotCore:
                 session_id = existing.session_id
                 log.info(f"Reusing interrupted worker's session_id={session_id}")
             else:
-                session_id = self.session_mgr.get_active(user_key)
+                session_id = self.session_mgr.get_active(
+                    user_key, worker_type=self._worker_type)
                 log.info(f"Loaded session_id from session_mgr: {session_id}")
 
             if existing:
@@ -584,4 +585,4 @@ class BotCore:
             if worker.session_id
         }
         if active:
-            self.session_mgr.save(active)
+            self.session_mgr.save(active, worker_type=self._worker_type)

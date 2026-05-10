@@ -44,6 +44,8 @@ export BOT_NAME
 
 # Bot secrets 全部从 Firestore 读取，不再需要 .env
 # 机器级环境变量（CC_PAGES_*等）由 ~/.claude/settings.json 或 ~/.zshrc 管理
+# bash 不加载 .zshenv，需要显式 source（内容全是 export，bash 兼容）
+[ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv"
 
 # ── gcsfuse 挂载检测 ─────────────────────────────────────────
 # gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失

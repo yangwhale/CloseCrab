@@ -83,11 +83,13 @@ class SessionManager:
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
-    def save(self, active_sessions: dict[str, Optional[str]]):
+    def save(self, active_sessions: dict[str, Optional[str]],
+             worker_type: str = ""):
         """保存活跃 session 信息。
 
         Args:
             active_sessions: {user_key: session_id} 映射
+            worker_type: 当前 worker 类型（claude/kilo/gemini），用于切换时检测兼容性
         """
         data = self.load()
         for user_key, session_id in active_sessions.items():
@@ -95,6 +97,8 @@ class SessionManager:
                 if user_key not in data:
                     data[user_key] = {"active": None, "history": []}
                 data[user_key]["active"] = session_id
+                if worker_type:
+                    data[user_key]["worker_type"] = worker_type
         self._sessions_file.write_text(json.dumps(data, indent=2))
 
     def archive(self, user_key: str, session_id: str):
@@ -108,10 +112,21 @@ class SessionManager:
         data[user_key]["active"] = None
         self._sessions_file.write_text(json.dumps(data, indent=2))
 
-    def get_active(self, user_key: str) -> Optional[str]:
-        """获取用户的活跃 session_id。"""
+    def get_active(self, user_key: str,
+                   worker_type: str = "") -> Optional[str]:
+        """获取用户的活跃 session_id。
+
+        Args:
+            worker_type: 如果提供，仅返回同类型 worker 的 session（跨类型不兼容）
+        """
         data = self.load()
-        return data.get(user_key, {}).get("active")
+        entry = data.get(user_key, {})
+        sid = entry.get("active")
+        if sid and worker_type and entry.get("worker_type", "") != worker_type:
+            log.info("Session %s was from worker_type=%s, current=%s — skipping resume",
+                     sid[:8], entry.get("worker_type", "?"), worker_type)
+            return None
+        return sid
 
     def get_history(self, user_key: str) -> list[str]:
         """获取用户的历史 session 列表。"""
