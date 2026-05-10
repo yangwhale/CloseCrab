@@ -1,0 +1,19 @@
+{
+  "coding": {
+    "command": "python3",
+    "args": ["/usr/local/google/home/chrisya/.local/bin/coding-server-wrapper.py"]
+  },
+  "bugged": {
+    "command": "/google/bin/releases/codemind-mcp-servers/bugged.par"
+  },
+  "google-workspace": {
+    "command": "/google/bin/releases/anthropic-google-workspace-mcp/server.par"
+  },
+  "chrome-devtools-mcp": {
+    "command": "npx",
+    "args": ["-y", "@anthropic-ai/chrome-devtools-mcp@latest"]
+  },
+  "c2xprof": {
+    "command": "/google/bin/releases/codemind-mcp-servers/c2xprof.par"
+  }
+}
