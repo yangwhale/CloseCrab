@@ -995,6 +995,7 @@ class FeishuChannel(Channel):
             current_action=_pending_action[0],
             history=[], elapsed=0,
             header_text=_make_header(_CRAB_FRAMES[0], random.randint(0, len(_WITTY_TIPS) - 1)),
+            usage=self._core.get_context_usage(user_key) or {},
         )
         _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 
@@ -1032,6 +1033,7 @@ class FeishuChannel(Channel):
                     card = self._build_progress_card(
                         current_action=current, history=_progress_history,
                         elapsed=now - _start_time, header_text=header,
+                        usage=self._core.get_context_usage(user_key) or {},
                     )
                     if _card_dirty[0]:
                         if current != _pending_action[0][:40] and (not _progress_history or _progress_history[-1] != current):
@@ -1215,6 +1217,7 @@ class FeishuChannel(Channel):
                 current_action="🧠 思考中...",
                 history=[],
                 elapsed=0,
+                usage=self._core.get_context_usage(user_key) or {},
             )
             _card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 
@@ -1444,6 +1447,7 @@ class FeishuChannel(Channel):
             history=[],
             elapsed=0,
             header_text=_make_header(_CRAB_FRAMES[0], random.randint(0, len(_WITTY_TIPS) - 1)),
+            usage=self._core.get_context_usage(user_key) or {},
         )
         _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 
@@ -1887,6 +1891,7 @@ class FeishuChannel(Channel):
                 history=[],
                 elapsed=0,
                 header_text=_make_header(_CRAB_FRAMES[0], random.randint(0, len(_WITTY_TIPS) - 1)),
+                usage=self._core.get_context_usage(user_key) or {},
             )
             _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 

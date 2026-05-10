@@ -448,10 +448,11 @@ class BotCore:
         worker = self._workers.get(user_key)
         if worker and worker.is_alive():
             usage = worker.get_context_usage()
-            usage["worker_type"] = self._worker_type
-            usage["backbone_model"] = self._backbone_model
-            return usage
-        return None
+        else:
+            usage = {}
+        usage["worker_type"] = self._worker_type
+        usage["backbone_model"] = self._backbone_model
+        return usage
 
     async def shutdown(self):
         """停止所有 worker，清理资源。"""
