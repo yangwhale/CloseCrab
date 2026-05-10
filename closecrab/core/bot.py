@@ -543,6 +543,11 @@ class BotCore:
     def _create_worker(self, session_id: Optional[str] = None) -> Worker:
         """创建 Worker 实例（不启动），根据 worker_type 选择实现。"""
         if self._worker_type == "gemini":
+            # Claude model names (claude-*) are invalid for Gemini API;
+            # pass empty string to let Gemini CLI use its default model.
+            gemini_model = self._backbone_model
+            if gemini_model and gemini_model.startswith("claude-"):
+                gemini_model = ""
             return GeminiACPWorker(
                 gemini_bin=shutil.which("gemini") or "gemini",
                 work_dir=self._work_dir,
@@ -550,7 +555,8 @@ class BotCore:
                 system_prompt=self._system_prompt,
                 session_id=session_id,
                 claude_proxy_url=self._claude_proxy_url,
-                model=self._backbone_model,
+                model=gemini_model,
+                bot_name=self.bot_name,
             )
         if self._worker_type == "kilo":
             return KiloWorker(

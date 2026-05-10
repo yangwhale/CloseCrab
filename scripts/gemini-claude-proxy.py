@@ -216,7 +216,7 @@ def to_anthropic(req, gemini_tools, claude_model, default_max_tokens):
     if "maxOutputTokens" in gc:
         hard_limit = CLAUDE_HARD_LIMIT.get(claude_model, 64000)
         body["max_tokens"] = min(gc["maxOutputTokens"], hard_limit)
-    if "topP" in gc:
+    if "topP" in gc and "temperature" not in gc:
         body["top_p"] = gc["topP"]
     if "topK" in gc:
         body["top_k"] = gc["topK"]

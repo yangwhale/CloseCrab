@@ -127,9 +127,18 @@ class GeminiACPWorker(Worker):
         session_id: Optional[str] = None,
         claude_proxy_url: Optional[str] = None,
         model: str = "",
+        bot_name: str = "",
     ):
         self._gemini_bin = gemini_bin or shutil.which("gemini") or "gemini"
         self._work_dir = work_dir or str(Path.home())
+        self._bot_name = bot_name
+        # Per-bot Gemini cwd: isolate GEMINI.md and Gemini CLI cwd so that
+        # multiple bots on the same machine don't overwrite each other's identity.
+        if bot_name:
+            self._gemini_cwd = str(Path.home() / ".closecrab" / "gemini-workspace" / bot_name)
+            Path(self._gemini_cwd).mkdir(parents=True, exist_ok=True)
+        else:
+            self._gemini_cwd = self._work_dir
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
@@ -181,7 +190,7 @@ class GeminiACPWorker(Worker):
         self._started = True
         self._start_time = time.monotonic()
         self._start_wall = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        log.info(f"GeminiACPWorker started: work_dir={self._work_dir}, session={self._session_id}")
+        log.info(f"GeminiACPWorker started: work_dir={self._work_dir}, gemini_cwd={self._gemini_cwd}, session={self._session_id}")
         return self._session_id or ""
 
     async def _ensure_process(self, _retry: bool = False):
@@ -227,7 +236,7 @@ class GeminiACPWorker(Worker):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr_fd,
                 limit=16 * 1024 * 1024,
-                cwd=self._work_dir,
+                cwd=self._gemini_cwd,
                 env=env,
                 start_new_session=True,
             )
@@ -282,7 +291,7 @@ class GeminiACPWorker(Worker):
         # Fallback: create a new session
         if not resumed:
             resp = await self._rpc("session/new", {
-                "cwd": self._work_dir,
+                "cwd": self._gemini_cwd,
                 "mcpServers": mcp_servers,
             }, timeout=60)
             if not resp or "error" in resp:
@@ -296,7 +305,7 @@ class GeminiACPWorker(Worker):
         """Try to load an existing session via session/load. Returns True on success."""
         log.info(f"Attempting session/load: {target_id}")
         resp = await self._rpc("session/load", {
-            "cwd": self._work_dir,
+            "cwd": self._gemini_cwd,
             "mcpServers": mcp_servers,
             "sessionId": target_id,
         }, timeout=60)
@@ -315,7 +324,7 @@ class GeminiACPWorker(Worker):
     async def _find_latest_session(self) -> Optional[str]:
         """Call session/list to find the most recent session."""
         resp = await self._rpc("session/list", {
-            "cwd": self._work_dir,
+            "cwd": self._gemini_cwd,
         }, timeout=15)
         if not resp or "error" in resp:
             return None
@@ -340,7 +349,7 @@ class GeminiACPWorker(Worker):
         all_sessions = []
         cursor = None
         while len(all_sessions) < limit:
-            params: dict = {"cwd": self._work_dir}
+            params: dict = {"cwd": self._gemini_cwd}
             if cursor:
                 params["cursor"] = cursor
             resp = await self._rpc("session/list", params, timeout=15)
@@ -369,7 +378,7 @@ class GeminiACPWorker(Worker):
             return False
         mcp_servers = self._load_mcp_servers()
         resp = await self._rpc("session/new", {
-            "cwd": self._work_dir,
+            "cwd": self._gemini_cwd,
             "mcpServers": mcp_servers,
         }, timeout=60)
         if not resp or "error" in resp:
@@ -513,8 +522,8 @@ class GeminiACPWorker(Worker):
         # Step 4: Create new session on same process
         if not await self._create_new_session():
             log.error("Compaction: failed to create new session, trying to recover")
-            # Try loading an existing session
-            if not await self._try_load_session():
+            latest_id = await self._find_latest_session()
+            if not latest_id or not await self._try_load_session(latest_id, self._load_mcp_servers()):
                 log.error("Compaction: recovery failed completely")
                 return None
 
@@ -1176,7 +1185,7 @@ class GeminiACPWorker(Worker):
         """Upsert the CloseCrab section in GEMINI.md, preserving all other content."""
         if not self._system_prompt:
             return
-        gemini_md = Path(self._work_dir) / "GEMINI.md"
+        gemini_md = Path(self._gemini_cwd) / "GEMINI.md"
         injected = (
             f"{self._GEMINI_MD_BEGIN}\n"
             f"<!-- 此区域由 CloseCrab 自动管理，每次启动自动更新。请勿手动编辑。 -->\n"
@@ -1307,7 +1316,7 @@ class GeminiACPWorker(Worker):
         self._acp_session_id = None
 
         # Remove CloseCrab section from GEMINI.md (preserve Gemini's own content)
-        gemini_md = Path(self._work_dir) / "GEMINI.md"
+        gemini_md = Path(self._gemini_cwd) / "GEMINI.md"
         try:
             if gemini_md.exists():
                 content = gemini_md.read_text(encoding="utf-8")
