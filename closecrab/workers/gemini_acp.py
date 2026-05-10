@@ -542,8 +542,12 @@ class GeminiACPWorker(Worker):
     def _load_mcp_servers(self) -> list:
         """Load MCP servers from ~/.gemini/settings.json and convert to ACP array format.
 
-        ACP session/new expects: [{name, command, args: [], env: [{name, value}]}]
-        settings.json has: {mcpServers: {name: {command, args: [], env: {K: V}}}}
+        Only command-based (stdio) MCPs are passed via ACP session/new.
+        URL-based MCPs (SSE/HTTP) are intentionally excluded because Gemini CLI
+        v0.41 has a bug where ACP session/new overwrites the settings.json entry
+        but drops the 'type' field, causing SSE transports to fall back to
+        StreamableHTTP and silently fail tool discovery.  URL-based MCPs in
+        settings.json load correctly on their own via loadSettings(cwd).
         """
         settings_path = Path.home() / ".gemini" / "settings.json"
         if not settings_path.exists():
@@ -561,20 +565,13 @@ class GeminiACPWorker(Worker):
             return []
 
         result = []
+        skipped_url = 0
         for name, cfg in servers_obj.items():
             if not isinstance(cfg, dict):
                 continue
             if "url" in cfg:
-                entry = {
-                    "name": name,
-                    "url": cfg["url"],
-                    "type": cfg.get("type", "sse"),
-                    "headers": cfg.get("headers", []),
-                }
-                if cfg.get("timeout"):
-                    entry["timeout"] = cfg["timeout"]
-                result.append(entry)
-                log.debug(f"Loaded MCP server (sse): {name}")
+                skipped_url += 1
+                log.debug(f"Skipping URL-based MCP '{name}' (loaded from settings.json)")
             elif "command" in cfg:
                 env_list = []
                 for k, v in (cfg.get("env") or {}).items():
@@ -587,7 +584,8 @@ class GeminiACPWorker(Worker):
                 })
                 log.debug(f"Loaded MCP server (stdio): {name}")
 
-        log.info(f"Loaded {len(result)} MCP servers for ACP session")
+        log.info(f"Loaded {len(result)} MCP servers for ACP session "
+                 f"(skipped {skipped_url} URL-based, loaded from settings.json)")
         return result
 
     def _read_stderr_tail(self, max_bytes: int = 2000) -> str:
