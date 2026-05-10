@@ -814,6 +814,12 @@ if 'wiki' not in cfg['mcpServers'] and os.path.isdir(wiki_dir):
     changed = True
 elif 'wiki' in cfg['mcpServers']:
     print('  [gemini] wiki MCP 已存在, 跳过')
+# Migrate URL-based MCPs: add type=sse if missing (Gemini CLI defaults to http which fails with SSE proxies)
+for name, mcfg in cfg['mcpServers'].items():
+    if 'url' in mcfg and 'type' not in mcfg:
+        mcfg['type'] = 'sse'
+        print(f'  [gemini] {name}: added type=sse')
+        changed = True
 if changed:
     with open(path, 'w') as f:
         json.dump(cfg, f, indent=2)
