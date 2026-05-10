@@ -232,6 +232,27 @@ def load_feishu_style() -> str:
     return "你正在通过飞书与用户交互，请用简短对话式风格回复，不要用表格。"
 
 
+def _shorten_model_name(raw: str) -> str:
+    """将原始 model ID 转为简短显示名。"""
+    if not raw:
+        return ""
+    name = raw.rsplit("/", 1)[-1] if "/" in raw else raw
+    name = name.split("@")[0]
+    _MAP = {
+        "claude-opus-4-6": "Opus 4.6",
+        "claude-opus-4-7": "Opus 4.7",
+        "claude-sonnet-4-6": "Sonnet 4.6",
+        "claude-sonnet-4-5": "Sonnet 4.5",
+        "claude-haiku-4-5": "Haiku 4.5",
+        "gemini-3.1-pro": "Gemini 3.1 Pro",
+        "gemini-3.1-flash": "Gemini 3.1 Flash",
+        "gemini-3-flash": "Gemini 3 Flash",
+        "gemini-2.5-pro": "Gemini 2.5 Pro",
+        "gemini-2.5-flash": "Gemini 2.5 Flash",
+    }
+    return _MAP.get(name, name)
+
+
 def _extract_stop_and_rest(content: str) -> tuple[bool, str]:
     """检查消息是否以停车关键词开头。"""
     stripped = content.strip()
@@ -2714,10 +2735,17 @@ class FeishuChannel(Channel):
             "text": {"tag": "lark_md", "content": f"**{current_action}**"},
         })
 
-        # 底部状态栏：耗时 · 上下文 · 轮次
+        # 底部状态栏：耗时 · 上下文 · 轮次 · Worker · Model
         elements.append({"tag": "hr"})
         time_str = f"{elapsed:.0f}s" if elapsed >= 1 else "刚开始"
+        wt = u.get("worker_type", "")
+        w_label = {"claude": "C", "kilo": "K", "gemini": "G"}.get(wt, wt[:1].upper() if wt else "?")
+        m_label = _shorten_model_name(u.get("backbone_model", ""))
         parts = [f"⏱ {time_str}", f"📊 ctx {ctx_pct:.0f}%", f"🔄 T{turns}"]
+        if w_label:
+            parts.append(f"👷 {w_label}")
+        if m_label:
+            parts.append(f"🧠 {m_label}")
         elements.append({
             "tag": "note",
             "elements": [{"tag": "plain_text", "content": " · ".join(parts)}],

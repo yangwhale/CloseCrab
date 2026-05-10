@@ -311,8 +311,9 @@ def build_system_prompt(
             "wiki_status / wiki_graph_neighbors / wiki_graph_path"
         )
 
-    # Gemini worker 行为指导（从模板文件加载）
-    if worker_type == "gemini":
+    # 非 Claude worker 行为指导（从模板文件加载）
+    # Gemini ACP 和 Kilo Code worker 都需要这些通用行为准则
+    if worker_type in ("gemini", "kilo"):
         _guide_path = Path(__file__).parent / "prompts" / "gemini-worker-guide.md"
         try:
             prompt += "\n\n" + _guide_path.read_text(encoding="utf-8")

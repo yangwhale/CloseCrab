@@ -7,7 +7,8 @@ Usage:
     config-manage.py create <bot_name> --channel <type> [channel options]
     config-manage.py add-channel <bot_name> <channel_type> [channel options]
     config-manage.py set-channel <bot_name> <channel_type>
-    config-manage.py set-worker-type <bot_name> <claude|gemini>
+    config-manage.py set-model <bot_name> <preset>     (claude-opus-4.6|claude-opus-4.7|claude-sonnet-4.6|gemini-3-flash|gemini-3.1-pro)
+    config-manage.py set-worker-type <bot_name> <claude|gemini|kilo>
     config-manage.py set <bot_name> <field> <value>
     config-manage.py delete <bot_name>
 
@@ -292,6 +293,70 @@ def cmd_set_livekit(args):
 
 VALID_WORKER_TYPES = ("claude", "gemini", "kilo")
 
+# Model presets: friendly name → worker-specific model string
+# Each preset maps worker_type to the exact model ID that worker expects.
+MODEL_PRESETS = {
+    "claude-opus-4.6": {
+        "claude": "claude-opus-4-6@default",
+        "kilo":   "google-vertex-anthropic/claude-opus-4-6@default",
+        "gemini": None,  # Gemini CLI can't call Claude models
+    },
+    "claude-opus-4.7": {
+        "claude": "claude-opus-4-7@default",
+        "kilo":   "google-vertex-anthropic/claude-opus-4-7@default",
+        "gemini": None,
+    },
+    "claude-sonnet-4.6": {
+        "claude": "claude-sonnet-4-6@default",
+        "kilo":   "google-vertex-anthropic/claude-sonnet-4-6@default",
+        "gemini": None,
+    },
+    "gemini-3-flash": {
+        "claude": None,  # Claude Code can't call Gemini models
+        "kilo":   "google-vertex/gemini-3-flash-preview",
+        "gemini": "gemini-3-flash-preview",
+    },
+    "gemini-3.1-pro": {
+        "claude": None,
+        "kilo":   "google-vertex/gemini-3.1-pro-preview",
+        "gemini": "gemini-3.1-pro-preview",
+    },
+}
+
+
+def cmd_set_model(args):
+    db = get_db()
+    doc_ref = db.collection("bots").document(args.bot_name)
+    doc = doc_ref.get()
+    if not doc.exists:
+        print(f"Bot '{args.bot_name}' not found")
+        sys.exit(1)
+
+    cfg = doc.to_dict() or {}
+    worker_type = cfg.get("worker_type", "claude")
+    preset_name = args.model_preset
+
+    if preset_name not in MODEL_PRESETS:
+        print(f"Error: unknown model preset '{preset_name}'")
+        print(f"Available presets: {', '.join(MODEL_PRESETS.keys())}")
+        sys.exit(1)
+
+    preset = MODEL_PRESETS[preset_name]
+    model_str = preset.get(worker_type)
+
+    if model_str is None:
+        print(f"Error: '{preset_name}' is not compatible with worker_type='{worker_type}'")
+        compatible = [wt for wt, v in preset.items() if v is not None]
+        print(f"  Compatible workers: {', '.join(compatible)}")
+        print(f"  Switch worker first: config-manage.py set-worker-type {args.bot_name} <{'/'.join(compatible)}>")
+        sys.exit(1)
+
+    doc_ref.update({"model": model_str})
+    print(f"Set model for '{args.bot_name}': {preset_name}")
+    print(f"  worker_type: {worker_type}")
+    print(f"  model string: {model_str}")
+    print(f"  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
+
 
 def cmd_set_worker_type(args):
     db = get_db()
@@ -379,6 +444,12 @@ def main():
     p_switch.add_argument("bot_name")
     p_switch.add_argument("channel_type")
 
+    # set-model
+    p_model = subparsers.add_parser("set-model", help="Set model from predefined presets (auto-formats for worker type)")
+    p_model.add_argument("bot_name")
+    p_model.add_argument("model_preset", choices=list(MODEL_PRESETS.keys()),
+                         help="Model preset name")
+
     # set-worker-type
     p_wt = subparsers.add_parser("set-worker-type", help="Switch worker backend (claude or gemini)")
     p_wt.add_argument("bot_name")
@@ -427,6 +498,7 @@ def main():
         "add-channel": cmd_add_channel,
         "set-channel": cmd_set_channel,
         "set": cmd_set,
+        "set-model": cmd_set_model,
         "set-worker-type": cmd_set_worker_type,
         "set-livekit": cmd_set_livekit,
         "delete": cmd_delete,

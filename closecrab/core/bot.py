@@ -447,7 +447,10 @@ class BotCore:
         """返回指定用户 worker 的 context 使用情况。"""
         worker = self._workers.get(user_key)
         if worker and worker.is_alive():
-            return worker.get_context_usage()
+            usage = worker.get_context_usage()
+            usage["worker_type"] = self._worker_type
+            usage["backbone_model"] = self._backbone_model
+            return usage
         return None
 
     async def shutdown(self):

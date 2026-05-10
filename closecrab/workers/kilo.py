@@ -360,6 +360,11 @@ class KiloWorker(Worker):
                 )
                 instructions.append(str(guide_path))
 
+        # 4. HTML document template reference (Material Design CSS)
+        doc_template = Path(__file__).parent.parent / "prompts" / "doc-template-reference.html"
+        if doc_template.exists():
+            instructions.append(str(doc_template))
+
         if instructions:
             config["instructions"] = instructions
 
@@ -545,8 +550,8 @@ class KiloWorker(Worker):
         elif etype == "question.asked":
             await self._on_question_asked(props)
         elif etype == "session.error":
-            err = props.get("error", {})
-            msg = err.get("message", "") or err.get("name", "unknown error")
+            err = props.get("error") or {}
+            msg = err.get("message", "") or err.get("name", "unknown error") if isinstance(err, dict) else str(err)
             log.error("Kilo session error: %s", msg)
             self._turn_error = msg
             self._turn_event.set()
