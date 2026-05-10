@@ -1668,7 +1668,7 @@
     html += `<div class="cfg-card">${cardHeader('tune','General','general')}
       <div class="cfg-card-body">
         <div class="cfg-field"><label class="cfg-label">Description</label>
-          ${gEdit ? `<textarea class="cfg-textarea" id="cfg-description">${escHtml(cfg.description || '')}</textarea>`
+          ${gEdit ? `<textarea class="cfg-textarea" id="cfg-description" oninput="markDirty('general')">${escHtml(cfg.description || '')}</textarea>`
             : `<div class="cfg-display-value">${escHtml(cfg.description || '') || '—'}</div>`}
         </div>
         <div class="cfg-field"><label class="cfg-label">Model</label>
@@ -1676,7 +1676,7 @@
             const wt = cfg.worker_type || 'claude';
             const models = wt === 'gemini' ? GEMINI_MODELS : wt === 'kilo' ? KILO_MODELS : CLAUDE_MODELS;
             const allModels = [...CLAUDE_MODELS, ...GEMINI_MODELS, ...KILO_MODELS];
-            return `<select class="cfg-select" id="cfg-model">
+            return `<select class="cfg-select" id="cfg-model" onchange="markDirty('general')">
               <option value="" ${!cfg.model ? 'selected' : ''}>(default)</option>
               ${models.map(m => `<option value="${m}" ${m === cfg.model ? 'selected' : ''}>${m}</option>`).join('')}
               ${cfg.model && !allModels.includes(cfg.model) ? `<option value="${escHtml(cfg.model)}" selected>${escHtml(cfg.model)}</option>` : ''}
@@ -1684,21 +1684,21 @@
           })() : `<div class="cfg-display-value">${escHtml(cfg.model || '—')}</div>`}
         </div>
         <div class="cfg-field"><label class="cfg-label">Work Directory</label>
-          ${gEdit ? `<input class="cfg-input mono" id="cfg-work_dir" value="${escHtml(cfg.work_dir || '~/')}">` : `<div class="cfg-display-value">${escHtml(cfg.work_dir || '~/')}</div>`}
+          ${gEdit ? `<input class="cfg-input mono" id="cfg-work_dir" value="${escHtml(cfg.work_dir || '~/')}" oninput="markDirty('general')">` : `<div class="cfg-display-value">${escHtml(cfg.work_dir || '~/')}</div>`}
         </div>
         <div style="display:flex;gap:20px;">
           <div class="cfg-field" style="flex:1;"><label class="cfg-label">Timeout (seconds)</label>
-            ${gEdit ? `<input class="cfg-input cfg-number" type="number" id="cfg-timeout" value="${cfg.timeout || 600}">` : `<div class="cfg-display-value">${cfg.timeout || 600}s</div>`}
+            ${gEdit ? `<input class="cfg-input cfg-number" type="number" id="cfg-timeout" value="${cfg.timeout || 600}" oninput="markDirty('general')">` : `<div class="cfg-display-value">${cfg.timeout || 600}s</div>`}
           </div>
           <div class="cfg-field" style="flex:1;"><label class="cfg-label">STT Engine</label>
-            ${gEdit ? `<select class="cfg-select" id="cfg-stt_engine">
+            ${gEdit ? `<select class="cfg-select" id="cfg-stt_engine" onchange="markDirty('general')">
               ${STT_ENGINES.map(e => `<option value="${e}" ${e === cfg.stt_engine ? 'selected' : ''}>${e}</option>`).join('')}
               ${cfg.stt_engine && !STT_ENGINES.includes(cfg.stt_engine) ? `<option value="${escHtml(cfg.stt_engine)}" selected>${escHtml(cfg.stt_engine)}</option>` : ''}
             </select>` : `<div class="cfg-display-value">${escHtml(cfg.stt_engine || '—')}</div>`}
           </div>
         </div>
         <div class="cfg-field"><label class="cfg-label">Worker Type</label>
-          ${gEdit ? `<select class="cfg-select" id="cfg-worker_type" onchange="updateModelOptions()">
+          ${gEdit ? `<select class="cfg-select" id="cfg-worker_type" onchange="updateModelOptions(); markDirty('general')">
             ${WORKER_TYPES.map(w => `<option value="${w}" ${w === (cfg.worker_type || 'claude') ? 'selected' : ''}>${w === 'claude' ? 'Claude Code CLI' : w === 'kilo' ? 'Kilo Code (OpenCode)' : 'Gemini CLI (ACP)'}</option>`).join('')}
           </select>
           <div class="cfg-hint">claude = Claude Code CLI, gemini = Gemini CLI (ACP), kilo = Kilo Code (OpenCode fork)</div>` : `<div class="cfg-display-value">${({claude:'Claude Code CLI',gemini:'Gemini CLI (ACP)',kilo:'Kilo Code (OpenCode)'})[cfg.worker_type||'claude'] || cfg.worker_type}</div>`}
@@ -1729,13 +1729,13 @@
     html += `<div class="cfg-card">${cardHeader('groups','Team','team')}
       <div class="cfg-card-body">
         <div class="cfg-field"><label class="cfg-label">Role</label>
-          ${tEdit ? `<select class="cfg-select" id="cfg-team-role">
+          ${tEdit ? `<select class="cfg-select" id="cfg-team-role" onchange="markDirty('team')">
             ${TEAM_ROLES.map(r => `<option value="${r}" ${r === role ? 'selected' : ''}>${r}</option>`).join('')}
           </select>` : `<div class="cfg-display-value">${role}</div>`}
         </div>
         ${role !== "standalone" ? `
           <div class="cfg-field"><label class="cfg-label">Team Channel ID</label>
-            ${tEdit ? `<input class="cfg-input mono" id="cfg-team-channel" value="${escHtml(team.team_channel_id || '')}">` : `<div class="cfg-display-value">${escHtml(team.team_channel_id || '—')}</div>`}
+            ${tEdit ? `<input class="cfg-input mono" id="cfg-team-channel" value="${escHtml(team.team_channel_id || '')}" oninput="markDirty('team')">` : `<div class="cfg-display-value">${escHtml(team.team_channel_id || '—')}</div>`}
           </div>
           ${role === "leader" && team.teammates ? `
             <div class="cfg-field"><label class="cfg-label">Teammates</label>
@@ -1747,7 +1747,7 @@
             </div>` : ''}
           ${role === "teammate" ? `
             <div class="cfg-field"><label class="cfg-label">Leader Bot ID</label>
-              ${tEdit ? `<input class="cfg-input mono" id="cfg-team-leader" value="${escHtml(String(team.leader_bot_id || ''))}">` : `<div class="cfg-display-value">${escHtml(String(team.leader_bot_id || '—'))}</div>`}
+              ${tEdit ? `<input class="cfg-input mono" id="cfg-team-leader" value="${escHtml(String(team.leader_bot_id || ''))}" oninput="markDirty('team')">` : `<div class="cfg-display-value">${escHtml(String(team.leader_bot_id || '—'))}</div>`}
             </div>` : ''}
         ` : ''}
       </div>
@@ -1803,7 +1803,7 @@
       if (editing) {
         if (isSecret) {
           html += `<div class="cfg-secret-wrap">
-            <input class="cfg-input mono" type="password" id="${fieldId}" value="${escHtml(String(val))}">
+            <input class="cfg-input mono" type="password" id="${fieldId}" value="${escHtml(String(val))}" oninput="markDirty('channel')">
             <button class="cfg-eye" onclick="window._toggleSecret('${fieldId}')"><span class="material-icons-outlined">visibility</span></button>
           </div>`;
         } else if (isTag) {
@@ -1813,7 +1813,7 @@
             <input placeholder="Type and press Enter" onkeydown="window._tagKeydown(event,'${fieldId}')">
           </div>`;
         } else {
-          html += `<input class="cfg-input mono" id="${fieldId}" value="${escHtml(String(val))}">`;
+          html += `<input class="cfg-input mono" id="${fieldId}" value="${escHtml(String(val))}" oninput="markDirty('channel')">`;
         }
       } else {
         if (isSecret) {
