@@ -874,12 +874,15 @@ class KiloWorker(Worker):
                     return ""
 
                 data = await resp.json()
-                # Extract text from response parts
+                # Extract text from response parts, filtering out
+                # tool-call descriptions injected by the Kilo server.
                 parts = data.get("parts", [])
                 texts = []
                 for p in parts:
                     if p.get("type") == "text":
-                        texts.append(p.get("content", p.get("text", "")))
+                        t = p.get("content", p.get("text", ""))
+                        if t and not t.startswith("[tool_call:"):
+                            texts.append(t)
                 result = "\n".join(texts).strip()
 
                 # Extract cost and tokens from response
