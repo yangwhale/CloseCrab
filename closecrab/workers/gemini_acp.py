@@ -565,7 +565,12 @@ class GeminiACPWorker(Worker):
             if not isinstance(cfg, dict):
                 continue
             if "url" in cfg:
-                entry = {"name": name, "url": cfg["url"]}
+                entry = {
+                    "name": name,
+                    "url": cfg["url"],
+                    "type": cfg.get("type", "sse"),
+                    "headers": cfg.get("headers", []),
+                }
                 if cfg.get("timeout"):
                     entry["timeout"] = cfg["timeout"]
                 result.append(entry)
