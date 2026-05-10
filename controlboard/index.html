@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CloseCrab Control Board</title>
+<title>CloseCrab Control Board v2</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cstyle%3Etext%7Bfilter:hue-rotate(200deg) saturate(1.8) brightness(1.1)%7D%3C/style%3E%3Ctext y='.9em' font-size='90'%3E🦀%3C/text%3E%3C/svg%3E">
 <!-- <link rel="apple-touch-icon" href="https://YOUR_DOMAIN/assets/apple-touch-icon.png"> -->
 <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Roboto+Mono:wght@400;500&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
@@ -796,7 +796,7 @@
   import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
   import { getAuth, signInWithPopup, signOut, onAuthStateChanged, GoogleAuthProvider }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
-  import { initializeFirestore, collection, doc, onSnapshot, query, orderBy, limit, where, getDocs, updateDoc, addDoc, Timestamp }
+  import { initializeFirestore, collection, doc, onSnapshot, query, orderBy, limit, where, getDocs, updateDoc, addDoc, Timestamp, deleteField }
     from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
 
   // Firebase config loaded from external config.js (gitignored)
@@ -1886,7 +1886,7 @@
       if (card === 'general') {
         updates.description = document.getElementById('cfg-description').value;
         const modelVal = document.getElementById('cfg-model').value;
-        updates.model = modelVal || firebase.firestore.FieldValue.delete();
+        updates.model = modelVal || deleteField();
         updates.work_dir = document.getElementById('cfg-work_dir').value;
         updates.timeout = parseInt(document.getElementById('cfg-timeout').value) || 600;
         updates.stt_engine = document.getElementById('cfg-stt_engine').value;
