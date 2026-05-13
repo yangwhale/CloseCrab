@@ -816,11 +816,19 @@ class FeishuChannel(Channel):
         if not content:
             return
 
-        # markdown 内容用卡片发送
+        # markdown 内容用卡片发送，失败则 fallback 到纯文本
         if self._has_markdown(content):
             card = self._build_reply_card(content)
-            await self._async_send_card(chat_id, card)
-            return
+            card_json = json.dumps(card)
+            if len(card_json) > 28000:
+                # 卡片 JSON 超 28KB，飞书 API 大概率拒绝，直接走纯文本
+                log.warning(f"Card JSON too large ({len(card_json)} bytes), fallback to plain text")
+            else:
+                msg_id = await self._async_send_card_with_id(chat_id, card)
+                if msg_id:
+                    return
+                log.warning("Card send failed, fallback to plain text")
+            # fallback: 去掉 markdown 格式标记后按纯文本分割发送（继续走下面的纯文本逻辑）
 
         # 纯文本：分割发送
         chunks = []
