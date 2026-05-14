@@ -133,9 +133,18 @@ OpenClaw CLI 自动读取工作目录下的 `AGENTS.md`。`_write_bootstrap_file
 ### Context Compaction
 自定义 context 压缩：soft 阈值 750K tokens、hard 阈值 950K tokens。压缩时让模型生成摘要，创建新 session，将摘要注入新 session。
 
+### GCP 环境变量
+通过构造函数 `gcp_project` / `gcp_location` 参数传入（`BotCore._create_worker()` 从 `GOOGLE_CLOUD_PROJECT` / `ANTHROPIC_VERTEX_PROJECT_ID` 环境变量读取），`_ensure_process()` 中通过 `env.setdefault()` 注入子进程环境。不再硬编码。
+
+### 空回复重试
+`_retry_on_empty_response()` 方法在以下条件同时满足时触发：
+- 最终文本为空
+- 消息数 ≤5（避免对长会话反复重试）
+创建全新 session 重试一次，仍然失败返回兜底文本。
+
 ### Thinking Tag 清理
-使用 Gemini Flash Lite + `thinking=medium` 时，模型可能在 `agent_message_chunk` 中混入 thinking tags。两层清理：
-- **Per-chunk**：`_THINKING_TAG_RE` 正则去除完整标签
+模型可能在 `agent_message_chunk` 中混入 thinking tags。两层清理：
+- **Per-chunk**：`_THINKING_TAG_RE` 精确匹配 `</?(?:think|thinking|final|reasoning)>`（不匹配 `thinker`、`thinking_about` 等衍生词）
 - **Final text**：`_TRAILING_TAG_RE` 正则去除流式分割产生的残留部分标签
 - **只去标签不去内容**：模型可能将答案包在 thinking 标签中
 
@@ -154,3 +163,10 @@ Gateway 的 `requestPermission` 事件默认自动批准（`_auto_approve_permis
 - Worker 生命周期由 BotCore 管理，不要在 Worker 内部自行 restart
 - 改 JSON 解析逻辑时，确保处理不完整的 JSON 行（可能分多次到达）
 - 新增事件类型时，同步更新 BotCore 的事件处理逻辑
+
+## 进程清理与信号处理
+- `main.py` 同时处理 SIGHUP 和 SIGTERM → `sys.exit(128+signum)` → SystemExit 传播到 `channel.run()` 的 `finally` 块 → `core.shutdown()` → 逐个调用 `worker.stop()`
+- ACP 子进程用 `start_new_session=True` 创建独立进程组，`stop()` 通过 `os.killpg()` 一次性清理整个进程组（包括 openclaw 和 openclaw-acp）
+- `stop()` 清理链：`session/close`（best-effort）→ SIGTERM + 5s wait → `os.killpg(SIGKILL)` + 3s wait → zombie reap
+- Channel 层在 shutdown 前 cancel heartbeat task（避免 asyncio "Task was destroyed" 警告）
+- run.sh 退出码 130/137/143 → 不重启；42 → 立即重启；其他非零 → crash 重启

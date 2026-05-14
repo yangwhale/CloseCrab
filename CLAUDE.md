@@ -78,7 +78,8 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 - **运行时配置**: Firestore `bots/{bot_name}` — channel tokens、model、allowed users、team、inbox、email
 - **全局常量**: Firestore `config/global` — cc_pages_url、gcs_bucket
 - **Claude Code 环境**: `~/.claude/settings.json` — env vars、permissions、plugins
-- **MCP Servers**: `~/.claude.json` — MCP server 配置
+- **MCP Servers**: `~/.claude.json` — Claude Code MCP 配置
+- **OpenClaw**: `~/.openclaw/openclaw.json` — Gateway + MCP + 模型配置（deploy.sh 从 `config/openclaw.json` 模板生成）
 - **Secrets**: 绝不硬编码。Firestore 存 tokens，GKE 用 K8s Secret 挂载
 
 ## Bot Team 系统
@@ -121,10 +122,10 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 - Discord 消息限 2000 字符，超长内容必须截断
 
 ### Worker 开发（通用）
-- 两种 worker：`ClaudeCodeWorker`（默认）和 `GeminiACPWorker`
-- Firestore `bots/{name}.worker_type` 字段决定使用哪种（`claude` 或 `gemini`）
+- 三种 worker：`ClaudeCodeWorker`（默认）、`GeminiACPWorker`、`OpenClawWorker`
+- Firestore `bots/{name}.worker_type` 字段决定使用哪种（`claude`、`gemini` 或 `openclaw`）
 - Worker 生命周期由 BotCore 管理，不要在 Worker 内自行 restart
-- 切换方式：`python3 scripts/config-manage.py set-worker-type <bot> <claude|gemini>`
+- 切换方式：`python3 scripts/config-manage.py set-worker-type <bot> <claude|gemini|openclaw>`
 
 ### Worker 开发（Claude Code）
 - `ClaudeCodeWorker` 通过 Unix socketpair 双 fd 通信（`sock_in` 写, `sock_out` 读），**不是** stdin/stdout
@@ -143,12 +144,25 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 - **内置能力**：Gemini CLI 自带 `google_web_search`、`web_fetch` 等工具，以及 gLinux 上的 Extensions（workspace/coding/research 等），无需通过 mcpServers 注入
 - 新增 MCP：在 `~/.gemini/settings.json` 的 `mcpServers` 加配置即可，下次创建 worker 自动生效；如需所有机器生效，同步更新 `deploy.sh` 的 Gemini MCP 注入段
 
+### Worker 开发（OpenClaw ACP）
+- `OpenClawWorker` 通过 **ACP 协议** 与 `openclaw acp --no-prefix-cwd` 子进程通信，子进程通过 WebSocket 连接外部 Gateway（`ws://127.0.0.1:18789`）
+- **必须先启动 Gateway**：`openclaw gateway`（独立进程，管理 MCP 和 Model API）
+- 通信走 stdin/stdout（与 Gemini 相同），协议 JSON-RPC 2.0 / NDJSON
+- **MCP 由 Gateway 管理**：Worker 传 `mcpServers: []`，与 Gemini ACP 不同。MCP 配置在 `~/.openclaw/openclaw.json`
+- **System Prompt**：注入到工作空间 `AGENTS.md` 的 `<!-- CloseCrab:BEGIN/END -->` 标记区间
+- **GCP 环境变量**：通过构造函数 `gcp_project` / `gcp_location` 参数传入，`_ensure_process()` 中 `env.setdefault()` 注入
+- **空回复重试**：`_retry_on_empty_response()` 在消息数 ≤5 且无文本时创建新 session 重试一次
+- **Thinking Tag 清理**：`_THINKING_TAG_RE` 精确匹配 `</?(?:think|thinking|final|reasoning)>`（不匹配衍生词如 `thinker`）
+- **进程清理**：子进程用 `start_new_session=True` 创建独立进程组，`stop()` 通过 `os.killpg()` 一次性清理整个进程组
+- **deploy.sh 配置**：`config/openclaw.json` 模板通过 `envsubst` 生成 `~/.openclaw/openclaw.json`
+- 新增 MCP：在 `config/openclaw.json` 加配置（stdio 或 SSE 类型），deploy 时自动生成；已部署机器需手动 `openclaw mcp set` 或重新 deploy
+
 ### 重要约束
 - **不要修改 `.env`** — deploy.sh 生成的，手动改会被覆盖
 - **不要 commit secrets** — tokens、API keys 存 Firestore，不进 git
-- **不要直接 kill bot 进程** — 用 `/stop` 命令或 SIGTERM 给 run.sh PID
+- **不要直接 kill bot 进程** — 用 `/stop` 命令或 SIGTERM（会触发 graceful shutdown，清理子进程）
 - **deploy.sh 修改后** — 至少在一台 VM 上测试 `./deploy.sh --cc-only` 通过
-- **run.sh 退出码** — 不要改约定（42=restart, 130/137=不重启, 1=不重启）
+- **run.sh 退出码** — 不要改约定（42=restart, 130/137/143=不重启, 1=不重启）
 - **Firestore schema 变更** — 考虑已部署 bot 的向后兼容性
 - **Skill 命名** — kebab-case（如 `sglang-installer`），新建用 `skill-creator` skill
 

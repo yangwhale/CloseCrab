@@ -5,7 +5,7 @@ globs: deploy.sh, run.sh, scripts/*.sh, scripts/*.py
 # 部署和运维脚本规则
 
 ## deploy.sh
-- 809 行，自动化安装 Claude Code + Skills + Bot Python 依赖
+- 920+ 行，自动化安装 Claude Code + Skills + Bot Python 依赖
 - 支持 `--cc-only`（只装 CC 环境）、`--bot`（补装 Bot 依赖）、`--npm`（用 npm 代替官方 installer）
 - 会生成 `.env`、`~/.claude/settings.json`、skills symlinks
 - 修改 deploy.sh 后**必须**在至少一台 VM 上测试 `./deploy.sh --cc-only` 通过
@@ -13,7 +13,7 @@ globs: deploy.sh, run.sh, scripts/*.sh, scripts/*.py
 ## run.sh
 - 自动重启 wrapper，检测退出码决定是否重启
 - 连续崩溃 >10 次自动停止（dirty restart 保护）
-- 不要改退出码约定（42=restart, 130/137=不重启, 1=不重启）
+- 不要改退出码约定（42=restart, 130/137/143=不重启, 1=不重启）
 
 ## scripts/ 目录
 - `config-manage.py` — Bot CRUD（Firestore），修改时注意向后兼容 Firestore schema
@@ -30,6 +30,15 @@ deploy.sh 第 9 步自动安装 Gemini CLI 并配置：
 - 注入 MCP servers（jina-ai、chrome-devtools-mcp、wiki）到 settings.json
 - 链接 Skills：遍历 `skills/` 目录执行 `gemini skills link`（跳过 Claude 专属 skill）
 - 新增 MCP 时同步更新 deploy.sh 的 Gemini MCP 注入段（Python inline 脚本）
+
+## OpenClaw 部署
+deploy.sh 第 11 步自动配置 OpenClaw（如已安装）：
+- 检测 `openclaw` 命令是否可用（`command -v` 或 `~/.npm-global/bin/openclaw`）
+- 用 `envsubst` 从 `config/openclaw.json` 模板生成 `~/.openclaw/openclaw.json`（含 Gateway、MCP、模型配置）
+- 用 `envsubst` 从 `config/openclaw-models.json` 模板生成 `~/.openclaw/agents/main/agent/models.json`
+- 已有配置不覆盖（与 Gemini CLI 行为一致）
+- 模板中 `${GEMINI_API_KEY}` 和 `${ANTHROPIC_VERTEX_PROJECT_ID}` 由 envsubst 替换
+- 新增 MCP：编辑 `config/openclaw.json`，支持 stdio 类型（command+args）和 SSE 类型（url-based，通过 mcp-proxy）
 
 ## 注意
 - 所有脚本都假设在 CloseCrab 根目录执行或通过绝对路径调用
