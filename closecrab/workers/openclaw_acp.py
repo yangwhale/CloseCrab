@@ -134,10 +134,14 @@ class OpenClawWorker(Worker):
         session_id: Optional[str] = None,
         model: str = "",
         bot_name: str = "",
+        gcp_project: str = "",
+        gcp_location: str = "",
     ):
         self._openclaw_bin = openclaw_bin or shutil.which("openclaw") or "openclaw"
         self._work_dir = work_dir or str(Path.home())
         self._bot_name = bot_name
+        self._gcp_project = gcp_project
+        self._gcp_location = gcp_location
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
@@ -210,8 +214,10 @@ class OpenClawWorker(Worker):
         cmd = [self._openclaw_bin, "acp", "--no-prefix-cwd"]
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
-        env.setdefault("GOOGLE_CLOUD_PROJECT", "gpu-launchpad-playground")
-        env.setdefault("GOOGLE_CLOUD_LOCATION", "us-east5")
+        if self._gcp_project:
+            env.setdefault("GOOGLE_CLOUD_PROJECT", self._gcp_project)
+        if self._gcp_location:
+            env.setdefault("GOOGLE_CLOUD_LOCATION", self._gcp_location)
 
         stderr_fd, self._stderr_path = tempfile.mkstemp(
             prefix="openclaw_acp_stderr_", suffix=".log"
@@ -856,77 +862,75 @@ class OpenClawWorker(Worker):
                     f"raw={raw_parts[:200]!r})"
                 )
                 if msg_count <= 5:
-                    log.warning(
-                        "Few messages and no text — session may be in bad "
-                        "state, creating new session and retrying"
+                    retry_result = await self._retry_on_empty_response(
+                        text, on_event, on_log, on_step,
                     )
-                    if await self._create_new_session():
-                        log.info("Retrying prompt on fresh session")
-                        self._req_id += 1
-                        retry_id = self._req_id
-                        await self._send_json({
-                            "jsonrpc": "2.0",
-                            "id": retry_id,
-                            "method": "session/prompt",
-                            "params": {
-                                "sessionId": self._acp_session_id,
-                                "prompt": [{
-                                    "type": "text", "text": text,
-                                }],
-                            },
-                        })
-                        log.info(
-                            f"ACP retry prompt sent (id={retry_id})"
-                        )
-                        retry_text = []
-                        retry_deadline = time.monotonic() + self._timeout
-                        while time.monotonic() < retry_deadline:
-                            remaining = max(
-                                1, retry_deadline - time.monotonic()
-                            )
-                            rmsg = await self._read_line(
-                                timeout=min(remaining, 30)
-                            )
-                            if rmsg is None:
-                                if (
-                                    self._proc
-                                    and self._proc.returncode is not None
-                                ):
-                                    break
-                                continue
-                            if rmsg.get("id") == retry_id:
-                                result = rmsg.get("result", {})
-                                rc = result.get("content", [])
-                                if rc:
-                                    rt = self._extract_content_text(rc)
-                                    if rt and rt.strip():
-                                        retry_text.append(rt)
-                                log.info(
-                                    f"ACP retry done: "
-                                    f"stop={result.get('stopReason')}"
-                                )
-                                break
-                            if "method" in rmsg:
-                                await self._handle_notification(
-                                    rmsg, retry_text,
-                                    on_event=on_event,
-                                    on_log=on_log,
-                                    on_step=on_step,
-                                )
-                                continue
-                            if (
-                                "id" in rmsg
-                                and rmsg.get("id") != retry_id
-                            ):
-                                await self._handle_server_request(rmsg)
-                        retry_result = self._clean_thinking_content(
-                            "".join(retry_text)
-                        )
-                        if retry_result:
-                            return retry_result
-                        log.error("Retry also produced no text")
+                    if retry_result:
+                        return retry_result
                 return "(OpenClaw 处理完成但未生成文字回复)"
             return final_text
+
+    async def _retry_on_empty_response(
+        self,
+        text: str,
+        on_event, on_log, on_step,
+    ) -> str:
+        """Create a fresh session and retry the prompt once.
+
+        Called when the initial prompt completed with no usable text and
+        very few messages, suggesting the session was in a bad state.
+        """
+        log.warning(
+            "Few messages and no text — session may be in bad "
+            "state, creating new session and retrying"
+        )
+        if not await self._create_new_session():
+            return ""
+
+        log.info("Retrying prompt on fresh session")
+        self._req_id += 1
+        retry_id = self._req_id
+        await self._send_json({
+            "jsonrpc": "2.0",
+            "id": retry_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": self._acp_session_id,
+                "prompt": [{"type": "text", "text": text}],
+            },
+        })
+
+        retry_text: list[str] = []
+        retry_deadline = time.monotonic() + self._timeout
+        while time.monotonic() < retry_deadline:
+            remaining = max(1, retry_deadline - time.monotonic())
+            rmsg = await self._read_line(timeout=min(remaining, 30))
+            if rmsg is None:
+                if self._proc and self._proc.returncode is not None:
+                    break
+                continue
+            if rmsg.get("id") == retry_id:
+                result = rmsg.get("result", {})
+                rc = result.get("content", [])
+                if rc:
+                    rt = self._extract_content_text(rc)
+                    if rt and rt.strip():
+                        retry_text.append(rt)
+                log.info(f"ACP retry done: stop={result.get('stopReason')}")
+                break
+            if "method" in rmsg:
+                await self._handle_notification(
+                    rmsg, retry_text,
+                    on_event=on_event, on_log=on_log, on_step=on_step,
+                )
+                continue
+            if "id" in rmsg and rmsg.get("id") != retry_id:
+                await self._handle_server_request(rmsg)
+
+        retry_result = self._clean_thinking_content("".join(retry_text))
+        if not retry_result:
+            log.error("Retry also produced no text")
+        return retry_result
 
     async def _handle_server_request(self, msg: dict):
         """Handle server-initiated JSON-RPC requests (permission, etc.).
@@ -1165,7 +1169,7 @@ class OpenClawWorker(Worker):
         return cc_name, params
 
     _THINKING_TAG_RE = re.compile(
-        r"</?(?:think\w*|final|reasoning)\b[^>]*>",
+        r"</?(?:think|thinking|final|reasoning)>",
         re.IGNORECASE,
     )
 

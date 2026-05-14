@@ -586,6 +586,14 @@ class BotCore:
                 session_id=session_id,
                 model=self._backbone_model,
                 bot_name=self.bot_name,
+                gcp_project=os.environ.get(
+                    "GOOGLE_CLOUD_PROJECT",
+                    os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", ""),
+                ),
+                gcp_location=os.environ.get(
+                    "GOOGLE_CLOUD_LOCATION",
+                    os.environ.get("ANTHROPIC_VERTEX_REGION", ""),
+                ),
             )
         return ClaudeCodeWorker(
             claude_bin=self._claude_bin,
