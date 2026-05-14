@@ -20,6 +20,7 @@ and holds shared dependencies (Auth, SessionManager).
 
 import asyncio
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
