@@ -385,6 +385,7 @@ def main():
         log.warning(f"Received signal {signum} ({signal.Signals(signum).name}), exiting...")
         sys.exit(128 + signum)
     signal.signal(signal.SIGHUP, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     channel_type = cfg["channel"]
 

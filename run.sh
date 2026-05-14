@@ -15,7 +15,7 @@
 
 # CloseCrab 自动重启 wrapper
 # exit code 42 = /restart 命令触发的重启
-# exit code 130/137 = SIGINT/SIGKILL，不重启
+# exit code 130/137/143 = SIGINT/SIGKILL/SIGTERM，不重启
 # exit code 1 = 配置错误，不重启
 
 # 工作目录设为 HOME，这样 Claude Code 继承 ~/CLAUDE.md 等配置
@@ -81,7 +81,7 @@ while true; do
             FAIL_COUNT=$((FAIL_COUNT + 1))
             sleep 5
             ;;
-        130|137)
+        130|137|143)
             echo "[$(date)] Bot stopped by signal (exit $EXIT_CODE), not restarting."
             break
             ;;

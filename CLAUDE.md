@@ -69,7 +69,7 @@ scripts/send-to-discord.sh --channel <id> "<msg>"  # 发 Discord 消息
 | 码 | 含义 | run.sh 行为 |
 |----|------|------------|
 | `42` | `/restart` 命令 | 立即重启 |
-| `130` / `137` | SIGINT / SIGKILL | 不重启 |
+| `130` / `137` / `143` | SIGINT / SIGKILL / SIGTERM | 不重启 |
 | `1` | 配置错误 | 不重启 |
 | 其他非零 | 崩溃 | 重启（连续 >10 次则停止） |
 
