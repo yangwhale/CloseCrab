@@ -162,6 +162,39 @@
       }
     }
   },
+  "mcp": {
+    "servers": {
+      "jina-ai": {
+        "command": "npx",
+        "args": ["-y", "jina-ai-mcp-server"],
+        "env": {
+          "JINA_API_KEY": "${JINA_API_KEY}"
+        }
+      },
+      "wiki": {
+        "command": "python3",
+        "args": ["${HOME}/my-wiki-v2/scripts/wiki-mcp-server.py"]
+      },
+      "context7": {
+        "command": "npx",
+        "args": ["-y", "@upstash/context7-mcp@latest"],
+        "env": {
+          "DEFAULT_MINIMUM_TOKENS": "10000"
+        }
+      },
+      "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {
+          "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+        }
+      },
+      "playwright": {
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@latest"]
+      }
+    }
+  },
   "plugins": {
     "entries": {
       "google": { "enabled": true },
