@@ -30,6 +30,7 @@ from .types import UnifiedMessage
 from ..workers.claude_code import ClaudeCodeWorker
 from ..workers.gemini_acp import GeminiACPWorker
 from ..workers.kilo import KiloWorker
+from ..workers.openclaw_acp import OpenClawWorker
 from ..workers.base import Worker
 
 if TYPE_CHECKING:
@@ -569,6 +570,20 @@ class BotCore:
                 session_id=session_id,
                 model=self._backbone_model,
                 state_dir=str(self._state_dir),
+            )
+        if self._worker_type == "openclaw":
+            oc_bin = shutil.which("openclaw")
+            if not oc_bin:
+                npm_global = Path.home() / ".npm-global" / "bin" / "openclaw"
+                if npm_global.exists():
+                    oc_bin = str(npm_global)
+            return OpenClawWorker(
+                openclaw_bin=oc_bin or "openclaw",
+                work_dir=self._work_dir,
+                timeout=self._timeout,
+                system_prompt=self._system_prompt,
+                session_id=session_id,
+                bot_name=self.bot_name,
             )
         return ClaudeCodeWorker(
             claude_bin=self._claude_bin,

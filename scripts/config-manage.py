@@ -291,7 +291,7 @@ def cmd_set_livekit(args):
             print(f"(首次启动时 bot 会自动生成 hmac_secret 并回写 Firestore)")
 
 
-VALID_WORKER_TYPES = ("claude", "gemini", "kilo")
+VALID_WORKER_TYPES = ("claude", "gemini", "kilo", "openclaw")
 
 # Model presets: friendly name → worker-specific model string
 # Each preset maps worker_type to the exact model ID that worker expects.
