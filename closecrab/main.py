@@ -439,9 +439,9 @@ def main():
     from google.cloud import firestore as _firestore
     db = _firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
 
-    # Gemini worker: inject MEMORY.md into system prompt
-    # (Claude Code loads memory automatically; Gemini CLI does not)
-    if worker_type == "gemini":
+    # Non-Claude workers: inject MEMORY.md into system prompt
+    # (Claude Code loads memory automatically; Gemini/OpenClaw do not)
+    if worker_type in ("gemini", "openclaw"):
         project_name = os.path.expanduser("~").replace("/", "-")
         memory_dir = Path.home() / ".claude" / "projects" / project_name / "memory"
         memory_index = memory_dir / "MEMORY.md"
@@ -459,7 +459,7 @@ def main():
                     f"写完后在 `{memory_index}` 的对应 section 里加一行索引。\n\n"
                     f"{memory_content}"
                 )
-                log.info(f"  Injected MEMORY.md ({len(memory_content)} chars) into Gemini system prompt")
+                log.info(f"  Injected MEMORY.md ({len(memory_content)} chars) into {worker_type} system prompt")
             except Exception as e:
                 log.warning(f"  Failed to read MEMORY.md: {e}")
     claude_proxy_url = cfg.get("claude_proxy_url")

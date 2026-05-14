@@ -117,7 +117,7 @@ class FirestoreInbox:
         Only process ADDED documents (new pending messages).
         """
         for change in changes:
-            if change.type.name not in ("ADDED", "MODIFIED"):
+            if change.type.name != "ADDED":
                 continue
             doc = change.document
             doc_id = doc.id

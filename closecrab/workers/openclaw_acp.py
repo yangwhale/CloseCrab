@@ -116,6 +116,7 @@ _COMPACTION_SUMMARY_PROMPT = """\
 - 用用户使用的语言书写"""
 
 
+
 class OpenClawWorker(Worker):
     """Persistent OpenClaw CLI worker via ACP (Agent Client Protocol).
 
@@ -276,11 +277,6 @@ class OpenClawWorker(Worker):
         if self._session_id:
             resumed = await self._try_load_session(self._session_id)
 
-        if not resumed and not self._session_id:
-            latest_id = await self._find_latest_session()
-            if latest_id:
-                resumed = await self._try_load_session(latest_id)
-
         if not resumed:
             new_params: dict = {
                 "cwd": self._workspace_dir,
@@ -321,53 +317,6 @@ class OpenClawWorker(Worker):
         err = resp.get("error", {}).get("message", "?") if resp else "no response"
         log.warning(f"session/load failed for {target_id}: {err}")
         return False
-
-    async def _find_latest_session(self) -> Optional[str]:
-        """Call session/list to find the most recent session."""
-        resp = await self._rpc("session/list", {
-            "cwd": self._workspace_dir,
-        }, timeout=15)
-        if not resp or "error" in resp:
-            return None
-        sessions = resp.get("result", {}).get("sessions", [])
-        if not sessions:
-            return None
-        latest = sessions[0]
-        sid = latest.get("sessionId", "")
-        if sid:
-            log.info(
-                f"Found latest session via session/list: {sid} "
-                f"title={latest.get('title', '?')[:50]}"
-            )
-        return sid or None
-
-    async def list_sessions(self, limit: int = 25) -> list[dict]:
-        """List available sessions via ACP session/list."""
-        if not self._initialized or not self._proc:
-            return []
-        all_sessions = []
-        cursor = None
-        while len(all_sessions) < limit:
-            params: dict = {"cwd": self._workspace_dir}
-            if cursor:
-                params["cursor"] = cursor
-            resp = await self._rpc("session/list", params, timeout=15)
-            if not resp or "error" in resp:
-                break
-            result = resp.get("result", {})
-            for s in result.get("sessions", []):
-                all_sessions.append({
-                    "id": s.get("sessionId", ""),
-                    "title": s.get("title", ""),
-                    "updated_at": s.get("updatedAt", ""),
-                    "summary": (s.get("title") or "")[:80],
-                })
-                if len(all_sessions) >= limit:
-                    break
-            cursor = result.get("nextCursor")
-            if not cursor:
-                break
-        return all_sessions
 
     async def _create_new_session(self) -> bool:
         """Create a new ACP session on the existing process."""
@@ -525,10 +474,7 @@ class OpenClawWorker(Worker):
         # Create new session
         if not await self._create_new_session():
             log.error("Compaction: failed to create new session")
-            latest_id = await self._find_latest_session()
-            if not latest_id or not await self._try_load_session(latest_id):
-                log.error("Compaction: recovery failed completely")
-                return None
+            return None
 
         self._compaction_count += 1
         self._last_compaction_ts = time.monotonic()
@@ -832,9 +778,7 @@ class OpenClawWorker(Worker):
                     quota = meta.get("quota", {})
                     tc = quota.get("token_count", {})
                     if not tc:
-                        usage = result.get("usage", {})
-                        if usage:
-                            tc = usage
+                        tc = result.get("usage", {})
                     if tc:
                         self._usage["input_tokens"] = tc.get(
                             "input_tokens", 0
@@ -858,9 +802,9 @@ class OpenClawWorker(Worker):
                             accumulated_text.append(result_text)
 
                     log.info(
-                        f"ACP prompt done: stop={result.get('stopReason')}, "
-                        f"in={tc.get('input_tokens', 0)}, "
-                        f"out={tc.get('output_tokens', 0)}"
+                        f"ACP prompt done: "
+                        f"stop={result.get('stopReason')}, "
+                        f"turns={self._usage['turns']}"
                     )
                     break
 
@@ -1150,11 +1094,10 @@ class OpenClawWorker(Worker):
                     )
 
         elif update_type == "usage_update":
-            usage = update.get("usage", {})
-            if usage:
-                self._usage["input_tokens"] = usage.get("inputTokens", 0)
-                self._usage["output_tokens"] = usage.get("outputTokens", 0)
-                self._check_compaction_needed()
+            used = update.get("used")
+            size = update.get("size")
+            if isinstance(used, (int, float)) and isinstance(size, (int, float)):
+                log.debug(f"Context window usage: {used}/{size} tokens")
 
         elif update_type in (
             "available_commands_update",
@@ -1166,7 +1109,7 @@ class OpenClawWorker(Worker):
             pass
 
         else:
-            log.debug(f"ACP update: {update_type}")
+            log.debug(f"ACP update_type: {update_type}")
 
         return None
 
@@ -1320,6 +1263,36 @@ class OpenClawWorker(Worker):
             )
         except Exception as e:
             log.error(f"Failed to write AGENTS.md: {e}")
+
+        self._ensure_memory_symlinks()
+
+    def _ensure_memory_symlinks(self):
+        """Create symlinks so OpenClaw can access CloseCrab shared memory.
+
+        OpenClaw resolves relative paths against its Agent Workspace
+        (~/.openclaw/workspace/) and ACP CWD, not the user's home.
+        We symlink ``memory/`` in both locations to the real memory dir.
+        """
+        home = Path.home()
+        memory_target = (
+            home / ".claude" / "projects" / "-home-chrisya" / "memory"
+        )
+        if not memory_target.is_dir():
+            return
+        for parent in (
+            home / ".openclaw" / "workspace",
+            Path(self._workspace_dir),
+        ):
+            link = parent / "memory"
+            if link.is_symlink() or link.exists():
+                if link.resolve() == memory_target.resolve():
+                    continue
+            try:
+                link.unlink(missing_ok=True)
+                link.symlink_to(memory_target)
+                log.info(f"Symlinked {link} → {memory_target}")
+            except Exception as e:
+                log.warning(f"Failed to create memory symlink {link}: {e}")
 
     def _cleanup_bootstrap_files(self):
         """Remove CloseCrab section from AGENTS.md on stop."""

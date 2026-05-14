@@ -1,7 +1,7 @@
 {
   "gateway": {
     "auth": {
-      "mode": "none",
+      "mode": "token",
       "token": "52ddbc1c0adfdaeebf783dd8386555be5028ebb97632839b"
     },
     "mode": "local"
@@ -128,7 +128,7 @@
       },
       "anthropic-vertex": {
         "api": "anthropic-messages",
-        "baseUrl": "https://us-east5-aiplatform.googleapis.com/v1/projects/${ANTHROPIC_VERTEX_PROJECT_ID}/locations/us-east5/publishers/anthropic",
+        "baseUrl": "https://us-east5-aiplatform.googleapis.com/v1",
         "apiKey": "gcp-vertex-credentials",
         "models": [
           {
