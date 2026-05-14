@@ -238,7 +238,7 @@ class KiloWorker(Worker):
 
         await self._ensure_server()
         self._http = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=None, sock_read=self._timeout + 60),
+            timeout=aiohttp.ClientTimeout(total=None, sock_read=None),
         )
         # _started must be True BEFORE SSE task starts, otherwise
         # the _sse_reader loop condition (self._started or not self._sse_task)
