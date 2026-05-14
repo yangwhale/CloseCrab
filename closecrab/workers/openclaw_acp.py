@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import shutil
 import tempfile
@@ -808,6 +809,10 @@ class OpenClawWorker(Worker):
                     meta = result.get("_meta", {})
                     quota = meta.get("quota", {})
                     tc = quota.get("token_count", {})
+                    if not tc:
+                        usage = result.get("usage", {})
+                        if usage:
+                            tc = usage
                     if tc:
                         self._usage["input_tokens"] = tc.get(
                             "input_tokens", 0
@@ -868,10 +873,14 @@ class OpenClawWorker(Worker):
                         break
                 if drained:
                     log.info(f"Drained {drained} stale messages after interrupt")
-                partial = "".join(accumulated_text).strip()
+                partial = self._clean_thinking_content(
+                    "".join(accumulated_text)
+                )
                 return partial or ""
 
-            final_text = "".join(accumulated_text).strip()
+            final_text = self._clean_thinking_content(
+                "".join(accumulated_text)
+            )
             if not final_text:
                 log.warning(
                     "ACP prompt completed with no accumulated text "
@@ -942,7 +951,7 @@ class OpenClawWorker(Worker):
                 if on_event:
                     preview = text[:80].replace("\n", " ")
                     await self._safe_callback(
-                        on_event, f"thinking: {preview}", name="on_event"
+                        on_event, f"responding: {preview}", name="on_event"
                     )
                 if on_log:
                     preview = text[:300].replace("\n", " ")
@@ -1117,19 +1126,25 @@ class OpenClawWorker(Worker):
         cc_name = _TOOL_NAME_MAP.get(title, title)
         return cc_name, params
 
-    @staticmethod
-    def _extract_content_text(content) -> str:
+    _THINKING_TAG_RE = re.compile(
+        r"</?(?:think\w*|final|reasoning)\b[^>]*>",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _extract_content_text(cls, content) -> str:
         """Extract text from ACP content field (list, dict, or str)."""
         if isinstance(content, str):
-            return content
-        if isinstance(content, dict):
+            raw = content
+        elif isinstance(content, dict):
             if (
                 content.get("type") == "content"
                 and isinstance(content.get("content"), dict)
             ):
-                return content["content"].get("text", "")
-            return content.get("text", "")
-        if isinstance(content, list):
+                raw = content["content"].get("text", "")
+            else:
+                raw = content.get("text", "")
+        elif isinstance(content, list):
             parts = []
             for item in content:
                 if isinstance(item, dict):
@@ -1142,8 +1157,19 @@ class OpenClawWorker(Worker):
                         parts.append(item["content"].get("text", ""))
                 elif isinstance(item, str):
                     parts.append(item)
-            return "".join(parts)
-        return ""
+            raw = "".join(parts)
+        else:
+            return ""
+        return cls._THINKING_TAG_RE.sub("", raw)
+
+    _TRAILING_TAG_RE = re.compile(r"<[^>]*$")
+
+    @classmethod
+    def _clean_thinking_content(cls, text: str) -> str:
+        """Strip thinking/final tags from final accumulated text (keeps content)."""
+        text = cls._THINKING_TAG_RE.sub("", text)
+        text = cls._TRAILING_TAG_RE.sub("", text)
+        return text.strip()
 
     @staticmethod
     async def _safe_callback(callback, arg, *, name: str = "callback"):
