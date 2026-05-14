@@ -91,6 +91,8 @@ _PROGRESS_EMOJI = {
     "spawning subtask": "🤖 启动子任务",
     "fetching web page": "🌐 抓取网页",
     "searching web": "🌐 搜索网页",
+    "responding": "💬 回复中",
+    "thinking": "🧠 思考中",
 }
 
 # header 动画帧：满头大汗的螃蟹（左右晃动 = 忙碌感）

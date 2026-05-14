@@ -86,6 +86,8 @@ _PROGRESS_EMOJI = {
     "spawning subtask": "🤖 启动子任务",
     "fetching web page": "🌐 抓取网页",
     "searching web": "🌐 搜索网页",
+    "responding": "💬 回复中",
+    "thinking": "🧠 思考中",
 }
 
 

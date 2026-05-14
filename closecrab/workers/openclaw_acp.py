@@ -209,6 +209,8 @@ class OpenClawWorker(Worker):
         cmd = [self._openclaw_bin, "acp", "--no-prefix-cwd"]
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
+        env.setdefault("GOOGLE_CLOUD_PROJECT", "gpu-launchpad-playground")
+        env.setdefault("GOOGLE_CLOUD_LOCATION", "us-east5")
 
         stderr_fd, self._stderr_path = tempfile.mkstemp(
             prefix="openclaw_acp_stderr_", suffix=".log"
@@ -280,10 +282,13 @@ class OpenClawWorker(Worker):
                 resumed = await self._try_load_session(latest_id)
 
         if not resumed:
-            resp = await self._rpc("session/new", {
+            new_params: dict = {
                 "cwd": self._workspace_dir,
                 "mcpServers": [],
-            }, timeout=60)
+            }
+            if self._model:
+                new_params["model"] = self._model
+            resp = await self._rpc("session/new", new_params, timeout=60)
             if not resp or "error" in resp:
                 err = (
                     resp.get("error", {}).get("message", "unknown")
@@ -297,11 +302,14 @@ class OpenClawWorker(Worker):
     async def _try_load_session(self, target_id: str) -> bool:
         """Try to load an existing session via session/load."""
         log.info(f"Attempting session/load: {target_id}")
-        resp = await self._rpc("session/load", {
+        load_params: dict = {
             "cwd": self._workspace_dir,
             "mcpServers": [],
             "sessionId": target_id,
-        }, timeout=60)
+        }
+        if self._model:
+            load_params["model"] = self._model
+        resp = await self._rpc("session/load", load_params, timeout=60)
         if resp and "error" not in resp:
             result = resp.get("result", {})
             loaded_id = result.get("sessionId", target_id)
@@ -367,10 +375,13 @@ class OpenClawWorker(Worker):
             return False
         if not self._initialized:
             return False
-        resp = await self._rpc("session/new", {
+        new_params: dict = {
             "cwd": self._workspace_dir,
             "mcpServers": [],
-        }, timeout=60)
+        }
+        if self._model:
+            new_params["model"] = self._model
+        resp = await self._rpc("session/new", new_params, timeout=60)
         if not resp or "error" in resp:
             err = (
                 resp.get("error", {}).get("message", "unknown")
@@ -751,6 +762,7 @@ class OpenClawWorker(Worker):
             accumulated_text = []
             deadline = time.monotonic() + self._timeout
             subagent_active = False
+            msg_count = 0
 
             while time.monotonic() < deadline:
                 if self._interrupted:
@@ -771,6 +783,16 @@ class OpenClawWorker(Worker):
                     if subagent_active:
                         deadline = max(deadline, time.monotonic() + 120)
                     continue
+
+                msg_count += 1
+                method = msg.get("method", "")
+                msg_id = msg.get("id", "")
+                if msg_count <= 30 or msg_id == prompt_id:
+                    log.debug(
+                        f"ACP raw #{msg_count}: id={msg_id} "
+                        f"method={method} "
+                        f"{json.dumps(msg, ensure_ascii=False)[:500]}"
+                    )
 
                 # Response to our prompt request → turn complete
                 if msg.get("id") == prompt_id:
@@ -882,10 +904,83 @@ class OpenClawWorker(Worker):
                 "".join(accumulated_text)
             )
             if not final_text:
+                raw_parts = "".join(accumulated_text)
                 log.warning(
-                    "ACP prompt completed with no accumulated text "
-                    f"(turns={self._usage['turns']})"
+                    f"ACP prompt completed with no usable text "
+                    f"(turns={self._usage['turns']}, msgs={msg_count}, "
+                    f"raw_len={len(raw_parts)}, "
+                    f"raw={raw_parts[:200]!r})"
                 )
+                if msg_count <= 5:
+                    log.warning(
+                        "Few messages and no text — session may be in bad "
+                        "state, creating new session and retrying"
+                    )
+                    if await self._create_new_session():
+                        log.info("Retrying prompt on fresh session")
+                        self._req_id += 1
+                        retry_id = self._req_id
+                        await self._send_json({
+                            "jsonrpc": "2.0",
+                            "id": retry_id,
+                            "method": "session/prompt",
+                            "params": {
+                                "sessionId": self._acp_session_id,
+                                "prompt": [{
+                                    "type": "text", "text": text,
+                                }],
+                            },
+                        })
+                        log.info(
+                            f"ACP retry prompt sent (id={retry_id})"
+                        )
+                        retry_text = []
+                        retry_deadline = time.monotonic() + self._timeout
+                        while time.monotonic() < retry_deadline:
+                            remaining = max(
+                                1, retry_deadline - time.monotonic()
+                            )
+                            rmsg = await self._read_line(
+                                timeout=min(remaining, 30)
+                            )
+                            if rmsg is None:
+                                if (
+                                    self._proc
+                                    and self._proc.returncode is not None
+                                ):
+                                    break
+                                continue
+                            if rmsg.get("id") == retry_id:
+                                result = rmsg.get("result", {})
+                                rc = result.get("content", [])
+                                if rc:
+                                    rt = self._extract_content_text(rc)
+                                    if rt and rt.strip():
+                                        retry_text.append(rt)
+                                log.info(
+                                    f"ACP retry done: "
+                                    f"stop={result.get('stopReason')}"
+                                )
+                                break
+                            if "method" in rmsg:
+                                await self._handle_notification(
+                                    rmsg, retry_text,
+                                    on_event=on_event,
+                                    on_log=on_log,
+                                    on_step=on_step,
+                                )
+                                continue
+                            if (
+                                "id" in rmsg
+                                and rmsg.get("id") != retry_id
+                            ):
+                                await self._handle_server_request(rmsg)
+                        retry_result = self._clean_thinking_content(
+                            "".join(retry_text)
+                        )
+                        if retry_result:
+                            return retry_result
+                        log.error("Retry also produced no text")
                 return "(OpenClaw 处理完成但未生成文字回复)"
             return final_text
 
@@ -1162,7 +1257,7 @@ class OpenClawWorker(Worker):
             return ""
         return cls._THINKING_TAG_RE.sub("", raw)
 
-    _TRAILING_TAG_RE = re.compile(r"<[^>]*$")
+    _TRAILING_TAG_RE = re.compile(r"<[^>]{0,80}$")
 
     @classmethod
     def _clean_thinking_content(cls, text: str) -> str:

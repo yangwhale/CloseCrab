@@ -312,13 +312,22 @@ def build_system_prompt(
         )
 
     # 非 Claude worker 行为指导（从模板文件加载）
-    # Gemini ACP 和 Kilo Code worker 都需要这些通用行为准则
-    if worker_type in ("gemini", "kilo"):
+    # Gemini ACP、Kilo Code、OpenClaw worker 都需要这些通用行为准则
+    if worker_type in ("gemini", "kilo", "openclaw"):
         _guide_path = Path(__file__).parent / "prompts" / "gemini-worker-guide.md"
         try:
             prompt += "\n\n" + _guide_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             pass
+
+    # 非 Claude worker 的语言指令
+    # Claude Code CLI 自带 "Always respond in 中文"，但其他 worker 需要显式注入
+    if worker_type in ("gemini", "kilo", "openclaw"):
+        prompt += (
+            "\n\n## 语言\n"
+            "始终使用中文回答。所有解释、分析、总结都用中文。"
+            "技术术语和代码标识符保持英文原文。"
+        )
 
     return prompt
 

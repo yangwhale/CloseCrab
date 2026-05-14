@@ -537,6 +537,7 @@ class BotCore:
                 worker.set_bg_result_callback(_bg_cb)
             await worker.start()
             self._workers[user_key] = worker
+            self._save_active_sessions()
             log.info(f"Worker created: type={self._worker_type}, "
                      f"session_id={worker.session_id}, "
                      f"alive={worker.is_alive()}, resume={'yes' if session_id else 'no'}")
@@ -583,6 +584,7 @@ class BotCore:
                 timeout=self._timeout,
                 system_prompt=self._system_prompt,
                 session_id=session_id,
+                model=self._backbone_model,
                 bot_name=self.bot_name,
             )
         return ClaudeCodeWorker(

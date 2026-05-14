@@ -873,12 +873,48 @@ with open(path, 'w') as f:
         echo "  警告: ~/.claude.json 不存在, 跳过 MCP 配置"
     fi
 
+    # ------------------------------------------------------------------
+    # [11/11] OpenClaw 配置
+    # ------------------------------------------------------------------
+    local OPENCLAW_BIN=""
+    if command -v openclaw &>/dev/null; then
+        OPENCLAW_BIN="$(command -v openclaw)"
+    elif [[ -x "$HOME/.npm-global/bin/openclaw" ]]; then
+        OPENCLAW_BIN="$HOME/.npm-global/bin/openclaw"
+    fi
+
+    if [[ -n "$OPENCLAW_BIN" ]]; then
+        echo "[11/11] 配置 OpenClaw..."
+        mkdir -p "$HOME/.openclaw/agents/main/agent"
+
+        if [[ ! -f "$HOME/.openclaw/openclaw.json" ]]; then
+            if [[ -f "$SCRIPT_DIR/config/openclaw.json" ]]; then
+                envsubst < "$SCRIPT_DIR/config/openclaw.json" > "$HOME/.openclaw/openclaw.json"
+                echo "  已生成 ~/.openclaw/openclaw.json"
+            fi
+        else
+            echo "  ~/.openclaw/openclaw.json 已存在, 跳过"
+        fi
+
+        if [[ ! -f "$HOME/.openclaw/agents/main/agent/models.json" ]]; then
+            if [[ -f "$SCRIPT_DIR/config/openclaw-models.json" ]]; then
+                envsubst < "$SCRIPT_DIR/config/openclaw-models.json" > "$HOME/.openclaw/agents/main/agent/models.json"
+                echo "  已生成 ~/.openclaw/agents/main/agent/models.json"
+            fi
+        else
+            echo "  models.json 已存在, 跳过"
+        fi
+    else
+        echo "[11/11] OpenClaw 未安装, 跳过配置"
+    fi
+
     echo ""
     echo "Claude Code 环境就绪！"
     echo "  Skills: $(ls "$SCRIPT_DIR/skills" 2>/dev/null | wc -l) 个"
     echo "  Scripts: $(ls ~/.claude/scripts/ 2>/dev/null | wc -l) 个"
     echo "  Memory: $(ls "$MEMORY_DIR" 2>/dev/null | wc -l) 个文件"
     echo "  Gemini CLI: $(command -v gemini &>/dev/null && echo '已安装' || echo '未安装')"
+    echo "  OpenClaw: $([[ -n "$OPENCLAW_BIN" ]] && echo '已配置' || echo '未安装')"
     echo "  运行 'claude' 开始使用"
 }
 

@@ -4,10 +4,11 @@ globs: closecrab/workers/*.py
 
 # Worker 开发规则
 
-## 双 Worker 架构
-CloseCrab 支持两种 Worker 实现，通过 Firestore `bots/{name}.worker_type` 字段切换：
+## 多 Worker 架构
+CloseCrab 支持多种 Worker 实现，通过 Firestore `bots/{name}.worker_type` 字段切换：
 - `claude`（默认）→ `ClaudeCodeWorker` — Claude Code CLI + socketpair
 - `gemini` → `GeminiACPWorker` — Gemini CLI + ACP 协议
+- `openclaw` → `OpenClawWorker` — OpenClaw CLI + ACP 协议 + 外部 Gateway
 
 `BotCore._create_worker()` 根据 `worker_type` 实例化对应 Worker。
 
@@ -92,6 +93,57 @@ Gemini CLI 自带以下能力，无需通过 mcpServers 注入：
 - `web_fetch` — 网页抓取
 - `shell`、`read_file`、`write_file`、`edit_file`、`glob`、`grep` 等标准工具
 - Extensions（gLinux 专属）：workspace、coding、research、duckie 等
+
+## OpenClawWorker（openclaw_acp.py）
+
+### 通信方式
+```
+Bot Process                 OpenClaw CLI (acp)           Gateway (ws://127.0.0.1:18789)
+    │                            │                              │
+    ├── proc.stdin ──────────►  stdin (NDJSON)                 │
+    │                                │                          │
+    ◄── proc.stdout ◄──────── stdout (NDJSON)                  │
+    │                                │                          │
+    │                                └── WebSocket ────────────►│
+    └── stderr file ◄────────  stderr                          └── MCP / Model API
+```
+
+- 标准 stdin/stdout，不用 socketpair（与 Gemini 相同）
+- 协议：JSON-RPC 2.0 over NDJSON
+- 启动命令：`openclaw acp --no-prefix-cwd`
+- **必须先启动 Gateway**：ACP 进程连接 `ws://127.0.0.1:18789`，Gateway 未运行会导致进程退出
+
+### ACP 协议流程
+1. `initialize` — 一次性握手（与 Gemini 相同）
+2. `session/new` — 创建会话（`mcpServers: []` 空数组，MCP 由 Gateway 管理）
+3. `session/prompt` — 发送用户消息，接收流式 `session/update` 通知
+4. `cancel` — 中断当前生成（**注意**：不是 `session/cancel`）
+
+### MCP 处理（关键差异）
+**OpenClaw 的 MCP 由 Gateway 统一管理**，不需要在 Worker 侧注入。Worker 始终传 `mcpServers: []` 空数组。这与 Gemini ACP（需要显式注入 MCP）完全不同。
+
+### System Prompt
+OpenClaw CLI 自动读取工作目录下的 `AGENTS.md`。`_write_bootstrap_files()` 将 CloseCrab system prompt 注入到 `<!-- CloseCrab:BEGIN -->` ... `<!-- CloseCrab:END -->` 标记之间（幂等更新）。
+
+每个 bot 在 `~/.closecrab/openclaw-workspace/{bot_name}/` 下有独立工作空间，避免多 bot 冲突。
+
+### Session Resume
+支持 `session/load`（与 Gemini 相同）。启动时优先 load 已有 session，失败才创建新 session。同一进程内支持 `session/list` 和 `switch_session()`。
+
+### Context Compaction
+自定义 context 压缩：soft 阈值 750K tokens、hard 阈值 950K tokens。压缩时让模型生成摘要，创建新 session，将摘要注入新 session。
+
+### Thinking Tag 清理
+使用 Gemini Flash Lite + `thinking=medium` 时，模型可能在 `agent_message_chunk` 中混入 thinking tags。两层清理：
+- **Per-chunk**：`_THINKING_TAG_RE` 正则去除完整标签
+- **Final text**：`_TRAILING_TAG_RE` 正则去除流式分割产生的残留部分标签
+- **只去标签不去内容**：模型可能将答案包在 thinking 标签中
+
+### 事件映射
+`_map_tool_kind()` 根据 ACP 事件的 `kind` 字段（execute/read/write/edit/search/list/function）映射为 Claude Code 风格的工具名。`_TOOL_NAME_MAP` 处理 `function` 类型的细粒度映射。
+
+### 权限审批
+Gateway 的 `requestPermission` 事件默认自动批准（`_auto_approve_permission()`）。
 
 ## 通用规则
 - `self._lock` — asyncio.Lock，防止并发操作同一个 worker
