@@ -320,7 +320,7 @@ class DiscordChannel(Channel):
             # 启动 Registry 心跳
             from ..utils.registry import heartbeat_loop
             inbox_cfg = {"project": self._inbox._project, "database": self._inbox._database} if self._inbox else {}
-            asyncio.ensure_future(heartbeat_loop(self._bot_name, inbox_cfg.get("project"), inbox_cfg.get("database")))
+            self._heartbeat_task = asyncio.ensure_future(heartbeat_loop(self._bot_name, inbox_cfg.get("project"), inbox_cfg.get("database")))
 
         @self._bot.event
         async def on_message(message):
@@ -515,6 +515,8 @@ class DiscordChannel(Channel):
             import asyncio
             loop = self._bot.loop
             if not loop.is_closed():
+                if hasattr(self, "_heartbeat_task") and not self._heartbeat_task.done():
+                    self._heartbeat_task.cancel()
                 loop.run_until_complete(core.shutdown())
 
     async def start(self):

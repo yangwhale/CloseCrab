@@ -2874,7 +2874,7 @@ class FeishuChannel(Channel):
         # 启动 Registry 心跳
         from ..utils.registry import heartbeat_loop
         inbox_cfg = {"project": self._inbox._project, "database": self._inbox._database} if self._inbox else {}
-        asyncio.ensure_future(heartbeat_loop(self._bot_name, inbox_cfg.get("project"), inbox_cfg.get("database")), loop=loop)
+        self._heartbeat_task = asyncio.ensure_future(heartbeat_loop(self._bot_name, inbox_cfg.get("project"), inbox_cfg.get("database")), loop=loop)
 
         # 启动 Voice IO (LiveKit Worker, 如果配置启用)
         if self._livekit_config.get("enabled"):
@@ -2937,6 +2937,8 @@ class FeishuChannel(Channel):
                     log.warning("Voice IO stop timeout, forcing shutdown")
                 except Exception as e:
                     log.warning(f"Voice IO stop failed: {e}")
+            if hasattr(self, "_heartbeat_task") and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
             loop.run_until_complete(self._core.shutdown())
             loop.close()
 
