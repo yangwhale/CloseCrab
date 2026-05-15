@@ -195,9 +195,10 @@ class BotCore:
                 for block in d.get("message", {}).get("content", []):
                     bt = block.get("type", "")
                     if bt == "text" and block.get("text", "").strip():
-                        # 保留前两行，截断 150 字符
-                        lines = block['text'].strip().split('\n')[:2]
-                        preview = '\n'.join(lines)[:150]
+                        # 保留完整段落（含 \n\n 段落分隔），截断到 500 字符。
+                        # 旧实现 split('\n')[:2] 会把第二行之后的内容（包括
+                        # 跨段落的 markdown 段）整段丢弃，所有 worker 都受影响。
+                        preview = block['text'].strip()[:500]
                         new_steps.append(f"💬 {preview}")
                     elif bt == "tool_use":
                         name = block.get("name", "")
