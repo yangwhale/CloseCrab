@@ -79,17 +79,31 @@ kubectl get pods -l jobset.sigs.k8s.io/jobset-name=JOB_NAME
 
 ### 3. Monitor
 
-Metrics 只在 `jax.process_index()==0` 的 Pod 输出（不一定是 Pod-0）。
+**重要**：MaxDiffusion 的训练日志（step time、TFLOP/s、loss）通过 Python logging 输出，**不会出现在 `kubectl logs` 里**。必须通过 **Cloud Logging** 查看。
+
+#### 方法一：Cloud Logging（推荐）
 
 ```bash
-# 找 metrics pod
-for pod in $(kubectl get pods -l jobset.sigs.k8s.io/jobset-name=JOB_NAME \
-  --no-headers -o custom-columns=NAME:.metadata.name); do
-  if kubectl logs $pod 2>/dev/null | grep -q "completed step"; then
-    kubectl logs $pod | grep "completed step"; break
-  fi
-done
+# gcloud CLI 查询训练步骤日志
+gcloud logging read '
+  resource.type="k8s_container"
+  AND resource.labels.cluster_name="CLUSTER_NAME"
+  AND resource.labels.namespace_name="default"
+  AND labels."k8s-pod/jobset_sigs_k8s_io/jobset-name"="JOB_NAME"
+  AND textPayload=~"completed step"
+' --project=PROJECT_ID --limit=20 --format="value(textPayload)"
 ```
+
+也可以在 GKE Console → Workloads → Job → Logs 标签页直接查看。
+
+#### 方法二：kubectl logs（仅部分信息）
+
+`kubectl logs` 只能看到 stdout/stderr 的直接输出（模型加载、TFLOPs 计算、Warning），**看不到训练步骤日志**。
+
+#### 注意事项
+
+- Metrics 只在 `jax.process_index()==0` 的节点输出（不一定是 Pod-0）
+- `log_period` 默认 100，短训练（如 benchmark 10 步）**必须**显式设置 `log_period=1`，否则无任何 step 输出
 
 ## Critical Pitfalls
 
@@ -98,6 +112,8 @@ done
 3. **v3 用 DP=32，main 需 DP=8+CP=4** — 混用会报错
 4. **`output_dir` 可用本地路径** — 避免跨项目 GCS 写权限，benchmark 不需 checkpoint
 5. **process_index=0 ≠ Pod-0** — grep `"completed step"` 定位 metrics pod
+6. **训练日志在 Cloud Logging，不在 kubectl logs** — MaxDiffusion 用 Python logging，GKE 日志 agent 采集到 Cloud Logging，`kubectl logs` 看不到 step time
+7. **`log_period` 默认 100** — benchmark 短训练必须设 `log_period=1`，否则步数不够触发日志输出，看起来像训练没跑
 
 ## XLA Flags
 
@@ -129,5 +145,5 @@ done
 
 ## Detailed Docs
 
-- End-to-end guide: `$CC_PAGES_URL_PREFIX/assets/wan21-reproduce-guide-public.html`
-- Benchmark report: `$CC_PAGES_URL_PREFIX/pages/wan21-benchmark-20260402.html`
+- End-to-end guide: https://cc.higcp.com/assets/wan21-reproduce-guide-public.html
+- Benchmark report: https://cc.higcp.com/pages/wan21-benchmark-20260402.html

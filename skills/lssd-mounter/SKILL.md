@@ -22,9 +22,8 @@ Google Cloud 的 Local SSD 提供极高的 IOPS 和带宽（每块 SSD 高达 68
 ## Prerequisites
 
 - Google Cloud VM with Local SSD attached
-- sudo privileges（如在 Claude Code sandbox 内无 sudo，可通过 SSH 到内网 IP 绕过，见 Troubleshooting）
+- sudo privileges
 - mdadm package (usually pre-installed)
-- gcloud CLI（sandbox 绕过方案需要，用于推送 SSH key）
 
 ## Quick Start
 
@@ -228,71 +227,6 @@ done | sort)
 ```
 
 **警告:** 不要使用 `grep -v nvme0` — 系统盘不一定是 nvme0。
-
-### 问题: Claude Code sandbox (bwrap) 内无 root 权限
-
-**症状:**
-```
-sudo: The "no new privileges" flag is set, which prevents sudo from running as root.
-mknod: Operation not permitted
-nsenter: reassociate to namespace 'ns/mnt' failed: Operation not permitted
-```
-
-**根因:**
-Claude Code 使用 bubblewrap (bwrap) sandbox 运行命令，sandbox 内：
-- 所有 Linux capabilities 被清零 (`CapEff: 0000000000000000`)
-- `NoNewPrivs` flag 已设置，`sudo` 完全不可用
-- `/dev/nvme*` 设备节点在 sandbox 的 mount namespace 中不存在
-- 新挂载的文件系统（如 `/lssd`）会被 bwrap 以 `ro` 模式 bind mount
-
-**解决方案: SSH 到内网 IP 绕过 sandbox**
-
-1. 生成临时 SSH key 并通过 gcloud 推送到实例 metadata：
-```bash
-ssh-keygen -t rsa -N "" -f $TMPDIR/gcloud_key
-
-gcloud compute ssh $(hostname) \
-  --zone=$(gcloud compute instances list --filter="name=$(hostname)" --format="value(zone)") \
-  --ssh-key-file=$TMPDIR/gcloud_key \
-  --command="echo key pushed" 2>&1
-# 这步可能因防火墙超时，但 SSH key 会被推送到 instance metadata
-```
-
-2. 通过**内网 IP** SSH 到宿主机（绕过防火墙）：
-```bash
-INTERNAL_IP=$(hostname -I | awk '{print $1}')
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  -i $TMPDIR/gcloud_key $(whoami)@$INTERNAL_IP "sudo whoami"
-# 应输出: root
-```
-
-3. 通过 SSH 执行挂载命令：
-```bash
-ssh -i $TMPDIR/gcloud_key $(whoami)@$INTERNAL_IP "
-  DEVICES=\$(lsblk -d -n -o NAME,SIZE | grep '375G' | awk '{print \"/dev/\"\$1}' | sort -V)
-  COUNT=\$(echo \"\$DEVICES\" | wc -l)
-  sudo mdadm --create /dev/md0 --level=0 --raid-devices=\$COUNT \$DEVICES --force --run
-  sudo mkfs.ext4 -F /dev/md0
-  sudo mkdir -p /lssd
-  sudo mount /dev/md0 /lssd
-  sudo chmod 777 /lssd
-  df -h /lssd
-"
-```
-
-4. 挂载后，sandbox 内可以**读取** `/lssd`，但**无法写入**（bwrap ro mount）。需要写入时（如下载模型、运行脚本），继续通过 SSH 在宿主机上执行：
-```bash
-ssh -i $TMPDIR/gcloud_key $(whoami)@$INTERNAL_IP "
-  source ~/venv/bin/activate && \
-  hf download deepseek-ai/DeepSeek-V3.2 --local-dir /lssd/DeepSeek-V3.2
-"
-```
-
-**注意事项:**
-- 外网 SSH（gcloud compute ssh 默认方式）和 IAP tunnel 可能被防火墙拦截
-- 内网 IP 通常是 `hostname -I` 输出的第一个地址
-- SSH key 推送到 instance metadata 后即使 gcloud ssh 超时也已生效
-- 这个方法依赖 OS Login 或 metadata SSH key 配置
 
 ### 问题: mdadm 命令未找到
 
