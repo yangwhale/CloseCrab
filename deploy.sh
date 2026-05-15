@@ -904,6 +904,32 @@ with open(path, 'w') as f:
         else
             echo "  models.json 已存在, 跳过"
         fi
+
+        # OpenClaw 不支持 symlink (symlink-escape 安全机制), 必须 cp -r
+        mkdir -p "$HOME/.openclaw/workspace/skills"
+        local OC_SKILL_COUNT=0
+        if [[ -d "$SCRIPT_DIR/skills" ]]; then
+            for skill_dir in "$SCRIPT_DIR/skills"/*/; do
+                [[ -d "$skill_dir" ]] || continue
+                local skill_name="$(basename "$skill_dir")"
+                # 跳过 Claude 专属 skill
+                [[ "$skill_name" == "skill-creator" ]] && continue
+                rm -rf "$HOME/.openclaw/workspace/skills/$skill_name"
+                cp -r "$skill_dir" "$HOME/.openclaw/workspace/skills/"
+                OC_SKILL_COUNT=$((OC_SKILL_COUNT + 1))
+            done
+        fi
+        # 私有 skills (如有 ClosedCrab)
+        if [[ -d "$HOME/ClosedCrab/skills" ]]; then
+            for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
+                [[ -d "$skill_dir" ]] || continue
+                local skill_name="$(basename "$skill_dir")"
+                rm -rf "$HOME/.openclaw/workspace/skills/$skill_name"
+                cp -r "$skill_dir" "$HOME/.openclaw/workspace/skills/"
+                OC_SKILL_COUNT=$((OC_SKILL_COUNT + 1))
+            done
+        fi
+        echo "  已部署 $OC_SKILL_COUNT 个 skills 到 ~/.openclaw/workspace/skills/"
     else
         echo "[11/11] OpenClaw 未安装, 跳过配置"
     fi
