@@ -623,7 +623,17 @@ install_cc() {
     fi
     mkdir -p ~/.claude/skills
     cp -a "$SCRIPT_DIR/skills/"* ~/.claude/skills/ 2>/dev/null || true
-    echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个)"
+    # 私有 skills (从 ClosedCrab)
+    if [[ -d "$HOME/ClosedCrab/skills" ]]; then
+        for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
+            [[ -d "$skill_dir" ]] || continue
+            local skill_name="$(basename "$skill_dir")"
+            cp -a "$skill_dir" ~/.claude/skills/
+        done
+        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, 含私有 skills)"
+    else
+        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个)"
+    fi
 
     # Gemini CLI skills linking (if gemini CLI is available)
     if command -v gemini &>/dev/null; then
@@ -639,6 +649,19 @@ install_cc() {
                 gemini skills link "$skill_dir" --consent 2>/dev/null && ((gemini_linked++)) || true
             fi
         done
+        # 私有 skills 也链接到 Gemini
+        if [[ -d "$HOME/ClosedCrab/skills" ]]; then
+            for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
+                [[ -d "$skill_dir" ]] || continue
+                local skill_name=$(basename "$skill_dir")
+                if echo "$GEMINI_SKIP" | grep -qw "$skill_name"; then
+                    continue
+                fi
+                if [[ -f "$skill_dir/SKILL.md" ]]; then
+                    gemini skills link "$skill_dir" --consent 2>/dev/null && ((gemini_linked++)) || true
+                fi
+            done
+        fi
         echo "  Gemini Skills 已链接 ($gemini_linked 个)"
     fi
 
