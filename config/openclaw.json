@@ -25,13 +25,13 @@
           ]
         }
       },
-      "imageModel": "google/gemini-3.1-flash-lite-preview",
-      "pdfModel": "google/gemini-3.1-flash-lite-preview",
+      "imageModel": "google/gemini-3.1-pro-preview",
+      "pdfModel": "google/gemini-3.1-pro-preview",
       "heartbeat": {
         "model": "google/gemini-3.1-flash-lite-preview"
       },
       "compaction": {
-        "model": "google/gemini-2.5-flash"
+        "model": "anthropic-vertex/claude-sonnet-4-6"
       }
     }
   },
