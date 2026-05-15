@@ -90,13 +90,19 @@ _COMPACTION_THRESHOLD = 750_000
 _COMPACTION_HARD_LIMIT = 950_000
 _COMPACTION_COOLDOWN_S = 60
 
-# Step buffer flush thresholds (defragment per-token agent_message_chunk)
+# Step buffer flush thresholds (defragment OpenClaw agent_message_chunk).
+# OpenClaw upstream sends ~30-60 char chunks already ending in punctuation,
+# so we accumulate by length only (not by sentence-end) to merge multiple
+# chunks into a readable paragraph-sized step.
 # OpenClaw ACP pushes 2-5 char chunks per token; firing on_step/on_log
 # per chunk produces fragmented Firestore step entries like "P","0","当","前".
 # We accumulate chunks and flush on sentence-end punctuation, length cap,
 # completed agent_message, or event-type switch.
 _STEP_SENTENCE_END = frozenset("。！？.!?\n")
-_STEP_FLUSH_THRESHOLD = 80
+# Soft threshold: only flush on sentence-end after we have enough text.
+# Hard threshold: force flush regardless of content (long unbroken text).
+_STEP_SOFT_THRESHOLD = 100
+_STEP_HARD_THRESHOLD = 200
 
 _COMPACTION_SUMMARY_PROMPT = """\
 [System: Context Compaction]
@@ -1059,10 +1065,21 @@ class OpenClawWorker(Worker):
                 if step_buffer is not None and flush_step_buffer is not None:
                     step_buffer.append(text)
                     full = "".join(step_buffer)
+                    # OpenClaw chunks already end at sentence boundaries
+                    # (~30-60 chars each). Buffer multiple chunks into a
+                    # readable paragraph: only flush on (a) completed
+                    # message, (b) hard length cap, or (c) sentence-end
+                    # AFTER reaching soft threshold.
+                    has_sentence_end = any(
+                        c in _STEP_SENTENCE_END for c in text
+                    )
                     should_flush = (
                         update_type == "agent_message"
-                        or any(c in _STEP_SENTENCE_END for c in text)
-                        or len(full) >= _STEP_FLUSH_THRESHOLD
+                        or len(full) >= _STEP_HARD_THRESHOLD
+                        or (
+                            has_sentence_end
+                            and len(full) >= _STEP_SOFT_THRESHOLD
+                        )
                     )
                     if should_flush:
                         await flush_step_buffer()
