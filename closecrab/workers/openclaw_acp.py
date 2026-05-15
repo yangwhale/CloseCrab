@@ -139,6 +139,30 @@ class OpenClawWorker(Worker):
     call. The Gateway must be running before this worker starts.
     """
 
+    @staticmethod
+    def get_default_model() -> str:
+        """读 ~/.openclaw/openclaw.json 的 agents.defaults.model.primary。
+
+        OpenClaw 的实际 default 模型由 Gateway 从这个文件加载（含 hot reload
+        和 fallback 链）。BotCore 用此值同步 backbone_model 给飞书卡片显示，
+        并写回 Firestore，让 Firestore 字段反映 OpenClaw 真实在用的模型。
+        """
+        path = Path.home() / ".openclaw" / "openclaw.json"
+        if not path.exists():
+            return ""
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            return (
+                cfg.get("agents", {})
+                .get("defaults", {})
+                .get("model", {})
+                .get("primary", "")
+            )
+        except Exception as e:
+            log.warning(f"get_default_model failed: {e}")
+            return ""
+
     def __init__(
         self,
         openclaw_bin: str | None = None,
@@ -159,6 +183,11 @@ class OpenClawWorker(Worker):
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
+        # NOTE: 不再传给 ACP（OpenClaw 期望 provider/model 格式如
+        # "anthropic-vertex/claude-opus-4-7"，与 Firestore 存的 Claude Code
+        # 风格 ID 不兼容）。模型由 Gateway 从 ~/.openclaw/openclaw.json 的
+        # agents.defaults.model 决定，含 fallback 链与 hot reload。
+        # 字段保留仅用于日志/向后兼容，运行时不发送。
         self._model = model
         self._acp_session_id: Optional[str] = None
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -302,8 +331,6 @@ class OpenClawWorker(Worker):
                 "cwd": self._workspace_dir,
                 "mcpServers": [],
             }
-            if self._model:
-                new_params["model"] = self._model
             resp = await self._rpc("session/new", new_params, timeout=60)
             if not resp or "error" in resp:
                 err = (
@@ -323,8 +350,6 @@ class OpenClawWorker(Worker):
             "mcpServers": [],
             "sessionId": target_id,
         }
-        if self._model:
-            load_params["model"] = self._model
         resp = await self._rpc("session/load", load_params, timeout=60)
         if resp and "error" not in resp:
             result = resp.get("result", {})
@@ -348,8 +373,6 @@ class OpenClawWorker(Worker):
             "cwd": self._workspace_dir,
             "mcpServers": [],
         }
-        if self._model:
-            new_params["model"] = self._model
         resp = await self._rpc("session/new", new_params, timeout=60)
         if not resp or "error" in resp:
             err = (

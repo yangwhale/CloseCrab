@@ -546,6 +546,20 @@ class BotCore:
 
             return worker
 
+    async def _sync_model_to_firestore(self, model: str) -> None:
+        """把 OpenClaw 实际 default 模型写回 Firestore bots/{name}.model。"""
+        if not self._db:
+            return
+        try:
+            await asyncio.to_thread(
+                lambda: self._db.collection("bots")
+                .document(self.bot_name)
+                .update({"model": model})
+            )
+            log.info(f"Synced model to Firestore: {model}")
+        except Exception as e:
+            log.warning(f"Failed to sync model to Firestore: {e}")
+
     def _create_worker(self, session_id: Optional[str] = None) -> Worker:
         """创建 Worker 实例（不启动），根据 worker_type 选择实现。"""
         if self._worker_type == "gemini":
@@ -580,13 +594,26 @@ class BotCore:
                 npm_global = Path.home() / ".npm-global" / "bin" / "openclaw"
                 if npm_global.exists():
                     oc_bin = str(npm_global)
+            # OpenClaw 真实模型来自 ~/.openclaw/openclaw.json 的 agents.defaults。
+                # Firestore 的 model 字段（Claude Code 风格 ID）OpenClaw 不认，
+                # 所以反向用 OpenClaw config 同步 backbone_model（飞书卡片显示）
+                # + 写回 Firestore（让用户看 Firestore 也是对的）。
+            actual_model = OpenClawWorker.get_default_model()
+            if actual_model and actual_model != self._backbone_model:
+                log.info(
+                    f"OpenClaw default model: {actual_model} "
+                    f"(was Firestore: {self._backbone_model})"
+                )
+                self._backbone_model = actual_model
+                if self._db:
+                    asyncio.create_task(self._sync_model_to_firestore(actual_model))
             return OpenClawWorker(
                 openclaw_bin=oc_bin or "openclaw",
                 work_dir=self._work_dir,
                 timeout=self._timeout,
                 system_prompt=self._system_prompt,
                 session_id=session_id,
-                model=self._backbone_model,
+                model="",  # 不传给 ACP，让 Gateway 用 agents.defaults
                 bot_name=self.bot_name,
                 gcp_project=os.environ.get(
                     "GOOGLE_CLOUD_PROJECT",
