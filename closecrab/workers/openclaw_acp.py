@@ -740,10 +740,9 @@ class OpenClawWorker(Worker):
                 paragraphs = [
                     p for p in re.split(r"\n\n+", flushed) if p.strip()
                 ]
-                log.info(
+                log.debug(
                     f"STEP_FLUSH len={len(flushed)} "
-                    f"paragraphs={len(paragraphs)} "
-                    f"text={json.dumps(flushed[:200], ensure_ascii=False)}"
+                    f"paragraphs={len(paragraphs)}"
                 )
                 if not paragraphs:
                     step_buffer.clear()
@@ -1064,9 +1063,8 @@ class OpenClawWorker(Worker):
 
         if update_type in ("agent_message_chunk", "agent_message"):
             if text:
-                log.info(
-                    f"CHUNK_RAW type={update_type} len={len(text)} "
-                    f"text={json.dumps(text[:200], ensure_ascii=False)}"
+                log.debug(
+                    f"CHUNK_RAW type={update_type} len={len(text)}"
                 )
                 accumulated_text.append(text)
                 # on_event keeps per-chunk for typewriter-style progress.
