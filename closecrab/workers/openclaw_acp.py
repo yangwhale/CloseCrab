@@ -728,13 +728,21 @@ class OpenClawWorker(Worker):
                 if not step_buffer:
                     return
                 flushed = "".join(step_buffer)
-                step_buffer.clear()
+                # Send first; clear only after on_step succeeded so that
+                # transient callback failures don't drop content.
+                log.info(
+                    f"STEP_FLUSH len={len(flushed)} "
+                    f"text={json.dumps(flushed[:200], ensure_ascii=False)}"
+                )
                 if on_step:
-                    await self._safe_callback(
-                        on_step,
-                        self._translate_text_event(flushed),
-                        name="on_step",
-                    )
+                    try:
+                        await on_step(self._translate_text_event(flushed))
+                    except Exception as e:
+                        log.warning(
+                            f"on_step failed, keeping buffer: {e}"
+                        )
+                        return
+                step_buffer.clear()
                 if on_log:
                     preview = flushed[:300].replace("\n", " ")
                     if preview.strip():
@@ -1035,6 +1043,10 @@ class OpenClawWorker(Worker):
 
         if update_type in ("agent_message_chunk", "agent_message"):
             if text:
+                log.info(
+                    f"CHUNK_RAW type={update_type} len={len(text)} "
+                    f"text={json.dumps(text[:200], ensure_ascii=False)}"
+                )
                 accumulated_text.append(text)
                 # on_event keeps per-chunk for typewriter-style progress.
                 if on_event:
