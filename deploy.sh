@@ -628,6 +628,7 @@ install_cc() {
         for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
             [[ -d "$skill_dir" ]] || continue
             local skill_name="$(basename "$skill_dir")"
+            rm -rf ~/.claude/skills/"$skill_name"
             cp -a "$skill_dir" ~/.claude/skills/
         done
         echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, 含私有 skills)"
