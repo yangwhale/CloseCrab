@@ -9,15 +9,20 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic-vertex/claude-opus-4-6",
+        "primary": "anthropic-vertex/claude-opus-4-7",
         "fallbacks": [
+          "anthropic-vertex/claude-opus-4-6",
           "anthropic-vertex/claude-sonnet-4-6",
           "google/gemini-2.5-flash"
         ]
       },
       "subagents": {
         "model": {
-          "primary": "google/gemini-3.1-flash-lite-preview"
+          "primary": "anthropic-vertex/claude-opus-4-6",
+          "fallbacks": [
+            "anthropic-vertex/claude-sonnet-4-6",
+            "google/gemini-2.5-flash"
+          ]
         }
       },
       "imageModel": "google/gemini-3.1-flash-lite-preview",
