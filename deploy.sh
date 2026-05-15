@@ -905,6 +905,12 @@ with open(path, 'w') as f:
             echo "  models.json 已存在, 跳过"
         fi
 
+        # bugged 双路径: gLinux (有 CLI) 用 skill 直调, 云上机器用 SSE MCP
+        local IS_GLINUX=0
+        if command -v bugged &>/dev/null; then
+            IS_GLINUX=1
+        fi
+
         # OpenClaw 不支持 symlink (symlink-escape 安全机制), 必须 cp -r
         mkdir -p "$HOME/.openclaw/workspace/skills"
         local OC_SKILL_COUNT=0
@@ -912,8 +918,11 @@ with open(path, 'w') as f:
             for skill_dir in "$SCRIPT_DIR/skills"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name="$(basename "$skill_dir")"
-                # 跳过 Claude 专属 skill
-                [[ "$skill_name" == "skill-creator" ]] && continue
+                # 跳过 Claude 专属 skill (清理历史残留)
+                if [[ "$skill_name" == "skill-creator" ]]; then
+                    rm -rf "$HOME/.openclaw/workspace/skills/skill-creator"
+                    continue
+                fi
                 rm -rf "$HOME/.openclaw/workspace/skills/$skill_name"
                 cp -r "$skill_dir" "$HOME/.openclaw/workspace/skills/"
                 OC_SKILL_COUNT=$((OC_SKILL_COUNT + 1))
@@ -924,12 +933,26 @@ with open(path, 'w') as f:
             for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name="$(basename "$skill_dir")"
+                # bugged skill 仅在 gLinux 上保留 (CLI 直调), 云上机器删除
+                if [[ "$skill_name" == "bugged" && $IS_GLINUX -eq 0 ]]; then
+                    rm -rf "$HOME/.openclaw/workspace/skills/bugged"
+                    continue
+                fi
                 rm -rf "$HOME/.openclaw/workspace/skills/$skill_name"
                 cp -r "$skill_dir" "$HOME/.openclaw/workspace/skills/"
                 OC_SKILL_COUNT=$((OC_SKILL_COUNT + 1))
             done
         fi
         echo "  已部署 $OC_SKILL_COUNT 个 skills 到 ~/.openclaw/workspace/skills/"
+
+        # bugged MCP 仅在云上机器保留, gLinux 上删除以走 CLI 路径
+        if [[ $IS_GLINUX -eq 1 ]]; then
+            "$OPENCLAW_BIN" mcp unset bugged &>/dev/null && \
+                echo "  bugged: gLinux 路径 (skill + CLI), 已删除 SSE MCP" || \
+                echo "  bugged: gLinux 路径 (skill + CLI)"
+        else
+            echo "  bugged: 云上路径 (SSE MCP), 已跳过 skill"
+        fi
     else
         echo "[11/11] OpenClaw 未安装, 跳过配置"
     fi
