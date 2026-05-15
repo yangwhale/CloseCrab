@@ -595,9 +595,9 @@ class BotCore:
                 if npm_global.exists():
                     oc_bin = str(npm_global)
             # OpenClaw 真实模型来自 ~/.openclaw/openclaw.json 的 agents.defaults。
-                # Firestore 的 model 字段（Claude Code 风格 ID）OpenClaw 不认，
-                # 所以反向用 OpenClaw config 同步 backbone_model（飞书卡片显示）
-                # + 写回 Firestore（让用户看 Firestore 也是对的）。
+            # Firestore 的 model 字段（Claude Code 风格 ID）OpenClaw 不认，
+            # 反向用 OpenClaw config 同步 backbone_model（飞书卡片显示）
+            # + 写回 Firestore（让用户看 Firestore 也是对的）。
             actual_model = OpenClawWorker.get_default_model()
             if actual_model and actual_model != self._backbone_model:
                 log.info(
