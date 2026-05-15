@@ -194,27 +194,27 @@
         "args": ["-y", "@playwright/mcp@latest"]
       },
       "coding": {
-        "type": "sse",
+        "transport": "sse",
         "url": "http://127.0.0.1:18090/coding/sse",
         "timeout": 300
       },
       "bugged": {
-        "type": "sse",
+        "transport": "sse",
         "url": "http://127.0.0.1:18090/bugged/sse",
         "timeout": 300
       },
       "chrome-devtools-mcp": {
-        "type": "sse",
+        "transport": "sse",
         "url": "http://127.0.0.1:18090/chrome/sse",
         "timeout": 300
       },
       "google-workspace": {
-        "type": "sse",
+        "transport": "sse",
         "url": "http://127.0.0.1:18090/workspace/sse",
         "timeout": 300
       },
       "c2xprof": {
-        "type": "sse",
+        "transport": "sse",
         "url": "http://127.0.0.1:18090/c2xprof/sse",
         "timeout": 300
       }
