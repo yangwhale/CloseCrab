@@ -2754,7 +2754,7 @@ class FeishuChannel(Channel):
         elements.append({"tag": "hr"})
         time_str = f"{elapsed:.0f}s" if elapsed >= 1 else "刚开始"
         wt = u.get("worker_type", "")
-        w_label = {"claude": "C", "kilo": "K", "gemini": "G"}.get(wt, wt[:1].upper() if wt else "?")
+        w_label = {"claude": "CC", "openclaw": "OC", "kilo": "KL", "gemini": "GM"}.get(wt, wt[:2].upper() if wt else "?")
         m_label = _shorten_model_name(u.get("backbone_model", ""))
         parts = [f"⏱ {time_str}", f"📊 ctx {ctx_pct:.0f}%", f"🔄 T{turns}"]
         if w_label:
