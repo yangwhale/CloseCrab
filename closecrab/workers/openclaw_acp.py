@@ -90,6 +90,14 @@ _COMPACTION_THRESHOLD = 750_000
 _COMPACTION_HARD_LIMIT = 950_000
 _COMPACTION_COOLDOWN_S = 60
 
+# Step buffer flush thresholds (defragment per-token agent_message_chunk)
+# OpenClaw ACP pushes 2-5 char chunks per token; firing on_step/on_log
+# per chunk produces fragmented Firestore step entries like "P","0","当","前".
+# We accumulate chunks and flush on sentence-end punctuation, length cap,
+# completed agent_message, or event-type switch.
+_STEP_SENTENCE_END = frozenset("。！？.!?\n")
+_STEP_FLUSH_THRESHOLD = 80
+
 _COMPACTION_SUMMARY_PROMPT = """\
 [System: Context Compaction]
 你的上下文即将超过限制。请按以下结构生成对话摘要，用于注入新 session：
@@ -712,6 +720,30 @@ class OpenClawWorker(Worker):
             log.info(f"ACP prompt sent (id={prompt_id}, len={len(text)})")
 
             accumulated_text = []
+            # Buffer for defragmenting per-token agent_message_chunk events.
+            # See _STEP_SENTENCE_END / _STEP_FLUSH_THRESHOLD for flush rules.
+            step_buffer: list[str] = []
+
+            async def flush_step_buffer() -> None:
+                if not step_buffer:
+                    return
+                flushed = "".join(step_buffer)
+                step_buffer.clear()
+                if on_step:
+                    await self._safe_callback(
+                        on_step,
+                        self._translate_text_event(flushed),
+                        name="on_step",
+                    )
+                if on_log:
+                    preview = flushed[:300].replace("\n", " ")
+                    if preview.strip():
+                        await self._safe_callback(
+                            on_log,
+                            f"\U0001f4ac {preview}",
+                            name="on_log",
+                        )
+
             deadline = time.monotonic() + self._timeout
             subagent_active = False
             msg_count = 0
@@ -822,6 +854,8 @@ class OpenClawWorker(Worker):
                         on_event=on_event,
                         on_log=on_log,
                         on_step=on_step,
+                        step_buffer=step_buffer,
+                        flush_step_buffer=flush_step_buffer,
                     )
                     if is_subagent is not None:
                         if is_subagent and not subagent_active:
@@ -833,6 +867,11 @@ class OpenClawWorker(Worker):
                 if "id" in msg and msg.get("id") != prompt_id:
                     await self._handle_server_request(msg)
                     continue
+
+            # Loop exited (prompt done / interrupted / timeout) — flush any
+            # pending text in the step buffer so the final sentence is not
+            # lost in Firestore steps / log channel.
+            await flush_step_buffer()
 
             if self._interrupted:
                 drained = 0
@@ -967,8 +1006,17 @@ class OpenClawWorker(Worker):
         on_event: Optional[Callable[[str], Awaitable[None]]] = None,
         on_log: Optional[Callable[[str], Awaitable[None]]] = None,
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
+        step_buffer: Optional[list] = None,
+        flush_step_buffer: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Optional[bool]:
-        """Process a session/update notification from the ACP agent."""
+        """Process a session/update notification from the ACP agent.
+
+        step_buffer / flush_step_buffer are passed in by send() to defragment
+        per-token agent_message_chunk events. on_step and on_log fire only
+        when the buffer is flushed (sentence-end / length cap / completed
+        message / event-type switch). on_event still fires per-chunk to keep
+        the typewriter-style progress feedback responsive.
+        """
         method = msg.get("method", "")
 
         if method in ("requestPermission", "session/request_permission"):
@@ -988,28 +1036,55 @@ class OpenClawWorker(Worker):
         if update_type in ("agent_message_chunk", "agent_message"):
             if text:
                 accumulated_text.append(text)
-                cc_event = self._translate_text_event(text)
-                if on_step:
-                    await self._safe_callback(on_step, cc_event, name="on_step")
+                # on_event keeps per-chunk for typewriter-style progress.
                 if on_event:
                     preview = text[:80].replace("\n", " ")
                     await self._safe_callback(
                         on_event, f"responding: {preview}", name="on_event"
                     )
-                if on_log:
-                    preview = text[:300].replace("\n", " ")
-                    if preview.strip():
+                # on_step / on_log accumulate into buffer; flush on sentence
+                # end, length cap, or when receiving a completed message.
+                if step_buffer is not None and flush_step_buffer is not None:
+                    step_buffer.append(text)
+                    full = "".join(step_buffer)
+                    should_flush = (
+                        update_type == "agent_message"
+                        or any(c in _STEP_SENTENCE_END for c in text)
+                        or len(full) >= _STEP_FLUSH_THRESHOLD
+                    )
+                    if should_flush:
+                        await flush_step_buffer()
+                else:
+                    # Fallback for callers that don't supply a buffer
+                    # (preserves legacy per-chunk behavior).
+                    if on_step:
                         await self._safe_callback(
-                            on_log, f"\U0001f4ac {preview}", name="on_log"
+                            on_step,
+                            self._translate_text_event(text),
+                            name="on_step",
                         )
+                    if on_log:
+                        preview = text[:300].replace("\n", " ")
+                        if preview.strip():
+                            await self._safe_callback(
+                                on_log,
+                                f"\U0001f4ac {preview}",
+                                name="on_log",
+                            )
 
         elif update_type in ("agent_thought_chunk", "agent_thought"):
+            # Switching event type — flush any pending text first.
+            if flush_step_buffer is not None:
+                await flush_step_buffer()
             if on_event and text:
                 await self._safe_callback(
                     on_event, f"thinking: {text[:60]}", name="on_event"
                 )
 
         elif update_type in ("tool_call", "tool_call_update"):
+            # Switching event type — flush any pending text first.
+            if flush_step_buffer is not None:
+                await flush_step_buffer()
             tool_title = update.get("title", "?")
             tool_status = update.get("status", "?")
             tool_kind = update.get("kind", "?")
