@@ -734,15 +734,29 @@ class OpenClawWorker(Worker):
                 if not step_buffer:
                     return
                 flushed = "".join(step_buffer)
-                # Send first; clear only after on_step succeeded so that
-                # transient callback failures don't drop content.
+                # Split on paragraph break so each step is one paragraph.
+                # bot.py:_format_step uses split('\n')[:2] which would drop
+                # everything after \n\n (second slice is empty).
+                paragraphs = [
+                    p for p in re.split(r"\n\n+", flushed) if p.strip()
+                ]
                 log.info(
                     f"STEP_FLUSH len={len(flushed)} "
+                    f"paragraphs={len(paragraphs)} "
                     f"text={json.dumps(flushed[:200], ensure_ascii=False)}"
                 )
+                if not paragraphs:
+                    step_buffer.clear()
+                    return
+                # Send each paragraph as a separate step; clear only after
+                # all on_step calls succeeded so that transient failures
+                # don't drop content.
                 if on_step:
                     try:
-                        await on_step(self._translate_text_event(flushed))
+                        for para in paragraphs:
+                            await on_step(
+                                self._translate_text_event(para)
+                            )
                     except Exception as e:
                         log.warning(
                             f"on_step failed, keeping buffer: {e}"
@@ -750,13 +764,14 @@ class OpenClawWorker(Worker):
                         return
                 step_buffer.clear()
                 if on_log:
-                    preview = flushed[:300].replace("\n", " ")
-                    if preview.strip():
-                        await self._safe_callback(
-                            on_log,
-                            f"\U0001f4ac {preview}",
-                            name="on_log",
-                        )
+                    for para in paragraphs:
+                        preview = para[:300].replace("\n", " ")
+                        if preview.strip():
+                            await self._safe_callback(
+                                on_log,
+                                f"\U0001f4ac {preview}",
+                                name="on_log",
+                            )
 
             deadline = time.monotonic() + self._timeout
             subagent_active = False
