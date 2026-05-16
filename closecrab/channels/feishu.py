@@ -34,6 +34,7 @@ import random
 import re
 import tempfile
 import threading
+import time
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -275,6 +276,146 @@ def _format_progress(text: str) -> str:
     return f"🔧 {text}"
 
 
+# P0-2: 飞书卡片交互防伪 envelope（搬运自
+# @openclaw/feishu/dist/send-result-zZZOR3qT.js）。把卡片按钮/选择器的
+# value 包装成带版本戳和声明（claims）的 envelope，卡片回调时校验：
+# (1) malformed schema、(2) 过期、(3) 错误的用户、(4) 错误的会话。
+# 防止 plan approval 等卡片被转发到群后被任意人点。
+_FEISHU_CARD_INTERACTION_VERSION = "ocf1"
+_FEISHU_CARD_INTERACTION_KINDS = ("button", "quick", "meta")
+# 卡片默认 15 分钟过期。pending input wait_for 是 300 秒，给 envelope 多
+# 一点缓冲，避免 wait_for 还没超时 envelope 就先 stale 了。
+_FEISHU_CARD_DEFAULT_EXPIRY_MS = 15 * 60 * 1000
+
+
+def _create_feishu_card_envelope(
+    action_name: str,
+    *,
+    answer: Optional[str] = None,
+    kind: str = "button",
+    metadata: Optional[dict] = None,
+    expected_user_open_id: Optional[str] = None,
+    expected_chat_id: Optional[str] = None,
+    expected_chat_type: Optional[str] = None,
+    session_id: Optional[str] = None,
+    expires_in_ms: Optional[int] = _FEISHU_CARD_DEFAULT_EXPIRY_MS,
+    now_ms: Optional[int] = None,
+) -> dict:
+    """构造一个签名的卡片 envelope，可直接作为飞书 action.value 使用。
+
+    字段缩写沿用 OpenClaw schema，方便后续 cherry-pick 上游：
+      oc - version stamp ("ocf1")
+      k  - interaction kind ("button"/"quick"/"meta")
+      a  - action 名（必填非空）
+      q  - quick reply / answer 文本（可选）
+      m  - metadata dict
+      c  - claims: u=open_id, h=chat_id, t=p2p|group, s=session, e=expiry_ms
+
+    expires_in_ms 显式传 None 时不设过期；传 0 也视作无过期。
+    """
+    if kind not in _FEISHU_CARD_INTERACTION_KINDS:
+        kind = "button"
+    env: dict = {
+        "oc": _FEISHU_CARD_INTERACTION_VERSION,
+        "k": kind,
+        "a": action_name,
+    }
+    if answer is not None:
+        env["q"] = answer
+    if metadata:
+        env["m"] = metadata
+    claims: dict = {}
+    if expected_user_open_id:
+        claims["u"] = expected_user_open_id
+    if expected_chat_id:
+        claims["h"] = expected_chat_id
+    if expected_chat_type in ("p2p", "group"):
+        claims["t"] = expected_chat_type
+    if session_id:
+        claims["s"] = session_id
+    if expires_in_ms:
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        claims["e"] = now_ms + int(expires_in_ms)
+    if claims:
+        env["c"] = claims
+    return env
+
+
+def _decode_feishu_card_action(
+    value: dict,
+    *,
+    operator_open_id: str,
+    chat_id: str,
+    now_ms: Optional[int] = None,
+) -> dict:
+    """解析 + 校验卡片回调 value。镜像 OpenClaw decodeFeishuCardAction。
+
+    返回 dict，kind 为下列之一：
+      - "legacy": 旧版未签名 value，退化为 value.action/answer 直读
+      - "invalid": envelope 校验失败，reason 为 malformed/stale/wrong_user/wrong_conversation
+      - "structured": 签名校验通过，返回 action/answer/metadata/claims
+    """
+    if not isinstance(value, dict):
+        return {"kind": "legacy", "action": "", "answer": None}
+    if value.get("oc") != _FEISHU_CARD_INTERACTION_VERSION:
+        # 旧卡片或被剥掉签名的 value — fall back 旧字段名
+        return {
+            "kind": "legacy",
+            "action": value.get("action", ""),
+            "answer": value.get("answer"),
+        }
+
+    if value.get("k") not in _FEISHU_CARD_INTERACTION_KINDS:
+        return {"kind": "invalid", "reason": "malformed"}
+    action_name = value.get("a")
+    if not isinstance(action_name, str) or not action_name:
+        return {"kind": "invalid", "reason": "malformed"}
+    answer = value.get("q")
+    if answer is not None and not isinstance(answer, str):
+        return {"kind": "invalid", "reason": "malformed"}
+    metadata = value.get("m")
+    if metadata is not None and not isinstance(metadata, dict):
+        return {"kind": "invalid", "reason": "malformed"}
+
+    claims_raw = value.get("c")
+    claims: dict = {}
+    if claims_raw is not None:
+        if not isinstance(claims_raw, dict):
+            return {"kind": "invalid", "reason": "malformed"}
+        for key in ("u", "h", "s"):
+            v = claims_raw.get(key)
+            if v is not None and not isinstance(v, str):
+                return {"kind": "invalid", "reason": "malformed"}
+        ct = claims_raw.get("t")
+        if ct is not None and ct not in ("p2p", "group"):
+            return {"kind": "invalid", "reason": "malformed"}
+        exp = claims_raw.get("e")
+        if exp is not None:
+            try:
+                exp_num = float(exp)
+            except (TypeError, ValueError):
+                return {"kind": "invalid", "reason": "malformed"}
+            now = now_ms if now_ms is not None else int(time.time() * 1000)
+            if exp_num < now:
+                return {"kind": "invalid", "reason": "stale"}
+        expected_user = (claims_raw.get("u") or "").strip()
+        if expected_user and expected_user != (operator_open_id or "").strip():
+            return {"kind": "invalid", "reason": "wrong_user"}
+        expected_chat = (claims_raw.get("h") or "").strip()
+        if expected_chat and expected_chat != (chat_id or "").strip():
+            return {"kind": "invalid", "reason": "wrong_conversation"}
+        claims = claims_raw
+
+    return {
+        "kind": "structured",
+        "action": action_name,
+        "answer": answer,
+        "metadata": metadata or {},
+        "claims": claims,
+    }
+
+
 def _format_interactive_prompt(info: dict) -> str:
     """将交互式工具事件格式化为文本。"""
     tool = info.get("tool", "")
@@ -463,12 +604,21 @@ class FeishuChannel(Channel):
         async def on_input_needed(info: dict) -> Optional[str]:
             tool = info.get("tool", "")
             inp = info.get("input", {})
+            # inbox 路径没有原始消息的 chat_type 信息，envelope 仅锁定 u+h+e。
             if tool == "ExitPlanMode":
-                card = self._build_plan_approval_card(inp.get("plan", ""))
+                card = self._build_plan_approval_card(
+                    inp.get("plan", ""),
+                    expected_user_open_id=user_key,
+                    expected_chat_id=chat_id,
+                )
                 self._last_interactive_card[user_key] = card
                 await self._async_send_card(chat_id, card)
             elif tool == "AskUserQuestion":
-                card = self._build_ask_question_card(inp)
+                card = self._build_ask_question_card(
+                    inp,
+                    expected_user_open_id=user_key,
+                    expected_chat_id=chat_id,
+                )
                 self._last_interactive_card[user_key] = card
                 await self._async_send_card(chat_id, card)
             else:
@@ -873,19 +1023,57 @@ class FeishuChannel(Channel):
         处理按钮点击：
         - 有 pending_input 时：直接 resolve future（ExitPlanMode / AskUserQuestion 流程）
         - 无 pending_input 时：把按钮答案当作新用户消息路由到 bot core
+
+        Envelope 校验：所有新卡片用 _create_feishu_card_envelope 包装，回调时
+        用 _decode_feishu_card_action 校验发起人、会话、过期时间。校验失败
+        立即用 toast 拒绝，不路由消息。legacy 卡片向后兼容（旧 worker 启动
+        时已发出的卡片可能没 envelope）。
         """
         try:
             action = data.event.action
             value = action.value or {}
             operator = data.event.operator
             open_id = operator.open_id if operator else ""
+            context = data.event.context
+            chat_id = context.open_chat_id if context else ""
 
-            action_type = value.get("action", "")
-            log.info(f"Card action: {action_type} from {open_id}, value={value}")
+            decoded = _decode_feishu_card_action(
+                value,
+                operator_open_id=open_id,
+                chat_id=chat_id,
+            )
+
+            if decoded["kind"] == "invalid":
+                reason = decoded.get("reason", "malformed")
+                toast_map = {
+                    "stale": "卡片已过期，请重新触发",
+                    "wrong_user": "只有原始发起人可以操作此卡片",
+                    "wrong_conversation": "此卡片不能在当前会话使用",
+                    "malformed": "卡片数据异常，请重试",
+                }
+                msg = toast_map.get(reason, "卡片不可用")
+                log.warning(
+                    f"Card action rejected: reason={reason} from={open_id} "
+                    f"chat={chat_id} value_keys={list(value.keys())}"
+                )
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "error", "content": msg}}
+                )
+
+            action_type = decoded.get("action", "") or ""
+            answer_payload = decoded.get("answer")
+            log.info(
+                f"Card action: {action_type} from {open_id} "
+                f"kind={decoded['kind']} chat={chat_id}"
+            )
 
             if action_type in ("approve_plan", "reject_plan", "ask_answer"):
                 user_key = open_id
-                answer = value.get("answer", "可以了")
+                # legacy 模式 answer 可能在 value 里；structured 模式从 decoded 拿
+                if answer_payload is not None:
+                    answer = answer_payload
+                else:
+                    answer = value.get("answer", "可以了")
                 # 整个 pending 检查+路由必须在 event loop 线程执行，避免跨线程竞态
                 def _handle_pending(uid=open_id, ukey=user_key, ans=answer):
                     pending = self._pending_input.get(ukey)
@@ -1773,13 +1961,25 @@ class FeishuChannel(Channel):
                 inp = info.get("input", {})
 
                 # 尝试用卡片（ExitPlanMode 和 AskUserQuestion）
+                # 卡片 envelope 签名：锁定 only user_key 在 only chat_id 中
+                # 的本次对话能点。chat_type ("p2p"|"group") 用于额外校验。
                 if tool == "ExitPlanMode":
                     plan_content = inp.get("plan", "")
-                    card = self._build_plan_approval_card(plan_content)
+                    card = self._build_plan_approval_card(
+                        plan_content,
+                        expected_user_open_id=user_key,
+                        expected_chat_id=chat_id,
+                        expected_chat_type=chat_type,
+                    )
                     self._last_interactive_card[user_key] = card
                     await self._async_send_card(chat_id, card)
                 elif tool == "AskUserQuestion":
-                    card = self._build_ask_question_card(inp)
+                    card = self._build_ask_question_card(
+                        inp,
+                        expected_user_open_id=user_key,
+                        expected_chat_id=chat_id,
+                        expected_chat_type=chat_type,
+                    )
                     self._last_interactive_card[user_key] = card
                     await self._async_send_card(chat_id, card)
                 else:
@@ -2106,7 +2306,12 @@ class FeishuChannel(Channel):
             if len(options) < 10:
                 options.append({"text": label, "value": sid})
 
-        card = self._build_sessions_card(lines, options)
+        card = self._build_sessions_card(
+            lines,
+            options,
+            expected_user_open_id=user_key,
+            expected_chat_id=chat_id,
+        )
         await self._async_send_card(chat_id, card)
 
     async def _handle_sessions_command_gemini(self, user_key: str, chat_id: str):
@@ -2147,7 +2352,12 @@ class FeishuChannel(Channel):
             if len(options) < 10:
                 options.append({"text": label, "value": sid})
 
-        card = self._build_sessions_card(lines, options)
+        card = self._build_sessions_card(
+            lines,
+            options,
+            expected_user_open_id=user_key,
+            expected_chat_id=chat_id,
+        )
         await self._async_send_card(chat_id, card)
 
     # ── 语音处理 ──
@@ -2574,7 +2784,15 @@ class FeishuChannel(Channel):
             ],
         }
 
-    def _build_sessions_card(self, lines: list[str], options: list[dict]) -> dict:
+    def _build_sessions_card(
+        self,
+        lines: list[str],
+        options: list[dict],
+        *,
+        expected_user_open_id: Optional[str] = None,
+        expected_chat_id: Optional[str] = None,
+        expected_chat_type: Optional[str] = None,
+    ) -> dict:
         """构建 /sessions 卡片（含下拉切换）。"""
         elements = [
             {
@@ -2601,7 +2819,12 @@ class FeishuChannel(Channel):
                             }
                             for opt in options
                         ],
-                        "value": {"action": "switch_session"},
+                        "value": _create_feishu_card_envelope(
+                            "switch_session",
+                            expected_user_open_id=expected_user_open_id,
+                            expected_chat_id=expected_chat_id,
+                            expected_chat_type=expected_chat_type,
+                        ),
                     },
                 ],
             })
@@ -2615,8 +2838,19 @@ class FeishuChannel(Channel):
             "elements": elements,
         }
 
-    def _build_plan_approval_card(self, plan_content: str = "") -> dict:
-        """构建 ExitPlanMode 方案审批卡片，展示方案内容。"""
+    def _build_plan_approval_card(
+        self,
+        plan_content: str = "",
+        *,
+        expected_user_open_id: Optional[str] = None,
+        expected_chat_id: Optional[str] = None,
+        expected_chat_type: Optional[str] = None,
+    ) -> dict:
+        """构建 ExitPlanMode 方案审批卡片，展示方案内容。
+
+        expected_* 用于卡片 envelope 签名（防伪），传入则只有原用户在原会话
+        15 分钟内能点。caller 一般传 (user_open_id, chat_id, chat_type)。
+        """
         elements = []
 
         # 方案内容：转换 markdown → lark_md 格式
@@ -2654,6 +2888,21 @@ class FeishuChannel(Channel):
                 "text": {"tag": "lark_md", "content": "Claude 的实施方案已准备好，请审批。"},
             })
 
+        approve_value = _create_feishu_card_envelope(
+            "approve_plan",
+            answer="可以了",
+            expected_user_open_id=expected_user_open_id,
+            expected_chat_id=expected_chat_id,
+            expected_chat_type=expected_chat_type,
+        )
+        reject_value = _create_feishu_card_envelope(
+            "reject_plan",
+            answer="__REJECT__",
+            expected_user_open_id=expected_user_open_id,
+            expected_chat_id=expected_chat_id,
+            expected_chat_type=expected_chat_type,
+        )
+
         elements.append({"tag": "hr"})
         elements.append({
             "tag": "action",
@@ -2662,13 +2911,13 @@ class FeishuChannel(Channel):
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "✅ 批准执行"},
                     "type": "primary",
-                    "value": {"action": "approve_plan", "answer": "可以了"},
+                    "value": approve_value,
                 },
                 {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "✏️ 需要修改"},
                     "type": "danger",
-                    "value": {"action": "reject_plan", "answer": "__REJECT__"},
+                    "value": reject_value,
                 },
             ],
         })
@@ -2682,8 +2931,18 @@ class FeishuChannel(Channel):
             "elements": elements,
         }
 
-    def _build_ask_question_card(self, inp: dict) -> dict:
-        """构建 AskUserQuestion 问题卡片。"""
+    def _build_ask_question_card(
+        self,
+        inp: dict,
+        *,
+        expected_user_open_id: Optional[str] = None,
+        expected_chat_id: Optional[str] = None,
+        expected_chat_type: Optional[str] = None,
+    ) -> dict:
+        """构建 AskUserQuestion 问题卡片。
+
+        expected_* 参数同 _build_plan_approval_card，用于卡片 envelope 签名。
+        """
         questions = inp.get("questions", [])
         elements = []
 
@@ -2706,7 +2965,13 @@ class FeishuChannel(Channel):
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": btn_text[:20]},
                         "type": "default",
-                        "value": {"action": "ask_answer", "answer": label},
+                        "value": _create_feishu_card_envelope(
+                            "ask_answer",
+                            answer=label,
+                            expected_user_open_id=expected_user_open_id,
+                            expected_chat_id=expected_chat_id,
+                            expected_chat_type=expected_chat_type,
+                        ),
                     })
                 elements.append({"tag": "action", "actions": actions})
 
