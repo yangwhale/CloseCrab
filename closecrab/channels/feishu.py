@@ -732,8 +732,26 @@ class FeishuChannel(Channel):
             return None
         return resp.data.message_id if resp.data else None
 
-    def _reply_text(self, message_id: str, text: str) -> bool:
-        """同步回复指定消息。"""
+    # 飞书"被引用消息已撤回/不存在"错误码（OpenClaw 实测）：
+    # - 230011: The message was withdrawn
+    # - 231003: The message is not found
+    _REPLY_FALLBACK_CODES = (230011, 231003)
+
+    def _reply_text(
+        self,
+        message_id: str,
+        text: str,
+        fallback_chat_id: Optional[str] = None,
+        fallback_id_type: str = "chat_id",
+    ) -> bool:
+        """同步回复指定消息。被引用消息撤回/删除时自动 fallback 到顶层 send。
+
+        参数:
+          message_id: 要 reply 的目标消息 ID
+          text: 文本内容
+          fallback_chat_id: 失败 fallback 用的目标 chat/user ID（None 不 fallback）
+          fallback_id_type: chat_id 或 open_id（与 _send_text 一致）
+        """
         body = ReplyMessageRequestBody.builder() \
             .msg_type("text") \
             .content(json.dumps({"text": text})) \
@@ -743,10 +761,20 @@ class FeishuChannel(Channel):
             .request_body(body) \
             .build()
         resp = self._client.im.v1.message.reply(req)
-        if not resp.success():
-            log.error(f"Reply failed: {resp.code} {resp.msg}")
-            return False
-        return True
+        if resp.success():
+            return True
+
+        # reply 失败：被撤回/不存在 → 退回到顶层 send（保留 toast 友好度）
+        if resp.code in self._REPLY_FALLBACK_CODES and fallback_chat_id:
+            log.info(
+                f"Reply target {message_id} unavailable (code={resp.code} {resp.msg}), "
+                f"falling back to top-level send"
+            )
+            sent_id = self._send_text(fallback_chat_id, text, fallback_id_type)
+            return sent_id is not None
+
+        log.error(f"Reply failed: {resp.code} {resp.msg}")
+        return False
 
     async def _async_send_text(self, chat_id: str, text: str):
         """异步发送文本消息（在 executor 中运行同步 API）。"""
@@ -1789,7 +1817,12 @@ class FeishuChannel(Channel):
             # 鉴权
             if not is_team_msg and self._allowed_open_ids:
                 if sender_open_id not in self._allowed_open_ids:
-                    self._reply_text(message_id, "You are not authorized to use this bot.")
+                    # P2-1: 用户撤回原消息时不应 silent fail，fallback 到顶层 send
+                    self._reply_text(
+                        message_id,
+                        "You are not authorized to use this bot.",
+                        fallback_chat_id=chat_id,
+                    )
                     log.warning(f"Unauthorized: {sender_open_id}")
                     return
 
