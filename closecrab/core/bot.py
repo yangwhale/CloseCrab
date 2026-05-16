@@ -89,6 +89,14 @@ class BotCore:
         self._workers: dict[str, Worker] = {}
         # user_key -> asyncio.Lock (防并发 get_or_create)
         self._locks: dict[str, asyncio.Lock] = {}
+        # user_key -> asyncio.Lock (整个 handle_message turn 串行化)
+        # 镜像 OpenClaw 的 createSequentialQueue：避免同一用户的连续消息触发
+        # 并发 worker.send (worker 内部虽然有 self._lock 保护进程，但没有超时
+        # 兜底，老任务卡死会让后续消息永久等待)。
+        self._user_task_locks: dict[str, asyncio.Lock] = {}
+        # 单条用户消息的处理超时（秒）。超时后强制 interrupt 老任务释放 lock。
+        # 默认 30 min（OpenClaw 用 ~60 min；30 min 对绝大多数 turn 足够）。
+        self._user_task_timeout: float = 30 * 60.0
         # Channel 实例引用（on_channel_ready 时设置）
         self._channel: Optional["Channel"] = None
 
@@ -96,6 +104,36 @@ class BotCore:
         """Channel 就绪时的回调。"""
         self._channel = channel
         log.info("BotCore: channel ready")
+
+    async def _acquire_user_task_lock(self, user_key: str) -> asyncio.Lock:
+        """获取 per-user 任务串行化 lock，老任务卡死则强制 evict。
+
+        语义对齐 OpenClaw createSequentialQueue：
+        - 同一用户的多条消息按 FIFO 顺序处理
+        - 任一任务持有 lock 超过 _user_task_timeout 秒 → log + interrupt worker
+        - interrupt 让 worker.send() 返回，老任务自然释放 lock，新任务能拿到
+        - 强制 evict 后再用 10s 兜底拿 lock；仍拿不到说明出大问题，直接抛
+        """
+        lock = self._user_task_locks.setdefault(user_key, asyncio.Lock())
+        try:
+            await asyncio.wait_for(
+                lock.acquire(), timeout=self._user_task_timeout,
+            )
+            return lock
+        except asyncio.TimeoutError:
+            log.warning(
+                f"User task lock timeout ({self._user_task_timeout}s) for "
+                f"{user_key}, evicting stale task by interrupting worker"
+            )
+            worker = self._workers.get(user_key)
+            if worker and worker.is_alive():
+                try:
+                    await worker.interrupt()
+                except Exception as e:
+                    log.warning(f"Worker interrupt during eviction failed: {e}")
+            await asyncio.wait_for(lock.acquire(), timeout=10.0)
+            log.info(f"Lock acquired after evicting stale task for {user_key}")
+            return lock
 
     async def handle_message(self, msg: UnifiedMessage) -> str:
         """处理来自 Channel 的消息，路由到对应 Worker。
@@ -107,6 +145,24 @@ class BotCore:
         on_progress = msg.metadata.get("on_progress")
         on_tui_step = msg.metadata.get("on_tui_step")
 
+        lock = await self._acquire_user_task_lock(user_key)
+        try:
+            return await self._handle_message_locked(
+                msg, user_key, on_progress, on_tui_step,
+            )
+        finally:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+
+    async def _handle_message_locked(
+        self,
+        msg: UnifiedMessage,
+        user_key: str,
+        on_progress,
+        on_tui_step,
+    ) -> str:
         worker = await self._get_or_create_worker(user_key)
 
         # 异常重启后第一条消息：加前缀让 CC 跳过旧 teammate 上下文
