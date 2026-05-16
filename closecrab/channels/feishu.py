@@ -806,6 +806,34 @@ class FeishuChannel(Channel):
             return False
         return True
 
+    def _edit_text(self, message_id: str, text: str) -> bool:
+        """同步原地编辑一条 text 消息（用 PatchMessage API）。
+
+        典型场景：进度条原地刷新（"已读 3 文件 → 已读 12 文件"），不刷屏。
+        镜像 OpenClaw extensions/feishu/src/send.ts:editMessageFeishu。
+
+        飞书侧约束：被 patch 的消息 msg_type 必须与 content 格式匹配。
+        本方法只用于编辑 text 类型消息，content 格式 {"text": "..."}。
+        编辑卡片用 _update_card。
+        """
+        body = PatchMessageRequestBody.builder() \
+            .content(json.dumps({"text": text})) \
+            .build()
+        req = PatchMessageRequest.builder() \
+            .message_id(message_id) \
+            .request_body(body) \
+            .build()
+        resp = self._client.im.v1.message.patch(req)
+        if not resp.success():
+            log.warning(f"Edit text failed: {resp.code} {resp.msg}")
+            return False
+        return True
+
+    async def _async_edit_text(self, message_id: str, text: str) -> bool:
+        """异步原地编辑 text 消息。"""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._edit_text, message_id, text)
+
     def _add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
         """同步给消息加 emoji 反应，返回 reaction_id 用于后续删除。
 
