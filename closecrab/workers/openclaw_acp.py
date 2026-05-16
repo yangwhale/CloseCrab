@@ -401,9 +401,9 @@ class OpenClawWorker(Worker):
             "mcpServers": [],
             "sessionId": target_id,
         }
-        if not self._cli_default_session_key and self._bot_name:
+        if not self._cli_default_session_key:
             load_params["_meta"] = {
-                "sessionKey": f"agent:{self._bot_name}:acp:{target_id}",
+                "sessionKey": f"acp:{target_id}",
             }
         resp = await self._rpc("session/load", load_params, timeout=60)
         if resp and "error" not in resp:
