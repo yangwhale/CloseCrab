@@ -594,26 +594,35 @@ class BotCore:
                 npm_global = Path.home() / ".npm-global" / "bin" / "openclaw"
                 if npm_global.exists():
                     oc_bin = str(npm_global)
-            # OpenClaw 真实模型来自 ~/.openclaw/openclaw.json 的 agents.defaults。
-            # Firestore 的 model 字段（Claude Code 风格 ID）OpenClaw 不认，
-            # 反向用 OpenClaw config 同步 backbone_model（飞书卡片显示）
-            # + 写回 Firestore（让用户看 Firestore 也是对的）。
-            actual_model = OpenClawWorker.get_default_model()
-            if actual_model and actual_model != self._backbone_model:
+            # Model override: 如果 Firestore 的 model 字段是 provider/model 格式
+            # （如 google/gemini-3.1-pro-preview），传给 OpenClawWorker
+            # 让它在 session 创建后自动切换。否则用 Gateway 默认。
+            gateway_default = OpenClawWorker.get_default_model()
+            firestore_model = self._backbone_model
+            use_model = ""
+            if firestore_model and "/" in firestore_model:
+                # Firestore model is in provider/model format — use it as override
+                use_model = firestore_model
                 log.info(
-                    f"OpenClaw default model: {actual_model} "
+                    f"OpenClaw model override from Firestore: {firestore_model} "
+                    f"(gateway default: {gateway_default})"
+                )
+            elif gateway_default and gateway_default != self._backbone_model:
+                # No explicit override, sync gateway default to display
+                log.info(
+                    f"OpenClaw default model: {gateway_default} "
                     f"(was Firestore: {self._backbone_model})"
                 )
-                self._backbone_model = actual_model
+                self._backbone_model = gateway_default
                 if self._db:
-                    asyncio.create_task(self._sync_model_to_firestore(actual_model))
+                    asyncio.create_task(self._sync_model_to_firestore(gateway_default))
             return OpenClawWorker(
                 openclaw_bin=oc_bin or "openclaw",
                 work_dir=self._work_dir,
                 timeout=self._timeout,
                 system_prompt=self._system_prompt,
                 session_id=session_id,
-                model="",  # 不传给 ACP，让 Gateway 用 agents.defaults
+                model=use_model,  # 非空时触发 per-session model override
                 bot_name=self.bot_name,
                 gcp_project=os.environ.get(
                     "GOOGLE_CLOUD_PROJECT",

@@ -33,7 +33,29 @@
       "compaction": {
         "model": "anthropic-vertex/claude-sonnet-4-6"
       }
-    }
+    },
+    "list": [
+      {
+        "id": "xiaoaitongxue",
+        "name": "xiaoaitongxue",
+        "model": {
+          "primary": "google/gemini-3.1-pro-preview",
+          "fallbacks": [
+            "anthropic-vertex/claude-opus-4-7",
+            "anthropic-vertex/claude-opus-4-6"
+          ]
+        },
+        "subagents": {
+          "model": {
+            "primary": "google/gemini-3.1-pro-preview",
+            "fallbacks": [
+              "anthropic-vertex/claude-opus-4-6",
+              "anthropic-vertex/claude-sonnet-4-6"
+            ]
+          }
+        }
+      }
+    ]
   },
   "models": {
     "providers": {

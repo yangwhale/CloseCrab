@@ -183,11 +183,11 @@ class OpenClawWorker(Worker):
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
-        # NOTE: 不再传给 ACP（OpenClaw 期望 provider/model 格式如
-        # "anthropic-vertex/claude-opus-4-7"，与 Firestore 存的 Claude Code
-        # 风格 ID 不兼容）。模型由 Gateway 从 ~/.openclaw/openclaw.json 的
-        # agents.defaults.model 决定，含 fallback 链与 hot reload。
-        # 字段保留仅用于日志/向后兼容，运行时不发送。
+        # Model override: 非空时触发 per-agent session routing — _ensure_process
+        # 会启动 ACP 时加 `--session agent:{bot_name}:main`，让 Gateway 路由到
+        # ~/.openclaw/openclaw.json 的 agents.list 配置（含自定义 model）。
+        # 不在 prompt/AGENTS.md 里塞 session_status 切换指令 —— 会触发 sticky
+        # override，参见 feedback_openclaw-session-sticky-model 经验。
         self._model = model
         self._acp_session_id: Optional[str] = None
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -255,6 +255,15 @@ class OpenClawWorker(Worker):
             return
 
         cmd = [self._openclaw_bin, "acp", "--no-prefix-cwd"]
+        # Per-bot agent routing: if bot has a non-default model,
+        # use a bot-specific session key so Gateway routes to the
+        # per-agent config in agents.list (with its own model).
+        if self._bot_name and self._model:
+            gateway_default = self._read_gateway_default_model()
+            if gateway_default and self._model != gateway_default:
+                agent_id = self._bot_name
+                cmd.extend(["--session", f"agent:{agent_id}:main"])
+                log.info(f"ACP session key: agent:{agent_id}:main (model: {self._model})")
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         if self._gcp_project:
@@ -341,6 +350,24 @@ class OpenClawWorker(Worker):
             self._acp_session_id = resp["result"]["sessionId"]
             self._session_id = self._acp_session_id
             log.info(f"ACP session created (new): {self._acp_session_id}")
+
+    @staticmethod
+    def _read_gateway_default_model() -> str:
+        """Read Gateway's default model from openclaw.json."""
+        path = Path.home() / ".openclaw" / "openclaw.json"
+        if not path.exists():
+            return ""
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            return (
+                cfg.get("agents", {})
+                .get("defaults", {})
+                .get("model", {})
+                .get("primary", "")
+            )
+        except Exception:
+            return ""
 
     async def _try_load_session(self, target_id: str) -> bool:
         """Try to load an existing session via session/load."""
@@ -1374,6 +1401,7 @@ class OpenClawWorker(Worker):
         """
         if not self._system_prompt:
             return
+
         agents_md = Path(self._workspace_dir) / "AGENTS.md"
         injected = (
             f"{self._AGENTS_MD_BEGIN}\n"
