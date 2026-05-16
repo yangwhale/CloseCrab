@@ -2551,6 +2551,7 @@ class FeishuChannel(Channel):
             # 缓冲区：on_progress / on_tui_step 只写这里，不直接调 API
             _pending_action: list = ["🧠 思考中..."]  # [current_action_text]
             _pending_tui: list = [None]  # [lines] or None
+            _pending_reply_text: list = [""]  # [full_accumulated_text] from on_text_chunk
             _card_dirty = [True]  # 首次发送后立即标脏以触发第一帧
 
             def _get_usage_info() -> dict:
@@ -2570,6 +2571,16 @@ class FeishuChannel(Channel):
             async def on_tui_step(lines: list[str]):
                 """只缓存 TUI 行，不调飞书 API。由 _card_update_loop 统一刷新。"""
                 _pending_tui[0] = lines
+                _card_dirty[0] = True
+
+            async def on_text_chunk(delta: str, full: str):
+                """流式 LLM text 累积回调。只写缓冲区，由 _card_update_loop 统一刷新。
+
+                full = 本次 send() 内所有 assistant turn 的 text 拼接。每来一段就
+                整体替换缓冲区（不做 append，由 worker 维护累积），让 progress card
+                在原地展示"打字机式"逐段填充的回复。
+                """
+                _pending_reply_text[0] = full or ""
                 _card_dirty[0] = True
 
             # 交互式工具回调
@@ -2639,6 +2650,7 @@ class FeishuChannel(Channel):
                 "on_tui_step": on_tui_step,
                 "on_input_needed": on_input_needed,
                 "on_log": on_log if _log else None,
+                "on_text_chunk": on_text_chunk,
             }
             if is_team_msg:
                 metadata["is_team_task"] = True
@@ -2692,6 +2704,7 @@ class FeishuChannel(Channel):
                             elapsed=elapsed,
                             header_text=header,
                             usage=_get_usage_info(),
+                            reply_text=_pending_reply_text[0],
                         )
 
                         # 如果有新进度，先提交到 history（在发 API 之前）
@@ -2741,13 +2754,6 @@ class FeishuChannel(Channel):
             if _anim_task[0]:
                 _anim_task[0].cancel()
 
-            # 删除 progress card
-            if _progress_card_id[0]:
-                try:
-                    await self._async_delete_message(_progress_card_id[0])
-                except Exception:
-                    pass
-
             # P1-3: 替换 👀 为 ✅ 表示完成
             if message_id and _reaction_id[0] and ":reaction:" not in message_id:
                 async def _done_reaction(rid=_reaction_id[0]):
@@ -2758,11 +2764,48 @@ class FeishuChannel(Channel):
             if result:
                 result, voice_file = self._extract_voice_file(result)
                 result, voice_text = self._extract_voice_summary(result)
-                await reply_fn(result)
+
+                # 流式 UI 收尾：把 progress card 原地 patch 为最终 reply card。
+                # 用户体验：同一张卡从「思考中 → 工具历史 → 流式预览」最后变成
+                # 「完整富文本回复」，不再删卡再发新消息。卡片 JSON 超 28KB 或
+                # patch 失败时 fallback 到旧路径（删卡 + 发新消息）。
+                patched = False
+                if _progress_card_id[0]:
+                    try:
+                        final_card = self._build_reply_card(result)
+                        card_json = json.dumps(final_card)
+                        if len(card_json) <= 28000:
+                            patched = await self._async_update_card(
+                                _progress_card_id[0], final_card,
+                            )
+                        else:
+                            log.info(
+                                f"Final reply card too large ({len(card_json)}B), "
+                                f"fallback to delete+send"
+                            )
+                    except Exception as e:
+                        log.warning(f"Final card patch failed: {e}", exc_info=True)
+
+                if not patched:
+                    # Fallback: 删 progress card + 发新消息（与改造前行为一致）
+                    if _progress_card_id[0]:
+                        try:
+                            await self._async_delete_message(_progress_card_id[0])
+                        except Exception:
+                            pass
+                    await reply_fn(result)
+
                 if voice_file:
                     asyncio.create_task(self._send_voice_file(chat_id, voice_file))
                 if voice_text:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
+            else:
+                # 空 result：删 progress card（无内容可保留）
+                if _progress_card_id[0]:
+                    try:
+                        await self._async_delete_message(_progress_card_id[0])
+                    except Exception:
+                        pass
 
             # 日志
             if _log:
@@ -3627,8 +3670,16 @@ class FeishuChannel(Channel):
         }
 
     def _build_progress_card(self, current_action: str, history: list, elapsed: float = 0,
-                             header_text: str = "⏳ 处理中...", usage: dict | None = None) -> dict:
-        """构建实时进度卡片 (Living Progress Card)。"""
+                             header_text: str = "⏳ 处理中...", usage: dict | None = None,
+                             reply_text: str = "") -> dict:
+        """构建实时进度卡片 (Living Progress Card)。
+
+        Args:
+            reply_text: 流式回复正文（CC 每个 LLM turn 输出的 text 累积）。非空时
+                在进度区下方插入「💬 实时回复」段，让用户看到字"打字机式"逐段
+                填充而不是憋几十秒突然 pop。Truncate 到最后 1500 字符避免卡片
+                JSON 超 28KB（飞书上限）。
+        """
         u = usage or {}
         ctx_pct = u.get("usage_pct", 0)
         turns = u.get("turns", 0)
@@ -3648,6 +3699,18 @@ class FeishuChannel(Channel):
             "tag": "div",
             "text": {"tag": "lark_md", "content": f"**{current_action}**"},
         })
+
+        # 流式回复预览（CC turn-level streaming）
+        if reply_text:
+            preview = reply_text
+            _STREAM_PREVIEW_LIMIT = 1500
+            if len(preview) > _STREAM_PREVIEW_LIMIT:
+                preview = "…（前文略）…\n" + preview[-_STREAM_PREVIEW_LIMIT:]
+            elements.append({"tag": "hr"})
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"💬 **实时回复**\n\n{preview}"},
+            })
 
         # 底部状态栏：耗时 · 上下文 · 轮次 · Worker · Model
         elements.append({"tag": "hr"})

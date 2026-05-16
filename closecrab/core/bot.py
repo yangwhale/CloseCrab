@@ -182,6 +182,12 @@ class BotCore:
 
         on_log = msg.metadata.get("on_log")
 
+        # 流式回复：每次 LLM turn 输出 text 时 fire（delta, accumulated_full）。
+        # 用于 channel 在原地刷新卡片，让用户看到回复"打字机式"逐段填充，而
+        # 不是等 30 秒后突然 pop 一大段。仅 Claude Code worker 支持（其他 worker
+        # 没接 on_text_chunk 也无害——参数会被 **_kwargs 吃掉）。
+        on_text_chunk = msg.metadata.get("on_text_chunk")
+
         # voice 路径专用: 每次 Claude 触发一个 tool_use 时调一句, 让 voice
         # 模式可以"边跑边话痨" (例如调 Bash → 念"命令跑起来啦"给用户)。
         # callback 签名: async (tool_name: str, tool_input: dict) -> None
@@ -381,7 +387,8 @@ class BotCore:
             result = await worker.send(content, on_event=on_progress,
                                        on_input_needed=on_input_needed,
                                        on_log=on_log,
-                                       on_step=_on_step)
+                                       on_step=_on_step,
+                                       on_text_chunk=on_text_chunk)
         except Exception:
             raise
         finally:

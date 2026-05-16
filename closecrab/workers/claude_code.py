@@ -602,6 +602,7 @@ class ClaudeCodeWorker(Worker):
         on_input_needed: Optional[Callable[[dict], Awaitable[Optional[str]]]] = None,
         on_log: Optional[Callable[[str], Awaitable[None]]] = None,
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
+        on_text_chunk: Optional[Callable[[str, str], Awaitable[None]]] = None,
         **_kwargs,  # 向后兼容（旧调用方可能传 on_stale_result）
     ) -> str:
         """发送消息并等待完整回复。
@@ -614,12 +615,18 @@ class ClaudeCodeWorker(Worker):
             on_event: 可选的异步回调，收到中间事件时调用 on_event(progress_text)
             on_input_needed: 可选的异步回调，检测到 ExitPlanMode/AskUserQuestion 时
                 调用 on_input_needed(event_info) -> 用户回复文本
+            on_text_chunk: 流式 text 回调。每次 assistant turn 出现新 text block 时
+                调 on_text_chunk(delta, accumulated_full)，让 channel 实时刷新卡片。
+                注意：CC stream-json 是 turn-level 流式，不是 token-level——每个 turn
+                的 text 一次性到达，整体效果是"段落级"打字机。
         """
         async with self._lock:
             if not self.is_alive():
                 await self._start_process()
 
             self._waiting = True
+            # 累积本次 send() 内所有 assistant turn 的 text，用于推 on_text_chunk
+            accumulated_reply_text = ""
             try:
                 msg = json.dumps({
                     "type": "user",
@@ -719,6 +726,26 @@ class ClaudeCodeWorker(Worker):
                                       "cache_creation_input_tokens",
                                       "cache_read_input_tokens"):
                                 self._usage[k] = msg_usage.get(k, 0)  # 取最新值（非累加）
+
+                        # 流式 text 累积：每个 assistant turn 把所有 text block 拼出来推给 channel
+                        # CC stream-json 是 turn-level 流式（每个 LLM turn 一次性到达），不是 token-level
+                        if on_text_chunk:
+                            turn_text_parts = []
+                            for block in d.get("message", {}).get("content", []):
+                                if block.get("type") == "text":
+                                    t_text = block.get("text", "")
+                                    if t_text:
+                                        turn_text_parts.append(t_text)
+                            if turn_text_parts:
+                                turn_text = "\n".join(turn_text_parts)
+                                accumulated_reply_text = (
+                                    accumulated_reply_text + "\n\n" + turn_text
+                                    if accumulated_reply_text else turn_text
+                                )
+                                try:
+                                    await on_text_chunk(turn_text, accumulated_reply_text)
+                                except Exception as e:
+                                    log.debug(f"on_text_chunk callback failed: {e}")
 
                     summary = self._summarize_event(d)
                     if summary:
