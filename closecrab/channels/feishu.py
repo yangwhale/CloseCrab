@@ -1231,6 +1231,35 @@ class FeishuChannel(Channel):
             self._loop,
         )
 
+    async def _resolve_chat_type(self, chat_id: str) -> str:
+        """查 chat_mode 区分 p2p vs group（飞书两者 chat_id 都是 oc_ 前缀）。
+
+        缓存在 self._chat_type_cache（永久 — chat_mode 不会变）。
+        失败时返回 "p2p"（保守默认，让消息能通过 group @bot 过滤）。
+        """
+        if not chat_id:
+            return "p2p"
+        if not hasattr(self, "_chat_type_cache"):
+            self._chat_type_cache = {}
+        if chat_id in self._chat_type_cache:
+            return self._chat_type_cache[chat_id]
+        try:
+            from lark_oapi.api.im.v1 import GetChatRequest
+            req = GetChatRequest.builder().chat_id(chat_id).build()
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                None, self._client.im.v1.chat.get, req
+            )
+            if resp.success() and resp.data and resp.data.chat_mode:
+                chat_type = "group" if resp.data.chat_mode == "group" else "p2p"
+            else:
+                chat_type = "p2p"
+        except Exception as e:
+            log.debug(f"chat.get failed for {chat_id}: {e}, defaulting to p2p")
+            chat_type = "p2p"
+        self._chat_type_cache[chat_id] = chat_type
+        return chat_type
+
     async def _handle_reaction_async(
         self, message_id: str, emoji_type: str, user_open_id: str
     ) -> None:
@@ -1257,14 +1286,15 @@ class FeishuChannel(Channel):
                 return
             original = resp.data.items[0]
             target_chat_id = original.chat_id
-            # SDK 的 Message 不返回 chat_type，按 chat_id 前缀推断（oc_=group, 否则 p2p）
-            target_chat_type = "group" if (target_chat_id or "").startswith("oc_") else "p2p"
             target_sender_id = (
                 original.sender.id if original.sender else None
             )
             target_sender_type = (
                 original.sender.sender_type if original.sender else None
             )
+            # SDK 的 Message 不返回 chat_type，飞书 p2p/group 的 chat_id 都是 oc_ 前缀，
+            # 必须调 chat.get 查 chat_mode 才能区分（缓存避免每次 reaction 都打 API）
+            target_chat_type = await self._resolve_chat_type(target_chat_id)
         except Exception as e:
             log.warning(f"reaction lookup failed for {message_id}: {e}")
             return
