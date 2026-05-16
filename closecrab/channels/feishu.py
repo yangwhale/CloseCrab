@@ -68,6 +68,10 @@ from .base import Channel
 from ..constants import G
 from ..core.types import UnifiedMessage
 from ..utils.stt import STTEngine
+from ..utils.text_chunking import chunk_text_for_outbound
+
+# 飞书纯文本消息长度上限（飞书 API 实际允许 ~30k，但 4000 与 OpenClaw 对齐，保留缓冲）
+FEISHU_TEXT_CHUNK_LIMIT = 4000
 
 if TYPE_CHECKING:
     from ..core.bot import BotCore
@@ -1033,17 +1037,8 @@ class FeishuChannel(Channel):
                 log.warning("Card send failed, fallback to plain text")
             # fallback: 去掉 markdown 格式标记后按纯文本分割发送（继续走下面的纯文本逻辑）
 
-        # 纯文本：分割发送
-        chunks = []
-        while content:
-            if len(content) <= 1990:
-                chunks.append(content)
-                break
-            split_at = content.rfind("\n", 0, 1990)
-            if split_at == -1:
-                split_at = 1990
-            chunks.append(content[:split_at])
-            content = content[split_at:].lstrip("\n")
+        # 纯文本：边界感知切分（优先换行 → 空格 → 硬切，与 OpenClaw 对齐）
+        chunks = chunk_text_for_outbound(content, FEISHU_TEXT_CHUNK_LIMIT)
         for i, chunk in enumerate(chunks):
             await self._async_send_text(chat_id, chunk)
             if i < len(chunks) - 1:
