@@ -156,38 +156,69 @@ def _ensure_gemini_api_key():
             pass
 
 
-def _generate_gemini_sdk(text: str, voice_name: str, api_key: str) -> bytes | None:
-    """Try generating audio via Python genai SDK. Returns raw PCM bytes or None."""
-    try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-tts-preview",
-            contents=text,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=voice_name,
-                        )
-                    )
-                ),
-            ),
-        )
-        part = response.candidates[0].content.parts[0]
-        if part.inline_data and part.inline_data.data:
-            data = part.inline_data.data
-            return base64.b64decode(data) if isinstance(data, str) else data
-    except Exception:
-        pass
+def _tts_config(voice_name: str):
+    from google.genai import types
+    return types.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+            )
+        ),
+    )
+
+
+def _extract_audio_bytes(response) -> bytes | None:
+    part = response.candidates[0].content.parts[0]
+    if part.inline_data and part.inline_data.data:
+        d = part.inline_data.data
+        return base64.b64decode(d) if isinstance(d, str) else d
     return None
 
 
+def _generate_gemini_sdk(text: str, voice_name: str, api_key: str) -> bytes | None:
+    """Generate via Gemini Developer API (generativelanguage.googleapis.com).
+    Fails with 400 FAILED_PRECONDITION in restricted regions (e.g. Hong Kong)."""
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        r = client.models.generate_content(
+            model="gemini-3.1-flash-tts-preview",
+            contents=text,
+            config=_tts_config(voice_name),
+        )
+        return _extract_audio_bytes(r)
+    except Exception as e:
+        print(f"[tts] gemini SDK (api-key) failed: {type(e).__name__}: {str(e)[:120]}",
+              file=sys.stderr)
+        return None
+
+
+def _generate_gemini_vertex(text: str, voice_name: str) -> bytes | None:
+    """Generate via Vertex AI (no region restriction, uses ADC + project)."""
+    project = (os.environ.get("GOOGLE_CLOUD_PROJECT")
+               or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+               or "")
+    if not project:
+        return None
+    try:
+        from google import genai
+        client = genai.Client(vertexai=True, project=project, location="global")
+        r = client.models.generate_content(
+            model="gemini-3.1-flash-tts-preview",
+            contents=text,
+            config=_tts_config(voice_name),
+        )
+        return _extract_audio_bytes(r)
+    except Exception as e:
+        print(f"[tts] gemini Vertex (project={project}) failed: "
+              f"{type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+        return None
+
+
 def _generate_gemini_curl(text: str, voice_name: str, api_key: str) -> bytes | None:
-    """Fallback: generate audio via curl REST API (bypasses ECP proxy)."""
-    import subprocess, json
+    """Last-resort fallback: curl REST API (bypasses gLinux ECP proxy)."""
+    import json
     payload = json.dumps({
         "contents": [{"parts": [{"text": text}]}],
         "generationConfig": {
@@ -202,39 +233,46 @@ def _generate_gemini_curl(text: str, voice_name: str, api_key: str) -> bytes | N
     try:
         result = subprocess.run(
             ["curl", "-s",
-             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent",
+             "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent",
              "-H", f"x-goog-api-key: {api_key}",
              "-H", "Content-Type: application/json",
              "-d", payload],
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
+            print(f"[tts] gemini curl failed: rc={result.returncode}", file=sys.stderr)
             return None
-        resp = json.loads(result.stdout)
+        import json as _j
+        resp = _j.loads(result.stdout)
+        if "error" in resp:
+            print(f"[tts] gemini curl API error: {str(resp['error'])[:120]}", file=sys.stderr)
+            return None
         b64_data = resp["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
         return base64.b64decode(b64_data)
-    except Exception:
+    except Exception as e:
+        print(f"[tts] gemini curl exception: {type(e).__name__}: {str(e)[:120]}",
+              file=sys.stderr)
         return None
 
 
 def generate_gemini(text: str, voice: str) -> str:
     """Generate OGG Opus audio via Gemini 3.1 Flash TTS.
-    Tries Python SDK first; falls back to curl if SDK returns text (ECP proxy issue).
-    """
-    _ensure_gemini_api_key()
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    Order: Vertex AI (ADC, primary) → Developer API (api key) → curl REST.
+    Vertex is preferred because generativelanguage.googleapis.com is region-restricted
+    in Hong Kong / mainland China (returns 400 FAILED_PRECONDITION)."""
     voice_name = GEMINI_VOICES.get(voice, voice.capitalize())
     prompt = _build_prompt(text)
 
-    # Try SDK first (works on VMs without ECP proxy)
-    data = _generate_gemini_sdk(prompt, voice_name, api_key)
-
-    # Fallback to curl REST API (bypasses gLinux ECP proxy)
+    data = _generate_gemini_vertex(prompt, voice_name)
     if data is None:
-        data = _generate_gemini_curl(prompt, voice_name, api_key)
+        _ensure_gemini_api_key()
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        data = _generate_gemini_sdk(prompt, voice_name, api_key)
+        if data is None:
+            data = _generate_gemini_curl(prompt, voice_name, api_key)
 
     if data is None:
-        raise RuntimeError("Gemini TTS failed via both SDK and curl")
+        raise RuntimeError("Gemini TTS failed via Vertex, SDK, and curl (see stderr above)")
 
     wav_path = tempfile.mktemp(suffix=".wav", prefix="tts-")
     _wav_write(wav_path, data)
