@@ -1257,7 +1257,8 @@ class FeishuChannel(Channel):
                 return
             original = resp.data.items[0]
             target_chat_id = original.chat_id
-            target_chat_type = original.chat_type
+            # SDK 的 Message 不返回 chat_type，按 chat_id 前缀推断（oc_=group, 否则 p2p）
+            target_chat_type = "group" if (target_chat_id or "").startswith("oc_") else "p2p"
             target_sender_id = (
                 original.sender.id if original.sender else None
             )
