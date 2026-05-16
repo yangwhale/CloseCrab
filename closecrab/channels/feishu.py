@@ -846,11 +846,24 @@ class FeishuChannel(Channel):
         await loop.run_in_executor(None, self._reply_text, message_id, text)
 
     _MD_PATTERN = re.compile(r'\*\*|`[^`]|~~|\[.+?\]\(.+?\)')
+    # 与 OpenClaw shouldUseCard 完全对齐：fenced 代码块 OR markdown 表格（含分隔行）
+    _CARD_REQUIRED_PATTERN = re.compile(
+        r'```[\s\S]*?```|\|.+\|[\r\n]+\|[-:| ]+\|'
+    )
 
     @staticmethod
     def _has_markdown(text: str) -> bool:
-        """检测文本是否包含 markdown 格式。"""
+        """检测文本是否包含 markdown 格式（粗体/inline code/删除线/链接）。"""
         return bool(FeishuChannel._MD_PATTERN.search(text))
+
+    @staticmethod
+    def _should_use_card(text: str) -> bool:
+        """更严格的 card 需求检测：fenced 代码块或 markdown 表格必须走 card，
+        否则纯文本发送会出现"一行乱码"（表格列对不齐、代码缩进丢失）。
+
+        镜像 OpenClaw extensions/feishu/src/outbound.ts:shouldUseCard。
+        """
+        return bool(FeishuChannel._CARD_REQUIRED_PATTERN.search(text))
 
     @staticmethod
     def _md_table_to_column_sets(table_lines: list[str]) -> list[dict]:
@@ -1024,7 +1037,8 @@ class FeishuChannel(Channel):
             return
 
         # markdown 内容用卡片发送，失败则 fallback 到纯文本
-        if self._has_markdown(content):
+        # 用 _has_markdown OR _should_use_card：前者捕粗体/inline/链接，后者捕表格/代码块
+        if self._has_markdown(content) or self._should_use_card(content):
             card = self._build_reply_card(content)
             card_json = json.dumps(card)
             if len(card_json) > 28000:
