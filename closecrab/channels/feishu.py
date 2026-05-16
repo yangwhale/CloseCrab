@@ -1168,14 +1168,17 @@ class FeishuChannel(Channel):
 
     # 用户 → bot 的语义映射（reaction 当作"快捷指令"）。未列出的 emoji 默认
     # 转一句"用户对消息 X 加了 emoji Y"，由 LLM 自行判断要不要响应。
+    # P3-2: reaction → 合成 prompt。
+    # 必须明确告诉模型这是用户表态信号，不是 yes/no 问题，不要回 "NO" / "是" 类单字答案。
+    # 早期版本写 "请理解为：批准" 导致非 Claude 模型（如 R1）误以为在问"是否批准"，回 NO。
     _REACTION_TO_TEXT = {
-        "THUMBSUP": "[用户给上一条消息点赞 👍，请理解为：批准，继续]",
-        "OK": "[用户给上一条消息点 OK 👌，请理解为：确认收到]",
-        "AGREE": "[用户给上一条消息点同意，请理解为：批准]",
-        "X": "[用户给上一条消息点 X ❌，请理解为：否决/取消]",
-        "NO_GOOD": "[用户给上一条消息点拒绝 🙅，请理解为：否决/取消]",
-        "QUESTION": "[用户给上一条消息加了问号 ❓，请理解为：希望解释一下]",
-        "THINKING": "[用户给上一条消息加了思考表情 🤔，请理解为：希望进一步分析]",
+        "THUMBSUP": "[系统通知] 用户给你上一条回复加了 👍 (THUMBSUP) 反应。语义：批准 / 满意 / 继续。请按这个信号继续工作；如果上一条回复在等用户决策，按"批准"路径走；如果只是闲聊回复，简短确认收到即可。不要把这条消息当成新问题，也不要回单字答案。",
+        "OK": "[系统通知] 用户给你上一条回复加了 👌 (OK) 反应。语义：确认收到。简短回应即可，不要展开。不要把这条消息当成新问题。",
+        "AGREE": "[系统通知] 用户给你上一条回复加了同意反应。语义：批准 / 同意。按"批准"路径继续；不要把这条消息当成新问题。",
+        "X": "[系统通知] 用户给你上一条回复加了 ❌ (X) 反应。语义：否决 / 取消刚才的提议。请撤回或停止刚才的操作，简短致歉确认。不要把这条消息当成新问题。",
+        "NO_GOOD": "[系统通知] 用户给你上一条回复加了 🙅 (NO_GOOD) 反应。语义：否决 / 不要这样做。请停止刚才的操作，简短致歉确认。不要把这条消息当成新问题。",
+        "QUESTION": "[系统通知] 用户给你上一条回复加了 ❓ (QUESTION) 反应。语义：希望你进一步解释上一条回复的内容。请详细说明。不要把这条消息当成 yes/no 问题。",
+        "THINKING": "[系统通知] 用户给你上一条回复加了 🤔 (THINKING) 反应。语义：希望进一步分析或深入思考刚才的话题。请展开分析。不要把这条消息当成 yes/no 问题。",
     }
 
     def _on_reaction_event(self, data: P2ImMessageReactionCreatedV1) -> None:
@@ -1317,7 +1320,9 @@ class FeishuChannel(Channel):
         # 语义映射：未识别的 emoji 用通用模板
         synthetic_text = self._REACTION_TO_TEXT.get(
             emoji_type,
-            f"[用户对上一条消息加了 emoji {emoji_type}，请判断是否需要回应]",
+            f"[系统通知] 用户给你上一条回复加了 {emoji_type} emoji 反应。"
+            f"这是用户的表态信号，不是新问题。如果上一条回复在等用户决策，"
+            f"按这个 emoji 的语义推断意图；否则简短确认收到即可。不要回单字答案。",
         )
 
         # 构造伪 P2ImMessageReceiveV1，最小字段，复用 _handle_message_async
@@ -2475,8 +2480,10 @@ class FeishuChannel(Channel):
 
             # P1-3: 给原消息加 👀 表示"看到了在处理"，处理完替换为 ✅
             # 失败 graceful（API 限流/无权限不影响主流程）
+            # P3-2 修复: reaction 合成消息的 fake message_id 不是真飞书 ID（含 :reaction: 标记），
+            #          飞书 API 会返回 99992354 拒绝；跳过 ack 避免污染日志
             _reaction_id: list = [None]
-            if message_id:
+            if message_id and ":reaction:" not in message_id:
                 async def _ack_reaction():
                     _reaction_id[0] = await self._async_add_reaction(message_id, "EYES")
                 asyncio.create_task(_ack_reaction())
@@ -2495,7 +2502,7 @@ class FeishuChannel(Channel):
                     pass
 
             # P1-3: 替换 👀 为 ✅ 表示完成
-            if message_id and _reaction_id[0]:
+            if message_id and _reaction_id[0] and ":reaction:" not in message_id:
                 async def _done_reaction(rid=_reaction_id[0]):
                     await self._async_remove_reaction(message_id, rid)
                     await self._async_add_reaction(message_id, "DONE")
