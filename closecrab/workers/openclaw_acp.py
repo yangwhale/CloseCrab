@@ -209,6 +209,13 @@ class OpenClawWorker(Worker):
         }
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
         self._session_resumed = False
+        # Tracks the default sessionKey passed via `--session` (if any). When
+        # set, every newSession/loadSession on this ACP process resolves to
+        # this shared key and we must NOT override it with `_meta.sessionKey`.
+        # When unset, we must pass `_meta.sessionKey` on loadSession to work
+        # around an asymmetric fallback in OpenClaw's ACP server (see
+        # `_try_load_session`).
+        self._cli_default_session_key: Optional[str] = None
         self._needs_compaction = False
         self._compaction_count = 0
         self._last_compaction_ts: Optional[float] = None
@@ -258,12 +265,15 @@ class OpenClawWorker(Worker):
         # Per-bot agent routing: if bot has a non-default model,
         # use a bot-specific session key so Gateway routes to the
         # per-agent config in agents.list (with its own model).
+        self._cli_default_session_key = None
         if self._bot_name and self._model:
             gateway_default = self._read_gateway_default_model()
             if gateway_default and self._model != gateway_default:
                 agent_id = self._bot_name
-                cmd.extend(["--session", f"agent:{agent_id}:main"])
-                log.info(f"ACP session key: agent:{agent_id}:main (model: {self._model})")
+                shared_key = f"agent:{agent_id}:main"
+                cmd.extend(["--session", shared_key])
+                self._cli_default_session_key = shared_key
+                log.info(f"ACP session key: {shared_key} (model: {self._model})")
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         if self._gcp_project:
@@ -370,13 +380,31 @@ class OpenClawWorker(Worker):
             return ""
 
     async def _try_load_session(self, target_id: str) -> bool:
-        """Try to load an existing session via session/load."""
+        """Try to load an existing session via session/load.
+
+        NOTE: OpenClaw ACP server's loadSession falls back to `params.sessionId`
+        as the sessionKey (bare UUID), while newSession falls back to
+        `acp:${sessionId}` (with prefix). When `--session` is not passed on
+        the CLI, this asymmetry means a restart lands on a different (empty)
+        session key and silently creates a blank session instead of replaying
+        the original transcript. We work around it by explicitly setting
+        `_meta.sessionKey` to the fully-qualified key that newSession would
+        have produced.
+
+        When `--session` IS passed (non-default-model bots), the CLI's
+        `defaultSessionKey` already pins both newSession and loadSession to
+        the same shared key, so we must NOT override it.
+        """
         log.info(f"Attempting session/load: {target_id}")
         load_params: dict = {
             "cwd": self._workspace_dir,
             "mcpServers": [],
             "sessionId": target_id,
         }
+        if not self._cli_default_session_key and self._bot_name:
+            load_params["_meta"] = {
+                "sessionKey": f"agent:{self._bot_name}:acp:{target_id}",
+            }
         resp = await self._rpc("session/load", load_params, timeout=60)
         if resp and "error" not in resp:
             result = resp.get("result", {})
