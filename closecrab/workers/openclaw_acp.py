@@ -778,9 +778,16 @@ class OpenClawWorker(Worker):
         on_input_needed: Optional[Callable[[dict], Awaitable[Optional[str]]]] = None,
         on_log: Optional[Callable[[str], Awaitable[None]]] = None,
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
+        on_text_chunk: Optional[Callable[[str, str], Awaitable[None]]] = None,
         **_kwargs,
     ) -> str:
-        """Send a prompt via ACP and stream the response."""
+        """Send a prompt via ACP and stream the response.
+
+        Args:
+            on_text_chunk: 流式回复回调。每个 agent_message_chunk 到达时调用
+                on_text_chunk(delta, accumulated_full)。ACP 协议是 token-level
+                流式（比 CC 的 turn-level 更细），channel 可以实现"真打字机"效果。
+        """
         async with self._lock:
             if not self._started:
                 await self.start()
@@ -1063,6 +1070,7 @@ class OpenClawWorker(Worker):
                             on_step=on_step,
                             step_buffer=step_buffer,
                             flush_step_buffer=flush_step_buffer,
+                            on_text_chunk=on_text_chunk,
                         )
                         if is_subagent is not None:
                             if is_subagent and not subagent_active:
@@ -1223,6 +1231,7 @@ class OpenClawWorker(Worker):
                 await self._handle_notification(
                     rmsg, retry_text,
                     on_event=on_event, on_log=on_log, on_step=on_step,
+                    on_text_chunk=on_text_chunk,
                 )
                 continue
             if "id" in rmsg and rmsg.get("id") != retry_id:
@@ -1270,6 +1279,7 @@ class OpenClawWorker(Worker):
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
         step_buffer: Optional[list] = None,
         flush_step_buffer: Optional[Callable[[], Awaitable[None]]] = None,
+        on_text_chunk: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ) -> Optional[bool]:
         """Process a session/update notification from the ACP agent.
 
@@ -1301,6 +1311,17 @@ class OpenClawWorker(Worker):
                     f"CHUNK_RAW type={update_type} len={len(text)}"
                 )
                 accumulated_text.append(text)
+                # 流式 text 推送给 channel：每个 chunk fire 一次 on_text_chunk(delta, full)。
+                # ACP 协议是 token-level 流式，full 就是 accumulated_text 拼接。
+                # channel 端只写缓冲区，由 card_update_loop 按 throttle 统一刷飞书 API，
+                # 所以即便每秒几十个 chunk，PatchCard QPS 也不会被打爆。
+                # 直接 inline 调用（_safe_callback 只支持单 arg，流式签名有 2 个）。
+                if on_text_chunk:
+                    full_so_far = "".join(accumulated_text)
+                    try:
+                        await on_text_chunk(text, full_so_far)
+                    except Exception as e:
+                        log.debug(f"on_text_chunk callback failed: {e}")
                 # on_event keeps per-chunk for typewriter-style progress.
                 if on_event:
                     preview = text[:80].replace("\n", " ")
