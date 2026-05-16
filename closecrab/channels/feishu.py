@@ -696,6 +696,15 @@ class FeishuChannel(Channel):
             self._on_reaction_event
         )
 
+        # P3-5: bot menu（左下角"+"菜单按钮）→ 合成命令
+        # 飞书 app 后台「机器人能力 → 自定义菜单」配置菜单项，event_key 决定动作
+        try:
+            handler_builder.register_p2_application_bot_menu_v6(
+                self._on_bot_menu_clicked
+            )
+        except Exception as e:
+            log.debug(f"bot_menu_v6 register failed (SDK 旧版本忽略): {e}")
+
         event_handler = handler_builder.build()
 
         self._ws_client = lark_ws.Client(
@@ -1375,6 +1384,108 @@ class FeishuChannel(Channel):
             return
 
         await self._handle_message_async(synthetic_event)
+
+    def _on_bot_menu_clicked(self, data) -> None:
+        """P3-5: bot 自定义菜单点击事件回调（SDK 线程）。
+
+        飞书 app 后台「机器人能力 → 自定义菜单」配置 event_key。
+        约定：event_key 为 _TEXT_COMMANDS 里的命令名（带 / 或不带均可），
+        如 `/restart` `restart` `voice`。未知 key 当普通文本输入处理。
+
+        飞书 menu 事件不带 chat_id，需要从 _user_chats 反查用户最近活跃 chat。
+        """
+        if self._loop is None:
+            log.warning("bot menu event but loop not ready, dropping")
+            return
+        try:
+            evt = data.event
+            if not evt:
+                return
+            operator = evt.operator
+            user_open_id = ""
+            if operator:
+                op_id = getattr(operator, "operator_id", None) or getattr(operator, "id", None)
+                if op_id:
+                    user_open_id = getattr(op_id, "open_id", "") or ""
+                if not user_open_id:
+                    user_open_id = getattr(operator, "open_id", "") or ""
+            event_key = (evt.event_key or "").strip()
+            log.info(f"BOT_MENU click: user={user_open_id} key={event_key!r}")
+            if not user_open_id or not event_key:
+                log.debug("bot menu event missing operator open_id or event_key, ignored")
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._handle_bot_menu_async(user_open_id, event_key),
+                self._loop,
+            )
+        except Exception as e:
+            log.error(f"_on_bot_menu_clicked failed: {e}", exc_info=True)
+
+    async def _handle_bot_menu_async(self, user_open_id: str, event_key: str) -> None:
+        """处理 bot menu 点击：鉴权 → 找 chat → 转为文本命令或合成消息。"""
+        # 鉴权
+        if self._allowed_open_ids and user_open_id not in self._allowed_open_ids:
+            log.warning(f"BOT_MENU unauthorized: {user_open_id}")
+            return
+
+        # 找用户最近活跃 chat
+        chat_id = self._user_chats.get(user_open_id)
+        if not chat_id:
+            log.warning(
+                f"BOT_MENU dropped: no known chat for user {user_open_id} "
+                f"(用户从未跟 bot 私聊过)"
+            )
+            return
+
+        # 命令规范化：event_key=restart / Restart / /restart → /restart
+        normalized = event_key.lower().strip()
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+
+        if normalized in _TEXT_COMMANDS:
+            log.info(f"BOT_MENU dispatch as text command: {normalized}")
+            # _handle_text_command 需要 message_id 用于 reply；这里没有原消息，传空
+            await self._handle_text_command(normalized, user_open_id, chat_id, "")
+            return
+
+        # 未知 event_key → 当作普通文本消息合成 inbound 走正常流程
+        log.info(f"BOT_MENU unknown event_key {event_key!r}, treating as text input")
+        synthetic_id = f"botmenu:{event_key}:{int(asyncio.get_running_loop().time()*1000)}"
+        # chat_type 用 chat.get 查（与 reaction 一致）
+        chat_type = await self._resolve_chat_type(chat_id)
+        fake_data = {
+            "schema": "2.0",
+            "header": {
+                "event_id": synthetic_id,
+                "event_type": "im.message.receive_v1",
+                "create_time": "0",
+                "token": "",
+                "app_id": self._app_id,
+                "tenant_key": "",
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {"open_id": user_open_id},
+                    "sender_type": "user",
+                    "tenant_key": "",
+                },
+                "message": {
+                    "message_id": synthetic_id,
+                    "create_time": "0",
+                    "chat_id": chat_id,
+                    "chat_type": chat_type or "p2p",
+                    "message_type": "text",
+                    "content": json.dumps({"text": event_key}),
+                    "mentions": [],
+                },
+            },
+        }
+        try:
+            synthetic_event = P2ImMessageReceiveV1(fake_data)
+            # 菜单触发不走 debouncer（用户点击是明确意图）
+            await self._handle_message_async(synthetic_event)
+        except Exception as e:
+            log.warning(f"BOT_MENU synthetic event construct failed: {e}")
 
     def _on_message_event(self, data: P2ImMessageReceiveV1) -> None:
         """WebSocket 消息事件回调（在 SDK 线程中执行）。
