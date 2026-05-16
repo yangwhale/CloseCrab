@@ -59,6 +59,9 @@ from lark_oapi.api.im.v1 import (
     PatchMessageRequestBody,
 )
 from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiveV1
+from lark_oapi.api.im.v1.model.p2_im_message_reaction_created_v1 import (
+    P2ImMessageReactionCreatedV1,
+)
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTrigger,
     P2CardActionTriggerResponse,
@@ -677,6 +680,11 @@ class FeishuChannel(Channel):
         # 注册卡片回调
         handler_builder.register_p2_card_action_trigger(self._on_card_action)
 
+        # P3-2: reaction → 合成 inbound（用户给 bot 消息加 emoji 当作一次输入）
+        handler_builder.register_p2_im_message_reaction_created_v1(
+            self._on_reaction_event
+        )
+
         event_handler = handler_builder.build()
 
         self._ws_client = lark_ws.Client(
@@ -1152,6 +1160,165 @@ class FeishuChannel(Channel):
                 await asyncio.sleep(0.3)
 
     # ── 消息接收事件处理 ──
+
+    # P3-2: 我们自己用 EYES/DONE 做 ack（P1-3），听到这两个 emoji 必须忽略，
+    # 否则 bot 给自己加 reaction → 触发 reaction event → bot 觉得有人 react →
+    # 又 ack 一次 EYES → 死循环。
+    _OWN_ACK_EMOJI_TYPES = {"EYES", "DONE"}
+
+    # 用户 → bot 的语义映射（reaction 当作"快捷指令"）。未列出的 emoji 默认
+    # 转一句"用户对消息 X 加了 emoji Y"，由 LLM 自行判断要不要响应。
+    _REACTION_TO_TEXT = {
+        "THUMBSUP": "[用户给上一条消息点赞 👍，请理解为：批准，继续]",
+        "OK": "[用户给上一条消息点 OK 👌，请理解为：确认收到]",
+        "AGREE": "[用户给上一条消息点同意，请理解为：批准]",
+        "X": "[用户给上一条消息点 X ❌，请理解为：否决/取消]",
+        "NO_GOOD": "[用户给上一条消息点拒绝 🙅，请理解为：否决/取消]",
+        "QUESTION": "[用户给上一条消息加了问号 ❓，请理解为：希望解释一下]",
+        "THINKING": "[用户给上一条消息加了思考表情 🤔，请理解为：希望进一步分析]",
+    }
+
+    def _on_reaction_event(self, data: P2ImMessageReactionCreatedV1) -> None:
+        """SDK 线程入口：reaction 事件 → 合成消息事件 → 进 BotCore。
+
+        镜像 OpenClaw extensions/feishu/src/monitor.account.ts:resolveReactionSyntheticEvent。
+        过滤逻辑保留与 OpenClaw 一致：app/operator_type=app/自反应/ack emoji 一律忽略。
+        """
+        if self._loop is None:
+            log.warning("reaction event but loop not ready, dropping")
+            return
+        try:
+            evt = data.event
+            if not evt:
+                return
+            emoji_type = evt.reaction_type.emoji_type if evt.reaction_type else None
+            message_id = evt.message_id
+            user_open_id = evt.user_id.open_id if evt.user_id else None
+            operator_type = evt.operator_type
+            app_id = evt.app_id
+        except Exception as e:
+            log.warning(f"reaction event parse failed: {e}")
+            return
+
+        if not emoji_type or not message_id or not user_open_id:
+            log.debug(f"reaction event missing required fields, ignored")
+            return
+
+        # 自反应：bot 自己加的 EYES/DONE 也会触发此回调，必须丢弃
+        if operator_type == "app":
+            return
+        if user_open_id == self._bot_open_id:
+            return
+        if app_id and self._app_id and app_id == self._app_id:
+            return
+        if emoji_type in self._OWN_ACK_EMOJI_TYPES:
+            return
+
+        log.info(
+            f"REACTION: user={user_open_id} emoji={emoji_type} target_msg={message_id}"
+        )
+        asyncio.run_coroutine_threadsafe(
+            self._handle_reaction_async(message_id, emoji_type, user_open_id),
+            self._loop,
+        )
+
+    async def _handle_reaction_async(
+        self, message_id: str, emoji_type: str, user_open_id: str
+    ) -> None:
+        """异步：reaction → lookup 原消息拿 chat_id → 合成 P2ImMessageReceiveV1 → 路由。
+
+        约束（与 OpenClaw 对齐）：只对 bot 自己发出的消息上的 reaction 响应，避免
+        群聊里别人互相 reaction 触发 bot。
+        """
+        # 鉴权：reactor 必须在白名单
+        if self._allowed_open_ids and user_open_id not in self._allowed_open_ids:
+            log.info(f"reaction from unauthorized {user_open_id}, ignored")
+            return
+
+        # 查原消息（取 chat_id + 验证是否 bot 自己的消息）
+        try:
+            from lark_oapi.api.im.v1 import GetMessageRequest
+            req = GetMessageRequest.builder().message_id(message_id).build()
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                None, self._client.im.v1.message.get, req
+            )
+            if not resp.success() or not resp.data or not resp.data.items:
+                log.info(f"reaction target {message_id} not found, ignored")
+                return
+            original = resp.data.items[0]
+            target_chat_id = original.chat_id
+            target_chat_type = original.chat_type
+            target_sender_id = (
+                original.sender.id if original.sender else None
+            )
+            target_sender_type = (
+                original.sender.sender_type if original.sender else None
+            )
+        except Exception as e:
+            log.warning(f"reaction lookup failed for {message_id}: {e}")
+            return
+
+        # 安全边界：只对 bot 发出的消息响应（避免群里别人间互相 reaction 触发 bot）
+        is_bot_msg = (
+            target_sender_type == "app"
+            or target_sender_id == self._bot_open_id
+        )
+        if not is_bot_msg:
+            log.info(
+                f"reaction on non-bot message {message_id} (sender={target_sender_id}), ignored"
+            )
+            return
+
+        if not target_chat_id:
+            log.info(f"reaction target {message_id} missing chat_id, ignored")
+            return
+
+        # 语义映射：未识别的 emoji 用通用模板
+        synthetic_text = self._REACTION_TO_TEXT.get(
+            emoji_type,
+            f"[用户对上一条消息加了 emoji {emoji_type}，请判断是否需要回应]",
+        )
+
+        # 构造伪 P2ImMessageReceiveV1，最小字段，复用 _handle_message_async
+        synthetic_id = f"{message_id}:reaction:{emoji_type}:{int(asyncio.get_running_loop().time()*1000)}"
+        fake_data = {
+            "schema": "2.0",
+            "header": {
+                "event_id": synthetic_id,
+                "event_type": "im.message.receive_v1",
+                "create_time": "0",
+                "token": "",
+                "app_id": self._app_id,
+                "tenant_key": "",
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {"open_id": user_open_id},
+                    "sender_type": "user",
+                    "tenant_key": "",
+                },
+                "message": {
+                    "message_id": synthetic_id,
+                    "root_id": message_id,
+                    "parent_id": message_id,
+                    "create_time": "0",
+                    "chat_id": target_chat_id,
+                    "chat_type": target_chat_type or "p2p",
+                    "message_type": "text",
+                    "content": json.dumps({"text": synthetic_text}),
+                    "mentions": [],
+                },
+            },
+        }
+        # 用 SDK 的反序列化器将 dict → P2ImMessageReceiveV1
+        try:
+            synthetic_event = P2ImMessageReceiveV1(fake_data)
+        except Exception as e:
+            log.warning(f"reaction synthetic event construct failed: {e}")
+            return
+
+        await self._handle_message_async(synthetic_event)
 
     def _on_message_event(self, data: P2ImMessageReceiveV1) -> None:
         """WebSocket 消息事件回调（在 SDK 线程中执行）。
