@@ -1218,9 +1218,18 @@ class OpenClawWorker(Worker):
                 f"kind={tool_kind} title={tool_title[:80]}"
             )
 
+            # OpenClaw spawns child agents via the `sessions_spawn` tool,
+            # which renders in the ACP UI with title "Sessions". The legacy
+            # keywords "delegat"/"subagent" don't match it, so subagent_active
+            # stayed False and send() let its deadline lapse during the child
+            # run. Match both the function name and the rendered title.
+            tool_name = (update.get("name") or "").lower()
+            title_lower = tool_title.lower()
             is_delegation = (
-                "delegat" in tool_title.lower()
-                or "subagent" in tool_title.lower()
+                "delegat" in title_lower
+                or "subagent" in title_lower
+                or "sessions" in title_lower
+                or tool_name == "sessions_spawn"
             )
             if is_delegation:
                 if tool_status in ("in_progress", "running", "started"):
