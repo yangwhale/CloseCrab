@@ -39,18 +39,19 @@
         "id": "xiaoaitongxue",
         "name": "xiaoaitongxue",
         "model": {
-          "primary": "google/gemini-3.1-pro-preview",
+          "primary": "anthropic-vertex/claude-opus-4-7",
           "fallbacks": [
-            "anthropic-vertex/claude-opus-4-7",
-            "anthropic-vertex/claude-opus-4-6"
+            "anthropic-vertex/claude-opus-4-6",
+            "anthropic-vertex/claude-sonnet-4-6",
+            "google/gemini-2.5-flash"
           ]
         },
         "subagents": {
           "model": {
-            "primary": "google/gemini-3.1-pro-preview",
+            "primary": "anthropic-vertex/claude-opus-4-6",
             "fallbacks": [
-              "anthropic-vertex/claude-opus-4-6",
-              "anthropic-vertex/claude-sonnet-4-6"
+              "anthropic-vertex/claude-sonnet-4-6",
+              "google/gemini-2.5-flash"
             ]
           }
         }
