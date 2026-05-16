@@ -3712,13 +3712,23 @@ class FeishuChannel(Channel):
                 "text": {"tag": "lark_md", "content": f"💬 **实时回复**\n\n{preview}"},
             })
 
-        # 底部状态栏：耗时 · 上下文 · 轮次 · Worker · Model
+        # 底部状态栏：耗时 · 上下文 · cache · 成本 · 轮次 · Worker · Model
         elements.append({"tag": "hr"})
         time_str = f"{elapsed:.0f}s" if elapsed >= 1 else "刚开始"
         wt = u.get("worker_type", "")
         w_label = {"claude": "CC", "openclaw": "OC", "kilo": "KL", "gemini": "GM"}.get(wt, wt[:2].upper() if wt else "?")
-        m_label = _shorten_model_name(u.get("backbone_model", ""))
-        parts = [f"⏱ {time_str}", f"📊 ctx {ctx_pct:.0f}%", f"🔄 T{turns}"]
+        # 优先用 sessions.json 里的真实 model（OpenClaw 路径），fallback backbone_model
+        m_label = _shorten_model_name(u.get("session_model") or u.get("backbone_model", ""))
+        parts = [f"⏱ {time_str}", f"📊 ctx {ctx_pct:.0f}%"]
+        # Cache hit rate — 只在 OpenClaw 提供时显示
+        hit_rate = u.get("cache_hit_rate", 0)
+        if hit_rate > 0:
+            parts.append(f"💾 hit {hit_rate:.0f}%")
+        # Cost — OpenClaw sessions.json 提供
+        cost = u.get("session_cost_usd", 0)
+        if cost > 0:
+            parts.append(f"💰 ${cost:.3f}")
+        parts.append(f"🔄 T{turns}")
         if w_label:
             parts.append(f"👷 {w_label}")
         if m_label:

@@ -1876,24 +1876,114 @@ class OpenClawWorker(Worker):
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
+    def _read_session_usage_from_file(self) -> Optional[dict]:
+        """绕过 ACP bridge，直接读 OpenClaw sessions.json 拿全套字段。
+
+        ACP usage_update 事件只透传 used/size。但 OpenClaw Gateway 在磁盘
+        sessions.json 里持久化了 totalTokens/inputTokens/outputTokens/
+        cacheRead/cacheWrite/estimatedCostUsd/model/modelProvider/
+        compactionCount 等全套字段。
+
+        路径：~/.openclaw/agents/{agent_id}/sessions/sessions.json
+        agent_id = bot_name (per-bot model 时) 或 main (默认 model 时)
+        """
+        if not self._session_id or not self._bot_name:
+            return None
+
+        # _cli_default_session_key 是 per-bot 路由信号
+        agent_id = self._bot_name if self._cli_default_session_key else "main"
+        sessions_path = (
+            Path.home()
+            / ".openclaw"
+            / "agents"
+            / agent_id
+            / "sessions"
+            / "sessions.json"
+        )
+        if not sessions_path.exists():
+            # Per-bot agent 文件不存在则 fallback main
+            if agent_id != "main":
+                sessions_path = (
+                    Path.home()
+                    / ".openclaw"
+                    / "agents"
+                    / "main"
+                    / "sessions"
+                    / "sessions.json"
+                )
+                if not sessions_path.exists():
+                    return None
+            else:
+                return None
+
+        try:
+            with sessions_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug(f"sessions.json read failed: {e}")
+            return None
+
+        # 找匹配的 entry — key 形如 agent:{agent_id}:acp:{session_id}
+        target_suffix = f":acp:{self._session_id}"
+        entry = None
+        for k, v in data.items():
+            if isinstance(k, str) and k.endswith(target_suffix) and isinstance(v, dict):
+                entry = v
+                break
+        if not entry:
+            return None
+
+        result = {}
+        for src, dst in [
+            ("totalTokens", "session_total_tokens"),
+            ("contextTokens", "session_context_window"),
+            ("inputTokens", "session_input_tokens"),
+            ("outputTokens", "session_output_tokens"),
+            ("cacheRead", "session_cache_read"),
+            ("cacheWrite", "session_cache_write"),
+            ("estimatedCostUsd", "session_cost_usd"),
+            ("model", "session_model"),
+            ("modelProvider", "session_model_provider"),
+            ("compactionCount", "session_compaction_count"),
+            ("totalTokensFresh", "session_tokens_fresh"),
+        ]:
+            if src in entry:
+                result[dst] = entry[src]
+        return result
+
     def get_context_usage(self) -> dict:
         u = self._usage.copy()
-        # OpenClaw ACP usage_update 提供的 live used/size 是权威值，优先使用。
-        # 回退到 input + cache_* 的 sum，针对 Gateway 偶尔通过 _meta.quota.token_count 透传的场景。
-        live_used = u.get("context_used_live")
-        live_window = u.get("context_window_live")
-        if isinstance(live_used, int) and live_used > 0:
-            total_ctx = live_used
+        # 1) 优先读 sessions.json（最全：cache/cost/model 全有）
+        file_usage = self._read_session_usage_from_file()
+        if file_usage:
+            u.update(file_usage)
+            total_ctx = file_usage.get("session_total_tokens") or 0
+            window = file_usage.get("session_context_window") or 1_000_000
         else:
-            total_ctx = (
-                u["input_tokens"]
-                + u["cache_creation_input_tokens"]
-                + u["cache_read_input_tokens"]
-            )
-        window = live_window if isinstance(live_window, int) and live_window > 0 else 1_000_000
+            # 2) 回退到 ACP usage_update live 值
+            live_used = u.get("context_used_live")
+            live_window = u.get("context_window_live")
+            if isinstance(live_used, int) and live_used > 0:
+                total_ctx = live_used
+            else:
+                # 3) 最后回退到 _meta.quota.token_count（很少有）
+                total_ctx = (
+                    u["input_tokens"]
+                    + u["cache_creation_input_tokens"]
+                    + u["cache_read_input_tokens"]
+                )
+            window = live_window if isinstance(live_window, int) and live_window > 0 else 1_000_000
         u["total_context_tokens"] = total_ctx
         u["context_window"] = window
         u["usage_pct"] = round(total_ctx / window * 100, 1) if total_ctx else 0
+        # Cache hit rate (只在 sessions.json 提供 cache* 字段时有意义)
+        cache_read = u.get("session_cache_read", 0)
+        cache_write = u.get("session_cache_write", 0)
+        input_t = u.get("session_input_tokens", 0)
+        cache_denom = cache_read + cache_write + input_t
+        u["cache_hit_rate"] = (
+            round(cache_read / cache_denom * 100, 1) if cache_denom > 0 else 0
+        )
         if self._start_time is not None:
             u["session_duration_s"] = int(time.monotonic() - self._start_time)
         else:
