@@ -1884,51 +1884,34 @@ class OpenClawWorker(Worker):
         cacheRead/cacheWrite/estimatedCostUsd/model/modelProvider/
         compactionCount 等全套字段。
 
-        路径：~/.openclaw/agents/{agent_id}/sessions/sessions.json
-        agent_id = bot_name (per-bot model 时) 或 main (默认 model 时)
+        OpenClaw 的 agent 路由由 Gateway 决定，bot_name 不一定对应同名 agent
+        目录（实测 tiemu 的 session 写在 xiaoaitongxue agent 里）。因此扫描所有
+        ~/.openclaw/agents/*/sessions/sessions.json 找 sessionKey 后缀匹配的 entry。
         """
-        if not self._session_id or not self._bot_name:
+        if not self._session_id:
             return None
 
-        # _cli_default_session_key 是 per-bot 路由信号
-        agent_id = self._bot_name if self._cli_default_session_key else "main"
-        sessions_path = (
-            Path.home()
-            / ".openclaw"
-            / "agents"
-            / agent_id
-            / "sessions"
-            / "sessions.json"
-        )
-        if not sessions_path.exists():
-            # Per-bot agent 文件不存在则 fallback main
-            if agent_id != "main":
-                sessions_path = (
-                    Path.home()
-                    / ".openclaw"
-                    / "agents"
-                    / "main"
-                    / "sessions"
-                    / "sessions.json"
-                )
-                if not sessions_path.exists():
-                    return None
-            else:
-                return None
-
-        try:
-            with sessions_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log.debug(f"sessions.json read failed: {e}")
+        agents_root = Path.home() / ".openclaw" / "agents"
+        if not agents_root.is_dir():
             return None
 
-        # 找匹配的 entry — key 形如 agent:{agent_id}:acp:{session_id}
         target_suffix = f":acp:{self._session_id}"
         entry = None
-        for k, v in data.items():
-            if isinstance(k, str) and k.endswith(target_suffix) and isinstance(v, dict):
-                entry = v
+        for agent_dir in agents_root.iterdir():
+            sessions_path = agent_dir / "sessions" / "sessions.json"
+            if not sessions_path.exists():
+                continue
+            try:
+                with sessions_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                log.debug(f"sessions.json read failed ({sessions_path}): {e}")
+                continue
+            for k, v in data.items():
+                if isinstance(k, str) and k.endswith(target_suffix) and isinstance(v, dict):
+                    entry = v
+                    break
+            if entry:
                 break
         if not entry:
             return None
