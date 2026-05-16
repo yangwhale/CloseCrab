@@ -193,6 +193,13 @@ class KiloWorker(Worker):
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
         self._tool_states: dict[str, str] = {}  # callID → last emitted status
         self._last_activity: float = 0.0  # monotonic timestamp of last SSE event
+        # Text part buffers: partID → {"content": str, "flushed": bool}.
+        # Kilo SSE streams text via `message.part.delta` (incremental field=text)
+        # then a final `message.part.updated` with the full content. We accumulate
+        # deltas defensively so we can flush the buffer on session.turn.close
+        # even if the final part.updated never arrives (multi-step turns where
+        # the model jumps straight from text to next tool call).
+        self._text_buffers: dict[str, dict] = {}
 
     # ── Properties ────────────────────────────────────────────────
 
@@ -540,6 +547,8 @@ class KiloWorker(Worker):
         if etype == "message.part.updated":
             log.debug("SSE part.updated: %s", json.dumps(props, default=str)[:300])
             await self._on_part_updated(props)
+        elif etype == "message.part.delta":
+            await self._on_part_delta(props)
         elif etype == "message.updated":
             await self._on_message_updated(props)
         elif etype == "permission.asked":
@@ -559,6 +568,7 @@ class KiloWorker(Worker):
             reason = props.get("reason", "")
             if reason == "error" and not self._turn_error:
                 self._turn_error = "Turn closed with error"
+            await self._flush_text_buffers()
             self._turn_event.set()
         elif etype == "session.compacted":
             log.info("Session %s context compacted", event_session or self._session_id)
@@ -622,6 +632,16 @@ class KiloWorker(Worker):
 
         if ptype == "text":
             text = part.get("content") or part.get("text", "")
+            part_id = part.get("id", "")
+            # Mark the buffer as flushed: the final part.updated carries the
+            # full content and has already fed into on_step via the
+            # _translate_to_cc_event call above. If we leave the buffer in
+            # an unflushed state, turn.close would re-emit the same text.
+            if part_id and text:
+                buf = self._text_buffers.get(part_id)
+                if buf is not None:
+                    buf["content"] = text
+                    buf["flushed"] = True
             if text:
                 on_event = self._callbacks.get("on_event")
                 if on_event:
@@ -675,6 +695,70 @@ class KiloWorker(Worker):
             cost = part.get("cost", 0)
             if cost and not self._usage.get("_cost_from_post"):
                 self._usage["cost_usd"] += float(cost)
+
+    async def _on_part_delta(self, props: dict):
+        """Accumulate streaming text deltas into per-partID buffers.
+
+        Kilo splits long assistant replies into:
+          1. `message.part.updated` text="" (empty placeholder)
+          2. N × `message.part.delta` field=text delta=<chunk>
+          3. `message.part.updated` text=<full> (final, with time.end)
+
+        Step 3 is what the existing on_step path keys off (`if text:`). We
+        buffer step 2 so that if step 3 is dropped (early turn.close, abort,
+        next tool call preempts), `_flush_text_buffers` still rescues the
+        text into a step. Also pings `on_event("thinking")` so the channel
+        animation reflects ongoing generation.
+        """
+        part_id = props.get("partID", "")
+        field = props.get("field", "")
+        delta = props.get("delta", "")
+        if field != "text" or not part_id or not isinstance(delta, str):
+            return
+        buf = self._text_buffers.setdefault(
+            part_id,
+            {"content": "", "flushed": False},
+        )
+        buf["content"] += delta
+        on_event = self._callbacks.get("on_event")
+        if on_event:
+            try:
+                await on_event("thinking")
+            except Exception:
+                pass
+
+    async def _flush_text_buffers(self):
+        """Emit any text buffers that never got a final part.updated.
+
+        Called from session.turn.close. For buffers that the updated handler
+        already marked flushed, this is a no-op. Otherwise we fabricate an
+        assistant text cc_event so the text appears as a 💬 step in the
+        Firestore live log instead of vanishing.
+        """
+        if not self._text_buffers:
+            return
+        on_step = self._callbacks.get("on_step")
+        pending = [
+            (pid, buf) for pid, buf in self._text_buffers.items()
+            if not buf.get("flushed") and buf.get("content")
+        ]
+        if pending and on_step:
+            for _pid, buf in pending:
+                cc_event = {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": buf["content"]},
+                        ],
+                    },
+                }
+                try:
+                    await on_step(cc_event)
+                    buf["flushed"] = True
+                except Exception as e:
+                    log.debug("flush text buffer error: %s", e)
+        # Drop the per-turn state; next turn starts fresh.
+        self._text_buffers.clear()
 
     async def _on_message_updated(self, props: dict):
         # Backup turn completion signal. Primary signal is session.turn.close.
@@ -796,6 +880,7 @@ class KiloWorker(Worker):
             self._turn_result = None
             self._turn_error = None
             self._tool_states.clear()
+            self._text_buffers.clear()
             self._last_activity = time.monotonic()
 
             self._callbacks = {
