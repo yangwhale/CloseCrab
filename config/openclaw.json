@@ -9,9 +9,8 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic-vertex/claude-opus-4-7",
+        "primary": "anthropic-vertex/claude-opus-4-6",
         "fallbacks": [
-          "anthropic-vertex/claude-opus-4-6",
           "anthropic-vertex/claude-sonnet-4-6",
           "google/gemini-2.5-flash"
         ]
@@ -39,9 +38,8 @@
         "id": "xiaoaitongxue",
         "name": "xiaoaitongxue",
         "model": {
-          "primary": "anthropic-vertex/claude-opus-4-7",
+          "primary": "anthropic-vertex/claude-opus-4-6",
           "fallbacks": [
-            "anthropic-vertex/claude-opus-4-6",
             "anthropic-vertex/claude-sonnet-4-6",
             "google/gemini-2.5-flash"
           ]
