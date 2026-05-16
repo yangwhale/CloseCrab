@@ -220,6 +220,16 @@ class OpenClawWorker(Worker):
         self._compaction_count = 0
         self._last_compaction_ts: Optional[float] = None
 
+        # P0-1 Tier 1: 跟踪 sessions_spawn 起的子会话。key=childSessionKey,
+        # value={"task": str, "label": str|None, "runtime": str, "streamTo":
+        # str|None, "started_at": float}. 用于诊断 "stop=end_turn but reply
+        # empty" 这类异步子任务结果丢失场景。Tier 2 binding manager 上线后
+        # 这个集合也是 child→chat 绑定查表的源。
+        self._active_child_sessions: dict[str, dict] = {}
+        # 上一次见到的 sessions_spawn 调用参数，按 toolCallId 暂存，等
+        # tool_call_update completed 时合并 input + result。
+        self._pending_spawn_calls: dict[str, dict] = {}
+
         # Per-bot workspace: isolate bootstrap files and CWD
         if bot_name:
             self._workspace_dir = str(
@@ -438,6 +448,10 @@ class OpenClawWorker(Worker):
             return False
         self._acp_session_id = resp["result"]["sessionId"]
         self._session_id = self._acp_session_id
+        # Fresh session — drop any sub-agent tracking left over from previous
+        # ACP session (stale childSessionKeys would never match).
+        self._active_child_sessions.clear()
+        self._pending_spawn_calls.clear()
         log.info(f"New ACP session created: {self._acp_session_id}")
         return True
 
@@ -1225,12 +1239,29 @@ class OpenClawWorker(Worker):
             # run. Match both the function name and the rendered title.
             tool_name = (update.get("name") or "").lower()
             title_lower = tool_title.lower()
+            is_sessions_spawn = (
+                tool_name == "sessions_spawn"
+                or title_lower == "sessions"
+            )
             is_delegation = (
                 "delegat" in title_lower
                 or "subagent" in title_lower
                 or "sessions" in title_lower
-                or tool_name == "sessions_spawn"
+                or is_sessions_spawn
             )
+
+            # P0-1 Tier 1 诊断：解析 sessions_spawn 的入参和结果，记录到
+            # _active_child_sessions，方便排查 "stop=end_turn but reply empty"
+            # 这类异步丢失场景。日志显示模型是否传了 runtime/streamTo。
+            if is_sessions_spawn:
+                tool_call_id = update.get("toolCallId") or update.get("id") or ""
+                self._handle_sessions_spawn_event(
+                    update_type=update_type,
+                    tool_call_id=tool_call_id,
+                    tool_status=tool_status,
+                    update=update,
+                )
+
             if is_delegation:
                 if tool_status in ("in_progress", "running", "started"):
                     return True
@@ -1320,6 +1351,131 @@ class OpenClawWorker(Worker):
             log.debug(f"ACP update_type: {update_type}")
 
         return None
+
+    def _handle_sessions_spawn_event(
+        self,
+        update_type: str,
+        tool_call_id: str,
+        tool_status: str,
+        update: dict,
+    ) -> None:
+        """诊断 sessions_spawn 事件：解析入参 + 结果，跟踪 active children。
+
+        OpenClaw 的 sessions_spawn 工具默认 runtime="subagent"（同步）。当
+        模型显式传 runtime="acp" 且不带 streamTo="parent" 时，工具返回
+        {status: "accepted"} 但结果不会回流，导致主 agent 看不到子结果就
+        end_turn。日志记录所有 spawn 调用的 runtime/streamTo/status 决策，
+        方便用户看出"为什么 reply 是空的"。
+        """
+        # 提取入参 — ACP tool_call event 可能把工具 input 放在 rawInput、
+        # input、arguments 等不同字段。OpenClaw 在 tool_call 事件里走 rawInput。
+        raw_input = (
+            update.get("rawInput")
+            or update.get("input")
+            or update.get("arguments")
+            or {}
+        )
+        if isinstance(raw_input, str):
+            try:
+                raw_input = json.loads(raw_input)
+            except (json.JSONDecodeError, ValueError):
+                raw_input = {}
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+
+        if update_type == "tool_call" and tool_call_id:
+            task = (raw_input.get("task") or "")[:200]
+            label = raw_input.get("label") or ""
+            runtime = raw_input.get("runtime") or "subagent"
+            stream_to = raw_input.get("streamTo")
+            agent_id = raw_input.get("agentId") or ""
+            self._pending_spawn_calls[tool_call_id] = {
+                "task": task,
+                "label": label,
+                "runtime": runtime,
+                "streamTo": stream_to,
+                "agentId": agent_id,
+                "started_at": time.monotonic(),
+            }
+            log.info(
+                f"sessions_spawn dispatch: id={tool_call_id[:8]} "
+                f"runtime={runtime} streamTo={stream_to or '-'} "
+                f"agentId={agent_id or '-'} label={label or '-'} "
+                f"task={task[:80]!r}"
+            )
+            # 早期预警：runtime=acp 必须带 streamTo=parent，否则结果丢失
+            if runtime == "acp" and stream_to != "parent":
+                log.warning(
+                    f"sessions_spawn id={tool_call_id[:8]}: runtime=acp 未传 "
+                    f"streamTo='parent'，子 agent 结果不会回流到主会话，"
+                    f"主 agent 可能 end_turn 后用户收到空回复。"
+                )
+
+        elif update_type == "tool_call_update" and tool_status in (
+            "completed",
+            "done",
+        ):
+            # 解析工具结果 — sessions_spawn 返回 JSON 形如:
+            # {"status":"accepted","childSessionKey":"...","runId":"...", ...}
+            # 或 {"status":"completed","childSessionKey":"...","output":"..."}
+            tool_content = update.get("content", [])
+            result_text = self._extract_content_text(tool_content)
+            spawn_result = self._parse_spawn_result(result_text)
+            pending = self._pending_spawn_calls.pop(tool_call_id, {})
+
+            child_key = (spawn_result.get("childSessionKey") or "").strip()
+            status = spawn_result.get("status", "?")
+            run_id = (spawn_result.get("runId") or "").strip()
+
+            log.info(
+                f"sessions_spawn result: id={tool_call_id[:8]} "
+                f"status={status} child={child_key[:16] or '-'} "
+                f"runtime={pending.get('runtime', '?')} "
+                f"streamTo={pending.get('streamTo') or '-'}"
+            )
+
+            # accepted == 异步分发，子会话还在跑；其他状态都是终态
+            if status == "accepted" and child_key:
+                self._active_child_sessions[child_key] = {
+                    **pending,
+                    "runId": run_id,
+                    "tool_call_id": tool_call_id,
+                }
+            elif status in ("completed", "error", "failed"):
+                # 同步 subagent 或异步已完成，清理跟踪
+                self._active_child_sessions.pop(child_key, None)
+
+        elif update_type == "tool_call_update" and tool_status == "error":
+            pending = self._pending_spawn_calls.pop(tool_call_id, {})
+            err = update.get("error", {})
+            if isinstance(err, dict):
+                err = err.get("message", str(err))
+            log.warning(
+                f"sessions_spawn error: id={tool_call_id[:8]} "
+                f"runtime={pending.get('runtime', '?')} err={str(err)[:200]}"
+            )
+
+    @staticmethod
+    def _parse_spawn_result(result_text: str) -> dict:
+        """Best-effort parse sessions_spawn 工具返回的 JSON。
+
+        工具结果是字符串化的 JSON（可能带前后空白/换行）。失败返回 {}。
+        """
+        if not result_text or not result_text.strip():
+            return {}
+        text = result_text.strip()
+        # OpenClaw 有时会在前后加 markdown 代码块，剥掉
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if len(lines) >= 3:
+                text = "\n".join(lines[1:-1])
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return {}
 
     @staticmethod
     def _map_tool_kind(

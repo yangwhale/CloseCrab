@@ -320,6 +320,16 @@ def build_system_prompt(
         except FileNotFoundError:
             pass
 
+    # OpenClaw 专属 sub-agent 规则（sessions_spawn 工具行为）
+    # 端口自 OpenClaw 飞书 channel 的 subagent_hooks 设计 — 没有 plugin runtime
+    # 时只能靠 streamTo: "parent" 中继机制承接子 agent 结果
+    if worker_type == "openclaw":
+        _subagent_guide = Path(__file__).parent / "prompts" / "openclaw-subagent-guide.md"
+        try:
+            prompt += "\n\n" + _subagent_guide.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+
     # 非 Claude worker 的语言指令
     # Claude Code CLI 自带 "Always respond in 中文"，但其他 worker 需要显式注入
     if worker_type in ("gemini", "kilo", "openclaw"):
