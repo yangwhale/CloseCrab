@@ -1200,22 +1200,31 @@ class FeishuChannel(Channel):
             log.warning(f"reaction event parse failed: {e}")
             return
 
+        log.info(
+            f"REACTION raw: user={user_open_id} emoji={emoji_type} "
+            f"target_msg={message_id} op_type={operator_type} app_id={app_id}"
+        )
+
         if not emoji_type or not message_id or not user_open_id:
             log.debug(f"reaction event missing required fields, ignored")
             return
 
         # 自反应：bot 自己加的 EYES/DONE 也会触发此回调，必须丢弃
         if operator_type == "app":
+            log.debug(f"REACTION ignored: operator_type=app")
             return
         if user_open_id == self._bot_open_id:
+            log.debug(f"REACTION ignored: from self (bot_open_id)")
             return
         if app_id and self._app_id and app_id == self._app_id:
+            log.debug(f"REACTION ignored: from self (app_id match)")
             return
         if emoji_type in self._OWN_ACK_EMOJI_TYPES:
+            log.debug(f"REACTION ignored: own ack emoji {emoji_type}")
             return
 
         log.info(
-            f"REACTION: user={user_open_id} emoji={emoji_type} target_msg={message_id}"
+            f"REACTION dispatch: user={user_open_id} emoji={emoji_type} target_msg={message_id}"
         )
         asyncio.run_coroutine_threadsafe(
             self._handle_reaction_async(message_id, emoji_type, user_open_id),
