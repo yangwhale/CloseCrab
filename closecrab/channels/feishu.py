@@ -47,7 +47,11 @@ from lark_oapi.api.im.v1 import (
     CreateFileRequestBody,
     CreateMessageRequest,
     CreateMessageRequestBody,
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
+    DeleteMessageReactionRequest,
     DeleteMessageRequest,
+    Emoji,
     GetMessageResourceRequest,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
@@ -769,6 +773,53 @@ class FeishuChannel(Channel):
             log.warning(f"Update card failed: {resp.code} {resp.msg}")
             return False
         return True
+
+    def _add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
+        """同步给消息加 emoji 反应，返回 reaction_id 用于后续删除。
+
+        emoji_type 是飞书 enum 字符串（SMILE / THUMBSUP / HEART / OK / DONE 等）。
+        见 https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+        """
+        try:
+            req = CreateMessageReactionRequest.builder().message_id(message_id).request_body(
+                CreateMessageReactionRequestBody.builder().reaction_type(
+                    Emoji.builder().emoji_type(emoji_type).build()
+                ).build()
+            ).build()
+            resp = self._client.im.v1.message_reaction.create(req)
+            if not resp.success():
+                log.warning(f"Add reaction failed: {resp.code} {resp.msg}")
+                return None
+            return resp.data.reaction_id if resp.data else None
+        except Exception as e:
+            log.warning(f"Add reaction exception: {e}")
+            return None
+
+    def _remove_reaction(self, message_id: str, reaction_id: str) -> bool:
+        """同步删除一个 emoji 反应。"""
+        try:
+            req = DeleteMessageReactionRequest.builder() \
+                .message_id(message_id).reaction_id(reaction_id).build()
+            resp = self._client.im.v1.message_reaction.delete(req)
+            if not resp.success():
+                log.warning(f"Remove reaction failed: {resp.code} {resp.msg}")
+                return False
+            return True
+        except Exception as e:
+            log.warning(f"Remove reaction exception: {e}")
+            return False
+
+    async def _async_add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._add_reaction, message_id, emoji_type,
+        )
+
+    async def _async_remove_reaction(self, message_id: str, reaction_id: str) -> bool:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._remove_reaction, message_id, reaction_id,
+        )
 
     async def _async_send_card(self, chat_id: str, card: dict):
         """异步发送卡片消息。"""
@@ -2108,6 +2159,14 @@ class FeishuChannel(Channel):
             # 启动统一更新循环
             _anim_task[0] = asyncio.create_task(_card_update_loop())
 
+            # P1-3: 给原消息加 👀 表示"看到了在处理"，处理完替换为 ✅
+            # 失败 graceful（API 限流/无权限不影响主流程）
+            _reaction_id: list = [None]
+            if message_id:
+                async def _ack_reaction():
+                    _reaction_id[0] = await self._async_add_reaction(message_id, "EYES")
+                asyncio.create_task(_ack_reaction())
+
             result = await self._core.handle_message(msg)
 
             # 停止卡片更新循环
@@ -2120,6 +2179,13 @@ class FeishuChannel(Channel):
                     await self._async_delete_message(_progress_card_id[0])
                 except Exception:
                     pass
+
+            # P1-3: 替换 👀 为 ✅ 表示完成
+            if message_id and _reaction_id[0]:
+                async def _done_reaction(rid=_reaction_id[0]):
+                    await self._async_remove_reaction(message_id, rid)
+                    await self._async_add_reaction(message_id, "DONE")
+                asyncio.create_task(_done_reaction())
 
             if result:
                 result, voice_file = self._extract_voice_file(result)
