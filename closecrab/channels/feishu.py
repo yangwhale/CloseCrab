@@ -610,6 +610,17 @@ class FeishuChannel(Channel):
                 database=inbox_config.get("database"),
             )
 
+        # P3-3: 入站防抖（合并 1 秒内连续短消息为 1 次 worker turn）
+        # 镜像 OpenClaw extensions/feishu/src/auto-reply/inbound-debounce.ts
+        # 仅对真人用户文本消息生效；语音/文件/team-bot 直通
+        from closecrab.utils.inbound_debouncer import InboundDebouncer
+        self._inbound_debouncer = InboundDebouncer(
+            debounce_s=0.8,
+            build_key=self._build_debounce_key,
+            should_debounce=self._should_debounce_msg,
+            on_flush=self._on_debounced_flush,
+        )
+
     def _make_input_callback(self, chat_id: str, user_key: str):
         """为 inbox 消息创建 on_input_needed 回调，复用 _pending_input 机制。"""
         async def on_input_needed(info: dict) -> Optional[str]:
@@ -1368,7 +1379,7 @@ class FeishuChannel(Channel):
     def _on_message_event(self, data: P2ImMessageReceiveV1) -> None:
         """WebSocket 消息事件回调（在 SDK 线程中执行）。
 
-        将处理调度到 asyncio event loop。
+        将处理调度到 asyncio event loop，经过 InboundDebouncer 合并连发。
         """
         if self._loop is None:
             try:
@@ -1379,8 +1390,133 @@ class FeishuChannel(Channel):
             log.error(f"Event loop not ready, dropping message from {sender_id} in chat {chat_id}")
             return
         asyncio.run_coroutine_threadsafe(
-            self._handle_message_async(data), self._loop
+            self._inbound_debouncer.enqueue(data), self._loop
         )
+
+    def _build_debounce_key(self, data: P2ImMessageReceiveV1) -> Optional[str]:
+        """同一 chat 内同一 sender 的消息进一个 buffer。"""
+        try:
+            evt = data.event
+            if not evt or not evt.message or not evt.sender or not evt.sender.sender_id:
+                return None
+            sender = evt.sender.sender_id.open_id
+            chat = evt.message.chat_id
+            if not sender or not chat:
+                return None
+            return f"{chat}::{sender}"
+        except Exception:
+            return None
+
+    def _should_debounce_msg(self, data: P2ImMessageReceiveV1) -> bool:
+        """只对真人用户的纯文本消息防抖。
+
+        跳过：
+        - team bot（sender_type=app）：bot 互发不需要合并
+        - 非 text 类型（audio/file/image/post）：有附件下载/转写副作用，每条独立处理
+        - 合成事件（reaction → synthetic）：不走 _on_message_event，到不了这里
+        """
+        try:
+            evt = data.event
+            if not evt or not evt.message or not evt.sender:
+                return False
+            if evt.sender.sender_type == "app":
+                return False
+            return evt.message.message_type == "text"
+        except Exception:
+            return False
+
+    async def _on_debounced_flush(self, items: list) -> None:
+        """Debouncer flush 回调：合并 items 后调用 _handle_message_async。
+
+        - 1 条：直通
+        - N 条：拼接 text，用最后一条的 metadata 构造 synthetic event
+        """
+        if not items:
+            return
+        if len(items) == 1:
+            await self._handle_message_async(items[0])
+            return
+
+        try:
+            texts = []
+            for d in items:
+                try:
+                    raw = d.event.message.content or "{}"
+                    obj = json.loads(raw) if raw else {}
+                    t = obj.get("text", "")
+                    if t:
+                        texts.append(t)
+                except Exception:
+                    continue
+            merged_text = "\n\n".join(texts)
+            last = items[-1]
+            last_msg = last.event.message
+            last_sender = last.event.sender
+            log.info(
+                f"DEBOUNCE flush: merged {len(items)} msgs, text_len={len(merged_text)} "
+                f"chat={last_msg.chat_id} sender={last_sender.sender_id.open_id}"
+            )
+
+            synthetic_id = f"{last_msg.message_id}:debounced:{len(items)}"
+            mentions_list = []
+            if last_msg.mentions:
+                for m in last_msg.mentions:
+                    if m.id:
+                        mentions_list.append({
+                            "id": {"open_id": m.id.open_id},
+                            "key": m.key or "",
+                            "name": getattr(m, "name", "") or "",
+                        })
+
+            fake_data = {
+                "schema": "2.0",
+                "header": {
+                    "event_id": synthetic_id,
+                    "event_type": "im.message.receive_v1",
+                    "create_time": "0",
+                    "token": "",
+                    "app_id": self._app_id,
+                    "tenant_key": "",
+                },
+                "event": {
+                    "sender": {
+                        "sender_id": {"open_id": last_sender.sender_id.open_id},
+                        "sender_type": last_sender.sender_type,
+                        "tenant_key": "",
+                    },
+                    "message": {
+                        "message_id": last_msg.message_id,
+                        "root_id": getattr(last_msg, "root_id", "") or "",
+                        "parent_id": getattr(last_msg, "parent_id", "") or "",
+                        "create_time": last_msg.create_time or "0",
+                        "chat_id": last_msg.chat_id,
+                        "chat_type": last_msg.chat_type,
+                        "message_type": "text",
+                        "content": json.dumps({"text": merged_text}, ensure_ascii=False),
+                        "mentions": mentions_list,
+                    },
+                },
+            }
+            try:
+                synthetic_data = P2ImMessageReceiveV1(fake_data)
+                await self._handle_message_async(synthetic_data)
+            except Exception as e:
+                log.warning(
+                    f"debounced merge synthetic event construct failed: {e}, "
+                    f"falling back to per-item dispatch"
+                )
+                for item in items:
+                    try:
+                        await self._handle_message_async(item)
+                    except Exception as ee:
+                        log.error(f"per-item dispatch failed: {ee}", exc_info=True)
+        except Exception as e:
+            log.error(f"debounced flush outer failed: {e}", exc_info=True)
+            for item in items:
+                try:
+                    await self._handle_message_async(item)
+                except Exception:
+                    pass
 
     def _on_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         """卡片回调事件（在 SDK 线程中执行）。
@@ -3471,6 +3607,10 @@ class FeishuChannel(Channel):
     async def stop(self):
         """停止飞书 bot。"""
         log.info("Stopping Feishu channel...")
+        try:
+            await self._inbound_debouncer.close()
+        except Exception as e:
+            log.debug(f"inbound_debouncer.close error (ignored): {e}")
 
     async def send_message(self, target: str, text: str):
         """发送消息到指定 chat。"""
