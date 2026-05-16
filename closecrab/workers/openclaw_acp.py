@@ -897,6 +897,22 @@ class OpenClawWorker(Worker):
                 # sessions_yield 工具调用会重新置 True。
                 self._yield_pending = False
 
+                # 仅在首次发 prompt 时追加 voice-summary system-reminder。
+                # OpenClaw 的 AGENTS.md 是 "Project Context" 而非真 system prompt，
+                # 模型对 voice-summary 规则响应弱；用 <system-reminder> 强化提示。
+                # 续杯不重复（continuation 阶段已有上下文）。
+                prompt_to_send = current_prompt_text
+                if yield_continuations == 0:
+                    prompt_to_send = (
+                        f"{current_prompt_text}\n\n"
+                        "<system-reminder>\n"
+                        "如果你的回复包含多步分析、表格、代码块、长列表或对比报告，"
+                        "请在末尾追加 `<voice-summary>[情绪标签] 2-3句口语化总结</voice-summary>`。"
+                        "情绪标签从 [casually][excitedly][thoughtfully][seriously][cheerfully][calmly] 中选一个。"
+                        "简单回复（一两句话、确认、问候）无需添加。"
+                        "</system-reminder>"
+                    )
+
                 # Send session/prompt
                 self._req_id += 1
                 prompt_id = self._req_id
@@ -907,7 +923,7 @@ class OpenClawWorker(Worker):
                     "params": {
                         "sessionId": self._acp_session_id,
                         "prompt": [
-                            {"type": "text", "text": current_prompt_text}
+                            {"type": "text", "text": prompt_to_send}
                         ],
                     },
                 })
