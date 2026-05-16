@@ -3712,7 +3712,7 @@ class FeishuChannel(Channel):
                 "text": {"tag": "lark_md", "content": f"💬 **实时回复**\n\n{preview}"},
             })
 
-        # 底部状态栏：耗时 · 上下文 · cache · 成本 · 轮次 · Worker · Model
+        # 底部状态栏：耗时 · 上下文 · cache · 轮次 · Worker · Model
         elements.append({"tag": "hr"})
         time_str = f"{elapsed:.0f}s" if elapsed >= 1 else "刚开始"
         wt = u.get("worker_type", "")
@@ -3724,10 +3724,6 @@ class FeishuChannel(Channel):
         hit_rate = u.get("cache_hit_rate", 0)
         if hit_rate > 0:
             parts.append(f"💾 hit {hit_rate:.0f}%")
-        # Cost — OpenClaw sessions.json 提供
-        cost = u.get("session_cost_usd", 0)
-        if cost > 0:
-            parts.append(f"💰 ${cost:.3f}")
         parts.append(f"🔄 T{turns}")
         if w_label:
             parts.append(f"👷 {w_label}")
