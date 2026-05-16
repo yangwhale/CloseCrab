@@ -477,14 +477,17 @@ class OpenClawWorker(Worker):
         return True
 
     def _check_compaction_needed(self) -> None:
-        input_tokens = self._usage.get("input_tokens", 0)
-        if input_tokens < _COMPACTION_THRESHOLD:
+        # ACP 模式拿不到 input_tokens（OpenClaw 不透传），优先用 usage_update 的 live used。
+        ctx_tokens = self._usage.get("context_used_live") or self._usage.get(
+            "input_tokens", 0
+        )
+        if ctx_tokens < _COMPACTION_THRESHOLD:
             return
 
         now = time.monotonic()
-        if input_tokens >= _COMPACTION_HARD_LIMIT:
+        if ctx_tokens >= _COMPACTION_HARD_LIMIT:
             log.warning(
-                f"Context at hard limit ({input_tokens} tokens), forcing compaction"
+                f"Context at hard limit ({ctx_tokens} tokens), forcing compaction"
             )
             self._needs_compaction = True
             return
@@ -496,7 +499,7 @@ class OpenClawWorker(Worker):
             return
 
         log.info(
-            f"Context at {input_tokens} tokens "
+            f"Context at {ctx_tokens} tokens "
             f"(threshold {_COMPACTION_THRESHOLD}), scheduling compaction"
         )
         self._needs_compaction = True
@@ -1515,10 +1518,16 @@ class OpenClawWorker(Worker):
                     )
 
         elif update_type == "usage_update":
+            # OpenClaw ACP 原生只提供 used/size（buildSessionUsageSnapshot），
+            # 不透传 cache_read/cache_creation/cost。存 live 值供 get_context_usage 优先使用。
             used = update.get("used")
             size = update.get("size")
-            if isinstance(used, (int, float)) and isinstance(size, (int, float)):
-                log.debug(f"Context window usage: {used}/{size} tokens")
+            if isinstance(used, (int, float)):
+                self._usage["context_used_live"] = int(used)
+            if isinstance(size, (int, float)) and size > 0:
+                self._usage["context_window_live"] = int(size)
+            if "context_used_live" in self._usage:
+                self._check_compaction_needed()
 
         elif update_type in (
             "available_commands_update",
@@ -1869,16 +1878,22 @@ class OpenClawWorker(Worker):
 
     def get_context_usage(self) -> dict:
         u = self._usage.copy()
-        total_ctx = (
-            u["input_tokens"]
-            + u["cache_creation_input_tokens"]
-            + u["cache_read_input_tokens"]
-        )
+        # OpenClaw ACP usage_update 提供的 live used/size 是权威值，优先使用。
+        # 回退到 input + cache_* 的 sum，针对 Gateway 偶尔通过 _meta.quota.token_count 透传的场景。
+        live_used = u.get("context_used_live")
+        live_window = u.get("context_window_live")
+        if isinstance(live_used, int) and live_used > 0:
+            total_ctx = live_used
+        else:
+            total_ctx = (
+                u["input_tokens"]
+                + u["cache_creation_input_tokens"]
+                + u["cache_read_input_tokens"]
+            )
+        window = live_window if isinstance(live_window, int) and live_window > 0 else 1_000_000
         u["total_context_tokens"] = total_ctx
-        u["context_window"] = 1_000_000
-        u["usage_pct"] = (
-            round(total_ctx / 1_000_000 * 100, 1) if total_ctx else 0
-        )
+        u["context_window"] = window
+        u["usage_pct"] = round(total_ctx / window * 100, 1) if total_ctx else 0
         if self._start_time is not None:
             u["session_duration_s"] = int(time.monotonic() - self._start_time)
         else:
