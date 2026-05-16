@@ -806,6 +806,43 @@ class FeishuChannel(Channel):
             return False
         return True
 
+    @staticmethod
+    def build_mentioned_text(targets: list[dict], message: str) -> str:
+        """构造文本消息的 @mention 前缀。
+
+        targets: [{"open_id": "ou_xxx", "name": "Alice"}, ...]
+        返回 "<at user_id=\"ou_xxx\">Alice</at> <at ...>Bob</at> message"
+
+        镜像 OpenClaw extensions/feishu/src/mention.ts:buildMentionedMessage。
+        飞书 text 消息内的 <at user_id="..."> 标签会被自动渲染为 mention。
+        """
+        if not targets:
+            return message
+        parts = [
+            f'<at user_id="{t["open_id"]}">{t.get("name", "")}</at>'
+            for t in targets if t.get("open_id")
+        ]
+        if not parts:
+            return message
+        return " ".join(parts) + " " + message
+
+    @staticmethod
+    def build_mentioned_card_text(targets: list[dict], message: str) -> str:
+        """构造 lark_md 卡片正文的 @mention 前缀。
+
+        卡片格式与 text 不同：<at id=OPEN_ID></at>（不带 user_id 属性，name 内嵌）。
+        镜像 OpenClaw extensions/feishu/src/mention.ts:buildMentionedCardContent。
+        """
+        if not targets:
+            return message
+        parts = [
+            f'<at id={t["open_id"]}></at>'
+            for t in targets if t.get("open_id")
+        ]
+        if not parts:
+            return message
+        return " ".join(parts) + " " + message
+
     def _edit_text(self, message_id: str, text: str) -> bool:
         """同步原地编辑一条 text 消息（用 PatchMessage API）。
 
