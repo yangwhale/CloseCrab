@@ -9,8 +9,9 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic-vertex/claude-opus-4-6",
+        "primary": "anthropic-vertex/claude-opus-4-7",
         "fallbacks": [
+          "anthropic-vertex/claude-opus-4-6",
           "anthropic-vertex/claude-sonnet-4-6",
           "google/gemini-2.5-flash"
         ]
@@ -38,8 +39,9 @@
         "id": "xiaoaitongxue",
         "name": "xiaoaitongxue",
         "model": {
-          "primary": "anthropic-vertex/claude-opus-4-6",
+          "primary": "anthropic-vertex/claude-opus-4-7",
           "fallbacks": [
+            "anthropic-vertex/claude-opus-4-6",
             "anthropic-vertex/claude-sonnet-4-6",
             "google/gemini-2.5-flash"
           ]
@@ -154,7 +156,7 @@
       },
       "anthropic-vertex": {
         "api": "anthropic-messages",
-        "baseUrl": "https://us-east5-aiplatform.googleapis.com/v1",
+        "baseUrl": "https://aiplatform.googleapis.com/v1",
         "apiKey": "gcp-vertex-credentials",
         "models": [
           {
