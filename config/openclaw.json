@@ -55,6 +55,27 @@
             ]
           }
         }
+      },
+      {
+        "id": "tiemu",
+        "name": "tiemu",
+        "model": {
+          "primary": "anthropic-vertex/claude-opus-4-7",
+          "fallbacks": [
+            "anthropic-vertex/claude-opus-4-6",
+            "anthropic-vertex/claude-sonnet-4-6",
+            "google/gemini-2.5-flash"
+          ]
+        },
+        "subagents": {
+          "model": {
+            "primary": "anthropic-vertex/claude-opus-4-6",
+            "fallbacks": [
+              "anthropic-vertex/claude-sonnet-4-6",
+              "google/gemini-2.5-flash"
+            ]
+          }
+        }
       }
     ]
   },

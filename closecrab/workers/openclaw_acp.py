@@ -292,18 +292,20 @@ class OpenClawWorker(Worker):
             return
 
         cmd = [self._openclaw_bin, "acp", "--no-prefix-cwd"]
-        # Per-bot agent routing: if bot has a non-default model,
-        # use a bot-specific session key so Gateway routes to the
-        # per-agent config in agents.list (with its own model).
+        # Per-bot agent routing: ALWAYS use a bot-specific session key.
+        # Previously only routed per-bot when model differed from gateway default,
+        # which caused identity bleed-through: two bots with the same model would
+        # share Gateway's default agent (whichever was in agents.list), inheriting
+        # each other's system prompt, history, and trajectory. tiemu starting up
+        # without --session got mapped to xiaoaitongxue's agent and self-identified
+        # as "小爱同学" with stale tool-call patterns.
         self._cli_default_session_key = None
-        if self._bot_name and self._model:
-            gateway_default = self._read_gateway_default_model()
-            if gateway_default and self._model != gateway_default:
-                agent_id = self._bot_name
-                shared_key = f"agent:{agent_id}:main"
-                cmd.extend(["--session", shared_key])
-                self._cli_default_session_key = shared_key
-                log.info(f"ACP session key: {shared_key} (model: {self._model})")
+        if self._bot_name:
+            agent_id = self._bot_name
+            shared_key = f"agent:{agent_id}:main"
+            cmd.extend(["--session", shared_key])
+            self._cli_default_session_key = shared_key
+            log.info(f"ACP session key: {shared_key} (model: {self._model or 'default'})")
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         if self._gcp_project:

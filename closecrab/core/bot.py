@@ -164,6 +164,8 @@ class BotCore:
         on_tui_step,
     ) -> str:
         worker = await self._get_or_create_worker(user_key)
+        # Track turn duration for finalize-time persistence to firestore.
+        _turn_start = asyncio.get_event_loop().time()
 
         # 异常重启后第一条消息：加前缀让 CC 跳过旧 teammate 上下文
         content = msg.content
@@ -397,13 +399,35 @@ class BotCore:
                 try:
                     final_steps = [s[:500] for s in steps[:200]]
                     final_status = "done" if result else "error"
+                    duration_s = round(
+                        asyncio.get_event_loop().time() - _turn_start, 2
+                    )
+                    # Pull worker usage snapshot. Each worker exposes _usage
+                    # differently; normalize to a flat dict of int/float for
+                    # firestore. Empty dict if worker hasn't tracked yet.
+                    worker_usage: dict = {}
+                    raw_usage = getattr(worker, "_usage", None) or {}
+                    if isinstance(raw_usage, dict):
+                        for k, v in raw_usage.items():
+                            if isinstance(v, (int, float)) and not k.startswith("_"):
+                                worker_usage[k] = v
                     loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(None, lambda: log_ref.update({
+                    update_payload = {
                         "assistant": (result or "")[:10000],
                         "status": final_status,
                         "steps": final_steps,
-                    }))
-                    log.info(f"Live log finalized: {log_ref.id} status={final_status} steps={len(final_steps)}")
+                        "duration_seconds": duration_s,
+                        "usage": worker_usage,
+                        "worker_type": type(worker).__name__,
+                    }
+                    await loop.run_in_executor(
+                        None, lambda: log_ref.update(update_payload)
+                    )
+                    log.info(
+                        f"Live log finalized: {log_ref.id} status={final_status} "
+                        f"steps={len(final_steps)} dur={duration_s}s "
+                        f"usage_keys={list(worker_usage.keys())}"
+                    )
                 except Exception as e:
                     log.warning(f"Failed to finalize live log: {e}")
             elif self._db and result:

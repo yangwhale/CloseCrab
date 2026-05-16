@@ -616,6 +616,44 @@ class KiloWorker(Worker):
                         pass
                 return
 
+        if ptype == "text":
+            # Final part.updated for text. If partial flushes already emitted
+            # some chunks via _on_part_delta, only emit the remaining tail to
+            # avoid duplicating the whole reply. If no partials happened (short
+            # reply that never hit threshold), emit the full text as one step.
+            text = part.get("content") or part.get("text", "")
+            part_id = part.get("id", "")
+            on_step = self._callbacks.get("on_step")
+            if text and on_step:
+                buf = self._text_buffers.get(part_id) if part_id else None
+                emitted_len = buf.get("emitted_len", 0) if buf else 0
+                emit_text = text[emitted_len:] if emitted_len < len(text) else ""
+                if emit_text:
+                    cc_event = {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{"type": "text", "text": emit_text}],
+                        },
+                    }
+                    try:
+                        await on_step(cc_event)
+                    except Exception as e:
+                        log.debug("on_step callback error: %s", e)
+            if part_id and text:
+                buf = self._text_buffers.get(part_id)
+                if buf is not None:
+                    buf["content"] = text
+                    buf["emitted_len"] = len(text)
+                    buf["flushed"] = True
+            if text:
+                on_event = self._callbacks.get("on_event")
+                if on_event:
+                    try:
+                        await on_event("thinking")
+                    except Exception:
+                        pass
+            return
+
         cc_event = _translate_to_cc_event(part)
         if cc_event:
             on_step = self._callbacks.get("on_step")
@@ -626,29 +664,9 @@ class KiloWorker(Worker):
                     log.debug("on_step callback error: %s", e)
             else:
                 log.debug("on_step callback not set, dropping cc_event type=%s", cc_event.get("type"))
-        elif ptype in ("tool", "text"):
+        elif ptype == "tool":
             log.debug("_translate_to_cc_event returned None for ptype=%s part=%s",
                        ptype, json.dumps(part, default=str)[:200])
-
-        if ptype == "text":
-            text = part.get("content") or part.get("text", "")
-            part_id = part.get("id", "")
-            # Mark the buffer as flushed: the final part.updated carries the
-            # full content and has already fed into on_step via the
-            # _translate_to_cc_event call above. If we leave the buffer in
-            # an unflushed state, turn.close would re-emit the same text.
-            if part_id and text:
-                buf = self._text_buffers.get(part_id)
-                if buf is not None:
-                    buf["content"] = text
-                    buf["flushed"] = True
-            if text:
-                on_event = self._callbacks.get("on_event")
-                if on_event:
-                    try:
-                        await on_event("thinking")
-                    except Exception:
-                        pass
 
         elif ptype == "tool":
             tool_raw = part.get("toolName", part.get("tool", ""))
@@ -697,18 +715,20 @@ class KiloWorker(Worker):
                 self._usage["cost_usd"] += float(cost)
 
     async def _on_part_delta(self, props: dict):
-        """Accumulate streaming text deltas into per-partID buffers.
+        """Accumulate streaming text deltas into per-partID buffers AND
+        emit partial chunks for live streaming feel.
 
         Kilo splits long assistant replies into:
           1. `message.part.updated` text="" (empty placeholder)
           2. N × `message.part.delta` field=text delta=<chunk>
           3. `message.part.updated` text=<full> (final, with time.end)
 
-        Step 3 is what the existing on_step path keys off (`if text:`). We
-        buffer step 2 so that if step 3 is dropped (early turn.close, abort,
-        next tool call preempts), `_flush_text_buffers` still rescues the
-        text into a step. Also pings `on_event("thinking")` so the channel
-        animation reflects ongoing generation.
+        Original fix only buffered for rescue at turn.close, which dumped
+        the whole reply as one big 💬 step. OpenClaw streams chunks live
+        (T2 RoPE: 13 chunks), giving a typewriter feel. We mirror that by
+        partial-flushing on (a) length cap or (b) sentence-end after a soft
+        threshold. emitted_len tracks how much has already gone out to
+        on_step so final part.updated and turn.close only emit the remainder.
         """
         part_id = props.get("partID", "")
         field = props.get("field", "")
@@ -717,7 +737,7 @@ class KiloWorker(Worker):
             return
         buf = self._text_buffers.setdefault(
             part_id,
-            {"content": "", "flushed": False},
+            {"content": "", "flushed": False, "emitted_len": 0},
         )
         buf["content"] += delta
         on_event = self._callbacks.get("on_event")
@@ -727,33 +747,64 @@ class KiloWorker(Worker):
             except Exception:
                 pass
 
-    async def _flush_text_buffers(self):
-        """Emit any text buffers that never got a final part.updated.
-
-        Called from session.turn.close. For buffers that the updated handler
-        already marked flushed, this is a no-op. Otherwise we fabricate an
-        assistant text cc_event so the text appears as a 💬 step in the
-        Firestore live log instead of vanishing.
-        """
-        if not self._text_buffers:
+        # Partial flush thresholds. Soft: 120 chars + sentence-end. Hard: 280 chars.
+        pending_len = len(buf["content"]) - buf["emitted_len"]
+        if pending_len <= 0:
             return
-        on_step = self._callbacks.get("on_step")
-        pending = [
-            (pid, buf) for pid, buf in self._text_buffers.items()
-            if not buf.get("flushed") and buf.get("content")
-        ]
-        if pending and on_step:
-            for _pid, buf in pending:
+        pending_text = buf["content"][buf["emitted_len"]:]
+        has_sentence_end = any(c in "。！？.!?\n" for c in pending_text[-4:])
+        should_flush = (
+            pending_len >= 280
+            or (pending_len >= 120 and has_sentence_end)
+        )
+        if should_flush:
+            on_step = self._callbacks.get("on_step")
+            if on_step:
                 cc_event = {
                     "type": "assistant",
                     "message": {
-                        "content": [
-                            {"type": "text", "text": buf["content"]},
-                        ],
+                        "content": [{"type": "text", "text": pending_text}],
                     },
                 }
                 try:
                     await on_step(cc_event)
+                    buf["emitted_len"] = len(buf["content"])
+                except Exception as e:
+                    log.debug("partial flush on_step error: %s", e)
+
+    async def _flush_text_buffers(self):
+        """Emit any text buffers that never got a final part.updated, or
+        that still have un-emitted tail content beyond the last partial flush.
+
+        Called from session.turn.close. Three cases:
+          1. buffer already fully flushed (final part.updated arrived and
+             marked content==emitted_len) → no-op
+          2. buffer partially flushed with tail (partial chunks emitted but
+             no final updated, or final updated didn't cover full content) →
+             emit tail as one more 💬 step
+          3. buffer never flushed (no final, no partials) → emit full content
+        """
+        if not self._text_buffers:
+            return
+        on_step = self._callbacks.get("on_step")
+        if on_step:
+            for _pid, buf in self._text_buffers.items():
+                content = buf.get("content", "")
+                emitted_len = buf.get("emitted_len", 0)
+                if not content or emitted_len >= len(content):
+                    continue
+                tail = content[emitted_len:]
+                if not tail.strip():
+                    continue
+                cc_event = {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": tail}],
+                    },
+                }
+                try:
+                    await on_step(cc_event)
+                    buf["emitted_len"] = len(content)
                     buf["flushed"] = True
                 except Exception as e:
                     log.debug("flush text buffer error: %s", e)
