@@ -104,6 +104,19 @@ _STEP_SENTENCE_END = frozenset("。！？.!?\n")
 _STEP_SOFT_THRESHOLD = 100
 _STEP_HARD_THRESHOLD = 200
 
+# P0-1 Tier 1.5: 续杯（auto-continue after sessions_yield）参数。
+# 模型 spawn 异步子任务 + 调 sessions_yield 后，OpenClaw runtime 会把子结果
+# enqueueSystemEvent 推到 parent sessionKey 队列，但队列只在下次
+# session/prompt 时 drain。worker 必须主动发"心跳 prompt"才能让模型看见
+# 子任务结果。下面参数控制续杯次数和每次预算。
+_YIELD_MAX_CONTINUATIONS = 5
+_YIELD_CONTINUATION_BUDGET_S = 900  # 单次续杯 15 分钟
+_YIELD_CONTINUATION_PROMPT = (
+    "[System: 子任务已经完成并将结果加入了队列。请综合所有子任务结果后给"
+    "用户最终回复。如需继续等待更多子任务，可以再次 sessions_yield。]"
+)
+
+
 _COMPACTION_SUMMARY_PROMPT = """\
 [System: Context Compaction]
 你的上下文即将超过限制。请按以下结构生成对话摘要，用于注入新 session：
@@ -223,12 +236,19 @@ class OpenClawWorker(Worker):
         # P0-1 Tier 1: 跟踪 sessions_spawn 起的子会话。key=childSessionKey,
         # value={"task": str, "label": str|None, "runtime": str, "streamTo":
         # str|None, "started_at": float}. 用于诊断 "stop=end_turn but reply
-        # empty" 这类异步子任务结果丢失场景。Tier 2 binding manager 上线后
-        # 这个集合也是 child→chat 绑定查表的源。
+        # empty" 这类异步子任务结果丢失场景。
         self._active_child_sessions: dict[str, dict] = {}
         # 上一次见到的 sessions_spawn 调用参数，按 toolCallId 暂存，等
         # tool_call_update completed 时合并 input + result。
         self._pending_spawn_calls: dict[str, dict] = {}
+        # P0-1 Tier 1.5: 当前 prompt 内是否检测到 sessions_yield 调用。
+        # send() 每次循环开头重置；inner loop 看到 sessions_yield tool_call
+        # 完成时置 True。yield 表示主 agent 派完子任务后让出 turn，期待
+        # OpenClaw runtime 在子 agent 完成时把结果作为下一条消息推回。但
+        # ACP 协议没有事件驱动唤醒——必须 worker 主动发"续杯 prompt"才能
+        # 让 enqueueSystemEvent 队列被 drain。send() 在 stop=end_turn 后
+        # 检查此标志决定是否 auto-continue。
+        self._yield_pending: bool = False
 
         # Per-bot workspace: isolate bootstrap files and CWD
         if bot_name:
@@ -452,6 +472,7 @@ class OpenClawWorker(Worker):
         # ACP session (stale childSessionKeys would never match).
         self._active_child_sessions.clear()
         self._pending_spawn_calls.clear()
+        self._yield_pending = False
         log.info(f"New ACP session created: {self._acp_session_id}")
         return True
 
@@ -803,23 +824,20 @@ class OpenClawWorker(Worker):
                     log.error("No ACP session after compaction")
                     return "[Error] Context compaction failed, no session"
 
-            # Send session/prompt
-            self._req_id += 1
-            prompt_id = self._req_id
-            await self._send_json({
-                "jsonrpc": "2.0",
-                "id": prompt_id,
-                "method": "session/prompt",
-                "params": {
-                    "sessionId": self._acp_session_id,
-                    "prompt": [{"type": "text", "text": text}],
-                },
-            })
-            log.info(f"ACP prompt sent (id={prompt_id}, len={len(text)})")
+            # P0-1 Tier 1.5: 跨续杯累积。outer loop 实现 sessions_yield
+            # auto-continue —— 模型 yield 后我们立即再发一次 session/prompt
+            # 触发 enqueueSystemEvent 队列 drain，让模型看到子任务结果。
+            # _YIELD_MAX_CONTINUATIONS 限制总续杯次数，避免死循环。
+            accumulated_text: list[str] = []
+            current_prompt_text = text
+            yield_continuations = 0
+            last_stop_reason: Optional[str] = None
+            last_msg_count = 0
+            session_state_err: Optional[str] = None
 
-            accumulated_text = []
             # Buffer for defragmenting per-token agent_message_chunk events.
-            # See _STEP_SENTENCE_END / _STEP_FLUSH_THRESHOLD for flush rules.
+            # 跨续杯保持同一个 buffer，确保即使在续杯之间有未 flush 的内容
+            # 也不丢；每次 prompt 完成后会显式 flush。
             step_buffer: list[str] = []
 
             async def flush_step_buffer() -> None:
@@ -864,150 +882,266 @@ class OpenClawWorker(Worker):
                                 name="on_log",
                             )
 
-            deadline = time.monotonic() + self._timeout
-            subagent_active = False
-            msg_count = 0
+            while True:
+                # 每次续杯都重置 yield_pending 标志。inner loop 看到
+                # sessions_yield 工具调用会重新置 True。
+                self._yield_pending = False
 
-            while time.monotonic() < deadline:
-                if self._interrupted:
-                    log.info("send() interrupted, returning partial result")
-                    break
-
-                remaining = max(1, deadline - time.monotonic())
-                msg = await self._read_line(timeout=min(remaining, 30))
-
-                if msg is None:
-                    if self._proc and self._proc.returncode is not None:
-                        log.error("ACP process died during prompt")
-                        stderr_content = self._read_stderr_tail()
-                        if stderr_content:
-                            log.error(f"ACP stderr: {stderr_content[:500]}")
-                        self._started = False
-                        return "[Error] OpenClaw ACP process crashed"
-                    if subagent_active:
-                        deadline = max(deadline, time.monotonic() + 120)
-                    continue
-
-                msg_count += 1
-                method = msg.get("method", "")
-                msg_id = msg.get("id", "")
-                if msg_count <= 30 or msg_id == prompt_id:
-                    log.debug(
-                        f"ACP raw #{msg_count}: id={msg_id} "
-                        f"method={method} "
-                        f"{json.dumps(msg, ensure_ascii=False)[:500]}"
-                    )
-
-                # Response to our prompt request → turn complete
-                if msg.get("id") == prompt_id:
-                    if "error" in msg:
-                        err_msg = msg["error"].get("message", "unknown error")
-                        err_code = msg["error"].get("code", 0)
-                        log.error(
-                            f"ACP prompt error (code={err_code}): {err_msg}"
-                        )
-
-                        if err_code == 429:
-                            return "(API 限流，请稍后再试)"
-
-                        if "not found" in err_msg.lower():
-                            log.warning(
-                                "ACP session lost, will recreate on next send"
-                            )
-                            self._acp_session_id = None
-                            return "(Session 状态异常，已自动重置。请再说一次)"
-
-                        if (
-                            "too long" in err_msg.lower()
-                            or "too many tokens" in err_msg.lower()
-                        ):
-                            self._needs_compaction = True
-                            if not await self._create_new_session():
-                                self._acp_session_id = None
-                            return (
-                                "(对话上下文超过 token 上限，已自动开启新会话。"
-                                "请再说一次)"
-                            )
-
-                        return f"[Error] {err_msg}"
-
-                    result = msg.get("result", {})
-                    meta = result.get("_meta", {})
-                    quota = meta.get("quota", {})
-                    tc = quota.get("token_count", {})
-                    if not tc:
-                        tc = result.get("usage", {})
-                    if tc:
-                        self._usage["input_tokens"] = tc.get(
-                            "input_tokens", 0
-                        )
-                        self._usage["output_tokens"] = tc.get(
-                            "output_tokens", 0
-                        )
-                        self._usage["cache_creation_input_tokens"] = tc.get(
-                            "cache_creation_input_tokens", 0
-                        )
-                        self._usage["cache_read_input_tokens"] = tc.get(
-                            "cache_read_input_tokens", 0
-                        )
-                    self._usage["turns"] += 1
-                    self._check_compaction_needed()
-
-                    result_content = result.get("content", [])
-                    if result_content:
-                        result_text = self._extract_content_text(result_content)
-                        if result_text and result_text.strip():
-                            accumulated_text.append(result_text)
-
-                    log.info(
-                        f"ACP prompt done: "
-                        f"stop={result.get('stopReason')}, "
-                        f"turns={self._usage['turns']}"
-                    )
-                    break
-
-                # Notification from the agent
-                if "method" in msg:
-                    is_subagent = await self._handle_notification(
-                        msg,
-                        accumulated_text,
-                        on_event=on_event,
-                        on_log=on_log,
-                        on_step=on_step,
-                        step_buffer=step_buffer,
-                        flush_step_buffer=flush_step_buffer,
-                    )
-                    if is_subagent is not None:
-                        if is_subagent and not subagent_active:
-                            log.info("Sub-agent started, extending deadline")
-                        subagent_active = is_subagent
-                    continue
-
-                # Server-initiated request (permission, etc.)
-                if "id" in msg and msg.get("id") != prompt_id:
-                    await self._handle_server_request(msg)
-                    continue
-
-            # Loop exited (prompt done / interrupted / timeout) — flush any
-            # pending text in the step buffer so the final sentence is not
-            # lost in Firestore steps / log channel.
-            await flush_step_buffer()
-
-            if self._interrupted:
-                drained = 0
-                while True:
-                    msg = await self._read_line(timeout=0.5)
-                    if msg is None:
-                        break
-                    drained += 1
-                    if msg.get("id") == prompt_id:
-                        break
-                if drained:
-                    log.info(f"Drained {drained} stale messages after interrupt")
-                partial = self._clean_thinking_content(
-                    "".join(accumulated_text)
+                # Send session/prompt
+                self._req_id += 1
+                prompt_id = self._req_id
+                await self._send_json({
+                    "jsonrpc": "2.0",
+                    "id": prompt_id,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": self._acp_session_id,
+                        "prompt": [
+                            {"type": "text", "text": current_prompt_text}
+                        ],
+                    },
+                })
+                log.info(
+                    f"ACP prompt sent (id={prompt_id}, "
+                    f"len={len(current_prompt_text)}, "
+                    f"continuation={yield_continuations})"
                 )
-                return partial or ""
+
+                # 续杯使用更短的预算（多数子任务在分钟级完成）。
+                if yield_continuations == 0:
+                    deadline = time.monotonic() + self._timeout
+                else:
+                    deadline = (
+                        time.monotonic() + _YIELD_CONTINUATION_BUDGET_S
+                    )
+                subagent_active = False
+                msg_count = 0
+                prompt_break_clean = False
+                process_died = False
+                early_return_reason: Optional[str] = None
+                early_return_text: Optional[str] = None
+
+                while time.monotonic() < deadline:
+                    if self._interrupted:
+                        log.info(
+                            "send() interrupted, returning partial result"
+                        )
+                        break
+
+                    remaining = max(1, deadline - time.monotonic())
+                    msg = await self._read_line(timeout=min(remaining, 30))
+
+                    if msg is None:
+                        if self._proc and self._proc.returncode is not None:
+                            log.error("ACP process died during prompt")
+                            stderr_content = self._read_stderr_tail()
+                            if stderr_content:
+                                log.error(
+                                    f"ACP stderr: {stderr_content[:500]}"
+                                )
+                            self._started = False
+                            process_died = True
+                            break
+                        if subagent_active:
+                            deadline = max(
+                                deadline, time.monotonic() + 120
+                            )
+                        continue
+
+                    msg_count += 1
+                    method = msg.get("method", "")
+                    msg_id = msg.get("id", "")
+                    if msg_count <= 30 or msg_id == prompt_id:
+                        log.debug(
+                            f"ACP raw #{msg_count}: id={msg_id} "
+                            f"method={method} "
+                            f"{json.dumps(msg, ensure_ascii=False)[:500]}"
+                        )
+
+                    # Response to our prompt request → turn complete
+                    if msg.get("id") == prompt_id:
+                        if "error" in msg:
+                            err_msg = msg["error"].get(
+                                "message", "unknown error"
+                            )
+                            err_code = msg["error"].get("code", 0)
+                            log.error(
+                                f"ACP prompt error "
+                                f"(code={err_code}): {err_msg}"
+                            )
+
+                            if err_code == 429:
+                                early_return_text = (
+                                    "(API 限流，请稍后再试)"
+                                )
+                                early_return_reason = "rate_limited"
+                                break
+
+                            if "not found" in err_msg.lower():
+                                log.warning(
+                                    "ACP session lost, will recreate "
+                                    "on next send"
+                                )
+                                self._acp_session_id = None
+                                early_return_text = (
+                                    "(Session 状态异常，已自动重置。"
+                                    "请再说一次)"
+                                )
+                                early_return_reason = "session_lost"
+                                break
+
+                            if (
+                                "too long" in err_msg.lower()
+                                or "too many tokens" in err_msg.lower()
+                            ):
+                                self._needs_compaction = True
+                                if not await self._create_new_session():
+                                    self._acp_session_id = None
+                                early_return_text = (
+                                    "(对话上下文超过 token 上限，"
+                                    "已自动开启新会话。请再说一次)"
+                                )
+                                early_return_reason = "context_overflow"
+                                break
+
+                            early_return_text = f"[Error] {err_msg}"
+                            early_return_reason = "prompt_error"
+                            break
+
+                        result = msg.get("result", {})
+                        meta = result.get("_meta", {})
+                        quota = meta.get("quota", {})
+                        tc = quota.get("token_count", {})
+                        if not tc:
+                            tc = result.get("usage", {})
+                        if tc:
+                            self._usage["input_tokens"] = tc.get(
+                                "input_tokens", 0
+                            )
+                            self._usage["output_tokens"] = tc.get(
+                                "output_tokens", 0
+                            )
+                            self._usage[
+                                "cache_creation_input_tokens"
+                            ] = tc.get(
+                                "cache_creation_input_tokens", 0
+                            )
+                            self._usage[
+                                "cache_read_input_tokens"
+                            ] = tc.get(
+                                "cache_read_input_tokens", 0
+                            )
+                        self._usage["turns"] += 1
+                        self._check_compaction_needed()
+
+                        result_content = result.get("content", [])
+                        if result_content:
+                            result_text = self._extract_content_text(
+                                result_content
+                            )
+                            if result_text and result_text.strip():
+                                accumulated_text.append(result_text)
+
+                        last_stop_reason = result.get("stopReason")
+                        log.info(
+                            f"ACP prompt done: "
+                            f"stop={last_stop_reason}, "
+                            f"turns={self._usage['turns']}, "
+                            f"yield_pending={self._yield_pending}, "
+                            f"continuation={yield_continuations}"
+                        )
+                        prompt_break_clean = True
+                        break
+
+                    # Notification from the agent
+                    if "method" in msg:
+                        is_subagent = await self._handle_notification(
+                            msg,
+                            accumulated_text,
+                            on_event=on_event,
+                            on_log=on_log,
+                            on_step=on_step,
+                            step_buffer=step_buffer,
+                            flush_step_buffer=flush_step_buffer,
+                        )
+                        if is_subagent is not None:
+                            if is_subagent and not subagent_active:
+                                log.info(
+                                    "Sub-agent started, extending deadline"
+                                )
+                            subagent_active = is_subagent
+                        continue
+
+                    # Server-initiated request (permission, etc.)
+                    if "id" in msg and msg.get("id") != prompt_id:
+                        await self._handle_server_request(msg)
+                        continue
+
+                # Inner loop done — flush pending step text per turn.
+                await flush_step_buffer()
+                last_msg_count = msg_count
+
+                if process_died:
+                    return "[Error] OpenClaw ACP process crashed"
+                if early_return_text:
+                    session_state_err = early_return_reason
+                    return early_return_text
+                if self._interrupted:
+                    drained = 0
+                    while True:
+                        msg = await self._read_line(timeout=0.5)
+                        if msg is None:
+                            break
+                        drained += 1
+                        if msg.get("id") == prompt_id:
+                            break
+                    if drained:
+                        log.info(
+                            f"Drained {drained} stale messages "
+                            "after interrupt"
+                        )
+                    partial = self._clean_thinking_content(
+                        "".join(accumulated_text)
+                    )
+                    return partial or ""
+
+                # 决定是否续杯：必须 prompt 干净结束 + 模型在本轮 yield 了
+                # + 续杯次数未到上限。session_state_err 已被早返回 cover；这
+                # 里只检查正常 end_turn 后的 yield 续杯。
+                if (
+                    prompt_break_clean
+                    and self._yield_pending
+                    and yield_continuations < _YIELD_MAX_CONTINUATIONS
+                ):
+                    yield_continuations += 1
+                    log.info(
+                        f"Auto-continuing after sessions_yield "
+                        f"({yield_continuations}/"
+                        f"{_YIELD_MAX_CONTINUATIONS}) — sending heartbeat "
+                        "prompt to drain child completion queue"
+                    )
+                    if on_event:
+                        await self._safe_callback(
+                            on_event,
+                            f"等待子任务结果 ({yield_continuations}/"
+                            f"{_YIELD_MAX_CONTINUATIONS})",
+                            name="on_event",
+                        )
+                    current_prompt_text = _YIELD_CONTINUATION_PROMPT
+                    continue
+
+                # 不再续杯：用本轮已累积的 accumulated_text 收尾。
+                if (
+                    prompt_break_clean
+                    and self._yield_pending
+                    and yield_continuations >= _YIELD_MAX_CONTINUATIONS
+                ):
+                    log.warning(
+                        f"sessions_yield 续杯次数已达上限 "
+                        f"({_YIELD_MAX_CONTINUATIONS})，停止 auto-continue。"
+                        "模型可能还在等待子任务，已累积文本将作为最终回复。"
+                    )
+                break
 
             final_text = self._clean_thinking_content(
                 "".join(accumulated_text)
@@ -1016,11 +1150,19 @@ class OpenClawWorker(Worker):
                 raw_parts = "".join(accumulated_text)
                 log.warning(
                     f"ACP prompt completed with no usable text "
-                    f"(turns={self._usage['turns']}, msgs={msg_count}, "
+                    f"(turns={self._usage['turns']}, "
+                    f"msgs={last_msg_count}, "
+                    f"continuations={yield_continuations}, "
                     f"raw_len={len(raw_parts)}, "
                     f"raw={raw_parts[:200]!r})"
                 )
-                if msg_count <= 5:
+                # 仅在首轮且无续杯时触发空响应重试；续杯过的会话状态不
+                # 适合粗暴重置。
+                if (
+                    last_msg_count <= 5
+                    and yield_continuations == 0
+                    and session_state_err is None
+                ):
                     retry_result = await self._retry_on_empty_response(
                         text, on_event, on_log, on_step,
                     )
@@ -1261,6 +1403,25 @@ class OpenClawWorker(Worker):
                     tool_status=tool_status,
                     update=update,
                 )
+
+            # P0-1 Tier 1.5: 检测 sessions_yield 工具调用。模型 spawn 异步
+            # 子任务后会调 sessions_yield 让出 turn。tool_call status 一旦走到
+            # in_progress/started，就标记 yield_pending=True。send() 主循环
+            # 在 stop=end_turn 后看到此标志，会主动发"续杯 prompt"触发
+            # enqueueSystemEvent 队列 drain，让模型看见子任务结果再综合回复。
+            is_sessions_yield = (
+                tool_name == "sessions_yield"
+                or title_lower == "yield"
+            )
+            if is_sessions_yield and tool_status in (
+                "in_progress", "running", "started", "completed", "done"
+            ):
+                if not self._yield_pending:
+                    log.info(
+                        "sessions_yield detected — will auto-continue after "
+                        "end_turn to drain child completion queue"
+                    )
+                self._yield_pending = True
 
             if is_delegation:
                 if tool_status in ("in_progress", "running", "started"):
