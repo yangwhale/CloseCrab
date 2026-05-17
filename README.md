@@ -1,197 +1,189 @@
 # CloseCrab 🦀
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![English](https://img.shields.io/badge/lang-English-blue)](#english-version)
 
 <p align="center">
-  <img src="crab-with-claude-code-inside.png" alt="CloseCrab — AI Agent Bot Framework" width="600"/>
+  <img src="crab-with-claude-code-inside.png" alt="CloseCrab — AI Agent Bot 框架" width="600"/>
 </p>
 
-> **Run Claude Code, OpenClaw, Kilo Code, and Gemini CLI as 24/7 chat bots on Discord, Feishu, Lark, and DingTalk — with shared memory, bot-to-bot collaboration, and hot-swappable runtimes.**
+> **把 Claude Code、OpenClaw、Kilo Code、Gemini CLI 变成 24/7 在线的聊天 Bot——跑在 Discord、飞书、Lark、钉钉上，支持共享记忆、bot 间协作、运行时热切换。**
 
-CloseCrab wraps the world's best AI agent CLIs into multi-platform chat bots. It doesn't re-implement agent capabilities — it directly drives the CLI processes, so **every upstream skill, plugin, and MCP server works out of the box, zero adaptation required**.
+CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实现 agent 能力——直接驱动 CLI 进程，所以**上游生态里的每一个 Skill、Plugin、MCP Server 都能即装即用，零适配成本**。
 
-## Why CloseCrab?
+## 为什么选 CloseCrab？
 
-**You get the full power of 4 agent CLIs — in a chat window.**
+**4 个顶流 Agent CLI 的全部能力——在聊天窗口里直接用。**
 
-| What you get | How |
+| 你得到什么 | 怎么做到的 |
 |---|---|
-| 🔄 **4 runtimes, hot-swappable** | Claude Code · OpenClaw · Kilo Code · Gemini CLI — switch any bot between them in 15 seconds, zero config |
-| 💬 **Multi-platform** | Discord · Feishu · Lark · DingTalk — same bot, any platform |
-| 🧠 **Persistent shared memory** | MEMORY.md + 100+ topic files + GCS-synced team knowledge — survives restarts, shared across bots |
-| 🤝 **Bot teams** | Multiple bots on different hardware, coordinated via real-time Firestore inbox — leader/teammate pattern |
-| 🎙️ **Voice I/O** | Voice messages → STT (Gemini/Chirp2/Whisper) → AI → TTS voice summary back |
-| 🔧 **23 built-in skills** | Wiki, image/video generation, email, enterprise docs, browser automation, and more |
-| 📊 **Control Board** | Real-time web dashboard — fleet overview, live logs, config editor, inbox viewer, chat panel |
-| 📄 **CC Pages** | Bot-generated HTML reports published to your domain with one command |
-| 🔌 **Full upstream ecosystem** | Claude Code skills, MCP servers, Gemini extensions — install and use immediately |
+| 🔄 **4 个 runtime，热切换** | Claude Code · OpenClaw · Kilo Code · Gemini CLI——任意 bot 15 秒切换，零配置 |
+| 💬 **多平台** | Discord · 飞书 · Lark · 钉钉——同一个 bot，任意平台 |
+| 🧠 **持久化共享记忆** | MEMORY.md + 100+ topic 文件 + GCS 同步的团队知识——重启不丢，跨 bot 共享 |
+| 🤝 **Bot 团队** | 多 bot 跨机器协作，Firestore inbox 实时推送——leader/teammate 模式 |
+| 🎙️ **语音 I/O** | 语音消息 → STT (Gemini/Chirp2/Whisper) → AI → TTS 语音摘要回传 |
+| 🔧 **23 个内置 Skill** | Wiki、图片/视频生成、邮件、企业文档、浏览器自动化等 |
+| 📊 **Control Board** | 实时 Web 仪表盘——总览、日志、配置编辑、收件箱、聊天面板 |
+| 📄 **CC Pages** | Bot 生成的 HTML 报告，一条命令发布到你的域名 |
+| 🔌 **完整上游生态** | Claude Code skills、MCP servers、Gemini extensions——装上就能用 |
 
-## Architecture
+## 架构
 
 ```
-User → Channel Adapter → BotCore → Worker → AI CLI
-         (Discord/           (session mgmt,     ├── ClaudeCodeWorker → Claude Code (socketpair)
-          Feishu/              auth, logging,    ├── OpenClawWorker   → OpenClaw   (ACP JSON-RPC)
-          DingTalk)            interrupt)        ├── KiloWorker       → Kilo Code  (HTTP SSE)
-                                                 └── GeminiACPWorker  → Gemini CLI (ACP JSON-RPC)
+用户 → Channel Adapter → BotCore → Worker → AI CLI
+        (Discord/           (session 管理,    ├── ClaudeCodeWorker → Claude Code (socketpair)
+         飞书/                鉴权, 日志,     ├── OpenClawWorker   → OpenClaw   (ACP JSON-RPC)
+         钉钉)               急刹车)         ├── KiloWorker       → Kilo Code  (HTTP SSE)
+                                              └── GeminiACPWorker  → Gemini CLI (ACP JSON-RPC)
 ```
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Architecture" width="800"/>
+  <img src="assets/architecture.svg" alt="架构图" width="800"/>
 </p>
 
-### The 4 Runtimes
+### 4 个 Runtime
 
-Each runtime is a different AI agent CLI with its own strengths. CloseCrab lets a single bot switch between them at runtime — the bot's personality, memory, and team context are preserved across switches.
+每个 runtime 是一个不同的 AI Agent CLI，各有所长。CloseCrab 让同一个 bot 在它们之间运行时切换——bot 的人格、记忆、团队上下文在切换中全部保留。
 
-| Runtime | Transport | Strength | Switch command |
+| Runtime | 通信方式 | 强项 | 切换命令 |
 |---|---|---|---|
-| **Claude Code** | Unix socketpair | Richest tool surface, parallel tool_use, native skills | `set-worker-type bot claude` |
-| **OpenClaw** | ACP (JSON-RPC) | Widest model selection, 1M-token context, semantic memory search | `set-worker-type bot openclaw` |
-| **Kilo Code** | HTTP SSE | Fastest cold start (~3s), real-time streaming | `set-worker-type bot kilo` |
-| **Gemini CLI** | ACP (JSON-RPC) | Google Search grounding, Workspace extensions | `set-worker-type bot gemini` |
+| **Claude Code** | Unix socketpair | 工具最丰富、并发 tool_use、原生 skills | `set-worker-type bot claude` |
+| **OpenClaw** | ACP (JSON-RPC) | 模型最广、可接入 1M-token 模型、语义记忆搜索 | `set-worker-type bot openclaw` |
+| **Kilo Code** | HTTP SSE | 启动最快(~3s)、实时 streaming | `set-worker-type bot kilo` |
+| **Gemini CLI** | ACP (JSON-RPC) | Google Search 接地、Workspace 扩展 | `set-worker-type bot gemini` |
 
-Switching a bot's runtime takes **15 seconds** and requires **zero manual configuration** — model names are automatically translated between runtime naming conventions, workspace files are self-healed, and memory indexes are rebuilt on startup.
+切换一个 bot 的 runtime 只需 **15 秒**，**零手工配置**——model 名自动跨 runtime 命名空间翻译，workspace 文件自动自愈，memory 索引启动时自动重建。
 
-> Read more: [Hybrid Agent Runtimes — how the three CLIs grew into each other's strengths](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/)
+> 延伸阅读: [Hybrid Agent Runtimes——4 个 Agent CLI 如何互相吸收对方的能力](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/)
 
-### Bot Team Collaboration
+### Bot 团队协作
 
-Multiple bots on different hardware collaborate through **Firestore Inbox** — real-time `on_snapshot` push, not polling. Because all bots share a filesystem on the same host, they can also directly edit each other's code, read each other's logs, and restart each other's processes.
+多 bot 跨机器通过 **Firestore Inbox** 协作——基于 `on_snapshot` 实时推送，不是轮询。同机 bot 还能直接编辑对方代码、查看对方日志、重启对方进程。
 
 <p align="center">
-  <img src="assets/bot-team-arch.svg" alt="Bot Team" width="800"/>
+  <img src="assets/bot-team-arch.svg" alt="Bot 团队架构" width="800"/>
 </p>
 
 ```bash
-# Send a task from one bot to another
-python3 scripts/inbox-send.py bunny "Run the Llama 4 benchmark on B200 and report back"
+# 给另一个 bot 派任务
+python3 scripts/inbox-send.py bunny "在 B200 上跑 Llama 4 benchmark，完事报告"
 ```
 
-The leader bot decomposes tasks, dispatches to teammates, and aggregates results — all automatically. Users just talk to the leader.
+Leader bot 拆解任务、派发给 teammate、汇总结果——全自动。用户只需跟 leader 对话。
 
-### Shared Memory
+### 共享记忆
 
 <p align="center">
   <img src="assets/auto-memory.svg" alt="Auto Memory" width="800"/>
 </p>
 
-Every bot has persistent memory that survives restarts and runtime switches:
+每个 bot 都有持久化记忆，重启和 runtime 切换后不丢：
 
-- **MEMORY.md** — long-term structured memory, auto-injected into every conversation
-- **memory/*.md** — 100+ topic files (project notes, feedback, preferences)
-- **shared/*.md** — team-wide infrastructure docs synced via GCS across all bots
-- **OpenClaw bonus** — sqlite-backed semantic search (`memory_search`) over all files
+- **MEMORY.md** — 长期结构化记忆，自动注入每次对话
+- **memory/*.md** — 100+ topic 文件（项目笔记、经验教训、偏好设置）
+- **shared/*.md** — 团队基础设施文档，GCS 同步，所有 bot 共享
+- **OpenClaw 加成** — sqlite 向量索引 + `memory_search` 工具，语义搜索全部文件
 
-## Quick Start
+## 快速开始
 
 ```bash
-# 1. Clone
+# 1. 克隆
 git clone https://github.com/yangwhale/CloseCrab.git && cd CloseCrab
 
-# 2. Configure Firestore
-cp .env.example .env && vim .env   # Set FIRESTORE_PROJECT and FIRESTORE_DATABASE
+# 2. 配置 Firestore
+cp .env.example .env && vim .env   # 填 FIRESTORE_PROJECT 和 FIRESTORE_DATABASE
 
-# 3. Deploy (interactive — walks you through API keys)
+# 3. 一键部署（交互式引导 API keys）
 ./deploy.sh
 
-# 4. Create a bot
+# 4. 创建 bot
 python3 scripts/config-manage.py create mybot --channel discord --token "BOT_TOKEN"
 
-# 5. Run
+# 5. 启动
 nohup ./run.sh mybot > /tmp/mybot.log 2>&1 &
 ```
 
-> **Pro tip:** Already have Claude Code installed? Just run `claude` in this directory and say "deploy me as a Discord bot" — it reads this README and does the rest.
+> **Pro tip:** 已经装了 Claude Code？在这个目录跑 `claude`，然后说"按照 README 帮我部署成飞书 bot"——它会读这份文档帮你搞定。
 
 <details>
-<summary><b>Platform-specific bot setup (Discord / Feishu / DingTalk)</b></summary>
+<summary><b>各平台 Bot Token 获取方式</b></summary>
 
-**Discord:** [Developer Portal](https://discord.com/developers/applications) → New App → Bot → copy token → enable Message Content Intent → invite to server.
+**Discord:** [Developer Portal](https://discord.com/developers/applications) → New App → Bot → 复制 token → 开启 Message Content Intent → 邀请到 server。
 
-**Feishu:** [Open Platform](https://open.feishu.cn/app) → Create App → copy App ID + Secret → Events: WebSocket mode → add `im.message.receive_v1` → publish.
+**飞书:** [开放平台](https://open.feishu.cn/app) → 创建企业自建应用 → 复制 App ID + Secret → 事件订阅用长连接 → 添加 `im.message.receive_v1` → 发布。
 
-**DingTalk:** [Open Platform](https://open-dev.dingtalk.com/) → Create App → copy Client ID + Secret → enable Stream Mode + Robot permission.
+**钉钉:** [开放平台](https://open-dev.dingtalk.com/) → 创建应用 → 复制 Client ID + Secret → 开启 Stream 模式 + 机器人权限。
 
 </details>
 
-## What You Need
+## 你需要准备什么
 
-| Required | Notes |
+| 必备 | 说明 |
 |---|---|
-| **GCP project** | Vertex AI (Claude models) + Firestore (config storage) |
-| **Chat platform bot** | Discord, Feishu, Lark, or DingTalk — create a bot and get the token |
-| **Linux machine** | GCE VM, gLinux, WSL, or any Ubuntu/Debian. Python 3.10+, Node.js 20+ |
+| **GCP 项目** | Vertex AI (Claude 模型调用) + Firestore (配置存储) |
+| **聊天平台 Bot** | Discord / 飞书 / Lark / 钉钉选一个，创建 bot 拿 token |
+| **Linux 机器** | GCE VM、gLinux、WSL、Ubuntu/Debian 均可。Python 3.10+, Node.js 20+ |
 
-| Optional | Notes |
+| 可选 | 说明 |
 |---|---|
-| **GCS bucket** | For CC Pages (web reports) and cross-machine shared memory |
-| **MCP API keys** | GitHub, Context7, Jina — each unlocks an MCP server |
+| **GCS 桶** | CC Pages（Web 报告）和跨机器共享 Memory |
+| **MCP API Keys** | GitHub、Context7、Jina——各解锁一个 MCP server |
 
-## Skills (23 built-in)
+## 内置 Skills (23 个)
 
-| Category | Skills |
+| 分类 | Skills |
 |---|---|
-| **Knowledge** | Personal Wiki (Karpathy LLM Wiki implementation) with MCP server |
-| **Media** | Imagen 4 image gen · Veo 3.1 video gen · TTS voice synthesis · HTML slides |
-| **Enterprise** | Feishu mail · docs · sheets · bitable |
-| **Infra** | Chrome browser automation · tmux orchestration · zsh setup |
-| **Meta** | Chat style · page style · notifications · bot config · skill creator · issue handler · agent teams |
+| **知识** | 个人知识 Wiki（基于 Karpathy LLM Wiki 理念），含 MCP server |
+| **媒体** | Imagen 4 图片生成 · Veo 3.1 视频生成 · TTS 语音合成 · HTML 幻灯片 |
+| **企业** | 飞书邮件 · 文档 · 表格 · 多维表格 |
+| **基建** | Chrome 浏览器自动化 · tmux 编排 · zsh 环境配置 |
+| **元技能** | 聊天风格 · 页面风格 · 通知 · bot 配置 · skill 创建 · issue 处理 · agent 团队 |
 
-## Operational Tools
+## 运维工具
 
 ```bash
-# Local bot management
+# 本地 bot 管理
 scripts/launcher.sh start|stop|restart|status|logs <bot>
 
-# Remote deployment
+# 远程部署
 scripts/dispatch-bot.sh deploy|recall|move|check <bot> <host>
 
-# Runtime switching
+# Runtime 切换
 scripts/config-manage.py set-worker-type <bot> claude|openclaw|kilo|gemini
 
-# Bot-to-bot messaging
-scripts/inbox-send.py <target-bot> "message"
+# Bot 间消息
+scripts/inbox-send.py <target-bot> "消息内容"
 
-# Memory sync + backup
+# 记忆同步 + 备份
 scripts/sync-memory.sh --push
 ```
 
-## Control Board
+## 平台功能对比
 
-Single-file web dashboard (~97KB, zero build) for fleet management:
-
-- Fleet overview with live context usage + color alerts
-- Bot detail: status / config editor / live logs / inbox viewer / chat panel
-- Firebase Auth + Firestore Rules for access control
-- Firestore `onSnapshot` real-time updates
-
-## Platform Features
-
-| Feature | Discord | Feishu | DingTalk |
+| 功能 | Discord | 飞书 | 钉钉 |
 |---|---|---|---|
-| Text messages | ✅ | ✅ | ✅ |
-| Voice input (STT) | ✅ Voice Channel | ✅ Audio messages | — |
-| Voice summary (TTS) | ✅ | ✅ | — |
-| Progress feedback | Edit message + emoji | Animated crab card 🦀 | Text update |
-| Message quoting | ✅ Reply context | ✅ | — |
-| Slash commands | ✅ 7 commands | — | — |
-| Connection | Gateway | WebSocket | Stream |
+| 文字消息 | ✅ | ✅ | ✅ |
+| 语音输入 (STT) | ✅ 语音频道 | ✅ 语音消息 | — |
+| 语音摘要 (TTS) | ✅ | ✅ | — |
+| 进度反馈 | 编辑消息 + emoji | 动画螃蟹卡片 🦀 | 文字更新 |
+| 消息引用 | ✅ | ✅ | — |
+| Slash 命令 | ✅ 7 个命令 | — | — |
+| 连接方式 | Gateway | WebSocket | Stream |
 
-## Emergency Stop
+## 急刹车
 
-Send any of these in any platform to immediately interrupt execution:
+在任何平台发送以下关键词立即中断执行：
 
 `停` `stop` `取消` `算了` `打住` `急刹车` `停下` `别做了` `不要了`
 
-## Documentation
+## 文档
 
-| Doc | Content |
+| 文档 | 内容 |
 |---|---|
-| [Full Reference](docs/full-reference.md) | Complete deployment guide, config reference, troubleshooting |
-| [OpenClaw Deploy Guide](docs/openclaw-deploy-quickstart.md) | OpenClaw Gateway setup |
-| [OpenClaw Worker Design](docs/openclaw-worker-design.md) | ACP protocol and architecture |
-| [Blog: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | How the 4 runtimes grew into each other's strengths |
+| [完整参考](docs/full-reference.md) | 详细部署指南、配置参考、故障排查 |
+| [OpenClaw 部署指南](docs/openclaw-deploy-quickstart.md) | OpenClaw Gateway 配置 |
+| [OpenClaw Worker 设计](docs/openclaw-worker-design.md) | ACP 协议和架构 |
+| [博客: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | 4 个 runtime 如何互相吸收能力 |
 
 ## Contributing
 
@@ -200,3 +192,48 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## License
 
 Copyright 2025-2026 Chris Yang (yangwhale). Apache License 2.0 — see [LICENSE](LICENSE).
+
+---
+
+<a id="english-version"></a>
+
+## English Version
+
+> **Run Claude Code, OpenClaw, Kilo Code, and Gemini CLI as 24/7 chat bots on Discord, Feishu, Lark, and DingTalk — with shared memory, bot-to-bot collaboration, and hot-swappable runtimes.**
+
+CloseCrab wraps the world's best AI agent CLIs into multi-platform chat bots. It doesn't re-implement agent capabilities — it directly drives the CLI processes, so **every upstream skill, plugin, and MCP server works out of the box, zero adaptation required**.
+
+### Why CloseCrab?
+
+| What you get | How |
+|---|---|
+| 🔄 **4 runtimes, hot-swappable** | Claude Code · OpenClaw · Kilo Code · Gemini CLI — switch any bot in 15 seconds, zero config |
+| 💬 **Multi-platform** | Discord · Feishu · Lark · DingTalk — same bot, any platform |
+| 🧠 **Persistent shared memory** | MEMORY.md + 100+ topic files + GCS-synced team knowledge — survives restarts, shared across bots |
+| 🤝 **Bot teams** | Multiple bots coordinated via real-time Firestore inbox — leader/teammate pattern |
+| 🎙️ **Voice I/O** | Voice messages → STT → AI → TTS voice summary back |
+| 🔧 **23 built-in skills** | Wiki, image/video generation, email, enterprise docs, browser automation, and more |
+| 📊 **Control Board** | Real-time web dashboard for fleet management |
+| 📄 **CC Pages** | Bot-generated HTML reports published to your domain |
+| 🔌 **Full upstream ecosystem** | Claude Code skills, MCP servers, Gemini extensions — install and use immediately |
+
+### The 4 Runtimes
+
+| Runtime | Transport | Strength | Switch command |
+|---|---|---|---|
+| **Claude Code** | Unix socketpair | Richest tools, parallel tool_use, native skills | `set-worker-type bot claude` |
+| **OpenClaw** | ACP (JSON-RPC) | Widest models, 1M-token capable, semantic memory search | `set-worker-type bot openclaw` |
+| **Kilo Code** | HTTP SSE | Fastest cold start (~3s), real-time streaming | `set-worker-type bot kilo` |
+| **Gemini CLI** | ACP (JSON-RPC) | Google Search grounding, Workspace extensions | `set-worker-type bot gemini` |
+
+### Quick Start
+
+```bash
+git clone https://github.com/yangwhale/CloseCrab.git && cd CloseCrab
+cp .env.example .env && vim .env
+./deploy.sh
+python3 scripts/config-manage.py create mybot --channel discord --token "TOKEN"
+nohup ./run.sh mybot > /tmp/mybot.log 2>&1 &
+```
+
+> Full documentation: [docs/full-reference.md](docs/full-reference.md)
