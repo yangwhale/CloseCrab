@@ -90,7 +90,8 @@ def gather(bot_name: str, days: int) -> dict:
                   "cache_read_input_tokens", "cache_creation_input_tokens"):
             agg[k] += int(u.get(k) or 0)
         agg["cost_usd"] += float(u.get("cost_usd") or 0)
-        agg["duration_s"] += float(d.get("duration_s") or 0)
+        # Firestore field is duration_seconds (legacy code in bot.py); accept either.
+        agg["duration_s"] += float(d.get("duration_seconds") or d.get("duration_s") or 0)
         if d.get("status") in ("error", "failed", "timeout"):
             agg["errors"] += 1
         src = d.get("source") or "unknown"
@@ -101,7 +102,7 @@ def gather(bot_name: str, days: int) -> dict:
                 "source": src,
                 "status": d.get("status"),
                 "steps": len(d.get("steps") or []),
-                "dur_s": round(float(d.get("duration_s") or 0), 1),
+                "dur_s": round(float(d.get("duration_seconds") or d.get("duration_s") or 0), 1),
                 "in_tok": int(u.get("input_tokens") or 0),
                 "out_tok": int(u.get("output_tokens") or 0),
                 "cost": float(u.get("cost_usd") or 0),

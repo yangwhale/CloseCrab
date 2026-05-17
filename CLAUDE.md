@@ -61,6 +61,14 @@ python3 scripts/config-manage.py set-worker-type <bot_name> gemini  # 切换到 
 # Bot 间消息
 python3 scripts/inbox-send.py <target_bot> "<message>"
 
+# Bot 增强能力（为 Kilo / 其他 worker 补齐 OpenClaw 同类能力）
+python3 scripts/subagent-parallel.py --inline '{"tasks":[{"label":"A","prompt":"..."}]}'  # 真并行多 sub-agent LLM
+python3 scripts/cron-tool.py add --target <bot> --in 10m --message "..."               # 定时提醒、一次性
+python3 scripts/cron-tool.py add --target <bot> --cron "0 9 * * MON-FRI" --message ...  # 重复 cron
+python3 scripts/cron-tool.py list|remove <id>|tick                                     # 查看/取消/手动制动
+python3 scripts/session-status.py <bot> [--days N]                                     # 查询 model/usage/cost/近期 turns
+# cron-daemon.py 由 launcher.sh 启 bot 时自动拉起、host 单例、每 30s tick 一次
+
 # 运维脚本
 scripts/dispatch-bot.sh deploy|recall|move|check   # 多 bot 调度
 scripts/sync-memory.sh --push|--pull               # 记忆同步

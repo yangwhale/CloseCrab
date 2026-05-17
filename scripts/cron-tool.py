@@ -227,10 +227,19 @@ def cmd_remove(args):
 
 
 def cmd_tick(args):
-    """Run by daemon. Fire all due scheduled jobs."""
+    """Run by daemon. Fire all due scheduled jobs and garbage-collect old done."""
     fired = []
     d = db()
     cutoff = NOW()
+    # Sweep: delete done/cancelled/error jobs older than 7 days to keep collection bounded.
+    sweep_before = cutoff - timedelta(days=7)
+    swept = 0
+    for snap in d.collection(COLL).where("status", "in", ["done", "cancelled", "error"]).stream():
+        x = snap.to_dict()
+        last = x.get("last_fired_at") or x.get("created_at")
+        if last and last < sweep_before:
+            snap.reference.delete()
+            swept += 1
     q = d.collection(COLL).where("status", "==", "scheduled")
     for snap in q.stream():
         x = snap.to_dict()
@@ -262,7 +271,10 @@ def cmd_tick(args):
             upd["status"] = "done"
         snap.reference.update(upd)
         fired.append(x["job_id"])
-    print(json.dumps({"fired": fired, "count": len(fired)}))
+    out = {"fired": fired, "count": len(fired)}
+    if swept:
+        out["swept"] = swept
+    print(json.dumps(out))
 
 
 def main():
