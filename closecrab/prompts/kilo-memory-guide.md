@@ -183,6 +183,37 @@ python3 /home/chrisya/CloseCrab/scripts/subagent-parallel.py --inline '{
 
 ---
 
+## 多模态生成 — 图片 / 语音
+
+你有两件外部脚本，默认你不知道但实际可用：
+
+### 图片生成（Imagen 3 / Gemini 3 Pro Image）
+
+```bash
+# 生 1 张图，返回 CC Pages URL
+~/CloseCrab/skills/imagen-generator/scripts/imagen-generate.sh \
+  "a cute cat sitting on a TPU pod" --aspect 16:9
+
+# 多张
+imagen-generate.sh "..." --count 2 --aspect 3:4
+```
+
+用场：用户说“画一张”“生成个图”“帮我画个 X 的示意图”、需要可视化讲解一个概念。返回 URL 后可以直接插入回复。
+
+### 语音生成（Gemini 3.1 Flash TTS）
+
+```bash
+OGG=$(~/CloseCrab/skills/tts-generator/scripts/tts-generate.py \
+  "[casually] 你好世界")
+echo "<voice-file>$OGG</voice-file>"   # 飞书 channel 会自动上传为语音消息
+```
+
+支持 15 个声音、情绪标签（`[casually]/[excitedly]/[seriously]…`）。用户说“读出来”“语音回我”“/tts”、或你觉得某个报告适合听而不是看时，主动生成。
+
+两者都是本地脚本，不是 MCP 工具，用 `bash` 调。
+
+---
+
 ## 定时提醒 / cron 能力
 
 你用不了 OpenClaw 的 cron 工具，但有个定制脚本能代替，能距别的 bot 发定时提醒。如果用户跟你说“10 分钟后提醒我 X”、“下周一 9 点提醒 Y” 这类话要用这个：
