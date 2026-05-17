@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" font-family="'Google Sans', 'Segoe UI', system-ui, sans-serif">
+  <defs>
+    <filter id="card-shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#202124" flood-opacity="0.12"/>
+    </filter>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5F6368"/>
+    </marker>
+    <marker id="ar-sw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#E8710A"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="620" fill="#F8F9FA"/>
+
+  <text x="500" y="36" text-anchor="middle" fill="#202124" font-size="20" font-weight="600">Runtime Hot-Swap · 15 秒切换，零数据迁移</text>
+  <text x="500" y="56" text-anchor="middle" fill="#5F6368" font-size="12">同一个 bot 在 4 个 Agent CLI 之间运行时切换 · 身份 / 记忆 / 团队上下文全部保留</text>
+
+  <!-- ============== TOP BAR: PERSISTENT IDENTITY ============== -->
+  <g transform="translate(60, 90)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">PERSISTENT BOT IDENTITY · 切换中保留</text>
+    <rect x="0" y="0" width="880" height="84" rx="8" fill="#E8F0FE" stroke="#1A73E8" filter="url(#card-shadow)"/>
+
+    <g transform="translate(20, 16)">
+      <text x="0" y="14" fill="#1A73E8" font-size="11" font-weight="700">bot_name</text>
+      <text x="0" y="32" fill="#202124" font-size="10">jarvis / bunny / hulk</text>
+      <text x="0" y="48" fill="#5F6368" font-size="9">Firestore bots/{name}</text>
+    </g>
+    <g transform="translate(160, 16)">
+      <text x="0" y="14" fill="#1A73E8" font-size="11" font-weight="700">MEMORY.md + memory/*</text>
+      <text x="0" y="32" fill="#202124" font-size="10">100+ topic files</text>
+      <text x="0" y="48" fill="#5F6368" font-size="9">本地文件 + GCS shared/</text>
+    </g>
+    <g transform="translate(360, 16)">
+      <text x="0" y="14" fill="#1A73E8" font-size="11" font-weight="700">Channel tokens</text>
+      <text x="0" y="32" fill="#202124" font-size="10">Discord / 飞书 / 钉钉</text>
+      <text x="0" y="48" fill="#5F6368" font-size="9">Firestore + K8s secret</text>
+    </g>
+    <g transform="translate(540, 16)">
+      <text x="0" y="14" fill="#1A73E8" font-size="11" font-weight="700">Team context</text>
+      <text x="0" y="32" fill="#202124" font-size="10">leader / teammate 角色</text>
+      <text x="0" y="48" fill="#5F6368" font-size="9">#team-ops 频道路由</text>
+    </g>
+    <g transform="translate(720, 16)">
+      <text x="0" y="14" fill="#1A73E8" font-size="11" font-weight="700">33 Skills</text>
+      <text x="0" y="32" fill="#202124" font-size="10">~/.claude/skills/*</text>
+      <text x="0" y="48" fill="#5F6368" font-size="9">symlink 到 repo</text>
+    </g>
+  </g>
+
+  <!-- Down arrow indicating "feeds into" -->
+  <line x1="500" y1="174" x2="500" y2="210" stroke="#5F6368" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#ar)"/>
+  <text x="510" y="194" fill="#5F6368" font-size="10">feeds into</text>
+
+  <!-- ============== MIDDLE: SWITCH KNOB ============== -->
+  <g transform="translate(60, 218)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">WORKER SLOT · 一次只激活一个</text>
+    <rect x="0" y="0" width="880" height="180" rx="8" fill="#FFFFFF" stroke="#DADCE0" stroke-dasharray="6,3" filter="url(#card-shadow)"/>
+
+    <!-- 4 candidate workers -->
+    <g transform="translate(20, 20)">
+      <rect width="190" height="140" rx="6" fill="#E8F0FE" stroke="#1A73E8" stroke-width="2"/>
+      <text x="95" y="26" text-anchor="middle" fill="#1A73E8" font-size="13" font-weight="700">Claude Code</text>
+      <text x="95" y="44" text-anchor="middle" fill="#5F6368" font-size="9">Unix socketpair</text>
+      <line x1="14" y1="56" x2="176" y2="56" stroke="#DADCE0"/>
+      <text x="14" y="74" fill="#202124" font-size="9">✓ 工具最丰富</text>
+      <text x="14" y="90" fill="#202124" font-size="9">✓ 原生 skills / MCP</text>
+      <text x="14" y="106" fill="#202124" font-size="9">✓ 并发 tool_use</text>
+      <text x="14" y="122" fill="#5F6368" font-size="9">⚡ stream-JSON · plan mode</text>
+    </g>
+
+    <g transform="translate(228, 20)">
+      <rect width="190" height="140" rx="6" fill="#E6F4EA" stroke="#188038" stroke-width="2"/>
+      <text x="95" y="26" text-anchor="middle" fill="#188038" font-size="13" font-weight="700">OpenClaw</text>
+      <text x="95" y="44" text-anchor="middle" fill="#5F6368" font-size="9">ACP + Gateway</text>
+      <line x1="14" y1="56" x2="176" y2="56" stroke="#DADCE0"/>
+      <text x="14" y="74" fill="#202124" font-size="9">✓ 模型最广（含 1M ctx）</text>
+      <text x="14" y="90" fill="#202124" font-size="9">✓ sqlite 语义记忆</text>
+      <text x="14" y="106" fill="#202124" font-size="9">✓ 多 bot 共享 Gateway</text>
+      <text x="14" y="122" fill="#5F6368" font-size="9">⚡ JSON-RPC / NDJSON</text>
+    </g>
+
+    <g transform="translate(436, 20)">
+      <rect width="190" height="140" rx="6" fill="#FEF7E0" stroke="#B06000" stroke-width="2"/>
+      <text x="95" y="26" text-anchor="middle" fill="#B06000" font-size="13" font-weight="700">Kilo Code</text>
+      <text x="95" y="44" text-anchor="middle" fill="#5F6368" font-size="9">HTTP SSE</text>
+      <line x1="14" y1="56" x2="176" y2="56" stroke="#DADCE0"/>
+      <text x="14" y="74" fill="#202124" font-size="9">✓ 启动最快 (~3s)</text>
+      <text x="14" y="90" fill="#202124" font-size="9">✓ Cloud-managed</text>
+      <text x="14" y="106" fill="#202124" font-size="9">✓ 真流式 part.delta</text>
+      <text x="14" y="122" fill="#5F6368" font-size="9">⚡ remote MCP · cloud LLM</text>
+    </g>
+
+    <g transform="translate(644, 20)">
+      <rect width="190" height="140" rx="6" fill="#FCE8E6" stroke="#C5221F" stroke-width="2"/>
+      <text x="95" y="26" text-anchor="middle" fill="#C5221F" font-size="13" font-weight="700">Gemini CLI</text>
+      <text x="95" y="44" text-anchor="middle" fill="#5F6368" font-size="9">ACP / NDJSON</text>
+      <line x1="14" y1="56" x2="176" y2="56" stroke="#DADCE0"/>
+      <text x="14" y="74" fill="#202124" font-size="9">✓ Google Search 接地</text>
+      <text x="14" y="90" fill="#202124" font-size="9">✓ Workspace 扩展</text>
+      <text x="14" y="106" fill="#202124" font-size="9">✓ 自带 web_fetch</text>
+      <text x="14" y="122" fill="#5F6368" font-size="9">⚡ gemini --acp --yolo</text>
+    </g>
+  </g>
+
+  <!-- Switch arrows -->
+  <g stroke="#E8710A" stroke-width="2" fill="none">
+    <path d="M 235 290 L 215 290" marker-end="url(#ar-sw)"/>
+    <path d="M 443 290 L 423 290" marker-end="url(#ar-sw)"/>
+    <path d="M 651 290 L 631 290" marker-end="url(#ar-sw)"/>
+    <path d="M 215 290 L 235 290" marker-end="url(#ar-sw)"/>
+    <path d="M 423 290 L 443 290" marker-end="url(#ar-sw)"/>
+    <path d="M 631 290 L 651 290" marker-end="url(#ar-sw)"/>
+  </g>
+
+  <!-- ============== BOTTOM: SWITCH COMMAND + WHAT GETS TRANSLATED ============== -->
+  <g transform="translate(60, 430)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">SWITCH ACTION · 一行命令 · 15 秒生效</text>
+    <rect x="0" y="0" width="880" height="60" rx="8" fill="#FFF3E0" stroke="#E8710A" filter="url(#card-shadow)"/>
+    <text x="20" y="26" fill="#202124" font-size="13" font-family="'JetBrains Mono', 'Courier New', monospace" font-weight="600">$ python3 scripts/config-manage.py set-worker-type jarvis openclaw</text>
+    <text x="20" y="46" fill="#5F6368" font-size="11">→ 改 Firestore bots/jarvis.worker_type → 进程 /restart → BotCore 实例化新 worker → bot 在新 runtime 上继续对话</text>
+  </g>
+
+  <!-- Bottom row: what gets auto-translated / auto-healed -->
+  <g transform="translate(60, 510)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">AUTO-TRANSLATION · 切换中自动处理</text>
+
+    <g transform="translate(0, 4)">
+      <rect width="284" height="78" rx="6" fill="#FFFFFF" stroke="#DADCE0" filter="url(#card-shadow)"/>
+      <text x="14" y="22" fill="#1A73E8" font-size="11" font-weight="700">Model 命名空间翻译</text>
+      <text x="14" y="40" fill="#202124" font-size="10">claude-opus-4-7 → opus-4.7</text>
+      <text x="14" y="54" fill="#202124" font-size="10">→ provider/model:openclaw</text>
+      <text x="14" y="68" fill="#5F6368" font-size="9">BotCore 反向同步 default model</text>
+    </g>
+
+    <g transform="translate(298, 4)">
+      <rect width="284" height="78" rx="6" fill="#FFFFFF" stroke="#DADCE0" filter="url(#card-shadow)"/>
+      <text x="14" y="22" fill="#188038" font-size="11" font-weight="700">Workspace 文件自愈</text>
+      <text x="14" y="40" fill="#202124" font-size="10">GEMINI.md · AGENTS.md</text>
+      <text x="14" y="54" fill="#202124" font-size="10">~/.claude/* · openclaw-workspace</text>
+      <text x="14" y="68" fill="#5F6368" font-size="9">缺失时 worker 启动时重写</text>
+    </g>
+
+    <g transform="translate(596, 4)">
+      <rect width="284" height="78" rx="6" fill="#FFFFFF" stroke="#DADCE0" filter="url(#card-shadow)"/>
+      <text x="14" y="22" fill="#6F2DA8" font-size="11" font-weight="700">Memory 索引重建</text>
+      <text x="14" y="40" fill="#202124" font-size="10">OpenClaw sqlite 启动时</text>
+      <text x="14" y="54" fill="#202124" font-size="10">扫描 .md 自动 reindex</text>
+      <text x="14" y="68" fill="#5F6368" font-size="9">Claude/Kilo/Gemini 用文件 + Grep</text>
+    </g>
+  </g>
+</svg>

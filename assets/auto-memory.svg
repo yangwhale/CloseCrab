@@ -1,143 +1,164 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 480" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" font-family="'Google Sans', 'Segoe UI', system-ui, sans-serif">
   <defs>
-    <linearGradient id="bg3" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#0d1117"/>
-      <stop offset="100%" stop-color="#161b22"/>
-    </linearGradient>
-    <linearGradient id="memGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#7c3aed"/>
-      <stop offset="100%" stop-color="#a855f7"/>
-    </linearGradient>
-    <linearGradient id="sharedGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0ea5e9"/>
-      <stop offset="100%" stop-color="#38bdf8"/>
-    </linearGradient>
-    <linearGradient id="gcsBarGrad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#059669"/>
-      <stop offset="50%" stop-color="#0ea5e9"/>
-      <stop offset="100%" stop-color="#059669"/>
-    </linearGradient>
-    <filter id="sh3">
-      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    <filter id="card-shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#202124" flood-opacity="0.12"/>
     </filter>
-    <marker id="arrowUp3" markerWidth="8" markerHeight="8" refX="4" refY="0" orient="auto">
-      <path d="M1,7 L4,1 L7,7" fill="none" stroke="#38bdf8" stroke-width="1.5"/>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5F6368"/>
+    </marker>
+    <marker id="arr-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1A73E8"/>
     </marker>
   </defs>
 
-  <!-- Background -->
-  <rect width="920" height="480" fill="url(#bg3)" rx="12"/>
+  <rect width="1000" height="620" fill="#F8F9FA"/>
 
-  <!-- Title -->
-  <text x="460" y="34" text-anchor="middle" fill="#e6edf3" font-size="17" font-weight="600">Auto Memory — Two-Layer Architecture</text>
+  <text x="500" y="36" text-anchor="middle" fill="#202124" font-size="20" font-weight="600">Persistent Shared Memory</text>
+  <text x="500" y="56" text-anchor="middle" fill="#5F6368" font-size="12">每次对话自动加载 · 重启不丢 · runtime 切换无损 · 多 bot 共享</text>
 
-  <!-- ==================== 3 Bot columns ==================== -->
+  <!-- ============== LEFT: AGENT TURN ============== -->
+  <g transform="translate(40, 100)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">AGENT TURN</text>
+    <rect x="0" y="0" width="240" height="440" rx="8" fill="#FFFFFF" stroke="#DADCE0" filter="url(#card-shadow)"/>
 
-  <!-- Bot A: Jarvis -->
-  <rect x="40" y="55" width="260" height="240" rx="12" fill="#161b22" stroke="#a855f7" stroke-width="1.2" filter="url(#sh3)"/>
-  <rect x="40" y="55" width="260" height="28" rx="12" fill="url(#memGrad)" opacity="0.15"/>
-  <text x="170" y="74" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="600">Bot A — Jarvis (gLinux)</text>
-  <text x="60" y="100" fill="#6e7681" font-size="10">~/.claude/projects/&lt;proj&gt;/memory/</text>
+    <g transform="translate(20, 24)">
+      <rect width="200" height="48" rx="6" fill="#FCE8E6" stroke="#C5221F"/>
+      <text x="100" y="20" text-anchor="middle" fill="#C5221F" font-size="12" font-weight="600">用户消息</text>
+      <text x="100" y="36" text-anchor="middle" fill="#5F6368" font-size="10">Discord / 飞书 / 钉钉</text>
+    </g>
 
-  <!-- MEMORY.md (local) -->
-  <rect x="60" y="112" width="220" height="50" rx="6" fill="#0d1117" stroke="#a855f7" stroke-width="1"/>
-  <text x="72" y="131" fill="#d2a8ff" font-size="11" font-weight="600">MEMORY.md</text>
-  <text x="230" y="131" text-anchor="end" fill="#484f58" font-size="9">local identity</text>
-  <text x="72" y="150" fill="#8b949e" font-size="10">user preferences, role, feedback</text>
+    <line x1="120" y1="86" x2="120" y2="118" stroke="#5F6368" stroke-width="1.5" marker-end="url(#arr)"/>
 
-  <!-- feedback/project files -->
-  <rect x="60" y="170" width="220" height="30" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
-  <text x="72" y="190" fill="#8b949e" font-size="10">feedback_*.md, project_*.md</text>
-  <text x="230" y="190" text-anchor="end" fill="#484f58" font-size="9">local only</text>
+    <g transform="translate(20, 122)">
+      <rect width="200" height="80" rx="6" fill="#EDE7F6" stroke="#6F2DA8"/>
+      <text x="100" y="22" text-anchor="middle" fill="#6F2DA8" font-size="12" font-weight="600">System Prompt 构造</text>
+      <text x="100" y="40" text-anchor="middle" fill="#5F6368" font-size="9">channel style + safety rule</text>
+      <text x="100" y="52" text-anchor="middle" fill="#5F6368" font-size="9">+ bot 身份 + team 角色</text>
+      <text x="100" y="64" text-anchor="middle" fill="#5F6368" font-size="9">+ MEMORY.md 全文注入</text>
+    </g>
 
-  <!-- shared/ (symlink) -->
-  <rect x="60" y="210" width="220" height="65" rx="6" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
-  <text x="72" y="230" fill="#58a6ff" font-size="11" font-weight="600">shared/</text>
-  <text x="230" y="230" text-anchor="end" fill="#38bdf8" font-size="9">symlink → gcsfuse</text>
-  <text x="72" y="248" fill="#8b949e" font-size="10">architecture.md</text>
-  <text x="72" y="263" fill="#8b949e" font-size="10">debugging.md, tools.md ...</text>
+    <line x1="120" y1="206" x2="120" y2="240" stroke="#5F6368" stroke-width="1.5" marker-end="url(#arr)"/>
 
-  <!-- Bot B: Tommy -->
-  <rect x="330" y="55" width="260" height="240" rx="12" fill="#161b22" stroke="#10b981" stroke-width="1.2" filter="url(#sh3)"/>
-  <rect x="330" y="55" width="260" height="28" rx="12" fill="#059669" opacity="0.12"/>
-  <text x="460" y="74" text-anchor="middle" fill="#7ee787" font-size="13" font-weight="600">Bot B — Tommy (TPU VM)</text>
-  <text x="350" y="100" fill="#6e7681" font-size="10">~/.claude/projects/&lt;proj&gt;/memory/</text>
+    <g transform="translate(20, 244)">
+      <rect width="200" height="68" rx="6" fill="#E6F4EA" stroke="#188038"/>
+      <text x="100" y="22" text-anchor="middle" fill="#188038" font-size="12" font-weight="600">Agent CLI 推理</text>
+      <text x="100" y="40" text-anchor="middle" fill="#5F6368" font-size="9">Claude / OpenClaw /</text>
+      <text x="100" y="52" text-anchor="middle" fill="#5F6368" font-size="9">Kilo / Gemini</text>
+    </g>
 
-  <rect x="350" y="112" width="220" height="50" rx="6" fill="#0d1117" stroke="#10b981" stroke-width="1"/>
-  <text x="362" y="131" fill="#7ee787" font-size="11" font-weight="600">MEMORY.md</text>
-  <text x="520" y="131" text-anchor="end" fill="#484f58" font-size="9">local identity</text>
-  <text x="362" y="150" fill="#8b949e" font-size="10">TPU expertise, training history</text>
+    <line x1="120" y1="316" x2="120" y2="350" stroke="#5F6368" stroke-width="1.5" marker-end="url(#arr)"/>
 
-  <rect x="350" y="170" width="220" height="30" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
-  <text x="362" y="190" fill="#8b949e" font-size="10">feedback_*.md, project_*.md</text>
-  <text x="520" y="190" text-anchor="end" fill="#484f58" font-size="9">local only</text>
+    <g transform="translate(20, 354)">
+      <rect width="200" height="68" rx="6" fill="#FEF7E0" stroke="#B06000"/>
+      <text x="100" y="22" text-anchor="middle" fill="#B06000" font-size="12" font-weight="600">自动写入 memory</text>
+      <text x="100" y="40" text-anchor="middle" fill="#5F6368" font-size="9">发现 user/feedback/project</text>
+      <text x="100" y="52" text-anchor="middle" fill="#5F6368" font-size="9">/reference 价值时主动落盘</text>
+    </g>
+  </g>
 
-  <rect x="350" y="210" width="220" height="65" rx="6" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
-  <text x="362" y="230" fill="#58a6ff" font-size="11" font-weight="600">shared/</text>
-  <text x="520" y="230" text-anchor="end" fill="#38bdf8" font-size="9">symlink → gcsfuse</text>
-  <text x="362" y="248" fill="#8b949e" font-size="10">architecture.md</text>
-  <text x="362" y="263" fill="#8b949e" font-size="10">debugging.md, tools.md ...</text>
+  <!-- ============== MIDDLE: 4 MEMORY LAYERS ============== -->
+  <g transform="translate(320, 100)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">MEMORY LAYERS · 持久化分层</text>
+    <rect x="0" y="0" width="380" height="440" rx="8" fill="#FFFFFF" stroke="#DADCE0" filter="url(#card-shadow)"/>
 
-  <!-- Bot C: Bunny -->
-  <rect x="620" y="55" width="260" height="240" rx="12" fill="#161b22" stroke="#f87171" stroke-width="1.2" filter="url(#sh3)"/>
-  <rect x="620" y="55" width="260" height="28" rx="12" fill="#dc2626" opacity="0.12"/>
-  <text x="750" y="74" text-anchor="middle" fill="#ffa198" font-size="13" font-weight="600">Bot C — Bunny (B200 VM)</text>
-  <text x="640" y="100" fill="#6e7681" font-size="10">~/.claude/projects/&lt;proj&gt;/memory/</text>
+    <g transform="translate(20, 18)">
+      <rect width="340" height="84" rx="6" fill="#E8F0FE" stroke="#1A73E8"/>
+      <text x="14" y="22" fill="#1A73E8" font-size="13" font-weight="700">① MEMORY.md</text>
+      <text x="320" y="22" text-anchor="end" fill="#1A73E8" font-size="10">每次对话自动加载</text>
+      <text x="14" y="42" fill="#202124" font-size="10">- bot 身份 + Chris 偏好 + 时区 + 称呼</text>
+      <text x="14" y="58" fill="#202124" font-size="10">- 项目/经验/参考的 topic 索引</text>
+      <text x="14" y="74" fill="#5F6368" font-size="9" font-style="italic">长度限制 ~200 行（system prompt 头部硬塞）</text>
+    </g>
 
-  <rect x="640" y="112" width="220" height="50" rx="6" fill="#0d1117" stroke="#f87171" stroke-width="1"/>
-  <text x="652" y="131" fill="#ffa198" font-size="11" font-weight="600">MEMORY.md</text>
-  <text x="810" y="131" text-anchor="end" fill="#484f58" font-size="9">local identity</text>
-  <text x="652" y="150" fill="#8b949e" font-size="10">GPU inference, vLLM experience</text>
+    <g transform="translate(20, 116)">
+      <rect width="340" height="84" rx="6" fill="#E6F4EA" stroke="#188038"/>
+      <text x="14" y="22" fill="#188038" font-size="13" font-weight="700">② memory/*.md</text>
+      <text x="320" y="22" text-anchor="end" fill="#188038" font-size="10">100+ topic 文件 · 按需读</text>
+      <text x="14" y="42" fill="#202124" font-size="10">- feedback_*.md (经验教训 / 个人偏好)</text>
+      <text x="14" y="58" fill="#202124" font-size="10">- project_*.md (长期项目笔记)</text>
+      <text x="14" y="74" fill="#202124" font-size="10">- user_*.md / reference_*.md / shared_*.md</text>
+    </g>
 
-  <rect x="640" y="170" width="220" height="30" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
-  <text x="652" y="190" fill="#8b949e" font-size="10">feedback_*.md, project_*.md</text>
-  <text x="810" y="190" text-anchor="end" fill="#484f58" font-size="9">local only</text>
+    <g transform="translate(20, 214)">
+      <rect width="340" height="84" rx="6" fill="#FEF7E0" stroke="#B06000"/>
+      <text x="14" y="22" fill="#B06000" font-size="13" font-weight="700">③ shared/*.md</text>
+      <text x="320" y="22" text-anchor="end" fill="#B06000" font-size="10">GCS gcsfuse · 多 bot 实时共享</text>
+      <text x="14" y="42" fill="#202124" font-size="10">- 团队基础设施文档（架构 / 工具 / 调试）</text>
+      <text x="14" y="58" fill="#202124" font-size="10">- 任一 bot 写入，所有 bot 立刻可读</text>
+      <text x="14" y="74" fill="#5F6368" font-size="9" font-style="italic">gs://chris-pgp-host-asia/memory/shared/</text>
+    </g>
 
-  <rect x="640" y="210" width="220" height="65" rx="6" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
-  <text x="652" y="230" fill="#58a6ff" font-size="11" font-weight="600">shared/</text>
-  <text x="810" y="230" text-anchor="end" fill="#38bdf8" font-size="9">symlink → gcsfuse</text>
-  <text x="652" y="248" fill="#8b949e" font-size="10">architecture.md</text>
-  <text x="652" y="263" fill="#8b949e" font-size="10">debugging.md, tools.md ...</text>
+    <g transform="translate(20, 312)">
+      <rect width="340" height="110" rx="6" fill="#F3E8FD" stroke="#6F2DA8"/>
+      <text x="14" y="22" fill="#6F2DA8" font-size="13" font-weight="700">④ OpenClaw sqlite 向量索引</text>
+      <text x="320" y="22" text-anchor="end" fill="#6F2DA8" font-size="10">OpenClaw runtime 加成</text>
+      <text x="14" y="42" fill="#202124" font-size="10">- 启动时自动重建索引（all .md files）</text>
+      <text x="14" y="58" fill="#202124" font-size="10">- 提供 memory_search MCP tool</text>
+      <text x="14" y="74" fill="#202124" font-size="10">- 语义检索：找记忆不用记得 slug</text>
+      <text x="14" y="94" fill="#5F6368" font-size="9" font-style="italic">注：Claude Code 走 Read + Grep，照样能找到</text>
+    </g>
+  </g>
 
-  <!-- ==================== gcsfuse arrows ==================== -->
-  <line x1="170" y1="275" x2="170" y2="340" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <line x1="460" y1="275" x2="460" y2="340" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <line x1="750" y1="275" x2="750" y2="340" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <!-- Arrows from agent turn to memory layers (right-pointing read) -->
+  <g stroke="#1A73E8" stroke-width="1.2" fill="none" opacity="0.6">
+    <path d="M 282 220 L 318 160" marker-end="url(#arr-r)"/>
+  </g>
+  <text x="290" y="200" fill="#1A73E8" font-size="9">read</text>
 
-  <!-- gcsfuse labels -->
-  <text x="170" y="312" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
-  <text x="460" y="312" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
-  <text x="750" y="312" text-anchor="middle" fill="#484f58" font-size="9">gcsfuse</text>
+  <!-- Arrow from "自动写入" back to memory layers (write) -->
+  <g stroke="#5F6368" stroke-width="1.2" fill="none">
+    <path d="M 282 388 L 318 256" marker-end="url(#arr)" stroke-dasharray="3,2"/>
+  </g>
+  <text x="285" y="320" fill="#5F6368" font-size="9">write</text>
 
-  <!-- bidirectional arrows -->
-  <path d="M170,280 L170,275" stroke="#38bdf8" stroke-width="1.5"/>
-  <polygon points="166,280 170,273 174,280" fill="#38bdf8"/>
-  <polygon points="166,335 170,342 174,335" fill="#38bdf8"/>
+  <!-- ============== RIGHT: GCS SYNC + REPLICATION ============== -->
+  <g transform="translate(740, 100)">
+    <text x="0" y="-6" fill="#5F6368" font-size="10" font-weight="500" letter-spacing="0.8">REPLICATION</text>
+    <rect x="0" y="0" width="220" height="440" rx="8" fill="#FFFFFF" stroke="#DADCE0" filter="url(#card-shadow)"/>
 
-  <path d="M460,280 L460,275" stroke="#38bdf8" stroke-width="1.5"/>
-  <polygon points="456,280 460,273 464,280" fill="#38bdf8"/>
-  <polygon points="456,335 460,342 464,335" fill="#38bdf8"/>
+    <g transform="translate(20, 20)">
+      <rect width="180" height="72" rx="6" fill="#E0F7FA" stroke="#006064"/>
+      <text x="90" y="22" text-anchor="middle" fill="#006064" font-size="12" font-weight="600">GCS Bucket</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">gs://chris-pgp-host-asia</text>
+      <text x="90" y="52" text-anchor="middle" fill="#5F6368" font-size="9">/memory/shared/</text>
+      <text x="90" y="64" text-anchor="middle" fill="#5F6368" font-size="9">gcsfuse 挂载</text>
+    </g>
 
-  <path d="M750,280 L750,275" stroke="#38bdf8" stroke-width="1.5"/>
-  <polygon points="746,280 750,273 754,280" fill="#38bdf8"/>
-  <polygon points="746,335 750,342 754,335" fill="#38bdf8"/>
+    <g transform="translate(20, 110)">
+      <rect width="180" height="72" rx="6" fill="#FCE8E6" stroke="#C5221F"/>
+      <text x="90" y="22" text-anchor="middle" fill="#C5221F" font-size="12" font-weight="600">private repo 备份</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">my-private/claude-code/</text>
+      <text x="90" y="52" text-anchor="middle" fill="#5F6368" font-size="9">memory/ (git)</text>
+      <text x="90" y="64" text-anchor="middle" fill="#5F6368" font-size="9">sync-memory.sh --push</text>
+    </g>
 
-  <!-- ==================== GCS bar ==================== -->
-  <rect x="40" y="345" width="840" height="70" rx="14" fill="#161b22" stroke="#30363d" stroke-width="1.2" filter="url(#sh3)"/>
-  <rect x="40" y="345" width="840" height="28" rx="14" fill="url(#gcsBarGrad)" opacity="0.1"/>
+    <g transform="translate(20, 200)">
+      <rect width="180" height="56" rx="6" fill="#E8F0FE" stroke="#1A73E8"/>
+      <text x="90" y="22" text-anchor="middle" fill="#1A73E8" font-size="11" font-weight="600">Bot A 写入</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">本地落盘到 shared/</text>
+      <text x="90" y="50" text-anchor="middle" fill="#5F6368" font-size="9">gcsfuse 自动上传</text>
+    </g>
 
-  <text x="460" y="368" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="600">gs://BUCKET/memory/shared/</text>
-  <text x="460" y="393" text-anchor="middle" fill="#8b949e" font-size="11">Single source of truth — any bot writes, all bots read — zero sync code</text>
+    <g transform="translate(20, 272)">
+      <rect width="180" height="56" rx="6" fill="#E6F4EA" stroke="#188038"/>
+      <text x="90" y="22" text-anchor="middle" fill="#188038" font-size="11" font-weight="600">Bot B / C / D 读到</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">下次对话自动看到</text>
+      <text x="90" y="50" text-anchor="middle" fill="#5F6368" font-size="9">无需手动推送通知</text>
+    </g>
 
-  <!-- ==================== Legend ==================== -->
-  <rect x="40" y="435" width="840" height="32" rx="8" fill="#0d1117" stroke="#21262d" stroke-width="1"/>
+    <g transform="translate(20, 344)">
+      <rect width="180" height="78" rx="6" fill="#FFF3E0" stroke="#E8710A"/>
+      <text x="90" y="22" text-anchor="middle" fill="#E8710A" font-size="12" font-weight="600">Runtime 切换</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">Claude ↔ OpenClaw ↔ ...</text>
+      <text x="90" y="52" text-anchor="middle" fill="#5F6368" font-size="9">所有 memory 文件保留</text>
+      <text x="90" y="68" text-anchor="middle" fill="#188038" font-size="10" font-weight="600">✓ 零数据迁移</text>
+    </g>
+  </g>
 
-  <rect x="65" y="443" width="14" height="14" rx="3" fill="#0d1117" stroke="#a855f7" stroke-width="1.2"/>
-  <text x="85" y="455" fill="#d2a8ff" font-size="11">MEMORY.md — local identity (each bot unique)</text>
+  <!-- Arrow from shared to GCS -->
+  <g stroke="#5F6368" stroke-width="1.2" fill="none">
+    <path d="M 702 256 L 738 136" marker-end="url(#arr)"/>
+  </g>
 
-  <rect x="380" y="443" width="14" height="14" rx="3" fill="#0d1117" stroke="#38bdf8" stroke-width="1.2"/>
-  <text x="400" y="455" fill="#58a6ff" font-size="11">shared/ — team knowledge (gcsfuse → GCS)</text>
-
-  <rect x="690" y="443" width="14" height="14" rx="3" fill="#0d1117" stroke="#30363d" stroke-width="0.8"/>
-  <text x="710" y="455" fill="#8b949e" font-size="11">feedback/project — local only</text>
+  <text x="500" y="586" text-anchor="middle" fill="#9AA0A6" font-size="10">参考 Karpathy LLM Wiki 理念 · 知识编译而非检索 · 角色分工：人类策展，LLM 维护</text>
 </svg>
