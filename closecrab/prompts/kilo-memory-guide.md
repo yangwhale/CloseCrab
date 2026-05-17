@@ -183,6 +183,20 @@ python3 /home/chrisya/CloseCrab/scripts/subagent-parallel.py --inline '{
 
 ---
 
+## 自我状态查询（session_status 等价）
+
+用户问“你现在用什么模型”、“今天花了多少钱 / token”、“上几轮干什么”、“为什么你今天这么贵”：
+
+```bash
+BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/session-status.py
+# 可选：--days 7 看 7 天、--json 要原始 JSON
+```
+
+返回：worker_type / model / online / host / 近 N 天 turns / tokens / cost / 最后 5 轮预览。
+问身份问费用问历史轮次都走这个，不要凭记忆猜。
+
+---
+
 ## 多模态生成 — 图片 / 语音
 
 你有两件外部脚本，默认你不知道但实际可用：

@@ -142,6 +142,32 @@ _local_stop() {
     echo -e "${GREEN}Bot '$bot_name' stopped${NC}"
 }
 
+# Ensure the shared cron-daemon is running on this host. Idempotent.
+# Cron jobs live in Firestore scheduled_jobs/; daemon ticks every 30s
+# to dispatch due reminders via inbox. One daemon per host is enough.
+_ensure_cron_daemon() {
+    local pid_file="/tmp/closecrab-cron-daemon.pid"
+    local script="$SCRIPT_DIR/cron-daemon.py"
+    [[ -x "$script" ]] || return 0
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0   # already running
+        fi
+        rm -f "$pid_file"
+    fi
+    echo -e "${CYAN}Starting cron-daemon (host singleton)...${NC}"
+    setsid python3 "$script" start </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    sleep 1
+    if [[ -f "$pid_file" ]]; then
+        echo -e "${GREEN}cron-daemon started (PID: $(cat "$pid_file"))${NC}"
+    else
+        echo -e "${YELLOW}cron-daemon may have failed to start; check ~/.claude/closecrab/cron-daemon.log${NC}"
+    fi
+}
+
 _local_start() {
     local bot_name="$1"
 
@@ -153,6 +179,8 @@ _local_start() {
 
     local state_dir="$STATE_BASE/$bot_name"
     mkdir -p "$state_dir"
+
+    _ensure_cron_daemon
 
     echo -e "${CYAN}Starting bot '$bot_name'...${NC}"
 
