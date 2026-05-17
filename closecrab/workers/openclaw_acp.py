@@ -1231,6 +1231,7 @@ class OpenClawWorker(Worker):
                 ):
                     retry_result = await self._retry_on_empty_response(
                         text, on_event, on_log, on_step,
+                        on_text_chunk=on_text_chunk,
                     )
                     if retry_result:
                         return retry_result
@@ -1241,6 +1242,7 @@ class OpenClawWorker(Worker):
         self,
         text: str,
         on_event, on_log, on_step,
+        on_text_chunk=None,
     ) -> str:
         """Create a fresh session and retry the prompt once.
 
