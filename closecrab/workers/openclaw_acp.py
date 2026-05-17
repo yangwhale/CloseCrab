@@ -1940,14 +1940,26 @@ class OpenClawWorker(Worker):
         目录（实测 tiemu 的 session 写在 xiaoaitongxue agent 里）。因此扫描所有
         ~/.openclaw/agents/*/sessions/sessions.json 找 sessionKey 后缀匹配的 entry。
         """
-        if not self._session_id:
+        if not self._session_id and not self._cli_default_session_key:
             return None
 
         agents_root = Path.home() / ".openclaw" / "agents"
         if not agents_root.is_dir():
             return None
 
-        target_suffix = f":acp:{self._session_id}"
+        # Match priority:
+        #   1) Exact match on the CLI session key passed via --session
+        #      (e.g. "agent:tiemu:main"). Gateway uses this as the dict key
+        #      directly when --session is supplied, so the on-disk entry is
+        #      keyed by the bot-specific routing name rather than the ACP
+        #      session UUID.
+        #   2) Suffix match on ":acp:{session_id}" — the legacy fallback for
+        #      sessions that Gateway auto-keyed by ACP session UUID.
+        target_keys = []
+        if self._cli_default_session_key:
+            target_keys.append(self._cli_default_session_key)
+        target_suffix = f":acp:{self._session_id}" if self._session_id else None
+
         entry = None
         for agent_dir in agents_root.iterdir():
             sessions_path = agent_dir / "sessions" / "sessions.json"
@@ -1960,7 +1972,12 @@ class OpenClawWorker(Worker):
                 log.debug(f"sessions.json read failed ({sessions_path}): {e}")
                 continue
             for k, v in data.items():
-                if isinstance(k, str) and k.endswith(target_suffix) and isinstance(v, dict):
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    continue
+                if k in target_keys:
+                    entry = v
+                    break
+                if target_suffix and k.endswith(target_suffix):
                     entry = v
                     break
             if entry:
