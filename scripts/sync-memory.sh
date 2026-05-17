@@ -32,13 +32,31 @@ rsync -av --delete "$SRC" "$DST"
 echo "Synced memory files to $DST"
 
 if [ "$1" = "--push" ]; then
-    cd "$REPO" || exit 1
+    if ! cd "$REPO" 2>/dev/null; then
+        echo "ERROR: cannot cd to $REPO — push skipped" >&2
+        exit 1
+    fi
+    # Verify it's actually a git repo before touching git. Without this,
+    # earlier versions of this script printed 'Pushed to GitHub (private)'
+    # on machines where ~/my-private was a plain rsync target with no .git
+    # (e.g. cc-tw). The user thought their memory was backed up; it wasn't.
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "ERROR: $REPO is not a git repo on this host — push skipped" >&2
+        echo "  (rsync to local $DST succeeded; push must run on a host where $REPO is a real clone)" >&2
+        exit 1
+    fi
     git add claude-code/memory/
     if git diff --cached --quiet; then
         echo "No changes to commit"
     else
-        git commit -m "sync: update CC auto memory $(date '+%Y-%m-%d %H:%M')"
-        git push
+        if ! git commit -m "sync: update CC auto memory $(date '+%Y-%m-%d %H:%M')"; then
+            echo "ERROR: git commit failed" >&2
+            exit 1
+        fi
+        if ! git push; then
+            echo "ERROR: git push failed (commit was created locally)" >&2
+            exit 1
+        fi
         echo "Pushed to GitHub (private)"
     fi
 fi
