@@ -275,6 +275,9 @@ class OpenClawWorker(Worker):
     async def start(self, session_id: Optional[str] = None) -> str:
         if session_id is not None:
             self._session_id = session_id
+        # Make sure OpenClaw config knows about us BEFORE the ACP child boots,
+        # so workspace + memory scope resolve correctly from the first turn.
+        self._ensure_openclaw_agent_config()
         self._write_bootstrap_files()
         await self._ensure_process()
         self._started = True
@@ -1877,9 +1880,14 @@ class OpenClawWorker(Worker):
     def _ensure_memory_symlinks(self):
         """Create symlinks so OpenClaw can access CloseCrab shared memory.
 
-        OpenClaw resolves relative paths against its Agent Workspace
-        (~/.openclaw/workspace/) and ACP CWD, not the user's home.
-        We symlink ``memory/`` in both locations to the real memory dir.
+        OpenClaw resolves the memory index scope from THREE possible paths:
+          1. agents.list[<bot>].workspace (when explicitly set) — covered by
+             _ensure_openclaw_agent_config writing that field.
+          2. The per-agent default ``~/.openclaw/workspace-<bot>/`` — fallback
+             when workspace field is missing.
+          3. The global ``~/.openclaw/workspace/`` — legacy fallback.
+        We symlink ``memory/`` in ALL three so memory_search works regardless
+        of which path OpenClaw resolves at runtime.
         """
         home = Path.home()
         memory_target = (
@@ -1887,20 +1895,93 @@ class OpenClawWorker(Worker):
         )
         if not memory_target.is_dir():
             return
-        for parent in (
-            home / ".openclaw" / "workspace",
-            Path(self._workspace_dir),
-        ):
+
+        parents = [
+            home / ".openclaw" / "workspace",                          # legacy global
+            Path(self._workspace_dir),                                  # ACP cwd (per-bot)
+        ]
+        if self._bot_name:
+            parents.append(home / ".openclaw" / f"workspace-{self._bot_name}")  # per-agent default
+
+        for parent in parents:
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                log.warning(f"mkdir {parent} failed: {e}")
+                continue
             link = parent / "memory"
             if link.is_symlink() or link.exists():
-                if link.resolve() == memory_target.resolve():
-                    continue
+                try:
+                    if link.resolve() == memory_target.resolve():
+                        continue
+                except Exception:
+                    pass
             try:
                 link.unlink(missing_ok=True)
                 link.symlink_to(memory_target)
                 log.info(f"Symlinked {link} → {memory_target}")
             except Exception as e:
                 log.warning(f"Failed to create memory symlink {link}: {e}")
+
+    def _ensure_openclaw_agent_config(self):
+        """Upsert ``agents.list[<bot>].workspace`` in ~/.openclaw/openclaw.json.
+
+        Why this matters: OpenClaw's memory indexer + workspace files loader
+        scope themselves based on the agent's workspace path. When that field
+        is missing, OpenClaw falls back to ``~/.openclaw/workspace-<bot>/``
+        (an empty bootstrap dir), which means memory_search returns 0 hits
+        even though MEMORY.md is right there. We fix that here so every bot
+        that uses the OpenClaw worker self-heals on next start.
+
+        Atomic write via temp-file rename to avoid corrupting config if two
+        bots start concurrently. Skipped silently if the file is missing or
+        unparseable (we don't want a bad config to kill bot startup).
+        """
+        if not self._bot_name:
+            return
+        cfg_path = Path.home() / ".openclaw" / "openclaw.json"
+        if not cfg_path.exists():
+            log.warning(f"OpenClaw config not found at {cfg_path}, skipping agents.list upsert")
+            return
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning(f"OpenClaw config unparseable, skipping agents.list upsert: {e}")
+            return
+
+        agents = cfg.setdefault("agents", {})
+        agent_list = agents.setdefault("list", [])
+        if not isinstance(agent_list, list):
+            log.warning("agents.list is not a list, skipping upsert")
+            return
+
+        wanted_ws = str(self._workspace_dir)
+        entry = None
+        for a in agent_list:
+            if isinstance(a, dict) and a.get("id") == self._bot_name:
+                entry = a
+                break
+
+        changed = False
+        if entry is None:
+            entry = {"id": self._bot_name, "name": self._bot_name, "workspace": wanted_ws}
+            agent_list.append(entry)
+            changed = True
+            log.info(f"Inserted agents.list entry for {self._bot_name} (workspace={wanted_ws})")
+        elif entry.get("workspace") != wanted_ws:
+            entry["workspace"] = wanted_ws
+            changed = True
+            log.info(f"Updated agents.list[{self._bot_name}].workspace = {wanted_ws}")
+
+        if not changed:
+            return
+
+        try:
+            tmp = cfg_path.with_suffix(cfg_path.suffix + ".tmp-closecrab")
+            tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(cfg_path)
+        except Exception as e:
+            log.error(f"Failed to write OpenClaw config: {e}")
 
     def _cleanup_bootstrap_files(self):
         """Remove CloseCrab section from AGENTS.md on stop."""
