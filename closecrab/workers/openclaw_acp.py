@@ -249,6 +249,10 @@ class OpenClawWorker(Worker):
         # 让 enqueueSystemEvent 队列被 drain。send() 在 stop=end_turn 后
         # 检查此标志决定是否 auto-continue。
         self._yield_pending: bool = False
+        # streaming callback failure counter (per-instance, not per-send) so
+        # we surface persistent breakage at warning level without spamming
+        # logs for transient hiccups.
+        self._chunk_cb_fail_count: int = 0
 
         # Per-bot workspace: isolate bootstrap files and CWD
         if bot_name:
@@ -1232,6 +1236,8 @@ class OpenClawWorker(Worker):
                     retry_result = await self._retry_on_empty_response(
                         text, on_event, on_log, on_step,
                         on_text_chunk=on_text_chunk,
+                        step_buffer=step_buffer,
+                        flush_step_buffer=flush_step_buffer,
                     )
                     if retry_result:
                         return retry_result
@@ -1243,11 +1249,18 @@ class OpenClawWorker(Worker):
         text: str,
         on_event, on_log, on_step,
         on_text_chunk=None,
+        step_buffer: Optional[list] = None,
+        flush_step_buffer: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> str:
         """Create a fresh session and retry the prompt once.
 
         Called when the initial prompt completed with no usable text and
         very few messages, suggesting the session was in a bad state.
+
+        step_buffer / flush_step_buffer are forwarded to _handle_notification
+        so the retry path defragments per-token chunks the same way as the
+        primary path. Without them, the retry would skip step aggregation
+        and the progress card would miss any text emitted during retry.
         """
         log.warning(
             "Few messages and no text — session may be in bad "
@@ -1291,11 +1304,22 @@ class OpenClawWorker(Worker):
                 await self._handle_notification(
                     rmsg, retry_text,
                     on_event=on_event, on_log=on_log, on_step=on_step,
+                    step_buffer=step_buffer,
+                    flush_step_buffer=flush_step_buffer,
                     on_text_chunk=on_text_chunk,
                 )
                 continue
             if "id" in rmsg and rmsg.get("id") != retry_id:
                 await self._handle_server_request(rmsg)
+
+        # Flush any pending step_buffer content from the retry path so the
+        # progress card surfaces what the retry produced (same as the main
+        # send() loop does after the prompt completes).
+        if flush_step_buffer is not None:
+            try:
+                await flush_step_buffer()
+            except Exception as e:
+                log.warning(f"Retry path flush_step_buffer failed: {e}")
 
         retry_result = self._clean_thinking_content("".join(retry_text))
         if not retry_result:
@@ -1380,8 +1404,22 @@ class OpenClawWorker(Worker):
                     full_so_far = "".join(accumulated_text)
                     try:
                         await on_text_chunk(text, full_so_far)
+                        # reset on success — only surface persistent failures.
+                        if self._chunk_cb_fail_count:
+                            self._chunk_cb_fail_count = 0
                     except Exception as e:
-                        log.debug(f"on_text_chunk callback failed: {e}")
+                        self._chunk_cb_fail_count += 1
+                        # First failure → warn. Then warn every 50th to avoid
+                        # log spam on chronic breakage (channel disconnected,
+                        # etc.) — silent drop is what bit us before.
+                        if (
+                            self._chunk_cb_fail_count == 1
+                            or self._chunk_cb_fail_count % 50 == 0
+                        ):
+                            log.warning(
+                                f"on_text_chunk callback failed "
+                                f"(count={self._chunk_cb_fail_count}): {e}"
+                            )
                 # on_event keeps per-chunk for typewriter-style progress.
                 if on_event:
                     preview = text[:80].replace("\n", " ")
