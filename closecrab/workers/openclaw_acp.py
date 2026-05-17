@@ -1986,6 +1986,45 @@ class OpenClawWorker(Worker):
             linked += 1
         log.info(f"Hardlinked {linked} memory file(s) into {ws}/memory/")
 
+        # Team shared infra docs (GCS-mounted): symlink target resolves to
+        # /gcs/memory/shared/ on a different filesystem, so hardlinks fail
+        # with EXDEV. Copy each .md to the workspace so OpenClaw's indexer
+        # (which doesn't follow symlinks) can scan them. Files in shared/
+        # change rarely (infrastructure docs), so bot-restart cadence is
+        # acceptable. Per-file mtime check avoids needless rewrites.
+        shared_src = memory_target / "shared"
+        if shared_src.is_dir():
+            try:
+                shared_dst = ws / "memory" / "shared"
+                # If a symlink existed from a previous version, drop it so we
+                # can put a real dir with copies in its place.
+                if shared_dst.is_symlink():
+                    shared_dst.unlink()
+                shared_dst.mkdir(parents=True, exist_ok=True)
+                import shutil
+                copied = skipped = 0
+                for src in shared_src.glob("*.md"):
+                    if not src.is_file():
+                        continue
+                    dst = shared_dst / src.name
+                    try:
+                        s = src.stat()
+                        if dst.exists():
+                            d = dst.stat()
+                            if d.st_size == s.st_size and d.st_mtime >= s.st_mtime:
+                                skipped += 1
+                                continue
+                        shutil.copyfile(src, dst)
+                        copied += 1
+                    except Exception as e:
+                        log.warning(f"shared copy {src} -> {dst} failed: {e}")
+                log.info(
+                    f"Synced shared/ infra docs into {shared_dst} "
+                    f"(+{copied} new/updated, {skipped} unchanged)"
+                )
+            except Exception as e:
+                log.warning(f"shared/ sync failed: {e}")
+
         # Trigger memory reindex so memory_search picks up changes from the
         # last shutdown (other bots may have written, or shared content may
         # have shifted while this bot was offline). Run in background to

@@ -87,7 +87,7 @@ PYEOF
     fi
     mkdir -p "${ws}/memory"
     python3 - "$ws" "$MEMORY_TARGET" << 'PYEOF'
-import os, sys, pathlib
+import os, sys, pathlib, shutil
 ws = pathlib.Path(sys.argv[1])
 shared = pathlib.Path(sys.argv[2])
 
@@ -117,6 +117,31 @@ for src in shared.glob('*.md'):
     else:
         count_ok += 1
 print(f'  hardlinks in {ws}/memory/: +{count_new} new, {count_ok} already ok')
+
+# Team shared infra docs (GCS-mounted, different FS, can't hardlink).
+shared_src = shared / 'shared'
+if shared_src.is_dir():
+    shared_dst = ws / 'memory' / 'shared'
+    if shared_dst.is_symlink():
+        shared_dst.unlink()
+    shared_dst.mkdir(parents=True, exist_ok=True)
+    copied = skipped = 0
+    for src in shared_src.glob('*.md'):
+        if not src.is_file():
+            continue
+        dst = shared_dst / src.name
+        try:
+            s = src.stat()
+            if dst.exists():
+                d = dst.stat()
+                if d.st_size == s.st_size and d.st_mtime >= s.st_mtime:
+                    skipped += 1
+                    continue
+            shutil.copyfile(src, dst)
+            copied += 1
+        except Exception as e:
+            print(f'  WARN shared copy {src.name}: {e}')
+    print(f'  shared/ infra docs: +{copied} copied, {skipped} unchanged')
 PYEOF
 
     # 3. Verify + reindex.
