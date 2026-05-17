@@ -665,46 +665,13 @@ class KiloWorker(Worker):
             else:
                 log.debug("on_step callback not set, dropping cc_event type=%s", cc_event.get("type"))
         elif ptype == "tool":
+            # _translate_to_cc_event handled the part (or correctly dropped it
+            # via state dedup). A second `elif ptype == "tool"` branch used
+            # to live here with duplicate progress/log emission; it was dead
+            # (elif chain) and has been removed. Keep this log to catch any
+            # future tool parts that translate gives up on.
             log.debug("_translate_to_cc_event returned None for ptype=%s part=%s",
                        ptype, json.dumps(part, default=str)[:200])
-
-        elif ptype == "tool":
-            tool_raw = part.get("toolName", part.get("tool", ""))
-            tool_name = _resolve_tool_name(tool_raw)
-
-            if status in ("pending", "running"):
-                label = _PROGRESS_LABELS.get(tool_name, f"using {tool_name}")
-                inp = state.get("input", {}) if isinstance(state, dict) else {}
-                inp = _normalize_keys(inp)
-                detail = ""
-                if tool_name == "Read" and isinstance(inp, dict):
-                    detail = f": {inp.get('file_path', '')}"
-                elif tool_name == "Bash" and isinstance(inp, dict):
-                    cmd = inp.get("command", "")
-                    detail = f": {cmd[:60]}" if cmd else ""
-
-                on_event = self._callbacks.get("on_event")
-                if on_event:
-                    try:
-                        await on_event(f"{label}{detail}")
-                    except Exception:
-                        pass
-
-            if status == "completed":
-                on_log = self._callbacks.get("on_log")
-                if on_log:
-                    output = ""
-                    if isinstance(part.get("state"), dict):
-                        output = str(part["state"].get("output", ""))[:500]
-                    try:
-                        emoji = {"Read": "📖", "Write": "✏️", "Edit": "✏️",
-                                 "Bash": "⚡", "Glob": "🔍", "Grep": "🔍",
-                                 "GitHub": "🐙", "Wiki": "📚", "Jina": "🔍",
-                                 "Context7": "📖", "Playwright": "🎭",
-                                 }.get(tool_name, "🔧")
-                        await on_log(f"{emoji} {tool_name} done\n```\n{output}\n```")
-                    except Exception:
-                        pass
 
         elif ptype == "step-finish":
             # Token usage and cost are extracted exclusively from POST
