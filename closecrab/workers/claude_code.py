@@ -627,12 +627,21 @@ class ClaudeCodeWorker(Worker):
             self._waiting = True
             # 累积本次 send() 内所有 assistant turn 的 text，用于推 on_text_chunk
             accumulated_reply_text = ""
+            # P1: empty-response retry parity with openclaw_acp.py (commit e72c62e).
+            # When Claude returns a result with empty text on the first attempt,
+            # we resend the same prompt once before giving up. Without this the
+            # user just sees "处理完成但未生成文字回复" even though a retry
+            # would have produced a real answer.
+            empty_retry_done = False
             try:
-                msg = json.dumps({
-                    "type": "user",
-                    "message": {"role": "user", "content": text}
-                }) + "\n"
-                self.sock_in.sendall(msg.encode())
+                def _send_prompt(prompt_text: str):
+                    msg_str = json.dumps({
+                        "type": "user",
+                        "message": {"role": "user", "content": prompt_text}
+                    }) + "\n"
+                    self.sock_in.sendall(msg_str.encode())
+
+                _send_prompt(text)
 
                 saw_task_notification = False
 
@@ -677,6 +686,17 @@ class ClaudeCodeWorker(Worker):
                         if not result_text:
                             log.warning(f"Claude returned empty result. is_error={d.get('is_error')}, "
                                         f"session={self._session_id}, duration={d.get('duration_ms')}")
+                            if not empty_retry_done:
+                                empty_retry_done = True
+                                log.info("Empty result -- resending prompt once before giving up")
+                                accumulated_reply_text = ""
+                                saw_task_notification = False
+                                try:
+                                    _send_prompt(text)
+                                except Exception as e:
+                                    log.warning(f"Empty-result retry resend failed: {e}")
+                                    return "(Claude 处理完成但未生成文字回复)"
+                                continue
                         return result_text or "(Claude 处理完成但未生成文字回复)"
 
                     # ── control_request 拦截 ──
@@ -845,6 +865,16 @@ class ClaudeCodeWorker(Worker):
                 log.warning(f"Claude process didn't exit after SIGTERM, sending SIGKILL")
                 self.proc.kill()
                 self.proc.wait()
+        # P3: clean up the stderr tempfile so /tmp doesn't bloat across
+        # bot restarts. Each _start_process() creates a fresh mkstemp file
+        # but stop() never unlinked it, so every claude restart leaked
+        # one claude_stderr_*.log entry into /tmp.
+        if self._stderr_path:
+            try:
+                Path(self._stderr_path).unlink(missing_ok=True)
+            except Exception as e:
+                log.debug(f"stderr tempfile cleanup failed for {self._stderr_path}: {e}")
+            self._stderr_path = None
         log.info(f"Claude session stopped: {self._session_id}")
 
     @property
