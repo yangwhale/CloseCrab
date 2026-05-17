@@ -1060,6 +1060,40 @@ class OpenClawWorker(Worker):
                                 "cache_read_input_tokens", 0
                             )
                         self._usage["turns"] += 1
+                        # ACP prompt response usually returns empty usage
+                        # (Gateway doesn't propagate it). Fall back to reading
+                        # the on-disk sessions.json which Gateway persists with
+                        # full cost/token/cache fields. Merge into _usage so
+                        # BotCore can persist usage in firestore log.
+                        try:
+                            file_usage = self._read_session_usage_from_file()
+                            if file_usage:
+                                if "session_input_tokens" in file_usage:
+                                    self._usage["input_tokens"] = int(
+                                        file_usage["session_input_tokens"]
+                                    )
+                                if "session_output_tokens" in file_usage:
+                                    self._usage["output_tokens"] = int(
+                                        file_usage["session_output_tokens"]
+                                    )
+                                if "session_cache_read" in file_usage:
+                                    self._usage[
+                                        "cache_read_input_tokens"
+                                    ] = int(file_usage["session_cache_read"])
+                                if "session_cache_write" in file_usage:
+                                    self._usage[
+                                        "cache_creation_input_tokens"
+                                    ] = int(file_usage["session_cache_write"])
+                                if "session_cost_usd" in file_usage:
+                                    self._usage["cost_usd"] = float(
+                                        file_usage["session_cost_usd"]
+                                    )
+                                if "session_total_tokens" in file_usage:
+                                    self._usage["session_total_tokens"] = int(
+                                        file_usage["session_total_tokens"]
+                                    )
+                        except Exception as e:
+                            log.debug(f"sessions.json usage merge failed: {e}")
                         self._check_compaction_needed()
 
                         result_content = result.get("content", [])

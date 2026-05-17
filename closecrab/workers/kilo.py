@@ -707,12 +707,12 @@ class KiloWorker(Worker):
                         pass
 
         elif ptype == "step-finish":
-            # Token usage is extracted from POST response info.tokens (in
-            # _post_message) to avoid double-counting. SSE step-finish is
-            # kept only for cost fallback in case POST doesn't include it.
-            cost = part.get("cost", 0)
-            if cost and not self._usage.get("_cost_from_post"):
-                self._usage["cost_usd"] += float(cost)
+            # Token usage and cost are extracted exclusively from POST
+            # response info.tokens / info.cost (in _post_message). SSE
+            # step-finish fires once per LLM call AND its cost is cumulative,
+            # so summing it across N tool steps in a single turn over-reports
+            # by ~Nx. Drop SSE cost entirely; POST is the authoritative source.
+            pass
 
     async def _on_part_delta(self, props: dict):
         """Accumulate streaming text deltas into per-partID buffers AND
@@ -1021,20 +1021,23 @@ class KiloWorker(Worker):
                             texts.append(t)
                 result = "\n".join(texts).strip()
 
-                # Extract cost and tokens from response
+                # Extract cost and tokens from POST response. Kilo returns
+                # PER-TURN values (not cumulative session totals), so accumulate
+                # with += across turns. Previously tokens used = assignment,
+                # which silently dropped earlier turns' usage.
                 info = data.get("info", {})
                 if isinstance(info, dict):
                     cost = info.get("cost", 0)
                     if cost:
                         self._usage["cost_usd"] += float(cost)
                     tokens = info.get("tokens", {})
-                    if isinstance(tokens, dict) and tokens.get("input", 0):
-                        self._usage["input_tokens"] = tokens.get("input", 0)
-                        self._usage["output_tokens"] = tokens.get("output", 0)
+                    if isinstance(tokens, dict):
+                        self._usage["input_tokens"] += int(tokens.get("input", 0) or 0)
+                        self._usage["output_tokens"] += int(tokens.get("output", 0) or 0)
                         cache = tokens.get("cache", {})
                         if isinstance(cache, dict):
-                            self._usage["cache_read_input_tokens"] = cache.get("read", 0)
-                            self._usage["cache_creation_input_tokens"] = cache.get("write", 0)
+                            self._usage["cache_read_input_tokens"] += int(cache.get("read", 0) or 0)
+                            self._usage["cache_creation_input_tokens"] += int(cache.get("write", 0) or 0)
 
                 self._turn_result = result
                 self._turn_event.set()
