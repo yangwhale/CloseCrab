@@ -1903,7 +1903,9 @@ class FeishuChannel(Channel):
             if voice_text:
                 asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
 
-        result_summary = (result or "已完成")[:2000]
+        # Inbox 回执允许 ~8000 字（firestore_inbox.mark_done 还会冸底到 10000）。
+        # 以前是 2000，给 MCP 多源调研这种长结果会被切掉 sub-agent 报告末尾。
+        result_summary = (result or "已完成")[:8000]
 
         # Inbox 回执：通知发送者任务已完成
         if inbox_from and inbox_record_id and self._inbox:
