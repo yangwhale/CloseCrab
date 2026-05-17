@@ -3064,18 +3064,9 @@ class FeishuChannel(Channel):
         return text, None
 
     async def _send_voice_summary(self, chat_id: str, text: str):
-        """生成 TTS 语音并作为飞书语音消息发送。
-
-        发送前先推一条 🔊 标记消息, 与输入端 🎤 transcript 对称, 让用户在
-        飞书时间线上一眼看到"接下来这条是 bot 的语音播报"。
-        """
+        """生成 TTS 语音并作为飞书语音消息发送。"""
         ogg_path = None
         try:
-            try:
-                await self._async_send_text(chat_id, "🔊")
-            except Exception:
-                pass
-
             tts_script = os.path.expanduser("~/.claude/skills/tts-generator/scripts/tts-generate.py")
 
             # 生成 ogg opus 文件
@@ -3159,19 +3150,11 @@ class FeishuChannel(Channel):
                     pass
 
     async def _send_voice_file(self, chat_id: str, file_path: str):
-        """上传已有 ogg 文件并作为飞书语音消息发送。
-
-        和 _send_voice_summary 同样, 上传前推一条 🔊 标记。
-        """
+        """上传已有 ogg 文件并作为飞书语音消息发送。"""
         try:
             if not os.path.exists(file_path):
                 log.warning(f"Voice file not found: {file_path}")
                 return
-
-            try:
-                await self._async_send_text(chat_id, "🔊")
-            except Exception:
-                pass
 
             duration = 10000
             try:
