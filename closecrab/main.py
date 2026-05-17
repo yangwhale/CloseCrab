@@ -339,6 +339,15 @@ def build_system_prompt(
             "技术术语和代码标识符保持英文原文。"
         )
 
+    # 通用 worker 准则（工具批处理 / Memory 纪律 / todo / 错误重试等 8 条）
+    # 及通用脚本文档（subagent-parallel / cron-tool / session-status / imagen / tts）。
+    # 所有 worker 都加载，不按 worker_type 条件。
+    _universal_rules = Path(__file__).parent / "prompts" / "universal-worker-rules.md"
+    try:
+        prompt += "\n\n" + _universal_rules.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+
     return prompt
 
 
