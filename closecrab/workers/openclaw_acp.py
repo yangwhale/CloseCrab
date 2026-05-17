@@ -1974,6 +1974,17 @@ class OpenClawWorker(Worker):
             for k, v in data.items():
                 if not isinstance(k, str) or not isinstance(v, dict):
                     continue
+                # Skip Gateway heartbeat entries that hijack the main session
+                # key to run gemini-3.1-flash-lite-preview as a keepalive.
+                # Symptoms: agentHarnessId=="pi" or pendingFinalDeliveryText
+                # contains "HEARTBEAT". Without this filter the worker reads
+                # the heartbeat's model field and the feishu card displays
+                # "Gemini 3.1 Flash" instead of the actual conversation model.
+                if v.get("agentHarnessId") == "pi":
+                    continue
+                pending_text = v.get("pendingFinalDeliveryText") or ""
+                if isinstance(pending_text, str) and "HEARTBEAT" in pending_text:
+                    continue
                 if k in target_keys:
                     entry = v
                     break
