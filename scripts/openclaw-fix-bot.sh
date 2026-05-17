@@ -64,11 +64,10 @@ if changed:
     print(f"  + wrote {cfg_path}")
 PYEOF
 
-    # 2. Memory symlinks (3 paths).
+    # 2a. Symlinks at the two non-indexed scope paths (for grep/read).
     for parent in \
         "${HOME}/.openclaw/workspace" \
-        "${HOME}/.openclaw/workspace-${bot}" \
-        "${ws}"
+        "${HOME}/.openclaw/workspace-${bot}"
     do
         mkdir -p "$parent"
         local link="${parent}/memory"
@@ -81,22 +80,75 @@ PYEOF
         fi
     done
 
-    # 3. Verify.
-    python3 -c "
-import json, pathlib
-cfg = json.load(open('$OPENCLAW_CFG'))
-entry = next((a for a in cfg['agents']['list'] if a.get('id') == '$bot'), None)
+    # 2b. Hardlinks at the per-bot workspace (OpenClaw memory indexer
+    #     does NOT follow symlinks, so we need real files here).
+    if [[ -L "${ws}/memory" ]]; then
+        rm -f "${ws}/memory"
+    fi
+    mkdir -p "${ws}/memory"
+    python3 - "$ws" "$MEMORY_TARGET" << 'PYEOF'
+import os, sys, pathlib
+ws = pathlib.Path(sys.argv[1])
+shared = pathlib.Path(sys.argv[2])
+
+def relink(src, dst):
+    if dst.exists():
+        if dst.is_symlink():
+            dst.unlink()
+        elif dst.stat().st_ino == src.stat().st_ino:
+            return False  # already linked
+        else:
+            dst.unlink()
+    os.link(src, dst)
+    return True
+
+if (shared / 'MEMORY.md').is_file():
+    if relink(shared / 'MEMORY.md', ws / 'MEMORY.md'):
+        print(f'  + hardlinked {ws}/MEMORY.md')
+    else:
+        print(f'  \u2713 hardlink ok: {ws}/MEMORY.md')
+
+count_new = count_ok = 0
+for src in shared.glob('*.md'):
+    if not src.is_file():
+        continue
+    if relink(src, ws / 'memory' / src.name):
+        count_new += 1
+    else:
+        count_ok += 1
+print(f'  hardlinks in {ws}/memory/: +{count_new} new, {count_ok} already ok')
+PYEOF
+
+    # 3. Verify + reindex.
+    python3 - "$bot" "$ws" "$OPENCLAW_CFG" << 'VERIFYEOF'
+import json, pathlib, os, sys
+bot, ws_str, cfg_path = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(open(cfg_path))
+entry = next((a for a in cfg['agents']['list'] if a.get('id') == bot), None)
 print('  -- verify --')
 print('  agents.list entry:', json.dumps(entry, ensure_ascii=False) if entry else 'MISSING')
-for p in ['${HOME}/.openclaw/workspace/memory', '${HOME}/.openclaw/workspace-${bot}/memory', '${ws}/memory']:
+home = os.environ['HOME']
+for p in [f'{home}/.openclaw/workspace/memory', f'{home}/.openclaw/workspace-{bot}/memory']:
     pp = pathlib.Path(p)
     if pp.is_symlink():
-        print(f'  symlink {p} → {pp.resolve()}')
+        print(f'  symlink {p} -> {pp.resolve()}')
     elif pp.exists():
-        print(f'  WARNING {p} exists but is not a symlink')
+        print(f'  WARNING_NOT_SYMLINK {p}')
     else:
         print(f'  MISSING {p}')
-"
+ws_mem = pathlib.Path(f'{ws_str}/MEMORY.md')
+if ws_mem.is_file():
+    st = ws_mem.stat()
+    print(f'  hardlink {ws_mem} inode={st.st_ino} nlinks={st.st_nlink}')
+ws_dir = pathlib.Path(f'{ws_str}/memory')
+if ws_dir.is_dir() and not ws_dir.is_symlink():
+    n = len(list(ws_dir.glob('*.md')))
+    print(f'  hardlink dir {ws_dir} ({n} *.md files)')
+VERIFYEOF
+    # Trigger reindex so memory_search works immediately.
+    if command -v openclaw &>/dev/null; then
+        openclaw memory index --agent "$bot" --force 2>&1 | tail -1
+    fi
 }
 
 case "${1:-}" in

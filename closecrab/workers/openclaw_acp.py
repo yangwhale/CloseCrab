@@ -1880,16 +1880,26 @@ class OpenClawWorker(Worker):
         self._ensure_memory_symlinks()
 
     def _ensure_memory_symlinks(self):
-        """Create symlinks so OpenClaw can access CloseCrab shared memory.
+        """Wire CloseCrab shared memory into per-bot OpenClaw workspaces.
 
-        OpenClaw resolves the memory index scope from THREE possible paths:
-          1. agents.list[<bot>].workspace (when explicitly set) — covered by
-             _ensure_openclaw_agent_config writing that field.
-          2. The per-agent default ``~/.openclaw/workspace-<bot>/`` — fallback
-             when workspace field is missing.
-          3. The global ``~/.openclaw/workspace/`` — legacy fallback.
-        We symlink ``memory/`` in ALL three so memory_search works regardless
-        of which path OpenClaw resolves at runtime.
+        OpenClaw's memory indexer (the thing that powers memory_search)
+        scans ``<workspace>/MEMORY.md`` and ``<workspace>/memory/*.md`` for
+        each agent, but **does NOT follow symlinks**. So the original
+        symlink-only approach gave us 0/0 indexed files even though the
+        files existed via the symlink path.
+
+        Fix: use HARDLINKS for the per-bot workspace (so the indexer sees
+        real files that share inodes with shared memory) plus traditional
+        symlinks for the other two scope candidates as belt-and-suspenders.
+
+        Hardlink trade-off: simple in-place writes (write_text, append)
+        preserve the inode and propagate to the shared file. Atomic rename
+        writes (tmp + rename) break the hardlink — we re-establish them on
+        every bot start, so any divergence is bounded by one session.
+
+        Sync direction: bot → shared via shared inode. Shared → bot only
+        on bot restart (new files appear, edits to existing files via
+        hardlink already visible).
         """
         home = Path.home()
         memory_target = (
@@ -1898,14 +1908,14 @@ class OpenClawWorker(Worker):
         if not memory_target.is_dir():
             return
 
-        parents = [
-            home / ".openclaw" / "workspace",                          # legacy global
-            Path(self._workspace_dir),                                  # ACP cwd (per-bot)
+        # Symlinks for the two scope paths that don't drive indexing today.
+        # Kept so explicit path queries (read, grep) still resolve.
+        symlink_parents = [
+            home / ".openclaw" / "workspace",                              # legacy global
         ]
         if self._bot_name:
-            parents.append(home / ".openclaw" / f"workspace-{self._bot_name}")  # per-agent default
-
-        for parent in parents:
+            symlink_parents.append(home / ".openclaw" / f"workspace-{self._bot_name}")  # per-agent default
+        for parent in symlink_parents:
             try:
                 parent.mkdir(parents=True, exist_ok=True)
             except Exception as e:
@@ -1924,6 +1934,75 @@ class OpenClawWorker(Worker):
                 log.info(f"Symlinked {link} → {memory_target}")
             except Exception as e:
                 log.warning(f"Failed to create memory symlink {link}: {e}")
+
+        # Per-bot ACP workspace: hardlinks so the indexer sees real files.
+        ws = Path(self._workspace_dir)
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.warning(f"mkdir {ws} failed: {e}")
+            return
+
+        # Remove legacy symlink at workspace/memory (if any) so we can put a
+        # real directory there for hardlinks.
+        legacy_link = ws / "memory"
+        if legacy_link.is_symlink():
+            try:
+                legacy_link.unlink()
+            except Exception as e:
+                log.warning(f"Failed to remove legacy symlink {legacy_link}: {e}")
+
+        try:
+            (ws / "memory").mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.warning(f"mkdir {ws/'memory'} failed: {e}")
+            return
+
+        def _link_or_relink(src: Path, dst: Path):
+            """Hardlink src → dst. Skip if already same inode."""
+            try:
+                if dst.exists():
+                    if dst.is_symlink():
+                        dst.unlink()
+                    elif dst.stat().st_ino == src.stat().st_ino:
+                        return
+                    else:
+                        dst.unlink()
+                os.link(src, dst)
+            except Exception as e:
+                log.warning(f"hardlink {src} → {dst} failed: {e}")
+
+        # Top-level MEMORY.md
+        shared_memory_md = memory_target / "MEMORY.md"
+        if shared_memory_md.is_file():
+            _link_or_relink(shared_memory_md, ws / "MEMORY.md")
+
+        # All *.md files in the shared memory dir.
+        linked = 0
+        for src in memory_target.glob("*.md"):
+            if not src.is_file():
+                continue
+            _link_or_relink(src, ws / "memory" / src.name)
+            linked += 1
+        log.info(f"Hardlinked {linked} memory file(s) into {ws}/memory/")
+
+        # Trigger memory reindex so memory_search picks up changes from the
+        # last shutdown (other bots may have written, or shared content may
+        # have shifted while this bot was offline). Run in background to
+        # avoid blocking bot start; subprocess inherits env so PATH is fine.
+        if self._bot_name:
+            try:
+                import subprocess
+                subprocess.Popen(
+                    [self._openclaw_bin, "memory", "index",
+                     "--agent", self._bot_name, "--force"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                log.info(f"Triggered background memory reindex for {self._bot_name}")
+            except Exception as e:
+                log.warning(f"Failed to trigger memory reindex: {e}")
 
     def _ensure_openclaw_agent_config(self):
         """Upsert ``agents.list[<bot>].workspace`` in ~/.openclaw/openclaw.json.
