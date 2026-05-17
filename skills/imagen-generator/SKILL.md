@@ -1,11 +1,15 @@
 ---
 name: imagen-generator
-description: Generate images using Gemini 3 Pro Image (Nano Banana) on Vertex AI. Use when the user says "生成图片", "画一张", "generate image", "帮我画", "生成一张图", "create an image", "图片生成", or when you need to create visual content to explain concepts.
+description: Generate or edit images using Gemini 3 Pro Image (Nano Banana) on Vertex AI. Use for text-to-image ("生成图片", "画一张", "generate image", "帮我画", "create an image", "图片生成") and image-to-image editing ("修图", "P图", "改图", "edit image", "在这张图上加 ...", "基于这张图 ...", "保持风格生成 ...").
 ---
 
 # Gemini Image Generator (Nano Banana)
 
-Generate images from text prompts using Gemini 3 Pro Image (gemini-3-pro-image-preview) on Vertex AI, save to CC Pages, and share.
+Generate or edit images using Gemini 3 Pro Image (gemini-3-pro-image-preview) on Vertex AI, save to CC Pages, and share.
+
+Two modes:
+- **Text-to-image** — pure prompt, model invents from scratch
+- **Image-to-image (修图)** — pass `--image <path>` one or more times; model treats them as visual baselines and the text prompt as the editing instruction (preserve / add / remove / restyle)
 
 ## Usage
 
@@ -39,6 +43,37 @@ Call the generation script directly:
 # Combine options
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "B200 GPU rack in datacenter, photorealistic" --aspect 16:9 --resolution 2K --count 2
 ```
+
+### Image-to-Image (修图)
+
+Pass `--image <path>` to provide a visual baseline. The text prompt becomes the editing instruction (what to keep, what to add, what to change). Repeat `--image` for multiple references — first one is the primary baseline.
+
+```bash
+# 在一张图上加元素，保持原风格
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh \
+  "Keep the cyberpunk style unchanged. Add a glowing holographic dashboard in the upper-left corner showing 4 floating cards." \
+  --image ~/CloseCrab/crab-with-claude-code-inside.png \
+  --aspect 4:5 --resolution 2K --output poster-with-cards
+
+# 多参考图：第一张是主 baseline，后面是风格/元素参考
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh \
+  "Combine subject of first image with the lighting and color palette of second image" \
+  --image subject.png --image style_ref.png \
+  --aspect 16:9 --resolution 2K
+
+# 改 aspect 重构图（recompose）— 模型会保留主体，重新构图填满目标比例
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh \
+  "Same subject, recompose for vertical poster, keep cinematic mood" \
+  --image hero.png --aspect 9:16 --resolution 2K
+```
+
+**Prompt 写法建议（修图）**：
+- 明确写"KEEP UNCHANGED:"列出要保留的元素（风格、材质、灯光、构图）
+- 明确写"ADD:" / "CHANGE:" / "REMOVE:" 列出要修改的元素
+- 最后强调"this must still look like the same artwork"，否则模型可能跑偏成纯文生图
+- 改 aspect 时加"recompose for ... aspect, keep [subject] as dominant element"
+
+支持的图片格式：`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`
 
 ### Output
 

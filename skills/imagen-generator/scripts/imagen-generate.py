@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gemini Image — Text-to-image generation via Google GenAI SDK (Vertex AI)."""
+"""Gemini Image — Text-to-image and image-to-image generation via Google GenAI SDK (Vertex AI)."""
 
 import argparse
 import base64
@@ -8,6 +8,16 @@ import re
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
+
+
+MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 def get_project():
@@ -26,16 +36,44 @@ def get_project():
     return project
 
 
-def generate_image(prompt, model, aspect, resolution):
+def _load_reference_parts(image_paths, types):
+    """Load reference images as types.Part objects in caller-specified order.
+
+    Reference images are prepended to the prompt — model treats them as
+    the visual baseline to edit/preserve. Order matters: first image is
+    the primary baseline, subsequent ones are additional context.
+    """
+    parts = []
+    for raw in image_paths:
+        p = Path(raw).expanduser()
+        if not p.is_file():
+            print(f"Error: reference image not found: {p}", file=sys.stderr)
+            sys.exit(1)
+        mime = MIME_BY_EXT.get(p.suffix.lower())
+        if not mime:
+            print(f"Error: unsupported image extension {p.suffix} (need {sorted(MIME_BY_EXT)})", file=sys.stderr)
+            sys.exit(1)
+        data = p.read_bytes()
+        parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+        print(f"Reference image: {p.name} ({len(data)/1024:.0f} KB, {mime})", file=sys.stderr)
+    return parts
+
+
+def generate_image(prompt, model, aspect, resolution, image_paths=None):
     from google import genai
     from google.genai import types
 
     project = get_project()
     client = genai.Client(vertexai=True, project=project, location="global")
 
+    contents = []
+    if image_paths:
+        contents.extend(_load_reference_parts(image_paths, types))
+    contents.append(prompt)
+
     response = client.models.generate_content(
         model=model,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(
@@ -71,6 +109,8 @@ def main():
                         help="Custom output filename (without extension)")
     parser.add_argument("--model", default="gemini-3-pro-image-preview",
                         help="Model ID (default: gemini-3-pro-image-preview)")
+    parser.add_argument("--image", dest="image_paths", action="append", default=[],
+                        help="Reference image for image-to-image editing. Repeat for multiple refs (first = primary baseline).")
     args = parser.parse_args()
 
     web_root = os.environ.get("CC_PAGES_WEB_ROOT")
@@ -91,7 +131,7 @@ def main():
         output_name = f"{sanitized}-{timestamp}"
 
     for i in range(1, args.count + 1):
-        img_bytes = generate_image(args.prompt, args.model, args.aspect, args.resolution)
+        img_bytes = generate_image(args.prompt, args.model, args.aspect, args.resolution, args.image_paths)
 
         suffix = f"-{i}" if args.count > 1 else ""
         filename = f"{output_name}{suffix}.png"
