@@ -30,6 +30,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -363,6 +364,65 @@ def cmd_set_model(args):
     print(f"  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
 
 
+# OpenClaw uses bare model IDs like "anthropic-vertex/claude-opus-4-7".
+# Kilo uses "google-vertex-anthropic/claude-opus-4-7@default".
+# Claude Code uses "claude-opus-4-7@default".
+# These translate via MODEL_PRESETS, but we also need to map OPENCLAW's bare
+# format because it isn't listed in MODEL_PRESETS (it's the gateway default).
+_OPENCLAW_TO_PRESET = {
+    "anthropic-vertex/claude-opus-4-7": "claude-opus-4.7",
+    "anthropic-vertex/claude-opus-4-6": "claude-opus-4.6",
+    "anthropic-vertex/claude-sonnet-4-6": "claude-sonnet-4.6",
+}
+
+
+# Substring fingerprints used as a fallback when exact match fails.
+# Catches misconfigured bots that have an OpenClaw-style model string saved
+# even though their worker is claude/kilo.
+_PRESET_FINGERPRINTS = [
+    ("claude-opus-4-7", "claude-opus-4.7"),
+    ("claude-opus-4-6", "claude-opus-4.6"),
+    ("claude-sonnet-4-6", "claude-sonnet-4.6"),
+    ("gemini-3.1-pro", "gemini-3.1-pro"),
+    ("gemini-3.1-flash-lite", "gemini-3.1-flash-lite"),
+    ("gemini-3-flash", "gemini-3-flash"),
+]
+
+
+def _detect_preset(current_model: str, current_worker: str) -> Optional[str]:
+    """Return the MODEL_PRESETS key matching the given model+worker.
+
+    Tries exact match first (worker-specific), then OpenClaw bare format,
+    then a substring fingerprint match as a fallback for misconfigured bots.
+    """
+    if not current_model:
+        return None
+    if current_worker == "openclaw":
+        hit = _OPENCLAW_TO_PRESET.get(current_model)
+        if hit:
+            return hit
+    for preset_name, mapping in MODEL_PRESETS.items():
+        if mapping.get(current_worker) == current_model:
+            return preset_name
+    # Fallback: substring fingerprint (handles cross-worker misconfigurations).
+    for needle, preset_name in _PRESET_FINGERPRINTS:
+        if needle in current_model:
+            return preset_name
+    return None
+
+
+def _model_for_worker(preset_name: str, target_worker: str) -> Optional[str]:
+    """Return the model string to use for target_worker given a preset name."""
+    if target_worker == "openclaw":
+        # OpenClaw goes via Gateway agents.list which uses bare IDs.
+        # Reverse the _OPENCLAW_TO_PRESET map.
+        for bare, preset in _OPENCLAW_TO_PRESET.items():
+            if preset == preset_name:
+                return bare
+        return None
+    return MODEL_PRESETS.get(preset_name, {}).get(target_worker)
+
+
 def cmd_set_worker_type(args):
     db = get_db()
     doc_ref = db.collection("bots").document(args.bot_name)
@@ -375,27 +435,55 @@ def cmd_set_worker_type(args):
         print(f"Error: worker_type must be one of {VALID_WORKER_TYPES}, got '{wt}'")
         sys.exit(1)
 
+    doc = doc_ref.get().to_dict() or {}
+    old_wt = doc.get("worker_type", "claude")
+    old_model = doc.get("model")
+
     updates = {"worker_type": wt}
+    notes = []
+
     if wt == "gemini":
-        # Clean up Claude-specific fields
-        doc = doc_ref.get().to_dict() or {}
-        cleaned = []
+        # Gemini path: drop Claude-specific fields, no model carry-over.
         if "claude_proxy_url" in doc:
             updates["claude_proxy_url"] = firestore.DELETE_FIELD
-            cleaned.append("claude_proxy_url")
+            notes.append("cleaned claude_proxy_url")
         if "model" in doc:
             updates["model"] = firestore.DELETE_FIELD
-            cleaned.append("model")
+            notes.append("cleaned model (Gemini CLI auto-picks)")
         doc_ref.update(updates)
         print(f"Set worker_type={wt} for '{args.bot_name}'")
-        if cleaned:
-            print(f"  Cleaned Claude-specific fields: {', '.join(cleaned)}")
-        print("  Note: bot 需要安装 Gemini CLI (`npm i -g @anthropic-ai/gemini-cli` 或 `npx @google/gemini-cli`)")
-        print("  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
-    else:
-        doc_ref.update(updates)
-        print(f"Set worker_type={wt} for '{args.bot_name}'")
-        print("  重启 bot 生效: 飞书发 /restart 或 kill run.sh PID")
+        for n in notes:
+            print(f"  {n}")
+        print("  Install Gemini CLI: npm i -g @anthropic-ai/gemini-cli")
+        print("  Restart bot to take effect.")
+        return
+
+    # claude / kilo / openclaw: translate model format if possible.
+    if old_model and old_wt != wt:
+        preset = _detect_preset(old_model, old_wt)
+        if preset:
+            new_model = _model_for_worker(preset, wt)
+            if new_model and new_model != old_model:
+                updates["model"] = new_model
+                notes.append(
+                    f"translated model: {old_model} -> {new_model} (preset={preset})"
+                )
+            elif new_model is None:
+                notes.append(
+                    f"WARN: preset '{preset}' has no {wt}-compatible model; "
+                    f"bot will fail to start until you run set-model"
+                )
+        else:
+            notes.append(
+                f"WARN: could not identify preset for model='{old_model}' "
+                f"under worker={old_wt}; consider running set-model after switch"
+            )
+
+    doc_ref.update(updates)
+    print(f"Set worker_type={wt} for '{args.bot_name}'")
+    for n in notes:
+        print(f"  {n}")
+    print("  Restart bot to take effect (launcher.sh restart <bot> or feishu /restart).")
 
 
 def cmd_delete(args):
