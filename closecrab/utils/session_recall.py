@@ -29,16 +29,31 @@ log = logging.getLogger("closecrab.session_recall")
 
 
 def _score(row: dict, now_ts: int) -> float:
-    """log(len) × recency decay. Half-life ≈ 14 days.
+    """log(len) × recency_decay × info_density. Half-life ≈ 14 days.
 
-    Bias toward substantive (longer) and recent rows. Caps length contribution
-    at len=2000 to avoid pathologically long rows hogging recall.
+    Three factors:
+      * length — log10 clamped to [20, 2000] chars; longer = more substance
+      * recency — 0.5 ** (age_days / 14); 2-week half-life
+      * info_density — LLM-rated 0..1 (NULL → neutral 0.5; floor at 0.3 so
+        a misjudged-low row doesn't completely vanish from recall)
+
+    The density floor matters because the haiku judge is probabilistic; a
+    real fact accidentally scored 0.1 should still be recallable if its
+    length + recency are strong.
     """
     text = row.get("text") or ""
     length = max(20, min(len(text), 2000))
     ts = row.get("ts") or 0
     age_days = max(0.0, (now_ts - ts) / 86400.0)
-    return math.log10(length) * (0.5 ** (age_days / 14.0))
+    density = row.get("info_density")
+    if density is None:
+        density_factor = 0.5
+    else:
+        try:
+            density_factor = max(0.3, min(1.0, float(density)))
+        except (TypeError, ValueError):
+            density_factor = 0.5
+    return math.log10(length) * (0.5 ** (age_days / 14.0)) * density_factor
 
 
 # Channel adapters prefix user text with provenance markers like

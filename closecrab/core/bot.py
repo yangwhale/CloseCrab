@@ -486,6 +486,15 @@ class BotCore:
                             log_id=log_ref.id,
                         ),
                     )
+                    # S1.2: kick off a background haiku call to score the
+                    # turn's info density. Detached task — never awaited,
+                    # so a slow LLM never blocks the next turn. The scorer
+                    # writes back to the same log_id row when it returns.
+                    self._spawn_density_scoring_task(
+                        log_id=log_ref.id,
+                        user_text=original_user_text,
+                        assistant_text=(result or ""),
+                    )
                 except Exception as e:
                     log.debug(f"Session index write skipped: {e}")
             elif self._db and result:
@@ -603,6 +612,48 @@ class BotCore:
         usage["worker_type"] = self._worker_type
         usage["backbone_model"] = self._backbone_model
         return usage
+
+    def _spawn_density_scoring_task(
+        self, log_id: str, user_text: str, assistant_text: str
+    ) -> None:
+        """Detached background task: haiku scores info density, writes back.
+
+        Never awaited — runs after the turn's finalize block returns, so
+        even a 20s timeout in the scorer can't delay the next user message.
+        Silent on every failure (scoring is optional; recall has a neutral
+        0.5 fallback for NULL densities).
+        """
+        if not log_id or not (user_text or assistant_text):
+            return
+
+        async def _score_and_update():
+            try:
+                from closecrab.utils.info_scorer import score_turn
+                from closecrab.utils.session_search import SessionIndex
+                user_s, asst_s = await score_turn(user_text, assistant_text)
+                if user_s is None and asst_s is None:
+                    return
+                idx = SessionIndex(self.bot_name)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: idx.update_density_by_log_id(
+                        log_id, info_density_user=user_s,
+                        info_density_assistant=asst_s,
+                    ),
+                )
+                log.debug(
+                    "info_density scored log=%s user=%s asst=%s",
+                    log_id, user_s, asst_s,
+                )
+            except Exception as e:
+                log.debug("density scoring task failed: %s", e)
+
+        try:
+            asyncio.create_task(_score_and_update())
+        except RuntimeError:
+            # Event loop closed (shutting down) — drop silently
+            pass
 
     async def shutdown(self):
         """停止所有 worker，清理资源。"""

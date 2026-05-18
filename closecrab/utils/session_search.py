@@ -77,14 +77,15 @@ def _is_substantive(text: str, role: str) -> bool:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages(
-  id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts        INTEGER NOT NULL,
-  bot_name  TEXT NOT NULL,
-  user_id   TEXT NOT NULL,
-  channel   TEXT NOT NULL,
-  role      TEXT NOT NULL,
-  text      TEXT NOT NULL,
-  log_id    TEXT
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts            INTEGER NOT NULL,
+  bot_name      TEXT NOT NULL,
+  user_id       TEXT NOT NULL,
+  channel       TEXT NOT NULL,
+  role          TEXT NOT NULL,
+  text          TEXT NOT NULL,
+  log_id        TEXT,
+  info_density  REAL DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_ts       ON messages(ts);
@@ -142,7 +143,12 @@ class SessionIndex:
         self._initialized = False
 
     def init_db(self) -> None:
-        """Create tables + FTS + triggers. Safe to call repeatedly."""
+        """Create tables + FTS + triggers. Safe to call repeatedly.
+
+        Also runs idempotent schema migrations for columns added later
+        (e.g. info_density). New columns must be ADD COLUMN with a default
+        so old rows stay readable.
+        """
         if self._initialized:
             return
         with _connect(self.db_path) as conn:
@@ -150,6 +156,13 @@ class SessionIndex:
             conn.execute(_FTS_MAIN)
             conn.execute(_FTS_TRIGRAM)
             conn.executescript(_TRIGGERS)
+            # Migrate: add info_density if missing on an older db
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
+            if "info_density" not in cols:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN info_density REAL DEFAULT NULL"
+                )
+                log.info("Migrated messages: added info_density column")
         self._initialized = True
         log.info("Session index ready: %s", self.db_path)
 
@@ -161,8 +174,15 @@ class SessionIndex:
         assistant_text: str,
         log_id: str | None = None,
         ts: int | None = None,
+        info_density_user: float | None = None,
+        info_density_assistant: float | None = None,
     ) -> None:
         """Index one conversational turn (user + assistant) as two rows.
+
+        ``info_density_*`` are optional 0..1 scores produced by an LLM judge
+        (see ``info_scorer.score_turn``). When ``None`` the column stays NULL
+        and recall treats it as the neutral 0.5 — callers can populate it
+        later via :meth:`update_density_by_log_id`.
 
         Fire-and-forget: caller wraps in try/except — failure here must not
         block the firestore finalize path.
@@ -172,18 +192,60 @@ class SessionIndex:
         rows: list[tuple] = []
         if user_text and _is_substantive(user_text, "user"):
             rows.append((ts, self.bot_name, user_id, channel, "user",
-                         user_text, log_id))
+                         user_text, log_id, info_density_user))
         if assistant_text and _is_substantive(assistant_text, "assistant"):
             rows.append((ts, self.bot_name, user_id, channel, "assistant",
-                         assistant_text, log_id))
+                         assistant_text, log_id, info_density_assistant))
         if not rows:
             return
         with _connect(self.db_path) as conn:
             conn.executemany(
                 "INSERT INTO messages(ts, bot_name, user_id, channel, role, "
-                "text, log_id) VALUES (?,?,?,?,?,?,?)",
+                "text, log_id, info_density) VALUES (?,?,?,?,?,?,?,?)",
                 rows,
             )
+
+    def update_density_by_log_id(
+        self,
+        log_id: str,
+        info_density_user: float | None = None,
+        info_density_assistant: float | None = None,
+    ) -> int:
+        """Set info_density for the (user, assistant) rows of a single turn.
+
+        Returns the number of rows updated. Silently skips ``None`` scores
+        so a half-failed scorer (e.g. only user side parsed) still writes
+        what it has. Called by the background fire-and-forget scorer task
+        after the turn has been inserted with NULL density.
+        """
+        self.init_db()
+        updated = 0
+        with _connect(self.db_path) as conn:
+            if info_density_user is not None:
+                cur = conn.execute(
+                    "UPDATE messages SET info_density = ? "
+                    "WHERE log_id = ? AND role = 'user'",
+                    (float(info_density_user), log_id),
+                )
+                updated += cur.rowcount
+            if info_density_assistant is not None:
+                cur = conn.execute(
+                    "UPDATE messages SET info_density = ? "
+                    "WHERE log_id = ? AND role = 'assistant'",
+                    (float(info_density_assistant), log_id),
+                )
+                updated += cur.rowcount
+        return updated
+
+    def update_density_by_row_id(self, row_id: int, density: float) -> int:
+        """Direct row-id update used by the backfill script."""
+        self.init_db()
+        with _connect(self.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE messages SET info_density = ? WHERE id = ?",
+                (float(density), int(row_id)),
+            )
+            return cur.rowcount
 
     def search(
         self,
@@ -224,7 +286,7 @@ class SessionIndex:
         def _fts_query(fts_table: str) -> list[dict]:
             sql = (
                 f"SELECT m.id, m.ts, m.bot_name, m.user_id, m.channel, "
-                f"m.role, m.text, m.log_id "
+                f"m.role, m.text, m.log_id, m.info_density "
                 f"FROM {fts_table} f JOIN messages m ON m.id = f.rowid "
                 f"WHERE f.text MATCH ?{where_extra} "
                 f"ORDER BY m.ts DESC LIMIT ?"
@@ -247,7 +309,8 @@ class SessionIndex:
         # unicode61 won't match CJK substrings either — drop to LIKE %x%.
         if not rows and len(query) < 3:
             sql = (
-                "SELECT id, ts, bot_name, user_id, channel, role, text, log_id "
+                "SELECT id, ts, bot_name, user_id, channel, role, text, log_id, "
+                "info_density "
                 "FROM messages m WHERE text LIKE ?"
                 + where_extra + " ORDER BY ts DESC LIMIT ?"
             )
