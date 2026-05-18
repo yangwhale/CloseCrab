@@ -18,6 +18,7 @@ Silent on any failure: callers receive ``""`` and degrade to S0 behavior.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from datetime import datetime
@@ -25,6 +26,19 @@ from datetime import datetime
 from closecrab.utils.session_search import SessionIndex
 
 log = logging.getLogger("closecrab.session_recall")
+
+
+def _score(row: dict, now_ts: int) -> float:
+    """log(len) × recency decay. Half-life ≈ 14 days.
+
+    Bias toward substantive (longer) and recent rows. Caps length contribution
+    at len=2000 to avoid pathologically long rows hogging recall.
+    """
+    text = row.get("text") or ""
+    length = max(20, min(len(text), 2000))
+    ts = row.get("ts") or 0
+    age_days = max(0.0, (now_ts - ts) / 86400.0)
+    return math.log10(length) * (0.5 ** (age_days / 14.0))
 
 
 # Channel adapters prefix user text with provenance markers like
@@ -203,10 +217,12 @@ def recall_history(
 
         idx = SessionIndex(bot_name)
         all_hits: list[dict] = []
+        # Pull 4x candidates so the score-based picker has room to filter.
+        per_kw_limit = limit * 4
         for kw in keywords:
             try:
                 rows = idx.search(
-                    kw, days=days, user_id=user_id or None, limit=limit,
+                    kw, days=days, user_id=user_id or None, limit=per_kw_limit,
                 )
             except Exception as e:
                 log.debug("search(%r, user_id=%r) failed: %s", kw, user_id, e)
@@ -216,7 +232,7 @@ def recall_history(
             # results so the user can still benefit from historical context.
             if user_id and len(rows) < 2:
                 try:
-                    extra = idx.search(kw, days=days, limit=limit)
+                    extra = idx.search(kw, days=days, limit=per_kw_limit)
                     rows.extend(extra)
                 except Exception:
                     pass
@@ -225,17 +241,22 @@ def recall_history(
         if not all_hits:
             return ""
 
-        # Dedup by row id; sort newest-first; cap at ``limit`` rows.
+        # Dedup by row id; sort by score = log(len) × recency_decay (DESC).
+        # Score promotes substantive + recent rows, so a short "好的" from
+        # last hour can't outrank a 300-char analysis from 3 days ago.
+        now_ts = int(time.time())
         seen_ids: set[int] = set()
-        unique: list[dict] = []
-        for r in sorted(all_hits, key=lambda x: -(x.get("ts") or 0)):
+        scored: list[tuple[float, dict]] = []
+        for r in all_hits:
             rid = r.get("id")
             if rid in seen_ids:
                 continue
             seen_ids.add(rid)
-            unique.append(r)
-            if len(unique) >= limit:
-                break
+            scored.append((_score(r, now_ts), r))
+        scored.sort(key=lambda x: -x[0])
+        unique = [r for _, r in scored[:limit]]
+        # Final display order: newest-first, so the LLM reads chronologically.
+        unique.sort(key=lambda r: -(r.get("ts") or 0))
 
         if not unique:
             return ""

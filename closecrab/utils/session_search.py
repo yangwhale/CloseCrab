@@ -12,6 +12,7 @@ at ~/.closecrab/sessions/{bot_name}.db.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -20,6 +21,59 @@ from typing import Iterable
 log = logging.getLogger("closecrab.session_search")
 
 _DEFAULT_DIR = Path.home() / ".closecrab" / "sessions"
+
+
+# ---------- Quality filter (shared by index_turn write path + cleanup script) ----------
+
+_API_ERROR_RE = re.compile(r"^\s*(?:API Error|Usage Policy)", re.I)
+_PROBE_RE = re.compile(
+    r"\[cycle\s+\d+|HEALTH_CHECK|\[smoke\]|\[probe\]|\[test\]|BUNNY_HEALTH",
+    re.I,
+)
+_GREETING_RE = re.compile(
+    r"^(?:hi+|嗨+|hello+|hey+|哈喽|哈啰|哈罗|你好|您好|在吗|在不在|早|早上好|晚安|晚上好|"
+    r"嘿|喂|哟|哈|hi chris|hey chris)"
+    r"[\s!?。.！？~～]*$",
+    re.I,
+)
+_ACK_RE = re.compile(
+    r"^(?:好|好的|好啊|好吧|嗯+|对|对的|是|是的|收到|明白|了解|懂了|知道了|"
+    r"继续|动手|执行|下一步|完成|搞定|可以|没问题|没事|没事儿|"
+    r"ok+|okay|got\s*it|sure|yeah|yep|yup|nope|done|cool|nice|great|"
+    r"thanks|thx|ty|嗯嗯|对对|是是|赞|👍|❤|❤️|✅|🎉|🚀|"
+    r"加油|辛苦|辛苦了|谢谢|多谢|👌)"
+    r"[\s!?。.！？~～]*$",
+    re.I,
+)
+_INBOX_ECHO_RE = re.compile(r"\[from:\s*Bitable Inbox\][^\n]*\[.*?·已完成\]", re.I)
+
+
+def _is_substantive(text: str, role: str) -> bool:
+    """Return True if a turn carries enough information to deserve indexing.
+
+    role-aware:
+      * user — keep short queries (e.g. "为什么 fail?"); threshold 10 chars.
+      * assistant — short replies ("好的", "试试") add noise to recall; require 80 chars.
+
+    Common rejects (both roles): empty, API Error, bot probes, pure greetings/ACKs,
+    inbox self-echo notifications.
+    """
+    s = (text or "").strip()
+    if not s:
+        return False
+    if _API_ERROR_RE.search(s):
+        return False
+    if _PROBE_RE.search(s):
+        return False
+    if _INBOX_ECHO_RE.search(s):
+        return False
+    if _GREETING_RE.match(s):
+        return False
+    if _ACK_RE.match(s):
+        return False
+    if role == "user":
+        return len(s) >= 10
+    return len(s) >= 80
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages(
@@ -116,10 +170,10 @@ class SessionIndex:
         self.init_db()
         ts = ts or int(time.time())
         rows: list[tuple] = []
-        if user_text:
+        if user_text and _is_substantive(user_text, "user"):
             rows.append((ts, self.bot_name, user_id, channel, "user",
                          user_text, log_id))
-        if assistant_text:
+        if assistant_text and _is_substantive(assistant_text, "assistant"):
             rows.append((ts, self.bot_name, user_id, channel, "assistant",
                          assistant_text, log_id))
         if not rows:
@@ -242,4 +296,4 @@ class SessionIndex:
         }
 
 
-__all__ = ["SessionIndex"]
+__all__ = ["SessionIndex", "_is_substantive"]
