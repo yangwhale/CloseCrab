@@ -581,6 +581,41 @@ class KiloWorker(Worker):
 
     # ── SSE event handlers ────────────────────────────────────────
 
+    def _accumulated_text(self) -> str:
+        """Concatenate all text part buffers in insertion order.
+
+        Source of truth for the turn's final assistant reply. Multi-step
+        turns (e.g. text → tool → text → tool → text) produce N text parts;
+        Kilo's HTTP POST response only echoes the LAST group of parts, so
+        reconstructing from POST data drops earlier segments. SSE streaming
+        captures every part as it arrives, so the buffer dict is the only
+        complete view.
+        """
+        if not self._text_buffers:
+            return ""
+        return "\n\n".join(
+            buf["content"]
+            for buf in self._text_buffers.values()
+            if buf.get("content")
+        ).strip()
+
+    async def _emit_text_chunk(self, delta: str):
+        """Notify on_text_chunk callback with (delta, full_accumulated_text).
+
+        Drives the progress card typewriter-style preview in feishu/discord
+        channels. `full` is the running concatenation of all text part buffers,
+        which matches what OpenClawWorker passes to on_text_chunk and what the
+        channel's _pending_reply_text expects.
+        """
+        on_text_chunk = self._callbacks.get("on_text_chunk")
+        if not on_text_chunk:
+            return
+        try:
+            full = self._accumulated_text()
+            await on_text_chunk(delta, full)
+        except Exception as e:
+            log.debug("on_text_chunk callback error: %s", e)
+
     def _is_new_tool_state(self, call_id: str, status: str) -> bool:
         """State machine for tool event dedup. Returns True on state transition."""
         prev = self._tool_states.get(call_id)
@@ -640,11 +675,13 @@ class KiloWorker(Worker):
                     except Exception as e:
                         log.debug("on_step callback error: %s", e)
             if part_id and text:
-                buf = self._text_buffers.get(part_id)
-                if buf is not None:
-                    buf["content"] = text
-                    buf["emitted_len"] = len(text)
-                    buf["flushed"] = True
+                buf = self._text_buffers.setdefault(
+                    part_id,
+                    {"content": "", "flushed": False, "emitted_len": 0},
+                )
+                buf["content"] = text
+                buf["emitted_len"] = len(text)
+                buf["flushed"] = True
             if text:
                 on_event = self._callbacks.get("on_event")
                 if on_event:
@@ -652,6 +689,10 @@ class KiloWorker(Worker):
                         await on_event("thinking")
                     except Exception:
                         pass
+                # Final part.updated: emit one more typewriter tick so the
+                # progress card converges on the full text even if intermediate
+                # part.delta chunks were missed (e.g. retries, reconnects).
+                await self._emit_text_chunk("")
             return
 
         cc_event = _translate_to_cc_event(part)
@@ -713,6 +754,8 @@ class KiloWorker(Worker):
                 await on_event("thinking")
             except Exception:
                 pass
+
+        await self._emit_text_chunk(delta)
 
         # Partial flush thresholds. Soft: 120 chars + sentence-end. Hard: 280 chars.
         pending_len = len(buf["content"]) - buf["emitted_len"]
@@ -887,6 +930,7 @@ class KiloWorker(Worker):
         on_input_needed: Optional[Callable[[dict], Awaitable[Optional[str]]]] = None,
         on_log: Optional[Callable[[str], Awaitable[None]]] = None,
         on_step: Optional[Callable[[dict], Awaitable[None]]] = None,
+        on_text_chunk: Optional[Callable[[str, str], Awaitable[None]]] = None,
         **_kwargs,
     ) -> str:
         async with self._lock:
@@ -906,6 +950,7 @@ class KiloWorker(Worker):
                 "on_input_needed": on_input_needed,
                 "on_log": on_log,
                 "on_step": on_step,
+                "on_text_chunk": on_text_chunk,
             }
 
             # Build request body
@@ -958,6 +1003,14 @@ class KiloWorker(Worker):
                     if not post_task.done():
                         post_task.cancel()
 
+                # Final guardrail: even if POST path took precedence above,
+                # always prefer the SSE-accumulated text when it has captured
+                # more content. This protects against the "POST returns only
+                # last part group" failure mode for multi-step turns.
+                sse_full = self._accumulated_text()
+                if sse_full and len(sse_full) > len(reply_text):
+                    reply_text = sse_full
+
             except Exception as e:
                 log.error("send() error: %s", e, exc_info=True)
                 reply_text = f"[Error] {e}"
@@ -977,16 +1030,26 @@ class KiloWorker(Worker):
                     return ""
 
                 data = await resp.json()
-                # Extract text from response parts, filtering out
-                # tool-call descriptions injected by the Kilo server.
-                parts = data.get("parts", [])
-                texts = []
-                for p in parts:
-                    if p.get("type") == "text":
-                        t = p.get("content", p.get("text", ""))
-                        if t and not t.startswith("[tool_call:"):
-                            texts.append(t)
-                result = "\n".join(texts).strip()
+                # Final assistant text comes from SSE part buffers, not the
+                # POST response. Kilo's HTTP response `parts` only contains the
+                # LAST group of message parts for the turn — for multi-step
+                # turns (text → tool → text → tool → text), prior text segments
+                # are absent and would be lost if we rebuilt from POST data.
+                # SSE _on_part_updated has already accumulated everything into
+                # self._text_buffers; _accumulated_text() is the source of truth.
+                result = self._accumulated_text()
+                if not result:
+                    # Fallback for unexpected cases (e.g. POST returned before
+                    # any SSE text part arrived). Use POST parts but skip
+                    # tool-call descriptions.
+                    parts = data.get("parts", [])
+                    texts = []
+                    for p in parts:
+                        if p.get("type") == "text":
+                            t = p.get("content", p.get("text", ""))
+                            if t and not t.startswith("[tool_call:"):
+                                texts.append(t)
+                    result = "\n".join(texts).strip()
 
                 # Extract cost and tokens from POST response. Kilo returns
                 # PER-TURN values (not cumulative session totals), so accumulate
