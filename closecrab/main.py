@@ -598,6 +598,17 @@ def main():
     except Exception as e:
         log.warning(f"Registry self-registration failed (non-fatal): {e}")
 
+    # Vertex Usage Policy fallback warmup: surface config errors (bad
+    # model id, wrong region, schema mismatch, expired creds) in
+    # startup log NOW, not days later when a real refusal hits. Adds
+    # ~2-5s to startup; failure is non-fatal (bot still starts).
+    try:
+        import asyncio as _asyncio
+        from .utils.usage_policy_fallback import warmup as _fb_warmup
+        _asyncio.run(_fb_warmup(timeout_s=10))
+    except Exception as e:
+        log.warning(f"usage_policy_fallback warmup hook crashed (non-fatal): {e}")
+
     # 启动 Channel
     try:
         log.info(f"Starting {channel_type} channel for '{bot_name}'...")

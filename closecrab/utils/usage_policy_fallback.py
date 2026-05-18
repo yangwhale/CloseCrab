@@ -112,14 +112,20 @@ async def try_fallback(
         return None
 
     sys_msg = (system_prompt or "")[:8000]
+    # Anthropic Vertex API rejects ``system=None`` with HTTP 400
+    # ("system: Input should be a valid list"). The kwarg must be either
+    # omitted entirely or a non-empty string/list. Build kwargs
+    # conditionally so an empty / None system_prompt drops the key.
+    kwargs: dict = {
+        "model": _FALLBACK_MODEL,
+        "max_tokens": _MAX_TOKENS,
+        "messages": [{"role": "user", "content": user_text[:16000]}],
+    }
+    if sys_msg:
+        kwargs["system"] = sys_msg
     try:
         resp = await asyncio.wait_for(
-            client.messages.create(
-                model=_FALLBACK_MODEL,
-                max_tokens=_MAX_TOKENS,
-                system=sys_msg if sys_msg else None,
-                messages=[{"role": "user", "content": user_text[:16000]}],
-            ),
+            client.messages.create(**kwargs),
             timeout=_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
@@ -150,4 +156,51 @@ async def try_fallback(
     return _FALLBACK_PREFIX + text_out
 
 
-__all__ = ["is_usage_policy_refusal", "try_fallback"]
+async def warmup(timeout_s: float = 10.0) -> bool:
+    """Fire one minimal real call against Vertex at bot startup.
+
+    Purpose: surface configuration errors (wrong region, wrong model id,
+    bad SDK schema, expired credentials) in the startup log instead of
+    waiting for an actual Usage Policy refusal — which is a probabilistic
+    RLHF event that may take days to trigger and is impossible to
+    reproduce on demand. This is the mechanized version of the
+    "mandatory live smoke test" rule.
+
+    Cheap: ~150 tokens in, ~5 tokens out, ~$0.001 per call. Synchronously
+    blocks bot startup for ~2-5s. Failure logs a WARNING but never raises
+    — the bot continues to start even if fallback infrastructure is down,
+    since fallback itself is a degraded path.
+    """
+    try:
+        result = await asyncio.wait_for(
+            try_fallback("ping", None),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "usage_policy_fallback warmup TIMED OUT after %.0fs — "
+            "fallback may be misconfigured (model=%s region=%s)",
+            timeout_s, _FALLBACK_MODEL, _REGION,
+        )
+        return False
+    except Exception as e:
+        log.warning(
+            "usage_policy_fallback warmup FAILED (model=%s region=%s): %s",
+            _FALLBACK_MODEL, _REGION, e,
+        )
+        return False
+    if result:
+        log.info(
+            "usage_policy_fallback warmup OK (model=%s region=%s, %d chars)",
+            _FALLBACK_MODEL, _REGION, len(result),
+        )
+        return True
+    log.warning(
+        "usage_policy_fallback warmup returned None — see prior log line "
+        "for root cause (model=%s region=%s)",
+        _FALLBACK_MODEL, _REGION,
+    )
+    return False
+
+
+__all__ = ["is_usage_policy_refusal", "try_fallback", "warmup"]
