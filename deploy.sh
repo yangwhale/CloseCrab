@@ -1006,32 +1006,57 @@ install_bot() {
     local PIP="pip3"
     command -v pip3 &>/dev/null || PIP="python3 -m pip"
 
-    # Python 依赖（核心 + 全平台 channel）
-    local DEPS=(
-        # 核心
-        google-cloud-firestore
-        google-cloud-speech
-        google-genai
-        fastapi
-        uvicorn
-        # Discord
-        py-cord
-        # 飞书 / Lark
-        lark-oapi
-        # 钉钉
-        dingtalk-stream
-    )
-    # Voice IO (LiveKit) 依赖, 仅在 --voice 时追加 (~200MB, 默认不装)
-    if [[ "$INSTALL_VOICE" == "true" ]]; then
-        DEPS+=(
-            livekit-agents
-            livekit-plugins-silero
-        )
-    fi
-    if $PIP install --break-system-packages -q "${DEPS[@]}" 2>&1 | tail -3; then
-        echo "  Python 依赖安装完成 (${#DEPS[@]} 个包)"
+    # Python 依赖：优先用 requirements/base.lock (exact-pinned, supply-chain
+    # safe). Fallback 到 unpinned array 兼容老仓库（无 requirements/ 目录的
+    # git checkout）。升级流程见 requirements/README.md。
+    local BASE_LOCK="$SCRIPT_DIR/requirements/base.lock"
+    local VOICE_LOCK="$SCRIPT_DIR/requirements/voice.lock"
+
+    if [[ -f "$BASE_LOCK" ]]; then
+        echo "  使用 lockfile: requirements/base.lock"
+        if $PIP install --break-system-packages -q -r "$BASE_LOCK" 2>&1 | tail -3; then
+            local base_count
+            base_count=$(grep -cE '^[a-zA-Z0-9]' "$BASE_LOCK" || echo 0)
+            echo "  Base 依赖安装完成 (${base_count} 个 pinned 包)"
+        else
+            echo "  警告: base lock 安装失败"
+        fi
+        if [[ "$INSTALL_VOICE" == "true" && -f "$VOICE_LOCK" ]]; then
+            if $PIP install --break-system-packages -q -r "$VOICE_LOCK" 2>&1 | tail -3; then
+                echo "  Voice 依赖安装完成 (pinned)"
+            else
+                echo "  警告: voice lock 安装失败"
+            fi
+        fi
     else
-        echo "  警告: 部分依赖安装失败"
+        echo "  [WARN] requirements/base.lock 不存在，使用 unpinned 依赖"
+        echo "  [WARN] 这是不安全的（无供应链版本保护），请 git pull 拿最新仓库"
+        local DEPS=(
+            # 核心
+            google-cloud-firestore
+            google-cloud-speech
+            google-genai
+            fastapi
+            uvicorn
+            python-dotenv
+            # Discord
+            py-cord
+            # 飞书 / Lark
+            lark-oapi
+            # 钉钉
+            dingtalk-stream
+        )
+        if [[ "$INSTALL_VOICE" == "true" ]]; then
+            DEPS+=(
+                livekit-agents
+                livekit-plugins-silero
+            )
+        fi
+        if $PIP install --break-system-packages -q "${DEPS[@]}" 2>&1 | tail -3; then
+            echo "  Python 依赖安装完成 (${#DEPS[@]} 个 unpinned 包)"
+        else
+            echo "  警告: 部分依赖安装失败"
+        fi
     fi
 
     # .env 配置（只需 Firestore 引导信息，bot 配置在 Firestore 里）

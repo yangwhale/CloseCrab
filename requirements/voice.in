@@ -1,0 +1,7 @@
+# Voice IO add-on. Only installed when deploy.sh is run with --voice.
+# Adds ~200MB on top of base. Not needed for text-only bots.
+#
+# This file is consumed in addition to base.in when generating voice.lock.
+
+livekit-agents
+livekit-plugins-silero

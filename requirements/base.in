@@ -1,0 +1,22 @@
+# CloseCrab top-level Python dependencies.
+#
+# Maintained by humans. Edit this file to add/remove a top-level dep,
+# then run `scripts/lock-deps.sh` to regenerate base.lock with the full
+# transitive closure (~50 packages).
+#
+# DO NOT install from this file directly — install from base.lock for
+# determinism. This file is the human-readable "what" we depend on;
+# base.lock is the machine-readable "exactly which versions" to install.
+
+# ---- Core ----
+google-cloud-firestore
+google-cloud-speech
+google-genai
+fastapi
+uvicorn
+python-dotenv
+
+# ---- Channels ----
+py-cord            # Discord
+lark-oapi          # 飞书 / Lark
+dingtalk-stream    # 钉钉
