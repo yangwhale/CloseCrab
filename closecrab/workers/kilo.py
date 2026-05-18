@@ -200,12 +200,16 @@ class KiloWorker(Worker):
         # even if the final part.updated never arrives (multi-step turns where
         # the model jumps straight from text to next tool call).
         self._text_buffers: dict[str, dict] = {}
-        # PartIDs that belong to the user message (the prompt being sent THIS
-        # turn). Kilo SSE replays the user's own text as a `message.part.updated`
-        # part too, so we must skip it when accumulating the assistant reply.
-        # Populated from `message.updated` events whose role=="user". Cleared
-        # at the start of each send() call.
+        # PartIDs / messageIDs that belong to the user prompt being sent THIS
+        # turn. Kilo SSE replays the user's own text as a `message.part.updated`
+        # text part too (different messageID from the assistant's). We tag the
+        # part by matching its full text against `_current_user_text` (the
+        # exact `text` arg of the current send() call), and remember the owning
+        # messageID so any future part.delta on that message is also skipped.
+        # Cleared at the start of each send() call.
         self._user_part_ids: set[str] = set()
+        self._user_message_ids: set[str] = set()
+        self._current_user_text: str = ""
 
     # ── Properties ────────────────────────────────────────────────
 
@@ -664,8 +668,19 @@ class KiloWorker(Worker):
             # reply that never hit threshold), emit the full text as one step.
             text = part.get("content") or part.get("text", "")
             part_id = part.get("id", "")
-            # Skip user prompt echoes (see _on_message_updated comment).
+            msg_id = props.get("messageID") or part.get("messageID", "")
+            # Skip user prompt echoes. Kilo replays the user message as a
+            # part.updated text part too; identify by exact text match against
+            # the prompt we sent. Remember the partID + owning messageID so
+            # part.delta and subsequent updates on the same message also skip.
             if part_id and part_id in self._user_part_ids:
+                return
+            if (text and self._current_user_text
+                    and text == self._current_user_text):
+                if part_id:
+                    self._user_part_ids.add(part_id)
+                if msg_id:
+                    self._user_message_ids.add(msg_id)
                 return
             on_step = self._callbacks.get("on_step")
             if text and on_step:
@@ -752,8 +767,13 @@ class KiloWorker(Worker):
         delta = props.get("delta", "")
         if field != "text" or not part_id or not isinstance(delta, str):
             return
-        # Skip user prompt echoes (see _on_message_updated comment).
+        # Skip user prompt echoes — by partID or by owning messageID. See
+        # _is_user_echo_part in _on_part_updated for how user parts get tagged.
         if part_id in self._user_part_ids:
+            return
+        msg_id = props.get("messageID", "")
+        if msg_id and msg_id in self._user_message_ids:
+            self._user_part_ids.add(part_id)
             return
         buf = self._text_buffers.setdefault(
             part_id,
@@ -835,30 +855,15 @@ class KiloWorker(Worker):
 
     async def _on_message_updated(self, props: dict):
         # Backup turn completion signal. Primary signal is session.turn.close.
-        msg = props if "role" in props else props.get("message", props)
-        role = msg.get("role", "")
-
-        # Track which partIDs belong to the user prompt so part.delta /
-        # part.updated handlers can skip them. Kilo SSE replays user text as
-        # part events too, and prior fix concatenated everything into the
-        # assistant reply (regression after switching reply rebuild from POST
-        # data to SSE buffers — POST data only echoed assistant parts so the
-        # leak was hidden). Handle both event orders:
-        #   (a) message.updated arrives first → record partIDs, future part
-        #       events skip on entry
-        #   (b) part events arrive first → record partIDs now, retroactively
-        #       drop already-buffered entries
-        if role == "user":
-            parts = msg.get("parts", []) or []
-            for p in parts:
-                pid = p.get("id", "")
-                if pid:
-                    self._user_part_ids.add(pid)
-                    if pid in self._text_buffers:
-                        self._text_buffers.pop(pid, None)
-
+        # Note: Kilo's message.updated payload is `{sessionID, info}` — it does
+        # NOT carry message body or role fields, only metadata (token cost,
+        # timestamps). So `role` here is always "" and the completion check
+        # below never fires. We still keep this handler as a defensive scaffold
+        # in case Kilo's schema changes.
         if self._turn_event.is_set():
             return
+        msg = props if "role" in props else props.get("message", props)
+        role = msg.get("role", "")
         t = msg.get("time", {})
         if role == "assistant" and t.get("completed"):
             self._turn_event.set()
@@ -976,6 +981,8 @@ class KiloWorker(Worker):
             self._tool_states.clear()
             self._text_buffers.clear()
             self._user_part_ids.clear()
+            self._user_message_ids.clear()
+            self._current_user_text = text
             self._last_activity = time.monotonic()
 
             self._callbacks = {
