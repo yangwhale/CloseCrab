@@ -430,6 +430,25 @@ class BotCore:
                     )
                 except Exception as e:
                     log.warning(f"Failed to finalize live log: {e}")
+
+                # Mirror turn to local FTS5 session index (fire-and-forget,
+                # never block firestore path). Lets `session-grep.py` answer
+                # "what did we discuss about X last month" without RPC.
+                try:
+                    from closecrab.utils.session_search import SessionIndex
+                    idx = SessionIndex(self.bot_name)
+                    await loop.run_in_executor(
+                        None,
+                        lambda: idx.index_turn(
+                            user_id=msg.user_id,
+                            channel=msg.channel_type,
+                            user_text=content,
+                            assistant_text=(result or ""),
+                            log_id=log_ref.id,
+                        ),
+                    )
+                except Exception as e:
+                    log.debug(f"Session index write skipped: {e}")
             elif self._db and result:
                 # fallback: 如果创建 live doc 失败，走老逻辑
                 try:
