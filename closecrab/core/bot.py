@@ -868,6 +868,7 @@ class BotCore:
             timeout=self._timeout,
             system_prompt=self._system_prompt,
             session_id=session_id,
+            model=self._backbone_model or None,
         )
 
     def _save_active_sessions(self):

@@ -51,12 +51,18 @@ class ClaudeCodeWorker(Worker):
         timeout: int = 600,
         system_prompt: str = "",
         session_id: Optional[str] = None,
+        model: Optional[str] = None,
     ):
         self._claude_bin = claude_bin or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         self._work_dir = work_dir or str(Path.home())
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id = session_id
+        # Per-bot model override (from Firestore bots/{name}.model).
+        # If set, overrides settings.json's ANTHROPIC_MODEL env when
+        # spawning the Claude CLI subprocess — making config-manage.py
+        # set-model name-and-actuality consistent.
+        self._model = model
         self.proc: Optional[subprocess.Popen] = None
         self.sock_in: Optional[socket.socket] = None   # bot -> claude (stdin)
         self.sock_out: Optional[socket.socket] = None   # claude -> bot (stdout)
@@ -131,6 +137,16 @@ class ClaudeCodeWorker(Worker):
         env.pop("CLAUDECODE", None)
         env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)  # 让 Claude CLI 用 VM 默认 SA 调 Vertex AI
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "0"
+        if self._model:
+            prev = env.get("ANTHROPIC_MODEL", "")
+            env["ANTHROPIC_MODEL"] = self._model
+            if prev and prev != self._model:
+                log.info(
+                    f"Claude CLI model override: {prev} -> {self._model} "
+                    f"(per-bot from Firestore)"
+                )
+            else:
+                log.info(f"Claude CLI model = {self._model} (per-bot)")
 
         stderr_fd, self._stderr_path = tempfile.mkstemp(prefix="claude_stderr_", suffix=".log")
         self.proc = subprocess.Popen(
