@@ -56,6 +56,13 @@ _STOP_CN = {
     "看看", "看下", "查查", "查一下", "试试", "试一下",
     "好的", "好啊", "嗯嗯", "对的", "明白", "了解", "收到", "懂了",
     "继续", "动手", "执行", "下一步", "完成", "搞定",
+    # 高频对话填充 2-grams (出自实际 bug case "我想想，有没有写过关于...")
+    "想想", "看看", "试试", "找找", "查查",
+    "有没", "没有", "有写", "写过", "做过", "干过",
+    "关于", "这个", "那个", "其他", "另外",
+    "可能", "或许", "也许", "大概", "差不多",
+    "我想", "你想", "想要", "要不", "要不要",
+    "之类", "等等", "什么样",
 }
 _STOP_EN = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
@@ -103,21 +110,32 @@ def _strip_channel_prefix(text: str) -> str:
 def _extract_keywords(text: str, max_keywords: int = 5) -> list[str]:
     """Extract up to ``max_keywords`` content-bearing tokens from ``text``.
 
-    For Latin: greedy alphanumeric tokens >= 2 chars (Hermes, vLLM, GKE).
-    For CJK: extract all 2-grams from each greedy CJK run >= 2 chars.
-    2-grams are how the FTS5 trigram tokenizer indexes content, so they
-    are guaranteed-matchable. Stopword set covers the usual Chinese
-    conversational filler ("上次", "怎么样" etc).
+    Two-tier priority — Latin tokens always outrank CJK bigrams. This is
+    deliberate: in this codebase's typical queries ("有没有写过关于
+    VLLM 和 sglang 的报告"), the user names the technical concept in
+    Latin (VLLM, sglang, OpenClaw, GKE) and surrounds it with Chinese
+    conversational filler. Without this priority the greedy left-to-right
+    walk would fill the keyword budget with the filler bigrams before
+    ever reaching the Latin tokens, and recall would surface noise.
+
+    - Tier 1: Latin alphanumeric runs >= 2 chars, sorted by length DESC
+      (so "OpenClaw" outranks "GKE" when both compete for a slot).
+    - Tier 2: CJK 2-grams from each greedy CJK run, document order.
+      Backfills only if Tier 1 didn't saturate the budget.
+
+    Stopword filter applies to both tiers. 2-grams match how the FTS5
+    trigram tokenizer indexes content, so they're guaranteed-matchable.
     """
     if not text:
         return []
-    tokens: list[str] = []
+    latin_tokens: list[str] = []
+    cjk_bigrams: list[str] = []
     seen: set[str] = set()
 
     for match in _TOKEN_RE.finditer(text):
         tok = match.group(0)
-        # CJK runs: explode into 2-grams (matches trigram tokenizer behavior)
         if "一" <= tok[0] <= "鿿":
+            # CJK run → explode into 2-grams; collect into Tier 2.
             if len(tok) < 2:
                 continue
             for i in range(len(tok) - 1):
@@ -125,18 +143,28 @@ def _extract_keywords(text: str, max_keywords: int = 5) -> list[str]:
                 if bigram in _STOP or bigram in seen:
                     continue
                 seen.add(bigram)
-                tokens.append(bigram)
-                if len(tokens) >= max_keywords:
-                    return tokens
+                cjk_bigrams.append(bigram)
         else:
+            # Latin/digit run → collect into Tier 1.
             t = tok.lower()
             if len(tok) < 2 or t in _STOP or t in seen:
                 continue
             seen.add(t)
-            tokens.append(tok)
-            if len(tokens) >= max_keywords:
-                return tokens
-    return tokens
+            latin_tokens.append(tok)
+
+    # Within Tier 1: longer first (more specific), tiebreak by lowercased
+    # spelling for deterministic ordering across runs.
+    latin_tokens.sort(key=lambda s: (-len(s), s.lower()))
+
+    result = latin_tokens[:max_keywords]
+    if len(result) < max_keywords:
+        for bg in cjk_bigrams:
+            if bg in result:
+                continue
+            result.append(bg)
+            if len(result) >= max_keywords:
+                break
+    return result
 
 
 def _fmt_row(r: dict, max_chars: int = 200) -> str:
