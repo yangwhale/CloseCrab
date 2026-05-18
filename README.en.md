@@ -42,13 +42,6 @@ CloseCrab wraps the world's best AI agent CLIs into multi-platform chat bots. It
   <img src="assets/architecture.svg" alt="CloseCrab Architecture" width="900"/>
 </p>
 
-```
-User message → Channel Adapter → BotCore → Worker (1 of 4) → Agent CLI
-                  (STT if voice)       ↕                 ↕
-                                  Firestore         Skills / MCP
-                                  Logs / Inbox
-```
-
 ### Module Map
 
 | Layer | Path | Implementation |
