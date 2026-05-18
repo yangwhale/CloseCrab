@@ -168,6 +168,12 @@ class BotCore:
         _turn_start = asyncio.get_event_loop().time()
 
         # 异常重启后第一条消息：加前缀让 CC 跳过旧 teammate 上下文
+        # `original_user_text` 是用户的原话（永不变），用于 firestore log doc
+        # 和 SessionIndex 持久化；`content` 是可能被 dirty restart / S1 recall
+        # 修改后的版本，仅传给 worker.send()。分离两者防止递归污染：如果把
+        # 拼了 recall block 的 content 写回 db，下次 backfill 会把 recall
+        # block 再灌进 SessionIndex，下次 recall 又命中自己 → 雪球。
+        original_user_text = msg.content
         content = msg.content
         dirty_flag = self._state_dir / ".dirty_restart"
         if dirty_flag.exists():
@@ -179,6 +185,32 @@ class BotCore:
             )
             dirty_flag.unlink()
             log.info("Dirty restart detected, prefixed user message with stale context warning")
+
+        # S1 Background Review: auto-recall relevant history from FTS5
+        # index and prepend as a context block. Silent-skip on any failure
+        # so this can never block the worker.send() path.
+        try:
+            from closecrab.utils.session_recall import recall_history
+            loop = asyncio.get_event_loop()
+            recall_block = await loop.run_in_executor(
+                None,
+                lambda: recall_history(
+                    self.bot_name,
+                    msg.user_id,
+                    original_user_text,
+                    limit=5,
+                    days=60,
+                ),
+            )
+            if recall_block:
+                content = recall_block + "\n\n---\n\n" + content
+                log.info(
+                    "S1 recall: injected %d chars (%d history lines)",
+                    len(recall_block),
+                    recall_block.count("\n"),
+                )
+        except Exception as e:
+            log.debug("S1 recall skipped: %s", e)
 
         on_input_needed = msg.metadata.get("on_input_needed")
 
@@ -227,7 +259,11 @@ class BotCore:
                 await loop.run_in_executor(None, lambda: log_ref.set({
                     "timestamp": SERVER_TIMESTAMP,
                     "session_id": worker.session_id or "",
-                    "user": content[:5000],
+                    # Persist the user's actual words, not the content padded
+                    # with S1 recall block / dirty-restart prefix. Otherwise
+                    # backfill re-ingests those into SessionIndex and creates
+                    # a recursive recall pollution loop.
+                    "user": original_user_text[:5000],
                     "assistant": "",
                     "source": msg.channel_type,
                     "status": "running",
@@ -442,7 +478,10 @@ class BotCore:
                         lambda: idx.index_turn(
                             user_id=msg.user_id,
                             channel=msg.channel_type,
-                            user_text=content,
+                            # Use original_user_text, not the padded content.
+                            # See comment at log_ref.set() above — same
+                            # anti-pollution requirement.
+                            user_text=original_user_text,
                             assistant_text=(result or ""),
                             log_id=log_ref.id,
                         ),
@@ -453,7 +492,9 @@ class BotCore:
                 # fallback: 如果创建 live doc 失败，走老逻辑
                 try:
                     await self._log_conversation(
-                        user_message=content,
+                        # Same anti-pollution rule: persist user's actual
+                        # words, not the S1-recall-padded content.
+                        user_message=original_user_text,
                         assistant_response=result,
                         session_id=worker.session_id,
                         source=msg.channel_type,
