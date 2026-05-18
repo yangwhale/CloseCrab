@@ -38,7 +38,7 @@ log = logging.getLogger("closecrab.usage_policy_fallback")
 _PROJECT = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "gpu-launchpad-playground")
 _REGION = os.environ.get("CLOUD_ML_REGION", "global")
 _FALLBACK_MODEL = os.environ.get(
-    "USAGE_POLICY_FALLBACK_MODEL", "claude-opus-4-6@20251001"
+    "USAGE_POLICY_FALLBACK_MODEL", "claude-opus-4-6@default"
 )
 _TIMEOUT_S = float(os.environ.get("USAGE_POLICY_FALLBACK_TIMEOUT_S", "60"))
 _MAX_TOKENS = int(os.environ.get("USAGE_POLICY_FALLBACK_MAX_TOKENS", "4096"))
