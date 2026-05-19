@@ -2,16 +2,18 @@
 # CloseCrab post-restart smoke test
 #
 # Usage:
-#   closecrab-smoke-test.sh <bot_name>      # check single bot
-#   closecrab-smoke-test.sh --all           # check every bot with a process on this host
-#   closecrab-smoke-test.sh <bot> --quiet   # only print summary line
+#   closecrab-smoke-test.sh <bot_name>          # check single bot
+#   closecrab-smoke-test.sh --all               # every bot with a process here
+#   closecrab-smoke-test.sh <bot> --quiet       # only summary line
+#   closecrab-smoke-test.sh <bot> --json        # machine-readable (implies --quiet)
+#   closecrab-smoke-test.sh <bot> --json --actions  # JSON + paste-ready fix cmds
 #
 # Exit code = number of failed checks (0 = all pass)
 # Drop-in extensions: ~/.closecrab/smoke-tests.d/*.sh         (all bots)
 #                     ~/.closecrab/smoke-tests.d/<bot>/*.sh   (per-bot)
 #
-# Inspired by gbrain skills/smoke-test/SKILL.md
-# v1: detect-only, no auto-fix (production bot safety)
+# Inspired by gbrain skills/{smoke-test,skillpack-check}
+# v1: detect-only (suggest actions; never auto-fix running bots)
 
 set -u
 LC_ALL=C.UTF-8
@@ -21,10 +23,12 @@ QUIET=0
 BOT=""
 MODE="single"
 JSON=0
+ACTIONS=0
 for arg in "$@"; do
     case "$arg" in
         --quiet|-q) QUIET=1 ;;
         --json)     JSON=1; QUIET=1 ;;
+        --actions)  ACTIONS=1 ;;
         --all)      MODE="all" ;;
         -*) echo "unknown flag: $arg" >&2; exit 2 ;;
         *) BOT="$arg" ;;
@@ -52,6 +56,22 @@ PASS_N=0
 FAIL_N=0
 SKIP_N=0
 RESULTS_JSON=""   # comma-separated json objects
+ACTIONS_JSON=""   # comma-separated json action objects {check, cmd, reason}
+
+# Append an actionable remediation for a failed check.
+# Args: check_name, fix_command, reason
+_suggest() {
+    [ "$ACTIONS" = "1" ] || return 0
+    local check="$1" cmd="$2" reason="$3"
+    local c_esc r_esc cmd_esc
+    c_esc=$(printf '%s' "$check"  | sed 's/\\/\\\\/g; s/"/\\"/g')
+    cmd_esc=$(printf '%s' "$cmd"  | sed 's/\\/\\\\/g; s/"/\\"/g')
+    r_esc=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    local entry; entry=$(printf '{"check":"%s","cmd":"%s","reason":"%s"}' \
+            "$c_esc" "$cmd_esc" "$r_esc")
+    if [ -z "$ACTIONS_JSON" ]; then ACTIONS_JSON="$entry"
+    else ACTIONS_JSON="$ACTIONS_JSON,$entry"; fi
+}
 
 _emit() {
     # $1=status (pass/fail/skip)  $2=name  $3=detail
@@ -129,6 +149,9 @@ check_bot_process() {
         pass bot_process "pid=$pid rss=${rss}KB"
     else
         fail bot_process "no closecrab process for bot=$bot"
+        _suggest bot_process \
+            "cd ~/CloseCrab && nohup ./run.sh $bot > /tmp/${bot}.run.log 2>&1 &" \
+            "Bot process not running; relaunch via run.sh supervisor."
     fi
 }
 
@@ -165,8 +188,14 @@ check_firestore_reachable() {
     local st; st=$(_fs_status "$out")
     case "$st" in
         EXISTS)   pass firestore_reachable "bots/$bot doc exists" ;;
-        NOTFOUND) fail firestore_reachable "bots/$bot doc missing" ;;
-        ERROR:*)  fail firestore_reachable "${st#ERROR:}" ;;
+        NOTFOUND) fail firestore_reachable "bots/$bot doc missing"
+                  _suggest firestore_reachable \
+                      "python3 ~/CloseCrab/scripts/config-manage.py add $bot --channel feishu" \
+                      "No bot config in Firestore -- needs initial registration." ;;
+        ERROR:*)  fail firestore_reachable "${st#ERROR:}"
+                  _suggest firestore_reachable \
+                      "gcloud auth application-default login --project=chris-pgp-host" \
+                      "Firestore client failed -- credentials or network." ;;
         *)        fail firestore_reachable "empty response (timeout?)" ;;
     esac
 }
@@ -218,6 +247,9 @@ check_worker_secrets() {
                 pass worker_openclaw_gateway "gateway on :18789"
             else
                 fail worker_openclaw_gateway "gateway not listening on :18789"
+                _suggest worker_openclaw_gateway \
+                    "nohup openclaw gateway > /tmp/openclaw-gateway.log 2>&1 &" \
+                    "OpenClaw Gateway must run before any OpenClaw worker can start."
             fi ;;
         kilo|KiloWorker)
             local kbin; kbin=$(command -v kilo 2>/dev/null)
@@ -255,6 +287,9 @@ check_bot_log_recent() {
         skip bot_log_recent "log idle ${age}s (no recent activity)"
     else
         fail bot_log_recent "log silent ${age}s (>24h)"
+        _suggest bot_log_recent \
+            "python3 ~/CloseCrab/scripts/inbox-send.py $bot '/restart'" \
+            "Bot log silent >24h -- likely stuck, restart it."
     fi
 }
 
@@ -356,10 +391,14 @@ done
 
 # summary
 if [ "$JSON" = "1" ]; then
-    printf '{"pass":%d,"fail":%d,"skip":%d,"bots":["%s"],"results":[%s]}\n' \
-        "$PASS_N" "$FAIL_N" "$SKIP_N" \
+    # overall status: ok | warn | fail
+    status_field="ok"
+    [ "$SKIP_N" -gt 0 ] && status_field="warn"
+    [ "$FAIL_N" -gt 0 ] && status_field="fail"
+    printf '{"status":"%s","pass":%d,"fail":%d,"skip":%d,"bots":["%s"],"results":[%s],"actions":[%s]}\n' \
+        "$status_field" "$PASS_N" "$FAIL_N" "$SKIP_N" \
         "$(IFS='","'; printf '%s' "${BOTS[*]}")" \
-        "$RESULTS_JSON"
+        "$RESULTS_JSON" "$ACTIONS_JSON"
 else
     [ "$QUIET" = "0" ] && echo ""
     if [ "$FAIL_N" -eq 0 ]; then
