@@ -482,6 +482,26 @@ def main():
                 log.info(f"  Injected MEMORY.md ({len(memory_content)} chars) into {worker_type} system prompt")
             except Exception as e:
                 log.warning(f"  Failed to read MEMORY.md: {e}")
+
+    # Phase E: inject GBrain index for ALL worker types (always-in-context)
+    # Per-bot opt-out via Firestore bots/{name}.gbrain_index.enabled=false
+    gbrain_cfg = cfg.get("gbrain_index") or {}
+    if gbrain_cfg.get("enabled", True):
+        import asyncio as _asyncio_for_gbrain
+        from closecrab.utils.gbrain_index import fetch_gbrain_index
+        try:
+            gbrain_md = _asyncio_for_gbrain.run(fetch_gbrain_index(
+                creds_path=gbrain_cfg.get("creds_path", "~/.gbrain/cc-tw-claude-creds.json"),
+                base_url=gbrain_cfg.get("base_url", "http://localhost:3131"),
+                list_limit=int(gbrain_cfg.get("list_limit", 30)),
+                salience_days=int(gbrain_cfg.get("salience_days", 14)),
+                timeout=float(gbrain_cfg.get("timeout", 5.0)),
+            ))
+            if gbrain_md:
+                system_prompt += f"\n\n{gbrain_md}"
+                log.info(f"  Injected GBrain index ({len(gbrain_md)} chars) into system prompt")
+        except Exception as e:
+            log.warning(f"  GBrain index injection skipped: {e}")
     claude_proxy_url = cfg.get("claude_proxy_url")
     log.info(f"  worker_type: {worker_type}"
              f"{f', claude_proxy: {claude_proxy_url}' if claude_proxy_url else ''}")
