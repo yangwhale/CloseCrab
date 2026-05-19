@@ -1170,5 +1170,40 @@ if [[ "$INSTALL_VOICE" == "true" ]]; then
     install_voice
 fi
 
+# ====================================================================
+# install_gbrain_monitor — Phase D 主动行为采样 cron (idempotent)
+# ====================================================================
+# 装一条 crontab 让 host 每小时跑 monitor，把 4 个 bot 对 GBrain 的调用率
+# 写回 brain (analytics/gbrain-usage-{date} page)。新机器装好后自动生效。
+# 已存在该 cron 则跳过；当前 brain 不可达则只记 warning 不挂部署。
+install_gbrain_monitor() {
+    local monitor="$SCRIPT_DIR/scripts/gbrain-usage-monitor.py"
+    local creds="$HOME/.gbrain/cc-tw-claude-creds.json"
+    local marker="gbrain-usage-monitor.py"
+
+    echo ""
+    echo "[GBrain Monitor] 装小时 cron (Phase D 主动行为采样)..."
+
+    if [[ ! -f "$monitor" ]]; then
+        echo "  WARN: $monitor 不存在, 跳过"
+        return 0
+    fi
+    if [[ ! -f "$creds" ]]; then
+        echo "  WARN: GBrain creds 不存在 ($creds), monitor 装了但不会写回 brain"
+    fi
+
+    # idempotent: 已有该行就跳过
+    if crontab -l 2>/dev/null | grep -q "$marker"; then
+        echo "  已存在该 cron, 跳过"
+        return 0
+    fi
+
+    (crontab -l 2>/dev/null; \
+     echo "17 * * * * /usr/bin/python3 $monitor --days 1 >/tmp/gbrain-monitor.log 2>&1") | crontab -
+    echo "  已加 crontab: 每小时 :17 跑 monitor"
+}
+
+install_gbrain_monitor
+
 echo ""
 echo "=== 部署完成 ==="

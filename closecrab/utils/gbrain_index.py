@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,18 @@ DEFAULT_CREDS_PATH = "~/.gbrain/cc-tw-claude-creds.json"
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_LIST_LIMIT = 30
 DEFAULT_SALIENCE_DAYS = 14
+# Slugs starting with these prefixes are noise (bot-generated rollups / scratch),
+# excluded from the index so they don't dominate the human-written knowledge.
+DEFAULT_EXCLUDE_PREFIXES = ("analytics/", "testing/", "tmp/", "scratch/")
+# Hard cap on final markdown size — protects bot startup from a runaway brain
+# (rogue ingestion, huge titles, etc.). At ~4 chars/token this is ~5K tokens,
+# enough headroom for 30 recent + 30 salient with full-ish titles. Truncating
+# is safer than letting system_prompt balloon to 50KB.
+DEFAULT_MAX_OUTPUT_CHARS = 20000
+# Same-process cache: bot boot only fires fetch_gbrain_index() once, but cron
+# / debug tools may re-call. 5-minute window matches Anthropic prompt-cache TTL.
+_CACHE_TTL = 300.0
+_cache: dict[tuple, tuple[float, str | None]] = {}
 
 
 def _parse_sse_payload(body: str) -> Any:
@@ -85,11 +98,72 @@ async def _call_tool(
     return json.loads(text)
 
 
+def _sanitize_for_md(s: str, max_len: int = 200) -> str:
+    """Sanitize a string for safe inclusion in a markdown system-prompt fragment.
+
+    Prevents prompt-injection / formatting-break from page slugs or titles that
+    contain backticks (would break our `code` fences), newlines (would let an
+    attacker inject "IGNORE ALL PREVIOUS INSTRUCTIONS"), or HTML/control chars.
+    GBrain put_page validation is the first line of defense, but we never
+    trust upstream data when it lands in a system prompt.
+    """
+    if not s:
+        return ""
+    # Strip control chars + newlines first (defangs jailbreak attempts).
+    cleaned = "".join(ch for ch in s if ch == " " or (ch.isprintable() and ch not in "\r\n\t"))
+    # Escape backticks so they can't break out of our `code` wrap.
+    cleaned = cleaned.replace("`", "'")
+    # Bound length to keep one row bounded even if upstream goes crazy.
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len] + "…"
+    return cleaned
+
+
+def _is_noise(slug: str, exclude_prefixes: tuple[str, ...]) -> bool:
+    """Filter out bot-generated rollup/scratch pages from the index.
+
+    Why: auto-generated pages (analytics/, testing/) accumulate fast and would
+    crowd out human-written knowledge from the top-30 list.
+    """
+    return any(slug.startswith(p) for p in exclude_prefixes)
+
+
+def _is_auto_derived_title(slug: str, title: str) -> bool:
+    """True if title looks auto-generated from slug (kebab/underscore → Title Case).
+
+    e.g. slug='feedback_openclaw-gateway-hot-reload',
+         title='Feedback Openclaw Gateway Hot Reload' → True.
+
+    Saves both tokens and visual clutter — when title duplicates slug, we skip it.
+    """
+    if not slug or not title:
+        return False
+    normalized = slug.replace("/", " ").replace("_", " ").replace("-", " ")
+    derived = " ".join(w.capitalize() for w in normalized.split())
+    return derived == title.strip()
+
+
+def _smart_title(page: dict[str, Any]) -> str:
+    """Prefer human-written description; fall back to title; empty string if
+    title is just auto-derived from slug (caller will skip the field)."""
+    desc = (page.get("description") or "").strip()
+    if desc and len(desc) <= 100:
+        return desc
+    slug = page.get("slug", "")
+    title = (page.get("title") or "").strip()
+    if not title:
+        return ""
+    if _is_auto_derived_title(slug, title):
+        return ""  # Skip — slug already says it.
+    return title
+
+
 def _format_markdown(
     recent: list[dict[str, Any]],
     salient: list[dict[str, Any]],
     list_limit: int,
     salience_days: int,
+    exclude_prefixes: tuple[str, ...] = DEFAULT_EXCLUDE_PREFIXES,
 ) -> str:
     """Build a compact markdown index. Goal: ~150 lines so it sits in
     system prompt without dominating it."""
@@ -107,17 +181,19 @@ def _format_markdown(
         "",
         "**主要工具**：`get_page` / `query`（语义搜索） / `list_pages` / `put_page` / `get_recent_salience` / `find_experts` / `recall`",
         "",
-        f"### 最近活跃页面（top {list_limit}, by updated_at）",
+        f"### 最近活跃页面（top {list_limit}, by updated_at, 已过滤 noise）",
         "",
     ]
 
-    if recent:
-        for p in recent[:list_limit]:
-            slug = p.get("slug", "")
-            ptype = p.get("type", "?")
-            title = p.get("title", "")
-            updated = (p.get("updated_at") or "")[:10]
-            lines.append(f"- `{slug}` ({ptype}) — {title} _{updated}_")
+    recent_clean = [p for p in recent if not _is_noise(p.get("slug", ""), exclude_prefixes)]
+    if recent_clean:
+        for p in recent_clean[:list_limit]:
+            slug = _sanitize_for_md(p.get("slug", ""), max_len=80)
+            ptype = _sanitize_for_md(p.get("type", "?"), max_len=20)
+            title = _sanitize_for_md(_smart_title(p), max_len=100)
+            updated = _sanitize_for_md((p.get("updated_at") or "")[:10], max_len=10)
+            tail = f" — {title}" if title else ""
+            lines.append(f"- `{slug}` ({ptype}){tail} _{updated}_")
     else:
         lines.append("- _(空)_")
 
@@ -127,14 +203,24 @@ def _format_markdown(
         "",
     ]
 
-    if salient:
-        for p in salient[:list_limit]:
-            slug = p.get("slug", "")
+    # Salient often overlaps heavily with recent (salience degrades to recency
+    # when no take/emotional signals exist). Dedup to surface genuinely-novel
+    # salient pages — the ones the LLM might miss from the recent list alone.
+    shown_slugs = {p.get("slug", "") for p in recent_clean[:list_limit]}
+    salient_clean = [
+        p for p in salient
+        if not _is_noise(p.get("slug", ""), exclude_prefixes)
+        and p.get("slug", "") not in shown_slugs
+    ]
+    if salient_clean:
+        for p in salient_clean[:list_limit]:
+            slug = _sanitize_for_md(p.get("slug", ""), max_len=80)
             score = p.get("score", 0)
-            title = p.get("title", "")
-            lines.append(f"- `{slug}` — {title} _(salience={score:.2f})_")
+            title = _sanitize_for_md(_smart_title(p), max_len=100)
+            tail = f" — {title}" if title else ""
+            lines.append(f"- `{slug}`{tail} _(salience={score:.2f})_")
     else:
-        lines.append("- _(空)_")
+        lines.append("- _(与最近活跃高度重叠，已合并)_")
 
     return "\n".join(lines)
 
@@ -146,12 +232,24 @@ async def fetch_gbrain_index(
     list_limit: int = DEFAULT_LIST_LIMIT,
     salience_days: int = DEFAULT_SALIENCE_DAYS,
     timeout: float = DEFAULT_TIMEOUT,
+    exclude_prefixes: tuple[str, ...] = DEFAULT_EXCLUDE_PREFIXES,
+    use_cache: bool = True,
 ) -> str | None:
     """Fetch + format GBrain index. Returns markdown string, or None on any failure.
 
     Designed to be called once at bot boot before BotCore construction.
     Total wall-time budget is ~3× timeout (one /token + two /mcp calls).
+
+    Cache: same-process 5min memo keyed on (base_url, list_limit, salience_days,
+    exclude_prefixes). Pass ``use_cache=False`` to force refresh.
     """
+    cache_key = (str(base_url), int(list_limit), int(salience_days), tuple(exclude_prefixes))
+    if use_cache:
+        entry = _cache.get(cache_key)
+        if entry and (time.monotonic() - entry[0]) < _CACHE_TTL:
+            log.debug(f"GBrain index: cache hit (age={time.monotonic() - entry[0]:.1f}s)")
+            return entry[1]
+
     creds_file = Path(str(creds_path)).expanduser()
     if not creds_file.exists():
         log.info(f"GBrain index: creds file not found ({creds_file}), skipping")
@@ -195,11 +293,22 @@ async def fetch_gbrain_index(
             log.info("GBrain index: both queries empty, skipping injection")
             return None
 
-        md = _format_markdown(recent or [], salient or [], list_limit, salience_days)
+        md = _format_markdown(
+            recent or [], salient or [], list_limit, salience_days, exclude_prefixes,
+        )
+        # Hard cap on output: protect against runaway page counts / huge titles.
+        if len(md) > DEFAULT_MAX_OUTPUT_CHARS:
+            log.warning(
+                f"GBrain index: output {len(md)} chars exceeds cap "
+                f"{DEFAULT_MAX_OUTPUT_CHARS}, truncating"
+            )
+            md = md[:DEFAULT_MAX_OUTPUT_CHARS] + "\n\n_(已截断: 上限 20K chars)_"
         log.info(
             f"GBrain index: fetched {len(recent)} recent + {len(salient)} salient "
             f"= {len(md)} chars"
         )
+        if use_cache:
+            _cache[cache_key] = (time.monotonic(), md)
         return md
     except (httpx.HTTPError, asyncio.TimeoutError, RuntimeError) as e:
         log.warning(f"GBrain index: fetch failed ({type(e).__name__}: {e}), skipping")
