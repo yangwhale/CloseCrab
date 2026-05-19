@@ -85,7 +85,10 @@ class BotCore:
         self._worker_type = worker_type
         self._claude_proxy_url = claude_proxy_url
 
-        # user_key -> Worker (ClaudeCodeWorker or GeminiCLIWorker)
+        # user_key -> Worker (any of: ClaudeCodeWorker, GeminiACPWorker,
+        # KiloWorker, OpenClawWorker — see _create_worker for the dispatch).
+        # Note: workers/gemini_cli.py exists in the tree but is dead code —
+        # no longer imported here; safe to delete in a future cleanup PR.
         self._workers: dict[str, Worker] = {}
         # user_key -> asyncio.Lock (防并发 get_or_create)
         self._locks: dict[str, asyncio.Lock] = {}
