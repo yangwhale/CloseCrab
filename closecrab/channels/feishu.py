@@ -1861,7 +1861,8 @@ class FeishuChannel(Channel):
         _anim_task[0] = asyncio.create_task(_card_update_loop_inbox())
 
         # 构造消息送入 Claude
-        content = f"[from: Bitable Inbox]\n{instruction}"
+        sender_tag = f"Inbox · {inbox_from}" if inbox_from else "Inbox"
+        content = f"[from: {sender_tag}]\n{instruction}"
         metadata = {
             "chat_id": chat_id,
             "on_progress": on_progress,
