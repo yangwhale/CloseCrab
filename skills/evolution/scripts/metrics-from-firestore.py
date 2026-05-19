@@ -101,24 +101,39 @@ def compute_metrics(db, target: str, since: datetime, until: datetime | None = N
         }
 
     total = len(logs)
-    successes = sum(1 for l in logs if l.get("status") == "success")
-    fails = total - successes
+    # Schema (verified from actual xiaoai/bunny/tiemu log docs):
+    #   - status: "done" / "error" / "running" / "interrupted"  (NOT "success")
+    #   - assistant: final reply text  (NOT "reply")
+    #   - steps: list[str] with emoji prefix ("💬 ...", "⚡ Bash: ...", "📖 Read: ...")
+    successes = sum(1 for l in logs if l.get("status") == "done")
+    fails = sum(1 for l in logs if l.get("status") not in ("done", "running"))
+    in_flight = sum(1 for l in logs if l.get("status") == "running")
     empty = sum(
         1 for l in logs
-        if (not l.get("reply") or l.get("reply") == "") or l.get("status") == "empty_response"
+        if (l.get("status") == "done" and not (l.get("assistant") or "").strip())
     )
 
     durations = [float(l["duration_seconds"]) for l in logs if l.get("duration_seconds")]
     step_counts = [len(l.get("steps", [])) for l in logs if isinstance(l.get("steps"), list)]
+    assistant_lens = [len(l.get("assistant") or "") for l in logs if l.get("status") == "done"]
 
-    # Tool diversity: unique kinds across all steps
+    # Tool diversity by emoji prefix (Kilo/Claude/OpenClaw all use same render)
+    EMOJI_TO_KIND = {
+        "💬": "text", "⚡": "bash", "📖": "read", "✏️": "write",
+        "🔧": "edit", "🔍": "search", "📋": "list", "🧠": "thinking",
+    }
     tools_used = set()
     for l in logs:
         for s in (l.get("steps") or []):
-            if isinstance(s, dict):
-                kind = s.get("kind") or s.get("tool") or s.get("name")
-                if kind:
-                    tools_used.add(kind)
+            if isinstance(s, str) and len(s) >= 2:
+                prefix = s[:2].strip() or s[:1]
+                # Try 2-char (✏️) then 1-char (💬)
+                kind = EMOJI_TO_KIND.get(prefix) or EMOJI_TO_KIND.get(s[:1], "other")
+                tools_used.add(kind)
+            elif isinstance(s, dict):
+                k = s.get("kind") or s.get("tool") or s.get("name")
+                if k:
+                    tools_used.add(k)
 
     def pct(values, p):
         if not values:
@@ -131,9 +146,12 @@ def compute_metrics(db, target: str, since: datetime, until: datetime | None = N
         "total": total,
         "successes": successes,
         "fails": fails,
+        "in_flight": in_flight,
         "fail_rate": round(fails / total, 3) if total else 0,
         "empty_response_count": empty,
         "empty_response_rate": round(empty / total, 3) if total else 0,
+        "assistant_len_p50": pct(assistant_lens, 50),
+        "assistant_len_p95": pct(assistant_lens, 95),
         "duration_p50": round(pct(durations, 50), 2),
         "duration_p95": round(pct(durations, 95), 2),
         "duration_max": round(max(durations), 2) if durations else 0,
@@ -156,14 +174,14 @@ Window: `{m['since']}` → `{m.get('until') or 'now'}`
 | Metric | Value |
 |---|---|
 | Total turns | {m['total']} |
-| Successes | {m['successes']} |
+| Done | {m['successes']} |
 | Fails | {m['fails']} ({m['fail_rate']*100:.1f}%) |
-| Empty responses | {m['empty_response_count']} ({m['empty_response_rate']*100:.1f}%) |
-| Duration p50 | {m['duration_p50']}s |
-| Duration p95 | {m['duration_p95']}s |
-| Duration max | {m['duration_max']}s |
+| In-flight | {m['in_flight']} |
+| Empty responses (done w/ assistant="") | {m['empty_response_count']} ({m['empty_response_rate']*100:.1f}%) |
+| Assistant len p50 / p95 | {m['assistant_len_p50']} / {m['assistant_len_p95']} chars |
+| Duration p50 / p95 / max | {m['duration_p50']}s / {m['duration_p95']}s / {m['duration_max']}s |
 | Avg steps / turn | {m['avg_step_count']} |
-| Tool diversity | {m['tool_diversity']} ({', '.join(m['tools_seen'][:8])}{'...' if len(m['tools_seen']) > 8 else ''}) |
+| Tool diversity (by emoji) | {m['tool_diversity']} ({', '.join(m['tools_seen'])}) |
 """
 
 
