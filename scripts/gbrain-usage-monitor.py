@@ -50,11 +50,21 @@ GBRAIN_CREDS = Path(os.environ.get(
     "GBRAIN_CREDS", str(Path.home() / ".gbrain" / "cc-tw-claude-creds.json"),
 )).expanduser()
 
-# Match strings like "🧠 mcp__gbrain__get_page" / "⚡ mcp__gbrain__query"
-# steps mix human text + tool labels — be specific to avoid false positives
-# (e.g. the word "gbrain" appearing in user prose).
-GBRAIN_TOOL_RE = re.compile(r"mcp__gbrain__(\w+)")
-GBRAIN_GENERIC_RE = re.compile(r"\bgbrain[_-]?", re.IGNORECASE)
+# Steps mix THREE things:
+#   ✅ "🔧 mcp__gbrain__xxx: ..."     — REAL successful tool call (what we want)
+#   ❌ "🔧 invalid: tool=mcp__gbrain__xxx, error=Model tried..."  — FAILED tool call
+#   ❌ "💬 ...mcp__gbrain__xxx..."     — LLM merely DISCUSSING the tool in prose
+#
+# Previous regex `mcp__gbrain__(\w+)` matched all three indiscriminately —
+# 22.2% baseline on xiaoaitongxue was bogus (those were 4 turns where the LLM
+# was *complaining about* gbrain being unavailable, plus 2 turns where it
+# *talked about* the tool by name).
+#
+# Correct measurement: only count steps that match the worker's tool_use
+# emoji prefix "🔧 mcp__gbrain__<name>" — and explicitly exclude the
+# "🔧 invalid:" failure marker.
+GBRAIN_TOOL_USE_RE = re.compile(r"^🔧\s+mcp__gbrain__(\w+)")
+GBRAIN_INVALID_RE = re.compile(r"^🔧\s+invalid:")
 
 
 def scan_logs(db: firestore.Client, bots: list[str], days: int) -> dict:
@@ -64,8 +74,10 @@ def scan_logs(db: firestore.Client, bots: list[str], days: int) -> dict:
         col = db.collection(f"bots/{bot}/logs")
         docs = col.where("timestamp", ">=", since).stream()
         total = 0
-        with_gbrain = 0
+        with_gbrain = 0     # turns with ≥1 SUCCESSFUL gbrain tool_use
+        with_failed = 0     # turns where LLM tried gbrain but tool returned invalid
         tool_counter: Counter[str] = Counter()
+        failed_counter: Counter[str] = Counter()
         for d in docs:
             data = d.to_dict() or {}
             total += 1
@@ -73,20 +85,37 @@ def scan_logs(db: firestore.Client, bots: list[str], days: int) -> dict:
             if not isinstance(steps, list):
                 continue
             hit = False
+            failed = False
             for step in steps:
                 if not isinstance(step, str):
                     continue
-                for m in GBRAIN_TOOL_RE.finditer(step):
+                # Successful tool_use: "🔧 mcp__gbrain__xxx: ..."
+                m = GBRAIN_TOOL_USE_RE.match(step)
+                if m:
                     tool_counter[m.group(1)] += 1
                     hit = True
+                    continue
+                # Failed tool_use: "🔧 invalid: tool=mcp__gbrain__xxx, ..."
+                if GBRAIN_INVALID_RE.match(step) and "mcp__gbrain__" in step:
+                    # Extract the tool name from invalid marker
+                    m2 = re.search(r"tool=mcp__gbrain__(\w+)", step)
+                    if m2:
+                        failed_counter[m2.group(1)] += 1
+                        failed = True
             if hit:
                 with_gbrain += 1
+            if failed:
+                with_failed += 1
         out[bot] = {
             "total_turns": total,
             "turns_with_gbrain": with_gbrain,
+            "turns_with_failed": with_failed,
             "hit_rate": (with_gbrain / total) if total else 0.0,
+            "fail_rate": (with_failed / total) if total else 0.0,
             "tool_breakdown": dict(tool_counter.most_common()),
+            "failed_breakdown": dict(failed_counter.most_common()),
             "total_gbrain_calls": sum(tool_counter.values()),
+            "total_failed_calls": sum(failed_counter.values()),
         }
     return out
 
@@ -103,18 +132,27 @@ def format_markdown(stats: dict, days: int, bots: list[str]) -> str:
         f"# GBrain 主动调用率（窗口 {days}d, 截至 {today} UTC）",
         "",
         "**目的**：观察 Phase E system-prompt 索引注入后，bot 在自然对话中**真的**多频繁查询 GBrain。",
-        "Phase A-C 已证可达性，Phase D 关注**召唤效率**。",
+        "**Hit Rate** = 该 bot 出现 ≥1 个成功 `🔧 mcp__gbrain__*` tool_use 的 turn 占比。",
+        "**Fail Rate** = LLM 试图调 gbrain 但拿到 `🔧 invalid: tool=mcp__gbrain__...` 失败标记的 turn 占比。",
+        "Fail rate 高意味着 MCP 配置层有问题（gbrain 已注册但 LLM 看到不可用），不是 LLM 不主动。",
         "",
-        "| Bot | Turns | With GBrain | Hit Rate | Total Calls | 最常用工具 |",
-        "|------|------:|-----------:|--------:|-----------:|--------------|",
+        "| Bot | Turns | Hit Turns | Hit Rate | Fail Turns | Fail Rate | 成功调用 | 失败调用 | 最常用 (成功) |",
+        "|------|------:|---------:|--------:|----------:|---------:|--------:|--------:|---------------|",
     ]
     for bot in bots:
         s = stats.get(bot, {})
         top = list(s.get("tool_breakdown", {}).items())[:3]
         top_str = ", ".join(f"{t}×{c}" for t, c in top) or "—"
         lines.append(
-            f"| {bot} | {s.get('total_turns', 0)} | {s.get('turns_with_gbrain', 0)} "
-            f"| {s.get('hit_rate', 0):.1%} | {s.get('total_gbrain_calls', 0)} | {top_str} |"
+            f"| {bot} "
+            f"| {s.get('total_turns', 0)} "
+            f"| {s.get('turns_with_gbrain', 0)} "
+            f"| {s.get('hit_rate', 0):.1%} "
+            f"| {s.get('turns_with_failed', 0)} "
+            f"| {s.get('fail_rate', 0):.1%} "
+            f"| {s.get('total_gbrain_calls', 0)} "
+            f"| {s.get('total_failed_calls', 0)} "
+            f"| {top_str} |"
         )
 
     lines += [
