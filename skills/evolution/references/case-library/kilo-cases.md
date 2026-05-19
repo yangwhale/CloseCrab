@@ -16,6 +16,36 @@
 | model 格式不同 | 配置 | 不能直接填 Firestore，要走 `config-manage.py set-model` 预设 | `feedback_kilo-model-format` |
 | sessionStorage 跨重启 | 持久化 | Kilo 不像 OpenClaw 有 session/load，restart 丢上下文 | (待验证) |
 
+## Round 2 — 2026-05-19 (晚 23:44)
+
+### Round metadata
+- `round_id`: `2026-05-19_xiaoai_kilo_r2`
+- `target`: xiaoaitongxue (worker_type=kilo)
+- `evaluators`: bunny (Claude Code) solo Leader
+- `motivation`: Round 1 case-3 ExitPlanMode 28 min 死锁 → 写 inbox fast-path patch 验证
+- `patch`: commit 361a38f `fix(feishu): inbox 派活的 ExitPlanMode/AskUserQuestion 走 fast-path`
+
+### Cases & Results
+
+| Case | Round 1 | Round 2 (patched) | Δ |
+|---|---|---|---|
+| case-1-long-streaming | 35.2s / 16 steps / done | ~25s / done | ✅ |
+| case-2-tool-then-text | 25.4s / 10 steps / done | ~25s / done | ✅ |
+| case-3-exitplanmode | **1701s / 46 steps / done (lock timeout 强杀)** | **50.5s / 11 steps / done** | **34× 提速** |
+| case-4-wiki-mcp | 41.4s / 12 steps / done | ~25s / done | ✅ |
+| case-5-hostname-sandbox | **silent fail (messages done, logs 缺 turn)** | **done** | ✅ rescue |
+| case-6-tmp-glob | 34.8s / 0 steps (session abort) | ~25s / done | ✅ |
+
+### Round 2 aggregate
+- p50 25.08s, p95 **50.55s** (vs Round 1 p95 1701s), max 50.55s
+- 6/6 done (vs Round 1 5+1 silent fail)
+- 总耗时 12 min (vs Round 1 30 min HOL block)
+
+### Round 2 meta-lessons
+1. **第一次跑 evolution skill 就发现 skill 自己的 bug** — `restart-peer-bot.sh:60` pgrep 模式 `[= ]\?` 反斜杠错误，0 匹配。已修。
+2. **case-5 silent fail 揭露 evolution loop 的 metrics 盲区** — 必须三源验证。已写 `references/silent-failure-detection.md`
+3. **Patch 命中真根因 = 全套 case 一起改善**，不只 case-3。HOL block 解开后 case 5/6 也跟着恢复。
+
 ## Round 1 — 2026-05-19 (今晚)
 
 ### Round metadata

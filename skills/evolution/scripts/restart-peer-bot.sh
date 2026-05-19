@@ -57,7 +57,9 @@ done
 # We grep for the main process: `python3 -m closecrab --bot <target>`
 # Avoid matching run.sh wrapper (we want SIGHUP on main.py, not the wrapper)
 get_main_pid() {
-    pgrep -f "python3 -m closecrab.*--bot[= ]\?${TARGET}\b" | head -1 || true
+    # 兼容 `--bot name`（空格）和 `--bot=name`（等号）两种调用风格
+    # 注意：pgrep -f 用 ERE，`[= ]?` 不要反斜杠否则 `\?` 被当字面字符 (Round 2 bug)
+    pgrep -f "python3 -m closecrab.*--bot[= ]?${TARGET}\b" | head -1 || true
 }
 
 OLD_PID=$(get_main_pid)
