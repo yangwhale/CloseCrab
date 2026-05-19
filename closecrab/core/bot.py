@@ -428,26 +428,30 @@ class BotCore:
                                        on_step=_on_step,
                                        on_text_chunk=on_text_chunk)
 
-            # Usage Policy fallback: if Anthropic Vertex refused the request
-            # (probabilistic RLHF guardrail trips on long sessions or odd
-            # combinations of context + prompt), re-issue the bare user
-            # prompt against Opus 4.6 via SDK direct. Replaces ``result``
-            # so the finalize/session_index/reply paths see the fallback
-            # reply, not the original API Error. Bypassed silently if
-            # anthropic SDK missing or call fails — user then sees the
-            # original error and can retry manually.
+            # Usage Policy fallback. Vertex's RLHF guardrail can flip the
+            # final `result` event into an "API Error...Usage Policy" text
+            # *after* the model already streamed a real answer. We recover
+            # either (a) free, from the worker's accumulated stream text
+            # (strip the refusal tail, use the real partial), or (b) ~5s,
+            # SDK re-issue against the fallback model. Replaces ``result``
+            # so finalize/session_index/reply paths see the recovered
+            # reply, not the API Error. Failures leave ``result`` untouched
+            # so the user sees the original error and can retry.
             try:
                 from closecrab.utils.usage_policy_fallback import (
                     is_usage_policy_refusal, try_fallback,
                 )
                 if is_usage_policy_refusal(result):
+                    partial = getattr(worker, "_last_accumulated_reply", "") or ""
                     log.warning(
                         f"Usage Policy refusal detected on user={user_key} "
-                        f"len={len(result)} — invoking Opus 4.6 fallback"
+                        f"len={len(result)} partial_len={len(partial)} "
+                        f"— invoking fallback"
                     )
                     fb_reply = await try_fallback(
                         user_text=original_user_text,
                         system_prompt=self._system_prompt,
+                        partial_reply=partial,
                     )
                     if fb_reply:
                         result = fb_reply

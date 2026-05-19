@@ -642,7 +642,13 @@ class ClaudeCodeWorker(Worker):
 
             self._waiting = True
             # 累积本次 send() 内所有 assistant turn 的 text，用于推 on_text_chunk
+            # 并暴露到 self._last_accumulated_reply 供 usage_policy_fallback
+            # 做"流式恢复"——Vertex Usage Policy refusal 经常发生在 finish 时
+            # 的 result event 覆盖，前面流式吐出的真答案被丢；BotCore 拿到
+            # accumulated 后可以 strip 掉 refusal 尾巴用真答案兜底，省一次
+            # SDK 调用。
             accumulated_reply_text = ""
+            self._last_accumulated_reply = ""
             # P1: empty-response retry parity with openclaw_acp.py (commit e72c62e).
             # When Claude returns a result with empty text on the first attempt,
             # we resend the same prompt once before giving up. Without this the
@@ -778,6 +784,7 @@ class ClaudeCodeWorker(Worker):
                                     accumulated_reply_text + "\n\n" + turn_text
                                     if accumulated_reply_text else turn_text
                                 )
+                                self._last_accumulated_reply = accumulated_reply_text
                                 try:
                                     await on_text_chunk(turn_text, accumulated_reply_text)
                                 except Exception as e:
