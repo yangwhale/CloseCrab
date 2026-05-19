@@ -769,22 +769,26 @@ class ClaudeCodeWorker(Worker):
                                       "cache_read_input_tokens"):
                                 self._usage[k] = msg_usage.get(k, 0)  # 取最新值（非累加）
 
-                        # 流式 text 累积：每个 assistant turn 把所有 text block 拼出来推给 channel
-                        # CC stream-json 是 turn-level 流式（每个 LLM turn 一次性到达），不是 token-level
-                        if on_text_chunk:
-                            turn_text_parts = []
-                            for block in d.get("message", {}).get("content", []):
-                                if block.get("type") == "text":
-                                    t_text = block.get("text", "")
-                                    if t_text:
-                                        turn_text_parts.append(t_text)
-                            if turn_text_parts:
-                                turn_text = "\n".join(turn_text_parts)
-                                accumulated_reply_text = (
-                                    accumulated_reply_text + "\n\n" + turn_text
-                                    if accumulated_reply_text else turn_text
-                                )
-                                self._last_accumulated_reply = accumulated_reply_text
+                        # 流式 text 累积：每个 assistant turn 把所有 text block 拼出来。
+                        # CC stream-json 是 turn-level 流式（每个 LLM turn 一次性到达），不是 token-level。
+                        # 累积**永远**做（不管 on_text_chunk 是否存在），因为
+                        # `self._last_accumulated_reply` 是 usage_policy_fallback 的
+                        # 流式恢复路径要读的——inbox / voice / 其他不传 on_text_chunk
+                        # 的调用方也必须能让 fallback 看到累积内容。
+                        turn_text_parts = []
+                        for block in d.get("message", {}).get("content", []):
+                            if block.get("type") == "text":
+                                t_text = block.get("text", "")
+                                if t_text:
+                                    turn_text_parts.append(t_text)
+                        if turn_text_parts:
+                            turn_text = "\n".join(turn_text_parts)
+                            accumulated_reply_text = (
+                                accumulated_reply_text + "\n\n" + turn_text
+                                if accumulated_reply_text else turn_text
+                            )
+                            self._last_accumulated_reply = accumulated_reply_text
+                            if on_text_chunk:
                                 try:
                                     await on_text_chunk(turn_text, accumulated_reply_text)
                                 except Exception as e:
