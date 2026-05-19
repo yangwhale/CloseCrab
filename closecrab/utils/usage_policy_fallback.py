@@ -52,7 +52,38 @@ _USAGE_POLICY_RE = re.compile(
     r"API\s+Error.{0,200}Usage\s+Policy", re.IGNORECASE | re.DOTALL
 )
 
-_FALLBACK_PREFIX = "🔁 [4.7 触发内容审核 → Opus 4.6 fallback]\n\n"
+_VERSION_RE = re.compile(r"^(\d+)-(\d+)(.*)$")
+
+
+def _short_model_name(model_id: str) -> str:
+    """``claude-opus-4-6@default`` → ``Opus 4.6``. Unknown → original id."""
+    base = (model_id or "").split("@")[0]
+    for prefix, label in (
+        ("claude-opus-", "Opus "),
+        ("claude-sonnet-", "Sonnet "),
+        ("claude-haiku-", "Haiku "),
+    ):
+        if base.startswith(prefix):
+            rest = base[len(prefix):]
+            # "4-6" → "4.6", "4-5-20251001" → "4.5-20251001"
+            m = _VERSION_RE.match(rest)
+            if m:
+                rest = f"{m.group(1)}.{m.group(2)}{m.group(3)}"
+            return label + rest
+    return base or "?"
+
+
+def _make_fallback_prefix() -> str:
+    """Build the user-facing banner at fallback time, NOT at import time.
+
+    Reads ``ANTHROPIC_MODEL`` env (the Claude CLI primary model — may have
+    been overridden per-bot in ``ClaudeCodeWorker._start_process``) so the
+    banner reflects reality. The legacy hardcoded string assumed primary
+    was always Opus 4.7 and got stale once jarvis switched to 4.6.
+    """
+    primary = _short_model_name(os.environ.get("ANTHROPIC_MODEL", ""))
+    fallback = _short_model_name(_FALLBACK_MODEL)
+    return f"🔁 [{primary} 触发内容审核 → {fallback} fallback]\n\n"
 
 # Lazy module-level client. AsyncAnthropicVertex reuses HTTP connections
 # across calls — important since fallback may fire multiple times in a
@@ -153,7 +184,7 @@ async def try_fallback(
         "usage_policy_fallback succeeded: %d chars from %s",
         len(text_out), _FALLBACK_MODEL,
     )
-    return _FALLBACK_PREFIX + text_out
+    return _make_fallback_prefix() + text_out
 
 
 async def warmup(timeout_s: float = 10.0) -> bool:
