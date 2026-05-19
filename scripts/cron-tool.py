@@ -31,8 +31,66 @@ Usage:
   # Run due jobs (called by daemon, not by bot)
   python3 cron-tool.py tick
 
+  # Show 5 scheduling principles (read before adding new recurring jobs)
+  python3 cron-tool.py principles
+
 Env:
   BOT_NAME — sender bot (auto-set by bot.py)
+
+================================================================
+5 SCHEDULING PRINCIPLES — read before --cron / --in / --at
+(adapted from gbrain skills/cron-scheduler)
+================================================================
+
+1. STAGGER — Never schedule multiple jobs at the same minute mark.
+   Every bot defaulting to "0 9 * * *" means a flood at 09:00.00,
+   contending on Firestore + inbox.
+   GOOD: "3 9 * * *", "17 9 * * *", "29 9 * * *", "47 9 * * *"
+   BAD : "0 9 * * *" for every bot.
+   Heuristic: when user says "morning", pick :03, :17, :29, :47.
+
+2. QUIET HOURS — Avoid 23:00-08:00 HKT for user-facing notifications.
+   If a job must run nightly (e.g. backup), it can run silently but DO
+   NOT push a chat notification during quiet hours. Hold and release
+   in the morning batch (08:30-09:30).
+
+3. THIN PROMPTS — Job `message` is a one-liner pointing at a skill /
+   doc, NOT a 2000-word inline prompt:
+   GOOD: "/health 体检一下，跑 ~/CloseCrab/skills/smoke-test"
+   BAD : ...3000 words of context glued into the message...
+   Why: messages persist in Firestore; long messages bloat `cron-tool list`
+   output, and the receiving bot's Claude fetches fresh context from
+   skill files (which evolve over time) anyway.
+
+4. IDEMPOTENCY — Assume any job may fire twice (daemon retry, race).
+   Job receiver must be safe to re-run:
+   - Side-effect actions guarded by "did I already do this in the last
+     N minutes?" check.
+   - Reports written to time-stamped paths
+     (~/.closecrab/cron-reports/<job>/<YYYY-MM-DD-HHMM>.md), not
+     overwriting.
+   - DB writes use idempotency keys derived from the slot.
+
+5. REPORTS PATH — Output goes to a consistent, discoverable location:
+   ~/.closecrab/cron-reports/<job_name>/<YYYY-MM-DD-HHMM>.md
+   Don't dump into /tmp (cleared on reboot) or inline in inbox messages
+   (gets buried).
+
+Trade-offs: cron-daemon polls every 30s (lossy) so jitter ≈ 30s.
+Don't schedule things tighter than 1 minute. For 1s-precision use
+in-process asyncio.sleep, not this scheduler.
+"""
+
+PRINCIPLES = """\
+5 CRON PRINCIPLES (read before scheduling a new recurring job)
+
+1. STAGGER       never use :00 mark; pick :03 / :17 / :29 / :47 for "morning"
+2. QUIET HOURS   avoid 23:00-08:00 HKT for user-facing notifications
+3. THIN PROMPTS  message = one-liner pointing at a skill, not 2000 words inline
+4. IDEMPOTENCY   daemon may fire twice; receiver must be safe to re-run
+5. REPORTS PATH  output to ~/.closecrab/cron-reports/<name>/<YYYY-MM-DD-HHMM>.md
+
+(See top of cron-tool.py for full rationale + examples.)
 """
 
 import argparse
@@ -300,6 +358,9 @@ def main():
 
     t = sub.add_parser("tick")
     t.set_defaults(fn=cmd_tick)
+
+    p = sub.add_parser("principles", help="print the 5 cron scheduling principles")
+    p.set_defaults(fn=lambda _args: print(PRINCIPLES))
 
     args = ap.parse_args()
     args.fn(args)
