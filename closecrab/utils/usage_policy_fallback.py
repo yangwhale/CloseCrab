@@ -122,15 +122,18 @@ def _short_model_name(model_id: str) -> str:
     return base or "?"
 
 
-def _make_banner(source: str) -> str:
+def _make_banner(source: str, primary_model: Optional[str] = None) -> str:
     """User-facing banner.
 
     ``source`` is ``"partial"`` (free, stream recovery) or ``"sdk"`` (paid,
-    SDK re-issue). Built at call time, not import time — reads
-    ``ANTHROPIC_MODEL`` env which the Claude CLI subprocess may have
-    overridden per-bot.
+    SDK re-issue). ``primary_model`` is the model the failing call actually
+    ran on (typically ``worker._model`` — per-bot Firestore override). Falls
+    back to ``ANTHROPIC_MODEL`` env only when caller didn't pass one, since
+    the env var in BotCore's parent process doesn't reflect per-worker
+    overrides set on the subprocess.
     """
-    primary = _short_model_name(os.environ.get("ANTHROPIC_MODEL", ""))
+    model_id = primary_model or os.environ.get("ANTHROPIC_MODEL", "")
+    primary = _short_model_name(model_id)
     if source == "partial":
         return f"🔁 [{primary} 触发内容审核 → 已回收流式片段]\n\n"
     fallback = _short_model_name(_FALLBACK_MODEL)
@@ -165,6 +168,7 @@ async def try_fallback(
     user_text: str,
     system_prompt: Optional[str] = None,
     partial_reply: Optional[str] = None,
+    primary_model: Optional[str] = None,
 ) -> Optional[str]:
     """Recover a refused reply. Return the banner-prefixed text on success,
     ``None`` on any failure (caller falls back to the original error).
@@ -176,6 +180,11 @@ async def try_fallback(
     Path 2 (~5s, ~$0.10): re-issue ``user_text`` to the fallback model
     via Vertex SDK. ``system_prompt`` (truncated to 8KB) preserves the
     bot's persona/voice in the SDK reply.
+
+    ``primary_model`` is the model the failing call actually ran on
+    (typically ``worker._model``). Used only in the user-facing banner —
+    BotCore reads it off the Worker since ``ANTHROPIC_MODEL`` env in the
+    Python parent process doesn't reflect per-bot subprocess overrides.
     """
     # ── Path 1: stream-text recovery ──
     if partial_reply:
@@ -185,7 +194,7 @@ async def try_fallback(
                 "usage_policy_fallback: recovered %d chars from stream "
                 "(skipped SDK re-issue)", len(clean),
             )
-            return _make_banner("partial") + clean
+            return _make_banner("partial", primary_model) + clean
 
     # ── Path 2: SDK re-issue ──
     if not (user_text or "").strip():
@@ -234,7 +243,7 @@ async def try_fallback(
         "usage_policy_fallback succeeded: %d chars from %s",
         len(text_out), _FALLBACK_MODEL,
     )
-    return _make_banner("sdk") + text_out
+    return _make_banner("sdk", primary_model) + text_out
 
 
 async def warmup(timeout_s: float = 10.0) -> bool:

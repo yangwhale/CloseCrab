@@ -452,6 +452,7 @@ class BotCore:
                         user_text=original_user_text,
                         system_prompt=self._system_prompt,
                         partial_reply=partial,
+                        primary_model=getattr(worker, "_model", None),
                     )
                     if fb_reply:
                         result = fb_reply
