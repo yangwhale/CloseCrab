@@ -453,9 +453,10 @@ openclaw mcp list
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
+| **所有 OpenClaw bot 同时报 `ECONNREFUSED 127.0.0.1:18789`** | Gateway 进程死了（常见触发：`npm install -g openclaw` 升级时 SIGTERM 退出，systemd `Restart=on-failure` 不拉 code=0 正常退出） | 立即：`sudo systemctl start openclaw-gateway` ；根治：systemd unit 改 `Restart=always`（见下方运维段） |
 | "ACP process failed to start" | Gateway 未运行 | 启动 Gateway: `openclaw gateway` |
 | ACP 进程启动后 1 秒内退出 | Gateway 端口不通 | 检查 `ss -tlnp \| grep 18789` |
-| "ACP initialize failed" | CLI 版本不兼容 | 升级: `npm install -g openclaw@latest` |
+| "ACP initialize failed" | CLI 版本不兼容 | 升级: `npm install -g openclaw@latest`（注意升级会重启 Gateway，确保 `Restart=always`） |
 | "ACP session/new failed" | Gateway 内部错误 | 查看 Gateway 日志: `cat /tmp/openclaw-gateway.log` |
 | bot 启动后无响应 | `openclaw` 不在 PATH | `which openclaw`，确认 npm bin 在 PATH 中 |
 | `worker_type` 切换无效 | 拼写错误或未重启 | 确认 Firestore 中值为 `openclaw`（小写），重启 bot |
@@ -516,12 +517,14 @@ sudo tee /etc/systemd/system/openclaw-gateway.service > /dev/null <<EOF
 [Unit]
 Description=OpenClaw Gateway
 After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=$USER
 ExecStart=$(which openclaw) gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment="PATH=$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=$HOME"
@@ -533,6 +536,8 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now openclaw-gateway
 ```
+
+> **关键：必须用 `Restart=always`，不要用 `Restart=on-failure`**。`npm install -g openclaw@latest` 升级会触发 Gateway SIGTERM 正常退出（code=0），`on-failure` 不会拉起，导致所有依赖 Gateway 的 bot 报 `ECONNREFUSED 127.0.0.1:18789` 全挂直到手动重启。`StartLimitIntervalSec=300` + `StartLimitBurst=5` 防止配置错误时无限重启。
 
 ### 更新 Skills
 
