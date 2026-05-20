@@ -979,6 +979,39 @@ class FeishuChannel(Channel):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._update_card, message_id, card)
 
+    async def _finalize_progress_card(self, card_id: str, log_context: str = "") -> None:
+        """安全终结进度卡片：先删除（带 timeout），失败则 patch 成 ✅ 完成态卡片。
+
+        Why: fallback 路径里 _async_delete_message 之前是 silent except，飞书 API
+        偶发失败会让卡片冻结在最后一帧 timer（用户看到的"357s 卡死"）。这里两段
+        兜底：删失败就改成短的 "✅ 完成" 卡，至少让 UI 终结，不再误导用户。
+        """
+        if not card_id:
+            return
+        try:
+            await asyncio.wait_for(
+                self._async_delete_message(card_id), timeout=10,
+            )
+            return
+        except Exception as e:
+            log.warning(
+                f"Progress card delete failed "
+                f"(card_id={card_id}, ctx={log_context}): {type(e).__name__}: {e}"
+            )
+        try:
+            done_card = self._build_progress_card(
+                current_action="✅ 已完成", history=[], elapsed=0,
+                header_text="✅ 完成", usage={},
+            )
+            await asyncio.wait_for(
+                self._async_update_card(card_id, done_card), timeout=5,
+            )
+        except Exception as e:
+            log.warning(
+                f"Progress card terminal-patch fallback also failed "
+                f"(card_id={card_id}, ctx={log_context}): {type(e).__name__}: {e}"
+            )
+
     async def _async_reply_text(self, message_id: str, text: str):
         """异步回复消息。"""
         loop = asyncio.get_running_loop()
@@ -1870,7 +1903,12 @@ class FeishuChannel(Channel):
                                 _progress_history[:] = _progress_history[-20:]
                         _card_dirty[0] = False
                     try:
-                        await self._async_update_card(_progress_card_id[0], card)
+                        # 10s timeout: 飞书 PatchCard API 偶发 hang，没 timeout
+                        # 整个 loop 会卡死，elapsed 冻在最后一帧
+                        await asyncio.wait_for(
+                            self._async_update_card(_progress_card_id[0], card),
+                            timeout=10,
+                        )
                     except Exception:
                         pass
             except asyncio.CancelledError:
@@ -1905,12 +1943,8 @@ class FeishuChannel(Channel):
             if _anim_task[0]:
                 _anim_task[0].cancel()
 
-        # 删除进度卡片
-        if _progress_card_id[0]:
-            try:
-                await self._async_delete_message(_progress_card_id[0])
-            except Exception:
-                pass
+        # 删除进度卡片（失败 fallback 到 ✅ 完成态，避免 357s 冻屏）
+        await self._finalize_progress_card(_progress_card_id[0], log_context="inbox")
 
         # 提取语音文件/语音总结 + 发送结果
         if result:
@@ -2197,7 +2231,11 @@ class FeishuChannel(Channel):
                     _card_dirty[0] = False
 
                     try:
-                        await self._async_update_card(_progress_card_id[0], card)
+                        # 10s timeout（防 PatchCard API hang 让 loop 卡死）
+                        await asyncio.wait_for(
+                            self._async_update_card(_progress_card_id[0], card),
+                            timeout=10,
+                        )
                     except Exception:
                         pass
             except asyncio.CancelledError:
@@ -2298,12 +2336,8 @@ class FeishuChannel(Channel):
                     await _anim_task[0]
                 except (asyncio.CancelledError, Exception):
                     pass
-            # 删除 progress card
-            if _progress_card_id[0]:
-                try:
-                    await self._async_delete_message(_progress_card_id[0])
-                except Exception:
-                    pass
+            # 删除 progress card（失败 fallback 到 ✅ 完成态）
+            await self._finalize_progress_card(_progress_card_id[0], log_context="voice")
 
         return result or ""
 
@@ -2740,7 +2774,11 @@ class FeishuChannel(Channel):
 
                         # 唯一的 API 调用点：更新卡片，失败就跳过等下次
                         try:
-                            await self._async_update_card(_progress_card_id[0], card)
+                            # 10s timeout（防 PatchCard API hang 让 loop 卡死）
+                            await asyncio.wait_for(
+                                self._async_update_card(_progress_card_id[0], card),
+                                timeout=10,
+                            )
                         except Exception:
                             pass
                 except asyncio.CancelledError:
@@ -2809,11 +2847,10 @@ class FeishuChannel(Channel):
 
                 if not patched:
                     # Fallback: 删 progress card + 发新消息（与改造前行为一致）
-                    if _progress_card_id[0]:
-                        try:
-                            await self._async_delete_message(_progress_card_id[0])
-                        except Exception:
-                            pass
+                    # 删失败时 fallback 到 ✅ 完成态，避免卡片冻在 timer
+                    await self._finalize_progress_card(
+                        _progress_card_id[0], log_context="text-fallback",
+                    )
                     await reply_fn(result)
 
                 if voice_file:
@@ -2822,11 +2859,9 @@ class FeishuChannel(Channel):
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
             else:
                 # 空 result：删 progress card（无内容可保留）
-                if _progress_card_id[0]:
-                    try:
-                        await self._async_delete_message(_progress_card_id[0])
-                    except Exception:
-                        pass
+                await self._finalize_progress_card(
+                    _progress_card_id[0], log_context="text-empty",
+                )
 
             # 日志
             if _log:
