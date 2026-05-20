@@ -101,6 +101,21 @@ Chris 已经永久授权 evolution 流程内的以下动作，不需要每轮再
 - `dispatch-case.py --target <bot> --case <id> --content "..."` — Firestore inbox dispatch wrapper
 - `metrics-from-firestore.py --bot <name> --since <ISO>` — 算 fail_rate / empty_response_count / p50p95 duration / avg_step_count
 
+### 共享 scripts/（Round 3 沉淀 — 在 `~/CloseCrab/scripts/`）
+- `test-fast-path.py <bot> <Tool>` — grep bot.log 取四元组（control_request_time / response_time / gap_ms / exact_return_string），自动判 fast-path PASS/FAIL。Anti-pattern 2 防御。
+- `check-binary-alignment.py <bot> [--commit SHA]` — `ps lstart` vs git commit 时间，bot 落后则 FAIL 并打印 SIGHUP 重启命令。Anti-pattern 1 防御。
+- `test-cross-worker-invariant.py <return_string> [...]` — 一条命令 grep 4 worker 的 control_response 解析逻辑（claude_code 用 AST 解 `_approve_keywords`），验证 fast-path 返回值是否被所有 downstream worker 识别。Anti-pattern 3 防御。
+
+Round 3 现在跑 case 之前一行命令组合验证:
+```bash
+# 一条命令完成 R3 三 anti-pattern 自检
+python3 ~/CloseCrab/scripts/check-binary-alignment.py bunny && \
+  python3 ~/CloseCrab/scripts/test-cross-worker-invariant.py approved && \
+  echo "✅ binary aligned + cross-worker invariant OK, 可以 dispatch case"
+# case 跑完
+python3 ~/CloseCrab/scripts/test-fast-path.py bunny ExitPlanMode
+```
+
 ### references/
 - `cross-bot-restart-protocol.md` — SIGHUP 协议详解、12s nohup 为什么 work、PID 验证清单、failure modes
 - `silent-failure-detection.md` — **Round 2 新增**：messages.status / logs.status / bot.log 三源对齐，避免 Round 1 那种"5 done + 1 silent fail 当成 6 done"的报告失真

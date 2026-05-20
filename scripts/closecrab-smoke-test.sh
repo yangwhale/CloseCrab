@@ -293,6 +293,57 @@ check_bot_log_recent() {
     fi
 }
 
+check_binary_alignment() {
+    # Round 3 anti-pattern 1: bot lstart > git HEAD commit time
+    local bot="$1"
+    local out; out=$(python3 ~/CloseCrab/scripts/check-binary-alignment.py "$bot" --json 2>/dev/null)
+    if [ -z "$out" ]; then
+        skip binary_alignment "check-binary-alignment.py not available"
+        return
+    fi
+    local aligned; aligned=$(echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('aligned', False))" 2>/dev/null)
+    local delta;   delta=$(echo "$out"   | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('delta_seconds', 0))" 2>/dev/null)
+    local sha;     sha=$(echo "$out"     | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('target_commit_short', '?'))" 2>/dev/null)
+    if [ "$aligned" = "True" ]; then
+        pass binary_alignment "bot $((delta))s newer than HEAD ($sha)"
+    else
+        fail binary_alignment "bot $((-delta))s STALER than HEAD ($sha) -- restart needed for any fast-path test"
+        _suggest binary_alignment \
+            "nohup setsid bash -c 'sleep 12 && pkill -HUP -f \"python3 -m closecrab --bot $bot\"' </dev/null >/dev/null 2>&1 & disown" \
+            "Round 3 anti-pattern 1: stale binary; fast-path tests on this bot will not reflect HEAD."
+    fi
+}
+
+check_fast_path_callbacks() {
+    # Round 2/3: every channel's _make_input_callback should accept is_inbox parameter
+    # Static check across closecrab/channels/*.py (cheap, runs once per bot invocation)
+    local channels_dir="$HOME/CloseCrab/closecrab/channels"
+    if [ ! -d "$channels_dir" ]; then
+        skip fast_path_callbacks "channels dir not found"
+        return
+    fi
+    local missing=""
+    for f in "$channels_dir"/*.py; do
+        local fname; fname=$(basename "$f")
+        # Skip base.py and non-channel utilities
+        [ "$fname" = "base.py" ] && continue
+        # If file defines _make_input_callback, the def line must contain is_inbox
+        if grep -q "def _make_input_callback" "$f"; then
+            if ! grep -q "def _make_input_callback.*is_inbox" "$f"; then
+                missing="${missing}${fname}, "
+            fi
+        fi
+    done
+    if [ -z "$missing" ]; then
+        pass fast_path_callbacks "all channels have is_inbox parameter"
+    else
+        fail fast_path_callbacks "missing is_inbox in: ${missing%, }"
+        _suggest fast_path_callbacks \
+            "Patch each channel's _make_input_callback signature to add is_inbox: bool = False + fast-path block (see evolution/references/control-request-fastpath.md)" \
+            "Round 2/3 anti-pattern: channel without is_inbox routes inbox-initiated control_request to user-facing path; bot-to-bot turns will block 5min × N hitting BotCore lock timeout."
+    fi
+}
+
 check_recent_errors() {
     local bot="$1"
     local logf="${HOME}/.claude/closecrab/${bot}/bot.log"
@@ -353,6 +404,8 @@ run_for_bot() {
     check_worker_secrets    "$bot" "$WORKER_TYPE"
     check_bot_log_recent    "$bot"
     check_recent_errors     "$bot"
+    check_binary_alignment  "$bot"
+    check_fast_path_callbacks
     check_drop_ins          "$bot"
 
     local p=$((PASS_N - start_pass))
