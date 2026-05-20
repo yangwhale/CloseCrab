@@ -424,6 +424,7 @@ scripts/send-to-discord.sh --channel <id> "<msg>"
 | [Kilo Worker 设计](docs/kilo-worker-design.md) | HTTP SSE、part.delta + emitted_len 不变量 |
 | [Kilo 优化记录](docs/kilo-worker-optimization.md) | streaming 切片阈值、partial flush 调优 |
 | [Voice 部署指南](docs/voice-deploy-quickstart.md) | LiveKit + Caddy + Gemini STT/TTS 一键装 |
+| [GBrain 集成指南](docs/gbrain-integration.md) | PGLite memory bank + OAuth MCP + per-bot 独立部署（可选） |
 | [博客: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | 4 个 runtime 互相吸收能力的设计哲学 |
 
 ---

@@ -111,6 +111,7 @@ scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 - **Claude Code 环境**: `~/.claude/settings.json` — env vars、permissions、plugins
 - **MCP Servers**: `~/.claude.json` — Claude Code MCP 配置
 - **OpenClaw**: `~/.openclaw/openclaw.json` — Gateway + MCP + 模型配置（deploy.sh 从 `config/openclaw.json` 模板生成）
+- **GBrain (可选)**: PGLite 持久化记忆服务 + OAuth MCP，client 端 `closecrab/utils/gbrain_index.py` silent-failure，详见 [docs/gbrain-integration.md](./docs/gbrain-integration.md)
 - **Secrets**: 绝不硬编码。Firestore 存 tokens，GKE 用 K8s Secret 挂载
 
 ## Bot Team 系统

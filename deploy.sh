@@ -1189,7 +1189,8 @@ install_gbrain_monitor() {
         return 0
     fi
     if [[ ! -f "$creds" ]]; then
-        echo "  WARN: GBrain creds 不存在 ($creds), monitor 装了但不会写回 brain"
+        echo "  WARN: GBrain creds 不存在 ($creds)"
+        echo "        Monitor cron 已装但不会写回 brain。要启用 GBrain server, 见 docs/gbrain-integration.md"
     fi
 
     # idempotent: 已有该行就跳过
