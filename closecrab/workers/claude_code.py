@@ -440,10 +440,15 @@ class ClaudeCodeWorker(Worker):
             answers = {}
             if user_response:
                 questions = tool_input.get("questions", [])
-                for q in questions:
+                lines = user_response.split("\n")
+                if len(lines) == len(questions):
+                    per_q_answers = lines
+                else:
+                    per_q_answers = [user_response] * len(questions)
+                for q, ans in zip(questions, per_q_answers):
                     q_text = q.get("question", "")
                     if q_text:
-                        answers[q_text] = user_response
+                        answers[q_text] = ans
             resp_data = {
                 "behavior": "allow",
                 "updatedInput": {**tool_input, "answers": answers},
