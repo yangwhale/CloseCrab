@@ -105,6 +105,8 @@ Chris 已经永久授权 evolution 流程内的以下动作，不需要每轮再
 - `cross-bot-restart-protocol.md` — SIGHUP 协议详解、12s nohup 为什么 work、PID 验证清单、failure modes
 - `silent-failure-detection.md` — **Round 2 新增**：messages.status / logs.status / bot.log 三源对齐，避免 Round 1 那种"5 done + 1 silent fail 当成 6 done"的报告失真
 - `control-request-fastpath.md` — **Round 2 新增**：inbox 派活时 ExitPlanMode/AskUserQuestion 必须走 fast-path，避免 5min × N 累积命中 BotCore lock timeout
+- `case-design-checklist.md` — **Round 3 新增**：case 设计/执行 7 问自查清单 + 3 个 anti-pattern（stale binary / 只看下游不取四元组 / fast-path return 跨层 contract 不 round-trip）。任何 fast-path / control-request / IPC 类 case 都要过这关
+- `mock-test-template/` — fast-path callback + round-trip 测试模板，含 negative test 防 approval bypass
 - `case-library/kilo-cases.md` — Kilo (xiaoai) 已知盲区 + cases
 - `case-library/openclaw-cases.md` — OpenClaw (tiemu) 已知盲区 + cases（待写）
 - `case-library/claude-cases.md` — Claude Code (bunny) 已知盲区 + cases（待写）
@@ -137,6 +139,9 @@ Chris 已经永久授权 evolution 流程内的以下动作，不需要每轮再
 - ❌ **不要 SIGKILL target**：用 SIGHUP，让 run.sh wrapper 干净重启，避免丢 session 状态
 - ❌ **不要只看 `messages.status` 当 case outcome**（Round 2 教训）：messages 表的 status 是 inbox envelope 的默认值，**真实结果在 `bots/{target}/logs`**。silent failure 形态：messages.status=done 但 logs 表无对应 turn。**Round report 必须 messages × logs × bot.log 三源对齐**。详见 `references/silent-failure-detection.md`
 - ❌ **不要让 worker 的 ExitPlanMode / AskUserQuestion 走 user-facing callback 处理 inbox 派活**（Round 2 教训）：没有真用户能答 → 5min 超时 × N 次 control_request → 命中 BotCore 1800s lock timeout → 强杀级联。channel 的 `_make_input_callback` 必须有 `is_inbox` fast-path（详见 `references/control-request-fastpath.md`）
+- ❌ **不要不验证 bot binary alignment 就跑 fast-path test**（Round 3 教训）：bot lstart < commit time → 跑的是旧版本，下游行为偶尔"正确"是巧合。case 第一行必须 `ps -eo lstart` vs `git log` 对齐。详见 `references/case-design-checklist.md` anti-pattern 1
+- ❌ **不要只看下游行为就报 PASS**（Round 3 教训）：必须取 source-of-truth 四元组（control_request_time / control_response_time / gap_ms / exact_return_string）。gap_ms < 100ms 才是真 fast-path，否则可能是 user 手点 card / 5min 超时返回 "继续" 误打误撞。详见 `references/case-design-checklist.md` anti-pattern 2
+- ❌ **不要 patch fast-path return 值前不 grep 所有 worker downstream consumer**（Round 3 教训）：fast-path 是 channel↔worker 跨层 contract，channel 返回 "approved" 但 worker `_approve_keywords` 没这个词 → behavior=deny。patch PR 必须附带 cross-worker grep 矩阵（4 worker × N 返回字符串）+ negative round-trip test。详见 `references/case-design-checklist.md` anti-pattern 3
 
 ## Failure Modes & Recovery
 
