@@ -102,6 +102,53 @@ done
 
 ---
 
+## Anti-pattern 4 — Cross-worker callback contract: single string vs per-Q routing
+
+### 症状
+- channel fast-path 对 multi-question AskUserQuestion 返回 `"opt1\nopt2\nopt3"` (多行 string)
+- worker A (claude_code) 路径: `for q in questions: answers[q_text] = user_response` — broadcast 完整 string 给每个 question
+- worker B (kilo, pre-patch): POST `{"answers": [[answer]]}` — 单 entry，Kilo CLI 把整 string 当 question[0] 的 answer，**Q2+ 显示 Unanswered**
+- channel 视角看 fast-path 完美触发；worker 视角看 silent degradation
+
+### Round 4 实例 (commit e0f0655)
+```python
+# closecrab/workers/kilo.py:914 (修复前)
+status = await self._post_with_retry(
+    url, {"answers": [[answer]]})   # 单 entry, 多 Q 时退化
+```
+
+修复:
+```python
+lines = answer.split("\n")
+if len(lines) == len(questions):
+    answers_payload = [[line] for line in lines]   # fast-path 1:1
+else:
+    answers_payload = [[answer] for _ in questions]  # broadcast (claude_code 行为)
+```
+
+### 必检步骤（设计 multi-input fast-path 时）
+```bash
+# 1. 列出所有 worker 接收 channel callback 返回值的路径
+grep -rn "on_input_needed\|on_question_asked\|_build_control_response" \
+  closecrab/workers/
+
+# 2. 对每个 worker 验证: multi-input 时如何 split user_response?
+#    - 期望: per-input 1:1 OR broadcast 一致
+#    - 反例: 单 entry + 后续 Unanswered (kilo pre-patch)
+
+# 3. 写 round-trip test:
+#    - case A: 1 question + 1 answer → both worker 都正确
+#    - case B: 2 questions + "yes\nyes" → both worker 都得到 Q1=yes, Q2=yes
+#    - case C: 2 questions + 单 string "approved" → both worker broadcast 一致
+```
+
+### 防御
+- multi-input fast-path 必须**所有 worker** 都验证 round-trip (test case B + C)
+- callback contract 写 docstring 明确: "answer 是 \n-joined per-input OR 单 string broadcast"
+- 加 negative test: 2 questions + 0 answer → 应有合理 fallback (reject / default value)
+
+---
+
 ## Case 设计模板（自查 7 问）
 
 新设计任何 fast-path / control-request / IPC 类 case 前，过一遍：
@@ -113,8 +160,9 @@ done
 5. ✅ 涉及的 cross-layer contract？fast-path 返回值在所有 downstream consumer 都被识别吗？
 6. ✅ 有 mock round-trip test 覆盖吗？（包含 negative test）
 7. ✅ 取证命令是什么？（log grep / 文件 read / Firestore query）
+8. ✅ **Multi-input case**（如 multi-Q AskUserQuestion）: 每个 worker 都正确 split user_response 到 per-input 路由吗？（anti-pattern 4）
 
-7 问全过才能 dispatch。少一个就**先补再 dispatch**，不要"先跑跑看"。
+8 问全过才能 dispatch。少一个就**先补再 dispatch**，不要"先跑跑看"。
 
 ---
 

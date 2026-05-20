@@ -120,7 +120,7 @@ python3 ~/CloseCrab/scripts/test-fast-path.py bunny ExitPlanMode
 - `cross-bot-restart-protocol.md` — SIGHUP 协议详解、12s nohup 为什么 work、PID 验证清单、failure modes
 - `silent-failure-detection.md` — **Round 2 新增**：messages.status / logs.status / bot.log 三源对齐，避免 Round 1 那种"5 done + 1 silent fail 当成 6 done"的报告失真
 - `control-request-fastpath.md` — **Round 2 新增**：inbox 派活时 ExitPlanMode/AskUserQuestion 必须走 fast-path，避免 5min × N 累积命中 BotCore lock timeout
-- `case-design-checklist.md` — **Round 3 新增**：case 设计/执行 7 问自查清单 + 3 个 anti-pattern（stale binary / 只看下游不取四元组 / fast-path return 跨层 contract 不 round-trip）。任何 fast-path / control-request / IPC 类 case 都要过这关
+- `case-design-checklist.md` — **Round 3+4 沉淀**：case 设计/执行 8 问自查清单 + 4 个 anti-pattern（stale binary / 只看下游不取四元组 / fast-path return 跨层 contract 不 round-trip / multi-input cross-worker callback contract gap）。任何 fast-path / control-request / IPC 类 case 都要过这关
 - `mock-test-template/` — fast-path callback + round-trip 测试模板，含 negative test 防 approval bypass
 - `case-library/kilo-cases.md` — Kilo (xiaoai) 已知盲区 + cases
 - `case-library/openclaw-cases.md` — OpenClaw (tiemu) 已知盲区 + cases（待写）
