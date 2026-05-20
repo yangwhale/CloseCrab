@@ -450,7 +450,7 @@ class ClaudeCodeWorker(Worker):
             }
         elif tool_name == "ExitPlanMode":
             # 用户批准 → allow；拒绝或反馈 → deny 让 Claude 留在 plan mode
-            _approve_keywords = {"可以了", "开干", "好的", "批准", "开始吧", "ok", "OK", "yes", "go"}
+            _approve_keywords = {"可以了", "开干", "好的", "批准", "开始吧", "ok", "OK", "yes", "go", "approved"}
             if user_response and (user_response in _approve_keywords
                                   or user_response.strip().lower() in _approve_keywords):
                 resp_data = {"behavior": "allow", "updatedInput": {**tool_input}}
