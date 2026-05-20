@@ -292,6 +292,50 @@ class DingTalkChannel(Channel):
                 if i < len(chunks) - 1:
                     await asyncio.sleep(0.3)
 
+    def _make_input_callback(self, msg: ChatbotMessage, user_key: str, is_inbox: bool = False):
+        """为 dingtalk 用户消息（含未来 inbox 派活）创建 on_input_needed 回调。
+
+        is_inbox=True: bot-to-bot 派活，没有真用户在线答 ExitPlanMode/AskUserQuestion。
+        走 fast-path 立即返回 sane default，避免 5 min × N control_request 累积
+        触发 BotCore 1800s user lock timeout（feishu Round 1 case-3 实测 28 min 死锁，
+        commit 361a38f 修了 feishu，同病同方修 dingtalk）。
+
+        当前 dingtalk 未集成 inbox handler，所以 is_inbox 默认 False，调用方行为不变；
+        未来加 dingtalk inbox 集成时直接传 is_inbox=True 即可，API 已就位。
+        """
+        async def on_input_needed(info: dict) -> Optional[str]:
+            tool = info.get("tool", "")
+            inp = info.get("input", {})
+            # Inbox 来源：bot 间派活没有真人能答控制请求，立即 auto-approve
+            if is_inbox:
+                if tool == "ExitPlanMode":
+                    return "approved"
+                elif tool == "AskUserQuestion":
+                    qs = inp.get("questions", []) or []
+                    parts = []
+                    for q in qs:
+                        opts = q.get("options") or []
+                        label = opts[0].get("label", "继续") if opts else "继续"
+                        parts.append(label)
+                    return "\n".join(parts) if parts else "继续"
+                return "继续"
+            prompt_text = _format_interactive_prompt(info)
+            await self._async_reply_text(msg, prompt_text)
+
+            future = asyncio.get_running_loop().create_future()
+            self._pending_input[user_key] = future
+            try:
+                response = await asyncio.wait_for(future, timeout=300)
+                return response
+            except asyncio.TimeoutError:
+                await self._async_reply_text(msg, "⏰ 等待回复超时（5 分钟），自动继续。")
+                return "继续"
+            except asyncio.CancelledError:
+                return None
+            finally:
+                self._pending_input.pop(user_key, None)
+        return on_input_needed
+
     # ── 消息接收处理 ──
 
     async def _handle_message_async(self, msg: ChatbotMessage):
@@ -418,22 +462,7 @@ class DingTalkChannel(Channel):
                 await self._async_reply_markdown(msg, "进度", f"⏳ **进度更新**\n\n{content}")
 
             # 交互式工具回调
-            async def on_input_needed(info: dict) -> Optional[str]:
-                prompt_text = _format_interactive_prompt(info)
-                await self._async_reply_text(msg, prompt_text)
-
-                future = asyncio.get_running_loop().create_future()
-                self._pending_input[user_key] = future
-                try:
-                    response = await asyncio.wait_for(future, timeout=300)
-                    return response
-                except asyncio.TimeoutError:
-                    await self._async_reply_text(msg, "⏰ 等待回复超时（5 分钟），自动继续。")
-                    return "继续"
-                except asyncio.CancelledError:
-                    return None
-                finally:
-                    self._pending_input.pop(user_key, None)
+            on_input_needed = self._make_input_callback(msg, user_key)
 
             # 回复函数
             async def reply_fn(text: str):

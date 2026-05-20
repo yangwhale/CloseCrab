@@ -255,9 +255,30 @@ class DiscordChannel(Channel):
         self._register_events()
         self._register_commands()
 
-    def _make_input_callback(self, channel, user_key: str):
-        """为 inbox/teammate 消息创建 on_input_needed 回调，复用 _pending_input 机制。"""
+    def _make_input_callback(self, channel, user_key: str, is_inbox: bool = False):
+        """为 inbox/teammate 消息创建 on_input_needed 回调。
+
+        is_inbox=True: bot-to-bot 派活，没有真用户在线答 ExitPlanMode/AskUserQuestion。
+        走 fast-path 立即返回 sane default，避免 5 min × N control_request 累积
+        触发 BotCore 1800s user lock timeout（feishu Round 1 case-3 实测 28 min 死锁，
+        commit 361a38f 修了 feishu，同病同方修 discord）。
+        """
         async def on_input_needed(info: dict) -> Optional[str]:
+            tool = info.get("tool", "")
+            inp = info.get("input", {})
+            # Inbox 来源：bot 间派活没有真人能答控制请求，立即 auto-approve
+            if is_inbox:
+                if tool == "ExitPlanMode":
+                    return "approved"
+                elif tool == "AskUserQuestion":
+                    qs = inp.get("questions", []) or []
+                    parts = []
+                    for q in qs:
+                        opts = q.get("options") or []
+                        label = opts[0].get("label", "继续") if opts else "继续"
+                        parts.append(label)
+                    return "\n".join(parts) if parts else "继续"
+                return "继续"
             prompt_text = _format_interactive_prompt(info)
             await channel.send(prompt_text)
             future = asyncio.get_event_loop().create_future()
@@ -602,7 +623,7 @@ class DiscordChannel(Channel):
                 try:
                     result = await worker.send(
                         notification,
-                        on_input_needed=self._make_input_callback(target_channel, user_key),
+                        on_input_needed=self._make_input_callback(target_channel, user_key, is_inbox=True),
                     )
                     if result:
                         await self._send_long(target_channel, result)
@@ -663,7 +684,7 @@ class DiscordChannel(Channel):
             await self._send_long(target_channel, f"📨 **{from_bot}** 派活：{instruction[:200]}")
             result = await worker.send(
                 instruction,
-                on_input_needed=self._make_input_callback(target_channel, user_key),
+                on_input_needed=self._make_input_callback(target_channel, user_key, is_inbox=True),
             )
             if result:
                 await self._send_long(target_channel, result)
