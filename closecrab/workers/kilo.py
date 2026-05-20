@@ -912,10 +912,18 @@ class KiloWorker(Worker):
             try:
                 answer = await on_input_needed(ctrl)
                 if answer is not None and self._http:
+                    lines = answer.split("\n")
+                    if len(lines) == len(questions):
+                        answers_payload = [[line] for line in lines]
+                    else:
+                        answers_payload = [[answer] for _ in questions]
                     url = f"{self._base_url}/question/{question_id}/reply"
                     status = await self._post_with_retry(
-                        url, {"answers": [[answer]]})
-                    log.debug("Question %s replied: %d", question_id, status)
+                        url, {"answers": answers_payload})
+                    log.debug(
+                        "Question %s replied: status=%d answers=%d/%d",
+                        question_id, status, len(answers_payload), len(questions),
+                    )
                     return
             except Exception as e:
                 log.warning("Question callback error: %s", e)
