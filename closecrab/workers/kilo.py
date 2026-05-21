@@ -1018,46 +1018,40 @@ class KiloWorker(Worker):
             # POST message (blocks until turn completes)
             url = f"{self._base_url}/session/{self._session_id}/message"
             reply_text = ""
+            empty_retry_done = False  # P1: empty-response retry guard (single retry per send())
 
             try:
-                post_task = asyncio.create_task(self._post_message(url, body))
+                reply_text = await self._do_post_and_wait(url, body)
 
-                # Activity-based timeout: poll _turn_event with short windows.
-                # Only timeout if no SSE events for self._timeout seconds.
-                # This keeps long-running sub-agents alive while producing events.
-                while not (self._turn_event.is_set() or post_task.done()
-                           or self._interrupted):
-                    try:
-                        await asyncio.wait_for(
-                            self._turn_event.wait(), timeout=10.0,
-                        )
-                    except asyncio.TimeoutError:
-                        idle = time.monotonic() - self._last_activity
-                        if idle >= self._timeout:
-                            log.warning("send() idle timeout: no SSE events for %ds", int(idle))
-                            await self.interrupt()
-                            self._turn_error = f"Idle timeout: no activity for {int(idle)}s"
-                            break
-                        continue
-
-                if self._interrupted:
-                    reply_text = self._turn_result or ""
-                elif self._turn_error:
-                    reply_text = f"[Error] {self._turn_error}"
-                elif post_task.done() and not post_task.cancelled():
-                    reply_text = post_task.result()
-                else:
-                    reply_text = self._turn_result or ""
-                    if not post_task.done():
-                        post_task.cancel()
-
-                # Final guardrail: even if POST path took precedence above,
-                # always prefer the SSE-accumulated text when it has captured
-                # more content. This protects against the "POST returns only
-                # last part group" failure mode for multi-step turns.
-                sse_full = self._accumulated_text()
-                if sse_full and len(sse_full) > len(reply_text):
-                    reply_text = sse_full
+                # Empty-response retry parity with claude_code.py:776-786 and
+                # openclaw_acp.py:1247. Triggered when Kilo backend returns
+                # SSE empty + POST empty (provider hiccup / model refusal /
+                # guardrail). Same-session retry: state lives in Kilo backend,
+                # client only relays HTTP/SSE — re-POST same body usually
+                # succeeds the second time. Bounded to 1 retry per send().
+                if (not reply_text.strip()
+                        and not self._interrupted
+                        and not self._turn_error
+                        and not empty_retry_done):
+                    empty_retry_done = True
+                    log.warning(
+                        "Kilo returned empty reply (session=%s, sse_buffers=%d), retrying once",
+                        self._session_id, len(self._text_buffers),
+                    )
+                    # Reset turn-level accumulators so retry SSE events don't
+                    # mix with the empty first attempt's state.
+                    self._turn_event.clear()
+                    self._turn_result = None
+                    self._tool_states.clear()
+                    self._text_buffers.clear()
+                    self._user_part_ids.clear()
+                    self._user_message_ids.clear()
+                    self._last_activity = time.monotonic()
+                    reply_text = await self._do_post_and_wait(url, body)
+                    if reply_text.strip():
+                        log.info("Kilo empty-retry succeeded: %d chars", len(reply_text))
+                    else:
+                        log.error("Kilo empty-retry also produced no text")
 
             except Exception as e:
                 log.error("send() error: %s", e, exc_info=True)
@@ -1067,6 +1061,54 @@ class KiloWorker(Worker):
 
             self._usage["turns"] += 1
             return reply_text
+
+    async def _do_post_and_wait(self, url: str, body: dict) -> str:
+        """POST message and wait for SSE turn-event with activity timeout.
+
+        Extracted from send() main body to enable empty-response retry
+        without copy-pasting the 30-line wait loop. Returns reply_text
+        derived from turn_result / post_task / accumulated SSE text.
+        """
+        post_task = asyncio.create_task(self._post_message(url, body))
+
+        # Activity-based timeout: poll _turn_event with short windows.
+        # Only timeout if no SSE events for self._timeout seconds.
+        # This keeps long-running sub-agents alive while producing events.
+        while not (self._turn_event.is_set() or post_task.done()
+                   or self._interrupted):
+            try:
+                await asyncio.wait_for(
+                    self._turn_event.wait(), timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                idle = time.monotonic() - self._last_activity
+                if idle >= self._timeout:
+                    log.warning("send() idle timeout: no SSE events for %ds", int(idle))
+                    await self.interrupt()
+                    self._turn_error = f"Idle timeout: no activity for {int(idle)}s"
+                    break
+                continue
+
+        if self._interrupted:
+            reply_text = self._turn_result or ""
+        elif self._turn_error:
+            reply_text = f"[Error] {self._turn_error}"
+        elif post_task.done() and not post_task.cancelled():
+            reply_text = post_task.result()
+        else:
+            reply_text = self._turn_result or ""
+            if not post_task.done():
+                post_task.cancel()
+
+        # Final guardrail: even if POST path took precedence above,
+        # always prefer the SSE-accumulated text when it has captured
+        # more content. This protects against the "POST returns only
+        # last part group" failure mode for multi-step turns.
+        sse_full = self._accumulated_text()
+        if sse_full and len(sse_full) > len(reply_text):
+            reply_text = sse_full
+
+        return reply_text
 
     async def _post_message(self, url: str, body: dict) -> str:
         try:
