@@ -35,8 +35,9 @@ import re
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -516,6 +517,27 @@ class _LogBuffer:
             log.debug(f"Log flush failed: {e}")
 
 
+# =====================================================================
+# 多阶段任务协议 (V1) — 详见 docs/inbox-task-protocol.md
+# =====================================================================
+_TASK_GC_DELAY_SEC = 1800  # done 后保留 30 min 供 UI 引用, 然后清
+
+
+@dataclass
+class _TaskState:
+    """单个多阶段任务的内存状态。jarvis 重启即丢 (V1 接受)。"""
+    task_id: str
+    task_name: str
+    worker_bot: str           # 发起方 bot name (即 inbox 的 from_bot)
+    kickoff_at: datetime
+    last_update_at: datetime
+    chat_id: str
+    main_card_id: str = ""    # kickoff 主消息 id (V1 用 _send_long, id 暂存空)
+    # progress_buffer: [{seq:int, label:str, content:str, ts:datetime}, ...]
+    progress_buffer: list = field(default_factory=list)
+    status: str = "active"    # "active" | "done"
+
+
 class FeishuChannel(Channel):
     """飞书平台适配器。
 
@@ -609,6 +631,10 @@ class FeishuChannel(Channel):
                 project=inbox_config.get("project"),
                 database=inbox_config.get("database"),
             )
+
+        # 多阶段任务协议 V1 (详见 docs/inbox-task-protocol.md):
+        # task_id -> _TaskState. 进程内存, jarvis 重启即丢 (V1 接受).
+        self._task_registry: dict[str, _TaskState] = {}
 
         # P3-3: 入站防抖（合并 1 秒内连续短消息为 1 次 worker turn）
         # 镜像 OpenClaw extensions/feishu/src/auto-reply/inbound-debounce.ts
@@ -1975,9 +2001,30 @@ class FeishuChannel(Channel):
 
         log.info(f"Task {task_id[:8]} completed: {summary[:60]}")
 
-    async def _on_inbox_message(self, from_bot: str, instruction: str, record_id: str, task_id: str = ""):
-        """处理 inbox 收到的消息：作为任务执行，结果回执给发送者。"""
-        log.info(f"Processing inbox message from {from_bot}: {instruction[:60]}")
+    async def _on_inbox_message(
+        self,
+        from_bot: str,
+        instruction: str,
+        record_id: str,
+        task_id: str = "",
+        task_name: str = "",
+        phase: str = "",
+        phase_seq: int = 0,
+        phase_label: str = "",
+        parent_task_id: str = "",
+    ):
+        """处理 inbox 收到的消息.
+
+        路由优先级:
+        1. 系统命令 ([system:restart]) 短路
+        2. 老式回执 (✅ 任务完成:) 短路 — 向后兼容老 receipt 协议
+        3. 有 phase 字段 -> 走多阶段任务协议 V1 (kickoff/progress/done)
+        4. 无 phase 字段 -> 老 fallback (单条消息当独立任务执行)
+        """
+        log.info(
+            f"Processing inbox message from {from_bot} "
+            f"phase={phase or 'none'} task_id={task_id}: {instruction[:60]}"
+        )
         loop = asyncio.get_running_loop()
 
         # 系统重启命令（如 control board 切换 channel 后触发）
@@ -2004,7 +2051,24 @@ class FeishuChannel(Channel):
                 await self._send_long(chat_id, f"📬 **{from_bot}** 回报：\n{instruction}")
             return
 
-        # 找到用户 chat（用于发送进度和结果）
+        # 多阶段任务协议 V1 分流
+        if phase == "kickoff":
+            await self._handle_task_kickoff(
+                from_bot, task_id, task_name, instruction, record_id
+            )
+            return
+        if phase == "progress":
+            await self._handle_task_progress(
+                from_bot, task_id, phase_seq, phase_label, instruction, record_id
+            )
+            return
+        if phase == "done":
+            await self._handle_task_done(
+                from_bot, task_id, phase_seq, phase_label, instruction, record_id
+            )
+            return
+
+        # Fallback: 无 phase -> 老行为, 单条消息当独立任务
         chat_id = next(reversed(self._user_chats.values()), "")
         if not chat_id:
             log.warning(f"No user chat for inbox task, skipping")
@@ -2019,6 +2083,226 @@ class FeishuChannel(Channel):
             chat_id=chat_id, id_type="chat_id",
             inbox_from=from_bot, inbox_record_id=record_id,
         )
+
+    # ===================================================================
+    # 多阶段任务协议 V1 — 3 个 phase handler + helpers
+    # 详见 docs/inbox-task-protocol.md
+    # ===================================================================
+
+    def _resolve_task_chat(self, from_bot: str) -> str:
+        """找一个合适的 chat_id 渲染 task timeline.
+
+        策略: 用最近活跃的用户 chat (与老 fallback 一致). V1 不支持
+        per-task 独立 channel, 后续可扩展.
+        """
+        return next(reversed(self._user_chats.values()), "")
+
+    async def _handle_task_kickoff(
+        self, from_bot: str, task_id: str, task_name: str,
+        kickoff_text: str, record_id: str,
+    ):
+        """Kickoff: 注册 task, 发主消息, mark inbox done. 不触发 Claude turn."""
+        chat_id = self._resolve_task_chat(from_bot)
+        loop = asyncio.get_running_loop()
+
+        if not chat_id:
+            log.warning(
+                f"Task kickoff {task_id} from {from_bot}: no user chat, "
+                f"still register task in memory"
+            )
+
+        if chat_id:
+            body = (
+                f"📋 **{task_name or '(unnamed task)'}**\n"
+                f"任务开启 | 来自 `{from_bot}` | ID: `{task_id}`\n\n"
+                f"{kickoff_text}"
+            )
+            try:
+                await self._send_long(chat_id, body)
+            except Exception as e:
+                log.warning(f"Kickoff card send failed: {e}")
+
+        now = datetime.now(timezone.utc)
+        self._task_registry[task_id] = _TaskState(
+            task_id=task_id,
+            task_name=task_name,
+            worker_bot=from_bot,
+            kickoff_at=now,
+            last_update_at=now,
+            chat_id=chat_id,
+            progress_buffer=[],
+            status="active",
+        )
+
+        if self._inbox:
+            await loop.run_in_executor(
+                None, self._inbox.mark_done, record_id, "kickoff received"
+            )
+        log.info(
+            f"Task kickoff registered: id={task_id} name={task_name!r} "
+            f"from={from_bot} chat={chat_id or 'N/A'}"
+        )
+
+    async def _handle_task_progress(
+        self, from_bot: str, task_id: str, phase_seq: int,
+        phase_label: str, content: str, record_id: str,
+    ):
+        """Progress: buffer 写入 + 发小消息. 关键: 不触发 Claude turn (省 token)."""
+        task = self._task_registry.get(task_id)
+        loop = asyncio.get_running_loop()
+
+        if not task:
+            # 孤立 progress (jarvis 重启 / 没收到 kickoff). 走 fallback 独立处理.
+            log.warning(
+                f"Orphan progress task_id={task_id} from {from_bot}, "
+                f"fallback to independent task"
+            )
+            chat_id = self._resolve_task_chat(from_bot)
+            if not chat_id:
+                if self._inbox:
+                    await loop.run_in_executor(
+                        None, self._inbox.mark_done, record_id,
+                        "❌ orphan progress + 无用户 chat",
+                    )
+                return
+            await self._execute_task(
+                task_id=task_id,
+                summary=f"[孤立进度 task_id={task_id}] {content}",
+                description="",
+                chat_id=chat_id, id_type="chat_id",
+                inbox_from=from_bot, inbox_record_id=record_id,
+            )
+            return
+
+        # 写 buffer (相同 seq 后到覆盖先到, 按 seq 排序)
+        task.progress_buffer = [
+            b for b in task.progress_buffer if b["seq"] != phase_seq
+        ]
+        task.progress_buffer.append({
+            "seq": phase_seq,
+            "label": phase_label,
+            "content": content,
+            "ts": datetime.now(timezone.utc),
+        })
+        task.progress_buffer.sort(key=lambda b: b["seq"])
+        task.last_update_at = datetime.now(timezone.utc)
+
+        # 发小进度消息 (旁路 BotCore, 不触发 turn)
+        if task.chat_id:
+            body = (
+                f"⏳ **{task.task_name}** · 进度 {phase_seq}"
+                f"{': ' + phase_label if phase_label else ''}\n\n"
+                f"{content}"
+            )
+            try:
+                await self._send_long(task.chat_id, body)
+            except Exception as e:
+                log.warning(f"Progress card send failed: {e}")
+
+        if self._inbox:
+            await loop.run_in_executor(
+                None, self._inbox.mark_done, record_id,
+                f"progress {phase_seq} buffered",
+            )
+        log.info(
+            f"Task progress buffered: id={task_id} seq={phase_seq} "
+            f"label={phase_label!r} buffer_size={len(task.progress_buffer)}"
+        )
+
+    async def _handle_task_done(
+        self, from_bot: str, task_id: str, phase_seq: int,
+        phase_label: str, done_text: str, record_id: str,
+    ):
+        """Done: 组装完整 prompt, 调 _execute_task 触发 1 次 Claude turn."""
+        task = self._task_registry.get(task_id)
+        loop = asyncio.get_running_loop()
+
+        if not task:
+            # 孤立 done (jarvis 重启 / 没收到 kickoff/progress). 走 fallback.
+            log.warning(
+                f"Orphan done task_id={task_id} from {from_bot}, "
+                f"fallback to independent task"
+            )
+            chat_id = self._resolve_task_chat(from_bot)
+            if not chat_id:
+                if self._inbox:
+                    await loop.run_in_executor(
+                        None, self._inbox.mark_done, record_id,
+                        "❌ orphan done + 无用户 chat",
+                    )
+                return
+            await self._execute_task(
+                task_id=task_id,
+                summary=f"[孤立 done task_id={task_id}] {done_text}",
+                description="",
+                chat_id=chat_id, id_type="chat_id",
+                inbox_from=from_bot, inbox_record_id=record_id,
+            )
+            return
+
+        task.status = "done"
+        task.last_update_at = datetime.now(timezone.utc)
+
+        prompt = self._assemble_done_prompt(task, done_text, phase_label)
+        chat_id = task.chat_id or self._resolve_task_chat(from_bot)
+
+        # _execute_task 的 summary 字段就是 prompt body, 直接传组装好的 prompt
+        await self._execute_task(
+            task_id=record_id,  # 用 firestore record_id 做防重 dedup
+            summary=prompt,
+            description="",
+            chat_id=chat_id, id_type="chat_id",
+            inbox_from=from_bot, inbox_record_id=record_id,
+        )
+
+        # GC: 保留 30 min 供 UI 引用, 然后从 registry 移除
+        asyncio.create_task(self._gc_task_state(task_id, delay=_TASK_GC_DELAY_SEC))
+
+    def _assemble_done_prompt(
+        self, task: _TaskState, done_text: str, done_label: str,
+    ) -> str:
+        """组装多阶段任务的总结 prompt 给 Claude."""
+        now = datetime.now(timezone.utc)
+        lines = [
+            f"# 多阶段任务完成 — {task.task_name}",
+            "",
+            f"由 `{task.worker_bot}` 执行 | task_id=`{task.task_id}`",
+            f"开始: {task.kickoff_at.isoformat(timespec='seconds')}",
+            f"结束: {now.isoformat(timespec='seconds')}",
+            f"完成标签: {done_label or '(unspecified)'}",
+            "",
+            f"## 过程回顾 (共 {len(task.progress_buffer)} 个阶段)",
+            "",
+        ]
+        for b in task.progress_buffer:
+            lines.extend([
+                f"### 阶段 {b['seq']}: {b['label'] or '(无标签)'}",
+                f"_{b['ts'].isoformat(timespec='seconds')}_",
+                "",
+                b["content"],
+                "",
+            ])
+        lines.extend([
+            "## 最终结论",
+            "",
+            done_text,
+            "",
+            "---",
+            "请基于以上完整过程给我综合分析与下一步建议。",
+        ])
+        return "\n".join(lines)
+
+    async def _gc_task_state(self, task_id: str, delay: float):
+        """延迟清 _task_registry 条目, 释放内存."""
+        try:
+            await asyncio.sleep(delay)
+            task = self._task_registry.pop(task_id, None)
+            if task:
+                log.info(
+                    f"Task state GCed: id={task_id} name={task.task_name!r}"
+                )
+        except asyncio.CancelledError:
+            pass
 
     def _route_card_answer_as_message(self, open_id: str, answer: str):
         """将卡片按钮答案作为新用户消息路由到 bot core。"""
