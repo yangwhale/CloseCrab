@@ -98,6 +98,43 @@ trigger: 进化 / evolution / 三方互评 / 互相 restart / 组队优化 / 今
 - 把可复用的 lesson 也写到 feedback page（`feedback_xxx`）
 - 在 #team-ops 一句话 summary，@Chris FYI
 
+## R4-style Free Exploration（探索"未知未知" bug）
+
+12 步标准流程要 evaluator 提前写好 case 派给 target，前提是「我们已经知道要测什么」——擅长验证假设，但发现新 bug 受限于评估者想象力。R4 free-exploration 模式补足这块：让 bot 自挑探查维度。
+
+### 适用场景
+- worker 跑了一段时间稳定 → 找不出明显 case 但怀疑还有隐藏 bug
+- 长上下文 / 新模型上线后做"基线扫描"，找一切异常
+- standard 流程 N 轮收敛后想换视角（参考 2026-05-21 R4：tiemu 选「Firestore usage 字段 0 token 异常」维度，锁定 `claude_code.py:824` 失真根因，此前 R1-R3 standard case 完全没暴露）
+
+### 跟标准 12 步的差异
+| 阶段 | Standard | Free Exploration |
+|---|---|---|
+| 招募 | evaluator 派 case | target 自挑维度 |
+| Dispatch 内容 | 具体 case + 期望 | 给 N 个候选探查维度 + 「选 1-2 个深挖」 |
+| 评估指标 | 跟 case 设计一致 | 由 target 在 done 报告里自陈"我看到什么" |
+| 修复 | evaluator 写 patch | target 提 patch 提案，evaluator 复核 |
+
+### Dispatch 模板（给 target 用 inbox V1 协议）
+```
+evo-r{N} free-exploration
+
+请你自己挑 1-2 个维度深挖，找出能复现的 worker bug。候选维度：
+(a) stream-JSON 解析路径 — assistant event 拆分 / tool_use 边界
+(b) usage 字段语义 — input/output/cache_create/cache_read 统计是否准
+(c) control_request round-trip — ExitPlanMode / AskUserQuestion fast-path
+(d) cache 行为 — fresh restart 后第一个 turn / autocompact 边界
+(e) Firestore log finalize — usage / steps / status 是否对齐
+(f) 你自己想到的其他维度
+
+要求：done 报告里列「选了哪个维度 / 看了什么 / 锁定的根因 / patch 提案」。
+预算：30 分钟内闭环；不要展开成长项目。
+```
+
+### Anti-pattern
+- **不要把 free-exploration 当 case dispatch 用**：明确探查范围，但不要预设答案。如果你已经知道要找什么，走标准 12 步更高效
+- **target 自己提的 patch 必须 evaluator 复核**：避免自查自纠盲区，参考 [[feedback-evolution-r3-prompt-fix-vs-tool-impl]] 关于改 prompt vs 改源码的判断
+
 ## Authorization Scope（永久授权）
 
 Chris 已经永久授权 evolution 流程内的以下动作，不需要每轮再问：
@@ -151,6 +188,7 @@ python3 ~/CloseCrab/scripts/test-fast-path.py bunny ExitPlanMode
 - `control-request-fastpath.md` — **Round 2 新增**：inbox 派活时 ExitPlanMode/AskUserQuestion 必须走 fast-path，避免 5min × N 累积命中 BotCore lock timeout
 - `case-design-checklist.md` — **Round 3+4 沉淀**：case 设计/执行 8 问自查清单 + 4 个 anti-pattern（stale binary / 只看下游不取四元组 / fast-path return 跨层 contract 不 round-trip / multi-input cross-worker callback contract gap）。任何 fast-path / control-request / IPC 类 case 都要过这关
 - `cross-worker-capability-matrix.md` — **Round 5 沉淀**：claude/kilo/openclaw/gemini 在 control_request / fast-path / permission 路径上的能力矩阵。**case 设计前必查此表**，否则可能像 R5 case 1 一样基于错误假设浪费一轮 dispatch。
+- `anomaly-metrics.md` — **2026-05-21 R5 新增**：`metrics-from-firestore.py` 自动检测的 3 个已知 bug 签名（out_tokens=1 多步 / all-zero usage / large cache_create）+ 怎么诊断 + 跨 worker 适用性。step 5 算指标时自动 flag，发现非零先排查再 dispatch fix
 - `mock-test-template/` — fast-path callback + round-trip 测试模板，含 negative test 防 approval bypass
 - `case-library/kilo-cases.md` — Kilo (xiaoai) 已知盲区 + cases
 - `case-library/openclaw-cases.md` — OpenClaw (tiemu) 已知盲区 + cases（待写）
@@ -187,6 +225,8 @@ python3 ~/CloseCrab/scripts/test-fast-path.py bunny ExitPlanMode
 - ❌ **不要不验证 bot binary alignment 就跑 fast-path test**（Round 3 教训）：bot lstart < commit time → 跑的是旧版本，下游行为偶尔"正确"是巧合。case 第一行必须 `ps -eo lstart` vs `git log` 对齐。详见 `references/case-design-checklist.md` anti-pattern 1
 - ❌ **不要只看下游行为就报 PASS**（Round 3 教训）：必须取 source-of-truth 四元组（control_request_time / control_response_time / gap_ms / exact_return_string）。gap_ms < 100ms 才是真 fast-path，否则可能是 user 手点 card / 5min 超时返回 "继续" 误打误撞。详见 `references/case-design-checklist.md` anti-pattern 2
 - ❌ **不要 patch fast-path return 值前不 grep 所有 worker downstream consumer**（Round 3 教训）：fast-path 是 channel↔worker 跨层 contract，channel 返回 "approved" 但 worker `_approve_keywords` 没这个词 → behavior=deny。patch PR 必须附带 cross-worker grep 矩阵（4 worker × N 返回字符串）+ negative round-trip test。详见 `references/case-design-checklist.md` anti-pattern 3
+- ❌ **不要不分 prompt-fix vs tool-impl 边界就提改进**（R3 教训）：改 LLM 行为前先判根因 — LLM 决策 (Read limit / wc 前置 / 不切 model) 改 prompt 就行；tool 实现 (Grep 没暴露 --follow / 内部状态 bug) 必须改 worker/binary 源码。误把 tool-impl 当 prompt-fix 写一堆 rule，LLM 看了也救不了。详见 [[feedback-evolution-r3-prompt-fix-vs-tool-impl]]
+- ❌ **不要把 1 个 bot 的现象当成普适事实推广**（R5 教训）：R5 xiaoai 假设「CLAUDE.md 每 turn inject 30K」听起来合理，但 grep raw jsonl `Contents of /home` = 0 matches，真根因是 assistant `thinking` block。**跨 bot 推广前必须 raw jsonl grep / Firestore 字段实查**，不要靠 bot 自报的解释直接信。详见 [[feedback-usage-tracking-msg-id-dedupe]]
 
 ## Failure Modes & Recovery
 

@@ -117,6 +117,35 @@ def compute_metrics(db, target: str, since: datetime, until: datetime | None = N
     step_counts = [len(l.get("steps", [])) for l in logs if isinstance(l.get("steps"), list)]
     assistant_lens = [len(l.get("assistant") or "") for l in logs if l.get("status") == "done"]
 
+    # Anomaly detection on usage field (R5 sediment 2026-05-21)
+    # See references/anomaly-metrics.md for full signature catalog.
+    anomalies = {
+        # signature: multi-step turn (steps>5) but output_tokens<=1
+        # -> ClaudeCodeWorker _usage 累加 bug or stream-JSON finalize failed
+        "out_tokens_1_multistep": 0,
+        # signature: in_tokens==0 AND out_tokens==0 with status=done
+        # -> finalize_live_log raced before _usage populated, or autocompact crash
+        "all_zero_usage": 0,
+        # signature: cache_creation > 30K tokens
+        # -> prompt inject 嫌疑 / extended thinking 长尾 / fresh prompt cache rebuild
+        "large_cache_create": 0,
+    }
+    for l in logs:
+        u = l.get("usage") or {}
+        if not isinstance(u, dict):
+            continue
+        in_t = u.get("input_tokens") or 0
+        out_t = u.get("output_tokens") or 0
+        cc_t = u.get("cache_creation_input_tokens") or 0
+        n_steps = len(l.get("steps") or []) if isinstance(l.get("steps"), list) else 0
+        status = l.get("status")
+        if n_steps > 5 and out_t <= 1:
+            anomalies["out_tokens_1_multistep"] += 1
+        if status == "done" and in_t == 0 and out_t == 0:
+            anomalies["all_zero_usage"] += 1
+        if cc_t > 30000:
+            anomalies["large_cache_create"] += 1
+
     # Tool diversity by emoji prefix (Kilo/Claude/OpenClaw all use same render)
     EMOJI_TO_KIND = {
         "💬": "text", "⚡": "bash", "📖": "read", "✏️": "write",
@@ -158,6 +187,7 @@ def compute_metrics(db, target: str, since: datetime, until: datetime | None = N
         "avg_step_count": round(statistics.mean(step_counts), 2) if step_counts else 0,
         "tool_diversity": len(tools_used),
         "tools_seen": sorted(tools_used),
+        "anomalies": anomalies,
         "since": since.isoformat(),
         "until": until.isoformat() if until else None,
     }
@@ -166,6 +196,20 @@ def compute_metrics(db, target: str, since: datetime, until: datetime | None = N
 def to_markdown(m: dict, target: str, label: str = "") -> str:
     if m.get("total") == 0:
         return f"**{target}** ({label or 'window'}): _no logs found in [{m.get('since')}, {m.get('until')}]_"
+
+    a = m.get("anomalies") or {}
+    anomaly_lines = ""
+    if any(a.values()):
+        anomaly_lines = "\n**⚠️ Usage anomalies detected** (see references/anomaly-metrics.md):\n"
+        if a.get("out_tokens_1_multistep"):
+            anomaly_lines += (f"- `out_tokens_1_multistep` × {a['out_tokens_1_multistep']} — "
+                              "多步 turn output_tokens<=1 (ClaudeCodeWorker _usage 累加 bug 签名)\n")
+        if a.get("all_zero_usage"):
+            anomaly_lines += (f"- `all_zero_usage` × {a['all_zero_usage']} — "
+                              "in=0 AND out=0 with done (finalize race / autocompact crash)\n")
+        if a.get("large_cache_create"):
+            anomaly_lines += (f"- `large_cache_create` × {a['large_cache_create']} — "
+                              "cache_creation > 30K (prompt inject / thinking 长尾 / cache rebuild)\n")
 
     return f"""### Metrics: {target} {f'({label})' if label else ''}
 
@@ -182,7 +226,7 @@ Window: `{m['since']}` → `{m.get('until') or 'now'}`
 | Duration p50 / p95 / max | {m['duration_p50']}s / {m['duration_p95']}s / {m['duration_max']}s |
 | Avg steps / turn | {m['avg_step_count']} |
 | Tool diversity (by emoji) | {m['tool_diversity']} ({', '.join(m['tools_seen'])}) |
-"""
+{anomaly_lines}"""
 
 
 def main():
