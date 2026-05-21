@@ -144,79 +144,115 @@ def detect_cold_links(indexed: dict[str, int], cold_days: int) -> list[str]:
     return sorted(cold)
 
 
-def to_markdown(report: dict, cold_days: int) -> str:
+def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
+    """
+    Output 3 分类 (R6 设计哲学纠正 2026-05-21):
+      🚨 ACTIONABLE: dead_index / duplicates / stale_timestamp — 必清, 无风险
+      👀 NEEDS REVIEW: orphans — 需 case-by-case 判断 active/废弃
+      ℹ️ INFO ONLY: cold_links — 绝不强清, 仅 INFO. cold ≠ garbage.
+
+    --action-only mode: 只显示 🚨 段; 如果 0 → 输出 "🟢 健康无需 cleanup"; 跳过 cold/orphan/info.
+    cron 用 --action-only, 防止形成"每天清 5%"的冲动.
+    """
     today = report["today"]
+    action_count = (
+        len(report["stale_timestamps"])
+        + len(report["duplicates"])
+        + len(report["dead_index"])
+    )
+
+    # action-only mode: 健康就 silent done
+    if action_only and action_count == 0:
+        return (
+            f"# 🟢 Memory Audit — {today}\n\n"
+            f"**actionable=0, 无需 cleanup**. "
+            f"MEMORY.md {report['memory_md_lines']} 行 / {len(report['indexed'])} 索引 / "
+            f"{report['disk_count']} disk 文件.\n\n"
+            "_(cold ≠ garbage. 没新东西进来时, 不要找事清. 类比真正的睡眠 — 没学新知识的晚上, "
+            "consolidation 是 maintenance 不是 cleanup.)_"
+        )
+
     lines = [
         f"# 📋 Memory Audit — {today}",
         "",
-        f"_自动 GC 体检 by `memory-audit.py` (类比人脑睡眠周期的 memory consolidation)_",
-        "",
-        "## 5 个健康信号",
-        "",
-        "| 信号 | 数量 | 含义 / 建议 |",
-        "|---|---|---|",
-        f"| **stale_timestamp** (醒来段 >7d) | **{len(report['stale_timestamps'])}** | "
-        f"过期 item 应 demote/删除 ([R6 规则](feedback_memory-system-overfit-r1-r5.md)) |",
-        f"| **duplicates** (同 slug 2+ 次) | **{len(report['duplicates'])}** | "
-        "MEMORY.md 重复索引, 浪费 prompt token |",
-        f"| **orphans** (disk 有 MEMORY 没) | **{len(report['orphans'])}** | "
-        "孤儿文件 bot 永远找不到, 应补索引或删 disk |",
-        f"| **dead_index** (MEMORY 有 disk 没) | **{len(report['dead_index'])}** | "
-        "死索引指向不存在文件, click 必 404, 必须删 |",
-        f"| **cold_links** (近 {cold_days}d 0 Read) | **{len(report['cold_links'])}** | "
-        "cold ≠ stale: 长期保险知识可保留, 但闭环项目 pointer 应删 |",
+        "_类比人脑睡眠 consolidation: 修剪噪音/重复, 但 **不删稳定记忆**_",
         "",
     ]
 
-    if report["stale_timestamps"]:
-        lines += ["## ⏰ 过期时间戳 (醒来段 >7d)", ""]
-        for s in report["stale_timestamps"]:
-            lines.append(f"- `{s['date']}` ({s['age_days']}d ago): {s['line']}")
+    # === 🚨 ACTIONABLE (必清, 无风险) ===
+    lines.append("## 🚨 ACTIONABLE (必清, 无风险)")
+    lines.append("")
+    if action_count == 0:
+        lines.append("**🟢 0 个 — 不需要做任何 cleanup**. 不要去翻下面的 INFO 段找事清.")
         lines.append("")
-
-    if report["duplicates"]:
-        lines += ["## ♊ 重复索引", ""]
-        for slug, n in report["duplicates"]:
-            lines.append(f"- `{slug}` × **{n}** 次")
+    else:
+        lines.append(f"**{action_count} 个 actionable 信号**. 这些是「明确证据过期」, 清了无风险:")
         lines.append("")
+        if report["stale_timestamps"]:
+            lines += ["### ⏰ 过期时间戳 (醒来段 >7d)", ""]
+            for s in report["stale_timestamps"]:
+                lines.append(f"- `{s['date']}` ({s['age_days']}d ago): {s['line']}")
+            lines.append("")
+        if report["duplicates"]:
+            lines += ["### ♊ 重复索引 (同 slug 2+ 次)", ""]
+            for slug, n in report["duplicates"]:
+                lines.append(f"- `{slug}` × **{n}** 次")
+            lines.append("")
+        if report["dead_index"]:
+            lines += ["### 💀 死索引 (MEMORY 有 disk 没)", ""]
+            for s in report["dead_index"]:
+                lines.append(f"- `{s}`")
+            lines.append("")
 
+    if action_only:
+        return "\n".join(lines)
+
+    # === 👀 NEEDS REVIEW (case-by-case) ===
     if report["orphans"]:
-        lines += [f"## 👻 孤儿文件 ({len(report['orphans'])} 个)", ""]
+        lines += [
+            "## 👀 NEEDS REVIEW (孤儿文件 — case-by-case 判断)",
+            "",
+            f"**{len(report['orphans'])} 个** disk 有但 MEMORY 没索引. "
+            "active 则补索引, 废弃才删 disk. 看 head + mtime 决定.",
+            "",
+        ]
         for s in report["orphans"][:20]:
             lines.append(f"- `{s}`")
         if len(report["orphans"]) > 20:
             lines.append(f"- ... 还有 {len(report['orphans']) - 20} 个")
         lines.append("")
 
-    if report["dead_index"]:
-        lines += ["## 💀 死索引 (必删)", ""]
-        for s in report["dead_index"]:
-            lines.append(f"- `{s}`")
-        lines.append("")
-
+    # === ℹ️ INFO ONLY (cold links — 绝不强清) ===
     if report["cold_links"]:
         n = len(report["cold_links"])
-        lines += [f"## 🧊 Cold Links (top 20 of {n}, 自己判断 cold ≠ stale)", ""]
-        for s in report["cold_links"][:20]:
+        lines += [
+            f"## ℹ️ INFO ONLY ({n} 个 cold links, 近 {cold_days}d 0 Read)",
+            "",
+            "**⚠️ 不要因为 cold 就清!** cold ≠ garbage. 大部分是「平时不 trigger, 一旦 trigger "
+            "就救命」的深度知识 (TPU/vendor quirk/平台 bug). R5 实证: cold shared/ 改触发关键词后 "
+            "命中率从 17%→83%, **而不是该删**.",
+            "",
+            "_只在 user 主动 ask 'check cold links' 或周末手工审时才看. cron 报告默认不展开._",
+            "",
+            "<details><summary>展开 (top 10 of " + str(n) + ")</summary>",
+            "",
+        ]
+        for s in report["cold_links"][:10]:
             lines.append(f"- `{s}`")
-        if n > 20:
-            lines.append(f"- ... 还有 {n - 20} 个")
-        lines.append("")
+        lines += ["", "</details>", ""]
 
-    health = "🟢 健康" if (
-        not report["stale_timestamps"]
-        and not report["duplicates"]
-        and not report["dead_index"]
-        and len(report["orphans"]) <= 2
-    ) else "🟡 有可清理项"
+    # 总评
+    health = "🟢 健康" if action_count == 0 else "🟡 有 actionable 项需要清"
     lines += [
         "## 总评",
         f"**状态**: {health}",
         f"- MEMORY.md: {report['memory_md_lines']} 行 / {report['memory_md_bytes']} bytes",
         f"- disk 上 memory 文件: {report['disk_count']}",
         f"- MEMORY.md 索引数: {len(report['indexed'])}",
+        f"- ACTIONABLE: {action_count} | NEEDS REVIEW: {len(report['orphans'])} | "
+        f"INFO ONLY: {len(report['cold_links'])}",
         "",
-        "_建议: 看到 stale/dead/重复 立刻清; orphans/cold 周末再审_",
+        "_GC 哲学: pressure-driven, 不是 time-driven. 没积累就不该清. cold ≠ garbage._",
     ]
     return "\n".join(lines)
 
@@ -228,6 +264,10 @@ def main():
                    help="window for cold link detection (default 14)")
     p.add_argument("--stale-days", type=int, default=7,
                    help="醒来段 timestamp stale threshold (default 7)")
+    p.add_argument("--action-only", action="store_true",
+                   help="only show 🚨 ACTIONABLE section (dead/dup/stale). "
+                        "If empty -> '🟢 健康无需 cleanup'. cron uses this to avoid "
+                        "creating 'must-clean-daily' compulsion. cold ≠ garbage.")
     p.add_argument("--deep", action="store_true",
                    help="(future) execute cleanup actions; currently report-only")
     p.add_argument("--apply", action="store_true",
@@ -268,7 +308,7 @@ def main():
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     else:
-        print(to_markdown(report, args.cold_days))
+        print(to_markdown(report, args.cold_days, action_only=args.action_only))
 
 
 if __name__ == "__main__":
