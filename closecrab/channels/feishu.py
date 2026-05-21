@@ -3337,7 +3337,9 @@ class FeishuChannel(Channel):
             if not usage:
                 await self._async_send_text(chat_id, "No active session.")
                 return
-            card = self._build_context_card(usage, user_key)
+            # 并发拉 prompt-audit breakdown (Chris R5 增强可观测性)
+            audit_data = await self._fetch_prompt_audit()
+            card = self._build_context_card(usage, user_key, audit_data)
             await self._async_send_card(chat_id, card)
 
         elif cmd == "/sessions":
@@ -3856,8 +3858,36 @@ class FeishuChannel(Channel):
             ],
         }
 
-    def _build_context_card(self, usage: dict, user_key: str) -> dict:
-        """构建 /context 上下文使用量卡片。"""
+    async def _fetch_prompt_audit(self) -> Optional[dict]:
+        """跑 prompt-audit.py --json 拿 cold-start prompt breakdown.
+
+        Chris 2026-05-21 需求: /context 卡片增加 9 段 breakdown 观测.
+        异步 subprocess 5s 超时, 失败返回 None (卡片仍显示总量).
+        """
+        try:
+            script = os.path.expanduser("~/CloseCrab/scripts/prompt-audit.py")
+            if not os.path.exists(script):
+                return None
+            proc = await asyncio.create_subprocess_exec(
+                "python3", script, "--bot", self._bot_name, "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            if proc.returncode != 0:
+                return None
+            return json.loads(stdout.decode())
+        except (asyncio.TimeoutError, json.JSONDecodeError, Exception):
+            return None
+
+    def _build_context_card(
+        self, usage: dict, user_key: str, audit_data: Optional[dict] = None,
+    ) -> dict:
+        """构建 /context 上下文使用量卡片。
+
+        audit_data: prompt-audit.py --json 输出, 含 9 段 token breakdown.
+        缺失则只显示总量 (向后兼容).
+        """
         total = usage["total_context_tokens"]
         window = usage["context_window"]
         pct = usage["usage_pct"]
@@ -3873,30 +3903,60 @@ class FeishuChannel(Channel):
         else:
             template = "red"
 
+        elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"`{bar}` **{pct}%**\n"
+                        f"**{total:,}** / {window:,} tokens\n"
+                        f"Input: {usage['input_tokens']:,} | "
+                        f"Cache read: {usage['cache_read_input_tokens']:,} | "
+                        f"Cache create: {usage['cache_creation_input_tokens']:,}\n"
+                        f"Output: {usage['output_tokens']:,} | "
+                        f"Turns: {usage['turns']} | "
+                        f"Cost: ${usage['cost_usd']:.4f}"
+                    ),
+                },
+            },
+        ]
+
+        # Cold-start prompt breakdown (audit_data 来自 prompt-audit.py --json)
+        if audit_data and "sections" in audit_data:
+            sections = audit_data["sections"]
+            est_total = sum(s.get("est_tokens", s.get("tokens", 0)) for s in sections.values())
+            # 按 token 降序排
+            sorted_secs = sorted(
+                sections.items(),
+                key=lambda x: -x[1].get("est_tokens", x[1].get("tokens", 0)),
+            )
+            # markdown table 格式 — 飞书 lark_md 会自动转 column_set
+            lines = [
+                f"---",
+                f"**Cold-start prompt breakdown** (估算 {est_total:,} tokens):",
+                f"",
+                f"| 段 | tokens | 占比 |",
+                f"|---|---|---|",
+            ]
+            for name, s in sorted_secs:
+                tk = s.get("est_tokens", s.get("tokens", 0))
+                pct_sec = 100 * tk / est_total if est_total else 0
+                # 去掉前缀数字 "1. "
+                clean_name = name.split(". ", 1)[-1] if ". " in name else name
+                lines.append(f"| {clean_name} | {tk:,} | {pct_sec:.1f}% |")
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "\n".join(lines)},
+            })
+
         return {
             "config": {"wide_screen_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "Context Window Usage"},
                 "template": template,
             },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"`{bar}` **{pct}%**\n"
-                            f"**{total:,}** / {window:,} tokens\n"
-                            f"Input: {usage['input_tokens']:,} | "
-                            f"Cache read: {usage['cache_read_input_tokens']:,} | "
-                            f"Cache create: {usage['cache_creation_input_tokens']:,}\n"
-                            f"Output: {usage['output_tokens']:,} | "
-                            f"Turns: {usage['turns']} | "
-                            f"Cost: ${usage['cost_usd']:.4f}"
-                        ),
-                    },
-                },
-            ],
+            "elements": elements,
         }
 
     def _build_sessions_card(

@@ -671,6 +671,35 @@ def main():
         target=_warmup_bg, daemon=True, name="fb-warmup-bg",
     ).start()
 
+    # Cold-start prompt audit (background, non-blocking) — Chris 2026-05-21
+    # 需求"增强可观测性, 启动时看上下文里有什么垃圾". 跑 prompt-audit.py
+    # 拿 9 大段 token breakdown, 写到 bot.log. 不主动推用户 (避免每次
+    # restart 都刷屏); user 想看可飞书发 /context 看完整 breakdown 卡片.
+    def _audit_bg():
+        try:
+            import subprocess
+            audit_script = (
+                Path(__file__).resolve().parent.parent / "scripts" / "prompt-audit.py"
+            )
+            if not audit_script.exists():
+                return
+            result = subprocess.run(
+                ["python3", str(audit_script), "--bot", bot_name],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                log.info("Cold-start prompt audit:\n%s", result.stdout)
+            else:
+                log.warning(
+                    "prompt-audit returned %d, stderr=%s",
+                    result.returncode, result.stderr[:200],
+                )
+        except Exception as e:
+            log.warning("prompt-audit (bg) crashed (non-fatal): %s", e)
+    _threading.Thread(
+        target=_audit_bg, daemon=True, name="prompt-audit-bg",
+    ).start()
+
     # 启动 Channel
     try:
         log.info(f"Starting {channel_type} channel for '{bot_name}'...")
