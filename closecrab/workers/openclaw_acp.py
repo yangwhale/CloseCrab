@@ -1075,29 +1075,52 @@ class OpenClawWorker(Worker):
                         try:
                             file_usage = self._read_session_usage_from_file()
                             if file_usage:
+                                # OC R3 evolution finding (bunny self-explore
+                                # 2026-05-21 19:37): race condition between
+                                # ACP response arrival and Gateway async write
+                                # to sessions.json. Extremely short replies
+                                # (e.g. "等于2" 3 chars) read sessions.json
+                                # before Gateway flushed, file_usage[key]==0
+                                # would unconditionally overwrite the non-zero
+                                # ACP response usage at L1053-1068. Guard:
+                                # only overwrite when file value > 0, so race
+                                # falls back to ACP response value (which may
+                                # itself be 0 if Gateway never propagated, but
+                                # at least doesn't destroy a good ACP value).
+                                def _safe_overwrite(key, val):
+                                    if (isinstance(val, (int, float))
+                                            and val > 0):
+                                        self._usage[key] = val
+
                                 if "session_input_tokens" in file_usage:
-                                    self._usage["input_tokens"] = int(
-                                        file_usage["session_input_tokens"]
+                                    _safe_overwrite(
+                                        "input_tokens",
+                                        int(file_usage["session_input_tokens"]),
                                     )
                                 if "session_output_tokens" in file_usage:
-                                    self._usage["output_tokens"] = int(
-                                        file_usage["session_output_tokens"]
+                                    _safe_overwrite(
+                                        "output_tokens",
+                                        int(file_usage["session_output_tokens"]),
                                     )
                                 if "session_cache_read" in file_usage:
-                                    self._usage[
-                                        "cache_read_input_tokens"
-                                    ] = int(file_usage["session_cache_read"])
+                                    _safe_overwrite(
+                                        "cache_read_input_tokens",
+                                        int(file_usage["session_cache_read"]),
+                                    )
                                 if "session_cache_write" in file_usage:
-                                    self._usage[
-                                        "cache_creation_input_tokens"
-                                    ] = int(file_usage["session_cache_write"])
+                                    _safe_overwrite(
+                                        "cache_creation_input_tokens",
+                                        int(file_usage["session_cache_write"]),
+                                    )
                                 if "session_cost_usd" in file_usage:
-                                    self._usage["cost_usd"] = float(
-                                        file_usage["session_cost_usd"]
+                                    _safe_overwrite(
+                                        "cost_usd",
+                                        float(file_usage["session_cost_usd"]),
                                     )
                                 if "session_total_tokens" in file_usage:
-                                    self._usage["session_total_tokens"] = int(
-                                        file_usage["session_total_tokens"]
+                                    _safe_overwrite(
+                                        "session_total_tokens",
+                                        int(file_usage["session_total_tokens"]),
                                     )
                         except Exception as e:
                             log.debug(f"sessions.json usage merge failed: {e}")
