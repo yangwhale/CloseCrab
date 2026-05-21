@@ -1019,32 +1019,36 @@ class KiloWorker(Worker):
             url = f"{self._base_url}/session/{self._session_id}/message"
             reply_text = ""
             empty_retry_done = False  # P1: empty-response retry guard (single retry per send())
-            prompt_too_long_fork_done = False  # P1: long-prompt fork guard
+            session_fork_done = False  # P1: session-fork guard (covers prompt-too-long + session-gone)
 
             try:
                 reply_text = await self._do_post_and_wait(url, body)
 
-                # Long-prompt auto-fork parity with claude_code.py:738-772.
-                # When Kilo backend returns "prompt is too long" / 413 / etc,
-                # the same session keeps the over-limit context — only forking
-                # to a fresh session breaks the deadlock. Bounded to 1 fork
-                # per send() (single-message-over-limit can't be fixed by fork
-                # either, user must shorten).
-                if (self._turn_error == "__PROMPT_TOO_LONG__"
-                        and not prompt_too_long_fork_done
+                # Session fork: triggered by 2 recoverable error sentinels.
+                # Both need same recovery (drop session_id, create new, retry):
+                #   __PROMPT_TOO_LONG__: claude_code.py:738-772 parity (commit d0cb1cf)
+                #     same session keeps over-limit context, fork drops it
+                #   __SESSION_GONE__: xiaoai R7 cross-eval finding
+                #     Kilo backend lost session (serve restart / GC), recreate
+                # Bounded to 1 fork per send(); single-message-over-limit can't
+                # be saved by fork (user must shorten).
+                FORK_SENTINELS = ("__PROMPT_TOO_LONG__", "__SESSION_GONE__")
+                if (self._turn_error in FORK_SENTINELS
+                        and not session_fork_done
                         and not self._interrupted):
-                    prompt_too_long_fork_done = True
+                    session_fork_done = True
+                    fork_reason = self._turn_error
                     old_sid = self._session_id
                     log.error(
-                        "Kilo prompt-too-long detected, forking new session (old=%s)",
-                        old_sid,
+                        "Kilo session fork triggered by %s (old=%s)",
+                        fork_reason, old_sid,
                     )
                     try:
                         # Force new session: drop sid, recreate
                         self._session_id = ""
                         await self._create_or_resume_session()
-                        log.info("Forked to new Kilo session: %s (from %s)",
-                                 self._session_id, old_sid)
+                        log.info("Forked to new Kilo session: %s (from %s, reason=%s)",
+                                 self._session_id, old_sid, fork_reason)
                         # Reset turn state + retry
                         self._turn_event.clear()
                         self._turn_result = None
@@ -1058,12 +1062,15 @@ class KiloWorker(Worker):
                         new_url = f"{self._base_url}/session/{self._session_id}/message"
                         reply_text = await self._do_post_and_wait(new_url, body)
                         if reply_text.strip():
-                            log.info("Prompt-too-long fork succeeded: %d chars", len(reply_text))
+                            log.info("Session fork (%s) succeeded: %d chars",
+                                     fork_reason, len(reply_text))
                         else:
-                            log.error("Prompt-too-long fork also produced no text")
+                            log.error("Session fork (%s) also produced no text",
+                                      fork_reason)
                     except Exception as fork_exc:
-                        log.error("Prompt-too-long fork failed: %s", fork_exc, exc_info=True)
-                        reply_text = f"[Error] prompt-too-long fork failed: {fork_exc}"
+                        log.error("Session fork (%s) failed: %s",
+                                  fork_reason, fork_exc, exc_info=True)
+                        reply_text = f"[Error] session fork ({fork_reason}) failed: {fork_exc}"
 
                 # Empty-response retry parity with claude_code.py:776-786 and
                 # openclaw_acp.py:1247. Triggered when Kilo backend returns
@@ -1157,12 +1164,15 @@ class KiloWorker(Worker):
             async with self._http.post(url, json=body) as resp:
                 if resp.status != 200:
                     err = await resp.text()
-                    # P1: Detect prompt-too-long / context-overflow errors so
-                    # send() can fork to a fresh session. Parity with
-                    # claude_code.py:738-772 (prompt_too_long_fork_done).
-                    # Kilo session state lives in backend; same session keeps
-                    # accumulated context that already exceeds the limit, so
-                    # only fork-to-new-session breaks the deadlock.
+                    # P1: Detect recoverable HTTP errors and set a sentinel
+                    # so send() can fork to a fresh session. Two recovery
+                    # triggers:
+                    #   - PROMPT_TOO_LONG: context exceeds limit, same session
+                    #     keeps over-limit state → fork to drop context
+                    #     (parity with claude_code.py:738-772, commit d0cb1cf)
+                    #   - SESSION_GONE: Kilo backend lost the session
+                    #     (kilo serve restarted, session GC'd, etc) → fork to
+                    #     create new session (xiaoai R7 cross-eval finding)
                     err_lower = err.lower()
                     is_too_long = (
                         resp.status == 413
@@ -1172,9 +1182,18 @@ class KiloWorker(Worker):
                         or "maximum context" in err_lower
                         or "context_length_exceeded" in err_lower
                     )
+                    is_session_gone = (
+                        resp.status == 404
+                        or "session not found" in err_lower
+                        or "no such session" in err_lower
+                        or "session does not exist" in err_lower
+                        or "unknown session" in err_lower
+                        or "invalid session" in err_lower
+                    )
                     if is_too_long:
-                        # Sentinel value picked up by send() fork branch.
                         self._turn_error = "__PROMPT_TOO_LONG__"
+                    elif is_session_gone:
+                        self._turn_error = "__SESSION_GONE__"
                     else:
                         self._turn_error = f"HTTP {resp.status}: {err[:200]}"
                     self._turn_event.set()
