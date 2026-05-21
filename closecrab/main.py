@@ -650,14 +650,26 @@ def main():
 
     # Vertex Usage Policy fallback warmup: surface config errors (bad
     # model id, wrong region, schema mismatch, expired creds) in
-    # startup log NOW, not days later when a real refusal hits. Adds
-    # ~2-5s to startup; failure is non-fatal (bot still starts).
-    try:
-        import asyncio as _asyncio
-        from .utils.usage_policy_fallback import warmup as _fb_warmup
-        _asyncio.run(_fb_warmup(timeout_s=10))
-    except Exception as e:
-        log.warning(f"usage_policy_fallback warmup hook crashed (non-fatal): {e}")
+    # startup log. R3 (2026-05-21 speed evo): changed from sync to
+    # background thread — old sync warmup added 2-5s to startup which
+    # speed-evo R2 identified as 42% of Layer 1 cold-start latency
+    # (2.98s of 7.15s). Background fire keeps config-error visibility
+    # in log (just async) at 0 blocking cost. warmup() is stateless smoke
+    # test — try_fallback() works without prior warmup, so first refusal
+    # is unaffected even if warmup is still in flight or fails.
+    def _warmup_bg():
+        try:
+            import asyncio as _asyncio
+            from .utils.usage_policy_fallback import warmup as _fb_warmup
+            _asyncio.run(_fb_warmup(timeout_s=10))
+        except Exception as e:
+            log.warning(
+                "usage_policy_fallback warmup (bg) crashed (non-fatal): %s", e
+            )
+    import threading as _threading
+    _threading.Thread(
+        target=_warmup_bg, daemon=True, name="fb-warmup-bg",
+    ).start()
 
     # 启动 Channel
     try:
