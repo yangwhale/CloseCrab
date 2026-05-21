@@ -4124,17 +4124,11 @@ class FeishuChannel(Channel):
             "text": {"tag": "lark_md", "content": f"**{current_action}**"},
         })
 
-        # 流式回复预览（CC turn-level streaming）
-        if reply_text:
-            preview = reply_text
-            _STREAM_PREVIEW_LIMIT = 1500
-            if len(preview) > _STREAM_PREVIEW_LIMIT:
-                preview = "…（前文略）…\n" + preview[-_STREAM_PREVIEW_LIMIT:]
-            elements.append({"tag": "hr"})
-            elements.append({
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": f"💬 **实时回复**\n\n{preview}"},
-            })
+        # V1.2 (2026-05-21): 流式回复预览段已移除, 防止跟独立 final reply 消息重复
+        # (Chris UX 反馈: 上下两段显示一样的东西). `reply_text` 参数保留兼容 caller,
+        # `on_text_chunk` / `_pending_reply_text` 也保留 (未来可能用于其他渲染需求).
+        # 用户体验: 卡片只显示 Steps (tool 调用) + status, final reply 走独立消息.
+        _ = reply_text  # 显式标记参数仍被接收 (静默 unused 警告)
 
         # 底部状态栏：耗时 · 上下文 · 轮次 · Worker · Model
         elements.append({"tag": "hr"})
