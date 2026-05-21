@@ -16,6 +16,19 @@ globs: closecrab/channels/*.py
 - `AskUserQuestion` — 展示 `inp.get("questions", [])` 列表
 - 新增控制类型时，三个 channel 都要加
 
+### AskUserQuestion.multiSelect 行为
+工具协议层每个 question 支持 `multiSelect: bool`（缺省 false）。各 channel 的处理：
+
+| Channel | multiSelect=False (单选) | multiSelect=True (多选) |
+|---|---|---|
+| feishu | 渲染按钮 (`tag: action`)，点一个 resolve future | **不渲染按钮**，把选项列成 `1. label — desc` 文本，hint 提示「请用文字回复，例如 `1,3,4`」，用户文字消息走 `_pending_input` 路径 (feishu.py:2955) |
+| discord | 渲染按钮（未实现 multi） | 未实现，目前跟单选一样 |
+| dingtalk | 纯文本列出 | 未实现 |
+
+**为什么飞书多选走文字回复**：飞书卡片没有「checkbox + 独立提交按钮」的简洁原生组件，要做得在 `tag: form` 容器里嵌 `tag: checker`，复杂度高。而 `_pending_input` 早已承接文字消息，多选直接复用文字路径只需 ~15 行改动。文字消息比 form 提交更灵活（LLM 能理解 `234` / `1,3,4` / `A、C、D` / `第一个和第三个`）。
+
+**测试**：`test_feishu_card.py` 覆盖 single/multi/mixed/empty/default 5+ 个场景。改动 `_build_ask_question_card` 前先跑一遍，改完再跑一遍。
+
 ## Channel 基类
 继承 `closecrab/channels/base.py` 的 `Channel` ABC，必须实现：
 - `start()` — 连接平台，开始监听

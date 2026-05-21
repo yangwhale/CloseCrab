@@ -4047,40 +4047,68 @@ class FeishuChannel(Channel):
         questions = inp.get("questions", [])
         elements = []
 
+        # 整张卡片是否含多选问题 — 影响底部 hint 文案
+        has_multi = any(q.get("multiSelect", False) for q in questions)
+
         for i, q in enumerate(questions):
             text = q.get("question", "")
             options = q.get("options", [])
+            multi = q.get("multiSelect", False)
 
+            # 多选问题在标题加 [多选] 标记，提示用户用文字回复
+            title_prefix = "🔢 [多选] " if multi else ""
             elements.append({
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**{text}**"},
+                "text": {"tag": "lark_md", "content": f"**{title_prefix}{text}**"},
             })
 
             if options:
-                actions = []
-                for j, opt in enumerate(options):
-                    label = opt.get("label", "")
-                    desc = opt.get("description", "")
-                    btn_text = f"{j+1}. {label}"
-                    actions.append({
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": btn_text[:20]},
-                        "type": "default",
-                        "value": _create_feishu_card_envelope(
-                            "ask_answer",
-                            answer=label,
-                            expected_user_open_id=expected_user_open_id,
-                            expected_chat_id=expected_chat_id,
-                            expected_chat_type=expected_chat_type,
-                        ),
+                if multi:
+                    # 多选：不渲染按钮（飞书没有原生 multi-checkbox + 提交 UI 的简洁实现），
+                    # 把选项列成带编号的文本，让用户打字回复（feishu.py:2955 已承接文字 → pending future）
+                    opt_lines = []
+                    for j, opt in enumerate(options):
+                        label = opt.get("label", "")
+                        desc = opt.get("description", "")
+                        line = f"`{j+1}.` **{label}**"
+                        if desc:
+                            line += f" — {desc}"
+                        opt_lines.append(line)
+                    elements.append({
+                        "tag": "div",
+                        "text": {"tag": "lark_md", "content": "\n".join(opt_lines)},
                     })
-                elements.append({"tag": "action", "actions": actions})
+                else:
+                    # 单选：保留按钮 UI（点一个就 resolve future）
+                    actions = []
+                    for j, opt in enumerate(options):
+                        label = opt.get("label", "")
+                        desc = opt.get("description", "")
+                        btn_text = f"{j+1}. {label}"
+                        actions.append({
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": btn_text[:20]},
+                            "type": "default",
+                            "value": _create_feishu_card_envelope(
+                                "ask_answer",
+                                answer=label,
+                                expected_user_open_id=expected_user_open_id,
+                                expected_chat_id=expected_chat_id,
+                                expected_chat_type=expected_chat_type,
+                            ),
+                        })
+                    elements.append({"tag": "action", "actions": actions})
 
         elements.append({"tag": "hr"})
+        hint = (
+            "多选题请用文字回复，例如：`1,3,4` 或 `A、C、D` 或 `第一个和第三个`"
+            if has_multi
+            else "点击按钮或直接回复文字"
+        )
         elements.append({
             "tag": "note",
             "elements": [
-                {"tag": "plain_text", "content": "点击按钮或直接回复文字"},
+                {"tag": "plain_text", "content": hint},
             ],
         })
 
