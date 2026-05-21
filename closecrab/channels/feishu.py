@@ -3482,11 +3482,19 @@ class FeishuChannel(Channel):
 
     @staticmethod
     def _extract_voice_summary(text: str) -> tuple:
-        """提取 <voice-summary> 标签内容，返回 (clean_text, voice_text)。"""
+        """提取 <voice-summary> 标签内容，返回 (clean_text, voice_text)。
+
+        clean_text 保留 voice 文字作为 markdown 引用块 (`> 🔊 xxx`)，让
+        用户既听到语音又看到文字 — Chris 2026-05-21 反馈"语音总结的文字
+        也给我在对话框里打一份"。voice_text 仍用于 TTS 合成。
+        """
         match = re.search(r"<voice-summary>(.*?)</voice-summary>", text, re.DOTALL)
         if match:
             voice_text = match.group(1).strip()
-            clean_text = text[:match.start()].rstrip() + text[match.end():]
+            # 把 voice-summary 标签替换成 markdown 引用块, 既显示文字又视觉区分
+            # 飞书 lark_md 支持 `>` 引用块, 渲染为左侧竖线 + 缩进
+            visible = f"> 🔊 {voice_text}"
+            clean_text = text[:match.start()] + visible + text[match.end():]
             clean_text = clean_text.strip()
             return clean_text, voice_text
         return text, None
