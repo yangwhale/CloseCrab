@@ -80,6 +80,10 @@ class ClaudeCodeWorker(Worker):
             "turns": 0,
             "cost_usd": 0.0,
         }
+        # CC stream-JSON 把 1 个 LLM message 拆 3 个 assistant events
+        # (thinking/text/tool_use), 同 message.id 重复 3 次。
+        # 用 msg_id dedupe 避免 usage 重复处理。
+        self._last_usage_msg_id: Optional[str] = None
         # 持续 reader task + event queue 架构
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
@@ -822,13 +826,26 @@ class ClaudeCodeWorker(Worker):
                                  f"answer={user_response[:80] if user_response else 'None'}")
 
                     # 追踪 assistant 消息的 token usage
+                    # R5 fix (tiemu R4 finding): CC stream-JSON 把 1 个 LLM
+                    # message 拆 3 个 assistant events(thinking/text/tool_use),
+                    # 每个 event 重复 same msg-level usage。同时 1 个 turn 内可能
+                    # 多次 LLM call (agentic loop) → 多个 msg_id。
+                    # - input/cache_*: per-LLM-call cumulative-from-turn-start
+                    #   (单调递增), 取最新 = 整 turn 真实 input
+                    # - output_tokens: per-message 增量, 多个 message 必须累加
+                    #   (老代码 `=` 让 output 永远 == 最后 1 个 message 的 output,
+                    #   多步 turn 经常变成 output=1, Firestore 日志失真)
                     if d.get("type") == "assistant":
                         msg_usage = d.get("message", {}).get("usage", {})
-                        if msg_usage:
-                            for k in ("input_tokens", "output_tokens",
+                        msg_id = d.get("message", {}).get("id")
+                        if msg_usage and msg_id and msg_id != self._last_usage_msg_id:
+                            self._last_usage_msg_id = msg_id
+                            for k in ("input_tokens",
                                       "cache_creation_input_tokens",
                                       "cache_read_input_tokens"):
-                                self._usage[k] = msg_usage.get(k, 0)  # 取最新值（非累加）
+                                self._usage[k] = msg_usage.get(k, 0)
+                            self._usage["output_tokens"] += msg_usage.get(
+                                "output_tokens", 0)
 
                         # 流式 text 累积：每个 assistant turn 把所有 text block 拼出来。
                         # CC stream-json 是 turn-level 流式（每个 LLM turn 一次性到达），不是 token-level。
