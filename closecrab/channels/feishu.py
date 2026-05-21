@@ -3487,13 +3487,19 @@ class FeishuChannel(Channel):
         clean_text 保留 voice 文字作为 markdown 引用块 (`> 🔊 xxx`)，让
         用户既听到语音又看到文字 — Chris 2026-05-21 反馈"语音总结的文字
         也给我在对话框里打一份"。voice_text 仍用于 TTS 合成。
+
+        双轨: voice_text (给 TTS) 保留 `[casually]` 等情绪标签 (Gemini TTS
+        需要标签控制语气); visible (打印给用户) 剥掉所有标签 (用户看的是
+        内容不需要 TTS 控制码).
         """
         match = re.search(r"<voice-summary>(.*?)</voice-summary>", text, re.DOTALL)
         if match:
             voice_text = match.group(1).strip()
+            # 给用户看的版本: 剥掉所有 [casually] / [excitedly] 等情绪标签
+            visible_text = re.sub(r"\[[a-zA-Z]+\]\s*", "", voice_text).strip()
             # 把 voice-summary 标签替换成 markdown 引用块, 既显示文字又视觉区分
             # 飞书 lark_md 支持 `>` 引用块, 渲染为左侧竖线 + 缩进
-            visible = f"> 🔊 {voice_text}"
+            visible = f"> 🔊 {visible_text}"
             clean_text = text[:match.start()] + visible + text[match.end():]
             clean_text = clean_text.strip()
             return clean_text, voice_text
