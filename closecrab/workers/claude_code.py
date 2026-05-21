@@ -660,13 +660,31 @@ class ClaudeCodeWorker(Worker):
             # user just sees "处理完成但未生成文字回复" even though a retry
             # would have produced a real answer.
             empty_retry_done = False
+            # 自动 fork-on-prompt-too-long：Vertex AI 30 MB payload 或 1M token
+            # 累积撞线时 Claude CLI 返回 "Prompt is too long"，session 已死。
+            # 唯一恢复路径是丢掉当前 session_id 起新 session 重发一次。
+            # 同一 send() 内只 fork 一次，第二次仍然撞限说明单条消息本身就
+            # 超限，再 fork 也没用，直接报错让用户拆短。
+            prompt_too_long_fork_done = False
             try:
                 def _send_prompt(prompt_text: str):
                     msg_str = json.dumps({
                         "type": "user",
                         "message": {"role": "user", "content": prompt_text}
                     }) + "\n"
-                    self.sock_in.sendall(msg_str.encode())
+                    payload = msg_str.encode()
+                    # Vertex AI 限单请求 payload 30 MB，对话越长越容易在 token
+                    # 数远低于 1M 时先撞这条线。日志里持续记 payload size，
+                    # 出 "Prompt is too long" 时直接对得上具体字节数。
+                    size_bytes = len(payload)
+                    if size_bytes >= 25 * 1024 * 1024:
+                        log.warning(
+                            f"Large prompt payload: {size_bytes:,} bytes "
+                            f"(near Vertex AI 30 MB limit)"
+                        )
+                    else:
+                        log.info(f"Sending prompt payload: {size_bytes:,} bytes")
+                    self.sock_in.sendall(payload)
 
                 _send_prompt(text)
 
@@ -710,6 +728,44 @@ class ClaudeCodeWorker(Worker):
                         self._usage["turns"] += 1
                         if "cost_usd" in d:
                             self._usage["cost_usd"] += d["cost_usd"]
+                        # Vertex AI 30 MB payload 或 1M token 累积撞线后 session 已死，
+                        # 必须丢 session_id 重起一次。只 fork 一次：第二次仍撞限说明
+                        # 单条消息本身就超限，让用户拆短。
+                        if d.get("is_error") and result_text and (
+                            "prompt is too long" in result_text.lower()
+                            or "input is too long" in result_text.lower()
+                        ):
+                            if prompt_too_long_fork_done:
+                                log.error(
+                                    f"Prompt-too-long fork already attempted, giving up: "
+                                    f"{result_text[:200]}"
+                                )
+                                return (
+                                    f"[Prompt too long] {result_text}\n\n"
+                                    f"（已尝试新建 session 但仍失败，请发更短的内容或开新对话）"
+                                )
+                            log.error(
+                                f"Prompt too long detected, forking new session: "
+                                f"{result_text[:200]}"
+                            )
+                            prompt_too_long_fork_done = True
+                            self._session_id = None
+                            await self.stop()
+                            self._session_id = None
+                            try:
+                                await self._start_process()
+                            except Exception as e:
+                                log.error(f"Fork _start_process failed: {e}")
+                                return f"[Prompt too long] Failed to fork session: {e}"
+                            accumulated_reply_text = ""
+                            self._last_accumulated_reply = ""
+                            saw_task_notification = False
+                            try:
+                                _send_prompt(text)
+                            except Exception as e:
+                                log.warning(f"Prompt-too-long fork resend failed: {e}")
+                                return "(Claude 处理完成但因 prompt 过长无法回复)"
+                            continue
                         if not result_text:
                             log.warning(f"Claude returned empty result. is_error={d.get('is_error')}, "
                                         f"session={self._session_id}, duration={d.get('duration_ms')}")
@@ -839,7 +895,7 @@ class ClaudeCodeWorker(Worker):
         # 总 context = input + cache_creation + cache_read
         total_ctx = u["input_tokens"] + u["cache_creation_input_tokens"] + u["cache_read_input_tokens"]
         u["total_context_tokens"] = total_ctx
-        u["context_window"] = 1_000_000  # Opus 4.6 [1m]
+        u["context_window"] = 1_000_000  # Opus 4.6 / 4.7 + Sonnet 4.6 on Vertex AI
         u["usage_pct"] = round(total_ctx / 1_000_000 * 100, 1) if total_ctx else 0
         # Session 时长（秒）
         if self._start_time is not None:
