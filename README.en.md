@@ -213,6 +213,46 @@ python3 scripts/config-manage.py set-livekit <bot> --auto-detect \
 
 ---
 
+## ⚠️ Claude Code CLI Upgrade Warning
+
+> **Do not upgrade casually.** CC has no auto-upgrade — every upgrade is a manual `claude install <version>`. **2.1.144+ has a confirmed 900K context regression**. Before any future upgrade, you **must** run the pre-check below to verify context is not stuck at 200K.
+
+### Known regression (bisected 2026-05-21)
+
+| Version | Status | Behavior |
+|---------|--------|----------|
+| **2.1.143** | ✅ **Current known-good** | autoCompactWindow=900000 works, peak cache_read 369K, 0 compacts |
+| 2.1.144 | ❌ Compact thrashing | 3 compacts within 5 min: 1st@371K, 2nd@167K (-204K), 3rd@174K; only 20K post-compact budget |
+| 2.1.145 | ❌ Hard cap to ~200K | Clean cap at ~200K, no thrashing but 900K config fully ignored; 16 compacts all ~167-171K |
+
+Root cause (decompiled): `Math.min(jL() cap, autoCompactWindow) - min(CqH(H), 20000)`. 2.1.144 changed the compact decision function, breaking `autoCompactWindow`.
+
+### Pre-upgrade Stress Test Checklist
+
+```bash
+# Step 1: Backup current binary (symlink pinned to 2.1.143)
+cp -a ~/.local/share/claude/versions/2.1.143 /tmp/claude-2.1.143.backup
+
+# Step 2: Install target version on a TEST bot (never on the main bot)
+claude install <target-version>
+
+# Step 3: Stress test — have the test bot read 5+ large files (>50K tokens each)
+#         to grow cache_read and watch whether it stalls at 200K
+
+# Step 4: PASS criteria (both must hold)
+#   ✅ peak_cache_read > 250K
+#   ✅ 0 new compact events (grep ~/.claude/projects/-home-chrisya/*.jsonl)
+
+# Step 5: FAIL → roll back immediately
+ln -sfn ~/.local/share/claude/versions/2.1.143/cli.js ~/.local/bin/claude
+
+# Step 6: Upgrade main bots only after PASS
+```
+
+**Memory references**: `feedback_cc-upgrade-checklist.md` + `feedback_cc-version-matters-for-jl.md`.
+
+---
+
 ## Platform Setup Details
 
 > Lark/Feishu is CloseCrab's **first-class citizen** — the configuration below is the most complete. Discord and DingTalk are basic support.

@@ -213,6 +213,46 @@ python3 scripts/config-manage.py set-livekit <bot> --auto-detect \
 
 ---
 
+## ⚠️ Claude Code CLI 升级注意事项
+
+> **别随便升级**。CC 没有 auto-upgrade，所有升级都是手动 `claude install <version>`。已知 **2.1.144+ 存在 900K 上下文 regression**，下次升级前**必须**先按下面流程验证「上下文有没有被卡死在 200K」。
+
+### 已知 regression（2026-05-21 二分法实测）
+
+| 版本 | 状态 | 行为 |
+|------|------|------|
+| **2.1.143** | ✅ **当前已知良品** | autoCompactWindow=900000 生效，peak cache_read 369K 无 compact |
+| 2.1.144 | ❌ Compact thrashing | 5 分钟内 3 次 compact：1st@371K，2nd@167K（-204K），3rd@174K；post-compact 仅 20K 可用预算 |
+| 2.1.145 | ❌ Cap 钳死 ~200K | 干净 cap 到 ~200K，不 thrash 但完全锁死 900K 配置；16 次 compact 全部 ~167-171K |
+
+根因（反编译验证）：`Math.min(jL() cap, autoCompactWindow) - min(CqH(H), 20000)`，144 改了 compact decision function 让 `autoCompactWindow` 失效。详见 [memory](https://github.com/yangwhale/CloseCrab/wiki) 的 `cc-version-matters-for-jl.md`。
+
+### 升级前必检清单（Pre-upgrade Stress Test）
+
+```bash
+# Step 1: 备份当前 binary（symlink 固化在 2.1.143）
+cp -a ~/.local/share/claude/versions/2.1.143 /tmp/claude-2.1.143.backup
+
+# Step 2: 在测试 bot 上装目标版本（不要拿主力 bot 测）
+claude install <target-version>
+
+# Step 3: 压力测试 —— 让测试 bot 连续 read 5+ 个大文件 (>50K tokens each)
+#         触发 cache_read 增长，观察是否在 200K 卡住
+
+# Step 4: 验收标准（两项都要满足才算 PASS）
+#   ✅ peak_cache_read > 250K
+#   ✅ 0 个新增 compact 事件（grep ~/.claude/projects/-home-chrisya/*.jsonl）
+
+# Step 5: 失败 → 立即回滚
+ln -sfn ~/.local/share/claude/versions/2.1.143/cli.js ~/.local/bin/claude
+
+# Step 6: PASS 才升主力 bot（jarvis/bunny/hulk/tiemu...）
+```
+
+**Memory 索引**：`feedback_cc-upgrade-checklist.md` + `feedback_cc-version-matters-for-jl.md`。
+
+---
+
 ## 平台配置详解
 
 > 飞书是 CloseCrab 的 **一等公民**——下面的配置最完整。Discord 和钉钉是基础支持。
