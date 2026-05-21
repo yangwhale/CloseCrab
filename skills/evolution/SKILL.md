@@ -16,6 +16,24 @@ trigger: 进化 / evolution / 三方互评 / 互相 restart / 组队优化 / 今
 - 自己发现 worker 有明显问题（空回复率高 / step 不动 / 协议崩溃），且另一个 bot 在线
 - 例行夜间任务（cron 配的话）
 
+## Mode Selection（先决：同类 vs 跨类）
+
+招募 evaluator 前先定模式，二者发现的 bug 类型完全不同：
+
+| 模式 | 组成 | 擅长发现 | 盲区 | 触发场景 |
+|---|---|---|---|---|
+| **同类 (same-worker-type)** | 3 个 bot 都是同一 worker（比如全 ClaudeCodeWorker：jarvis + xiaoai + tiemu）| **Worker 内部实现 bug** — usage 字段失真、stream-JSON 拆分、状态机错误、prompt cache 行为、token 计算 | 大家盲区一致，跨协议接口看不到 | 怀疑某 worker 内部状态/计算/解析有问题；或想压测某 worker 的 stream/usage/cache pipeline |
+| **跨类 (cross-worker-type)** | 3 个 bot 不同 worker（比如 claude + kilo + openclaw）| **协议层盲区** — IPC fast-path、MCP injection、control_request round-trip、permission 协议、空回复重试 | 单一 worker 内部细节抠不深 | 想发现接口契约不一致、新增 fast-path/control 类型后做 cross-worker 验证 |
+
+**怎么选**:
+- 想发现 worker 内部 bug → 同类（参考 2026-05-21 R5：3 个 ClaudeCodeWorker 锁定 `claude_code.py:824` usage 失真）
+- 想发现协议盲区 → 跨类（参考 2026-05-19 R1-R6：claude/kilo/openclaw 三方发现 fast-path 系列问题）
+- 默认推荐：先 1 轮跨类（接口盲区），再 1 轮同类（深挖 worker 实现）。两种都需要走下面同一套 12 步流程，只是 evaluator/target 招募范围不同
+
+**同类模式特殊注意**:
+- 因为 3 个 bot worker 一致, **同 bug 可能 3 个 bot 全都有**（不是 target 独占）。修复完必须 SIGHUP 全部 3 个 bot 才算完，不只 target
+- 假设跨 bot 推广前必须 **raw jsonl grep 验证**（不要把 1 个 bot 看到的现象当成普适事实），参考 `feedback_usage-tracking-msg-id-dedupe` 里 xiaoai "CLAUDE.md 30K inject" 假设被 raw grep 证伪的案例
+
 ## The Round（12 步标准流程）
 
 每轮一个 **target**（被优化的 bot），两个 **evaluators**（互相协作的另外两个 bot）。下面以 bunny+tiemu 优化 xiaoai 为例，角色可平移。
