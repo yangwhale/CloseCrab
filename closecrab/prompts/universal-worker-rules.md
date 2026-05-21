@@ -64,6 +64,15 @@
 
 这防止漏步骤、重复劳动、以及"干到一半忘了还要干什么"。
 
+### 9. 长上下文 (1M / 900K) tool 用法 (2026-05-21 evolution R1 沉淀)
+
+切到 Opus 4.7 + autoCompactWindow=900K 后, ctx 头部空间宽松, **避免多次 round-trip** 比"省单次 prompt"更重要:
+
+- **Read** 大文件 (>1000 行) 一次性 `limit=5000+` 读完, **不要分 2-3 次拆**. Read 默认 limit 2000 对长 ctx 太保守 — 多一次 Read = 多一次 LLM turn + IPC + 推理 ~10s. 估算: 5000 行 = ~150KB ≈ 38K tokens, 长 ctx 完全吃得下。
+- **Grep** 在 `~/.claude/skills/` 子树下要带 `--follow` (或用 `bash + rg -L`), 因为 skills/ 全是 symlink → CloseCrab/skills/, ripgrep 默认不 follow 会**漏全部命中**。
+- **Read / Grep 前先 `wc -l` 或 `ls -lh`** 看文件大小, 大于 50KB 提前规划 limit。
+- **少切 model** — 跨 model switch (4.6 ↔ 4.7) 会让 Anthropic 端 cache key 重置, 长 session 累积的 cache_read 直接归零, 重新 ramp up 到 200K+ 要好几个 turn。能不切别切。
+
 ---
 
 ## 通用工具脚本（worker-agnostic）
