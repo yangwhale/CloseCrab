@@ -41,8 +41,12 @@ def make_channel() -> FeishuChannel:
     ch._restart_requested = False
     ch._loop = None
     # 这些方法我们 mock 掉, 不真连飞书
-    ch._send_long = AsyncMock(return_value=None)
+    ch._send_long = AsyncMock(return_value=None)  # 老 fallback / 兜底
     ch._execute_task = AsyncMock(return_value=None)
+    # V1.1: 聚合卡片 API
+    ch._async_send_card_with_id = AsyncMock(return_value="msg_fake_card_id")
+    ch._async_update_card = AsyncMock(return_value=True)
+    ch._build_reply_card = MagicMock(return_value={"fake": "card_json"})
     return ch
 
 
@@ -94,6 +98,8 @@ async def scenario_happy_path(out_of_order: bool = False) -> dict:
     return {
         "channel": ch,
         "send_long_calls": ch._send_long.call_args_list,
+        "send_card_calls": ch._async_send_card_with_id.call_args_list,
+        "update_card_calls": ch._async_update_card.call_args_list,
         "execute_task_calls": ch._execute_task.call_args_list,
         "mark_done_calls": ch._inbox.mark_done.call_args_list,
     }
@@ -109,6 +115,7 @@ async def scenario_old_fallback() -> dict:
     )
     return {
         "send_long_calls": ch._send_long.call_args_list,
+        "send_card_calls": ch._async_send_card_with_id.call_args_list,
         "execute_task_calls": ch._execute_task.call_args_list,
     }
 
@@ -123,6 +130,7 @@ async def scenario_orphan_progress() -> dict:
     )
     return {
         "send_long_calls": ch._send_long.call_args_list,
+        "send_card_calls": ch._async_send_card_with_id.call_args_list,
         "execute_task_calls": ch._execute_task.call_args_list,
     }
 
@@ -168,11 +176,26 @@ async def run_all() -> int:
     ):
         fail += 1
 
-    # T3: progress 阶段 _send_long 调用 5 次 (kickoff 也调 1 次, 总 6 次)
+    # T3+T4: V1.1 聚合卡片 — kickoff 1 次 send_card, 5 progress + 1 done = 6 次 update_card
+    # 共 1 send + 6 patch = 7 个卡片 API 调用. _send_long 应该 0 次 (兜底没触发).
+    send_card_count = len(res["send_card_calls"])
+    update_card_count = len(res["update_card_calls"])
     send_long_count = len(res["send_long_calls"])
     if not _check(
-        "T3+T4. _send_long 调用 6 次 (1 kickoff + 5 progress)",
-        send_long_count == 6,
+        "T3. _async_send_card_with_id 调用 1 次 (kickoff 发主卡)",
+        send_card_count == 1,
+        f"实际 {send_card_count} 次",
+    ):
+        fail += 1
+    if not _check(
+        "T4. _async_update_card 调用 6 次 (5 progress patch + 1 done patch)",
+        update_card_count == 6,
+        f"实际 {update_card_count} 次",
+    ):
+        fail += 1
+    if not _check(
+        "T4b. _send_long 兜底未触发 (聚合卡片成功, 不应走兜底)",
+        send_long_count == 0,
         f"实际 {send_long_count} 次",
     ):
         fail += 1
@@ -237,8 +260,39 @@ async def run_all() -> int:
 
     print()
     print("=" * 65)
+    print("Test 9: V1.1 聚合卡片 markdown — 乱序 progress 仍按 seq 排序展示")
+    print("=" * 65)
+    # 重跑乱序 scenario, 拿 _build_task_aggregation_markdown 的输入参数验证
+    res_oo2 = await scenario_happy_path(out_of_order=True)
+    # 取 task 对象从 registry, 用真 _build_task_aggregation_markdown 渲染
+    from closecrab.channels.feishu import FeishuChannel
+    ch = res_oo2["channel"]
+    task = ch._task_registry.get("abcd1234")
+    if task is None:
+        _check("T9. task 应该在 registry 里", False, "registry 没找到 abcd1234")
+        fail += 1
+    else:
+        md = FeishuChannel._build_task_aggregation_markdown(
+            ch, task, done_text="测试结论", done_label="done",
+        )
+        # 5 个 label 应该按 1, 2, 3, 4, 5 顺序出现
+        labels_oo = ["GPU 检测", "TPU 初始化", "数据加载", "模型 forward", "模型 backward"]
+        positions = [md.find(lbl) for lbl in labels_oo]
+        in_seq = all(positions[i] < positions[i + 1] for i in range(len(positions) - 1))
+        all_found = -1 not in positions
+        # 应该含 ✅ 完成区域
+        has_done = "## ✅ 完成" in md and "测试结论" in md
+        if not _check(
+            "T9. markdown 含全部 5 label 按 seq 序 + ✅ 完成区域",
+            in_seq and all_found and has_done,
+            f"in_seq={in_seq} all_found={all_found} has_done={has_done}",
+        ):
+            fail += 1
+
+    print()
+    print("=" * 65)
     if fail == 0:
-        print(f"✅ ALL PASS ({8} tests)")
+        print(f"✅ ALL PASS ({10} tests)")
         return 0
     print(f"❌ {fail} test(s) FAILED")
     return 1

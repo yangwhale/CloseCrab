@@ -443,7 +443,45 @@ python3 ~/CloseCrab/scripts/inbox-send.py <主bot> "<最终结论 + 完整结果
 - Web UI 看 task 进度
 - **给 inbox task 用独立 user_key** — 实现真正的 done turn 并发，绕开 BotCore per-user lock 串行
 
-## 9. Bonus 修复：Firestore SDK Watch race (2026-05-21)
+## 9. V1.1 改进：飞书 task_id 聚合卡片 (2026-05-21 下午)
+
+### 问题
+
+V1 实现下，一个 task_id 在飞书会发 **N 个独立消息**：1 kickoff 消息 + N progress 消息 + 1 done LLM turn 卡片。多 bot 并发时屏幕会被 task 消息淹没，乱序到达的 progress 也散在多条独立消息里看不清顺序。
+
+### V1.1 设计
+
+**一个 task_id = 一个聚合卡片**, 不同 bot = 不同 task_id = 不同卡。kickoff 发**主聚合卡** (拿 `message_id` 存到 `task.main_card_id`), progress + done 都 `_async_update_card(main_card_id, new_card)` patch 同一张卡。乱序 progress 在卡片内**按 `phase_seq` 排序**展示，渲染时整齐 1, 2, 3...
+
+```
+┌─ 📋 bunny 任务 task_id=220cf7a4 ─┐
+│   开启 05:30:12                  │
+│   ✓ 1. uptime   05:30:12          │ ← 一张聚合卡片
+│   ✓ 2. time     05:30:13          │   一直 patch
+│   ✓ 3. procs    05:30:14          │
+│   ✅ done       05:30:15          │
+└────────────────────────────────────┘
+┌─ 🦀 jarvis 回应中... ─┐ ← done 触发的 LLM turn 是新卡 (螃蟹动画)
+└────────────────────────┘
+```
+
+### 实现 (closecrab/channels/feishu.py)
+
+- `_build_task_aggregation_markdown(task, done_text, done_label, kickoff_text)` — 渲染聚合卡 markdown, progress 按 `seq` 排序展示, content 截断 300 字符
+- `_send_or_patch_task_card(task, ...)` — kickoff 发新卡存 `main_card_id`, 后续 patch; 失败 fallback `_send_long`
+- 3 phase handler 改用上述 helper, 替换 V1 的多次 `_send_long`
+
+### 测试 (scripts/test-inbox-protocol.py, 10 PASS)
+
+新增 T9 验证乱序 progress 在聚合卡 markdown 里仍按 `seq` 序展示。T3-T4 改 assertion 从 `_send_long=6` → `_async_send_card_with_id=1 + _async_update_card=6`.
+
+### 边界
+
+- patch_card API rate limit (每秒 1-2 次): progress 通常 >1s 间隔安全, 撞上时 `try/except` log warn 不影响 buffer state
+- 卡片字符上限 ~50KB: progress content [:300], done_text [:500] 截断, 10+ 阶段通常安全
+- `main_card_id` 失效 (jarvis 重启 / 飞书删卡): patch 失败 log warn, 任务仍在 registry, done turn 仍正常触发
+
+## 10. Bonus 修复：Firestore SDK Watch race (2026-05-21)
 
 ### 触发场景
 

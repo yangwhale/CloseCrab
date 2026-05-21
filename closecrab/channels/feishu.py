@@ -2097,11 +2097,119 @@ class FeishuChannel(Channel):
         """
         return next(reversed(self._user_chats.values()), "")
 
+    def _build_task_aggregation_markdown(
+        self, task: _TaskState,
+        done_text: str = "", done_label: str = "",
+        kickoff_text: str = "",
+    ) -> str:
+        """V1.1: task 聚合卡片 markdown (kickoff/progress/done 都更新同一卡片).
+
+        Progress 按 `phase_seq` 排序展示, 乱序到达也能整齐 1, 2, 3...
+        done 时加 ✅ 完成区域. progress content > 300 字符截断.
+        """
+        kickoff_ts = task.kickoff_at.strftime("%H:%M:%S")
+        last_ts = task.last_update_at.strftime("%H:%M:%S")
+        status_emoji = "✅" if task.status == "done" else "⏳"
+        header_line = f"# {status_emoji} {task.task_name or '(unnamed task)'}"
+
+        lines = [
+            header_line,
+            "",
+            f"**来自** `{task.worker_bot}` | **ID** `{task.task_id}` | "
+            f"**开始** {kickoff_ts} | **更新** {last_ts}",
+            "",
+        ]
+
+        # Kickoff text (仅显示, 不污染 progress 时间线)
+        if kickoff_text:
+            kickoff_short = kickoff_text[:200]
+            lines.extend([f"> {kickoff_short}", ""])
+
+        # Progress 时间线 (按 seq 排序)
+        if task.progress_buffer:
+            lines.append(f"## 进度时间线 (共 {len(task.progress_buffer)} 项)")
+            lines.append("")
+            for b in task.progress_buffer:
+                ts = b["ts"].strftime("%H:%M:%S")
+                label = b.get("label") or "(无标签)"
+                content = (b.get("content") or "").strip()
+                lines.append(f"**✓ {b['seq']}. {label}** _{ts}_")
+                if content:
+                    # 截断 + blockquote
+                    content_short = content[:300]
+                    truncated = " ..." if len(content) > 300 else ""
+                    for cl in content_short.split("\n")[:5]:
+                        lines.append(f"> {cl}")
+                    if truncated:
+                        lines.append(f"> {truncated}")
+                lines.append("")
+        else:
+            lines.extend(["_(还没有进度)_", ""])
+
+        # Done 区域 (仅 status==done 时显示)
+        if task.status == "done":
+            lines.append("---")
+            lines.append("")
+            done_label_text = f" — {done_label}" if done_label else ""
+            lines.append(f"## ✅ 完成{done_label_text} _{last_ts}_")
+            lines.append("")
+            if done_text:
+                done_short = done_text[:500]
+                truncated = " ..." if len(done_text) > 500 else ""
+                lines.append(done_short + truncated)
+        else:
+            lines.append("_等待更多进度..._")
+
+        return "\n".join(lines)
+
+    async def _send_or_patch_task_card(
+        self, task: _TaskState,
+        kickoff_text: str = "", done_text: str = "", done_label: str = "",
+    ) -> None:
+        """V1.1: 发或 patch task 聚合卡片. 失败 fallback 走 _send_long.
+
+        - main_card_id 空 -> _async_send_card_with_id 发新卡, 存 id
+        - main_card_id 有 -> _async_update_card patch 卡片
+        - 任何失败 -> 用 _send_long 发当前 markdown 当兜底, 至少用户看得到
+        """
+        if not task.chat_id:
+            return  # 没 chat, kickoff handler 已 warn 过
+        md = self._build_task_aggregation_markdown(
+            task, done_text=done_text, done_label=done_label,
+            kickoff_text=kickoff_text,
+        )
+        card = self._build_reply_card(md)
+
+        if not task.main_card_id:
+            # 发新主卡
+            try:
+                mid = await self._async_send_card_with_id(task.chat_id, card)
+                if mid:
+                    task.main_card_id = mid
+                    return
+            except Exception as e:
+                log.warning(f"Task aggregation card send failed: {e}")
+            # fallback: 至少发个文本不让用户看不见
+            try:
+                await self._send_long(task.chat_id, md)
+            except Exception as e:
+                log.warning(f"Task aggregation fallback _send_long failed: {e}")
+            return
+
+        # patch 已有主卡
+        try:
+            await self._async_update_card(task.main_card_id, card)
+        except Exception as e:
+            log.warning(
+                f"Task aggregation card patch failed "
+                f"(task={task.task_id}, card={task.main_card_id}): {e}"
+            )
+
     async def _handle_task_kickoff(
         self, from_bot: str, task_id: str, task_name: str,
         kickoff_text: str, record_id: str,
     ):
-        """Kickoff: 注册 task, 发主消息, mark inbox done. 不触发 Claude turn."""
+        """Kickoff: 注册 task, 发聚合主卡片, mark inbox done. 不触发 Claude turn."""
         chat_id = self._resolve_task_chat(from_bot)
         loop = asyncio.get_running_loop()
 
@@ -2111,19 +2219,9 @@ class FeishuChannel(Channel):
                 f"still register task in memory"
             )
 
-        if chat_id:
-            body = (
-                f"📋 **{task_name or '(unnamed task)'}**\n"
-                f"任务开启 | 来自 `{from_bot}` | ID: `{task_id}`\n\n"
-                f"{kickoff_text}"
-            )
-            try:
-                await self._send_long(chat_id, body)
-            except Exception as e:
-                log.warning(f"Kickoff card send failed: {e}")
-
+        # V1.1: 先注册 task (拿到 _TaskState 对象), 再发聚合卡 (拿 main_card_id 存进去)
         now = datetime.now(timezone.utc)
-        self._task_registry[task_id] = _TaskState(
+        task = _TaskState(
             task_id=task_id,
             task_name=task_name,
             worker_bot=from_bot,
@@ -2133,6 +2231,10 @@ class FeishuChannel(Channel):
             progress_buffer=[],
             status="active",
         )
+        self._task_registry[task_id] = task
+
+        # 发聚合主卡片 — 把 main_card_id 写入 task 供后续 patch
+        await self._send_or_patch_task_card(task, kickoff_text=kickoff_text)
 
         if self._inbox:
             await loop.run_in_executor(
@@ -2140,7 +2242,8 @@ class FeishuChannel(Channel):
             )
         log.info(
             f"Task kickoff registered: id={task_id} name={task_name!r} "
-            f"from={from_bot} chat={chat_id or 'N/A'}"
+            f"from={from_bot} chat={chat_id or 'N/A'} "
+            f"card={task.main_card_id or 'N/A'}"
         )
 
     async def _handle_task_progress(
@@ -2187,17 +2290,9 @@ class FeishuChannel(Channel):
         task.progress_buffer.sort(key=lambda b: b["seq"])
         task.last_update_at = datetime.now(timezone.utc)
 
-        # 发小进度消息 (旁路 BotCore, 不触发 turn)
-        if task.chat_id:
-            body = (
-                f"⏳ **{task.task_name}** · 进度 {phase_seq}"
-                f"{': ' + phase_label if phase_label else ''}\n\n"
-                f"{content}"
-            )
-            try:
-                await self._send_long(task.chat_id, body)
-            except Exception as e:
-                log.warning(f"Progress card send failed: {e}")
+        # V1.1: patch 主聚合卡片 (旁路 BotCore, 不触发 turn)
+        # 进度内容按 seq 排序整齐展示, 即使乱序到达
+        await self._send_or_patch_task_card(task)
 
         if self._inbox:
             await loop.run_in_executor(
@@ -2243,10 +2338,16 @@ class FeishuChannel(Channel):
         task.status = "done"
         task.last_update_at = datetime.now(timezone.utc)
 
+        # V1.1: 先 patch 主聚合卡片加 ✅ 完成区域 (用户立刻看到任务收尾)
+        await self._send_or_patch_task_card(
+            task, done_text=done_text, done_label=phase_label,
+        )
+
         prompt = self._assemble_done_prompt(task, done_text, phase_label)
         chat_id = task.chat_id or self._resolve_task_chat(from_bot)
 
         # _execute_task 的 summary 字段就是 prompt body, 直接传组装好的 prompt
+        # 这是一个新的螃蟹动画卡 (LLM 处理 turn), 跟聚合卡区分
         await self._execute_task(
             task_id=record_id,  # 用 firestore record_id 做防重 dedup
             summary=prompt,
