@@ -348,7 +348,13 @@ def build_system_prompt(
     if worker_type in ("gemini", "kilo", "openclaw"):
         _guide_path = Path(__file__).parent / "prompts" / "gemini-worker-guide.md"
         try:
-            prompt += "\n\n" + _guide_path.read_text(encoding="utf-8")
+            _guide_text = _guide_path.read_text(encoding="utf-8")
+            # Kilo 没装 Chrome MCP, 跳过 "Chrome MCP 上下文管控" 段 (~300 tok)
+            if worker_type == "kilo":
+                _cm_idx = _guide_text.find("## Chrome MCP")
+                if _cm_idx > 0:
+                    _guide_text = _guide_text[:_cm_idx].rstrip()
+            prompt += "\n\n" + _guide_text
         except FileNotFoundError:
             pass
 
