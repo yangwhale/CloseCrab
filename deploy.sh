@@ -32,6 +32,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config/env.sh"
+
+# --- Skill allowlist helper ---
+# 不在 allowlist 的 skill 在 deploy 时全部跳过 (Claude Code / Gemini / OpenClaw 一致)
+SKILL_ALLOWLIST_FILE="${SKILL_ALLOWLIST_FILE:-$SCRIPT_DIR/config/skill-allowlist.txt}"
+SKILL_ALLOWLIST=()
+if [[ -f "$SKILL_ALLOWLIST_FILE" ]]; then
+    while IFS= read -r _line; do
+        _line="${_line%%#*}"   # 去行内注释
+        _line="${_line//[[:space:]]/}"
+        [[ -z "$_line" ]] && continue
+        SKILL_ALLOWLIST+=("$_line")
+    done < "$SKILL_ALLOWLIST_FILE"
+fi
+skill_allowed() {
+    # allowlist 缺失 → 不过滤 (兼容旧行为)
+    [[ ${#SKILL_ALLOWLIST[@]} -eq 0 ]] && return 0
+    local target="$1"
+    for s in "${SKILL_ALLOWLIST[@]}"; do
+        [[ "$s" == "$target" ]] && return 0
+    done
+    return 1
+}
+
 MODE="full"
 USE_NPM=false
 INSTALL_VOICE=false
@@ -622,27 +645,37 @@ install_cc() {
         rm ~/.claude/skills
     fi
     mkdir -p ~/.claude/skills
-    cp -a "$SCRIPT_DIR/skills/"* ~/.claude/skills/ 2>/dev/null || true
-    # 私有 skills (从 ClosedCrab)
+    # Public skills — 按 allowlist 过滤
+    for skill_dir in "$SCRIPT_DIR/skills/"*/; do
+        [[ -d "$skill_dir" ]] || continue
+        local skill_name="$(basename "$skill_dir")"
+        skill_allowed "$skill_name" || continue
+        rm -rf ~/.claude/skills/"$skill_name"
+        cp -a "$skill_dir" ~/.claude/skills/
+    done
+    # 私有 skills (从 ClosedCrab) — 同样按 allowlist 过滤
     if [[ -d "$HOME/ClosedCrab/skills" ]]; then
         for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
             [[ -d "$skill_dir" ]] || continue
             local skill_name="$(basename "$skill_dir")"
+            skill_allowed "$skill_name" || continue
             rm -rf ~/.claude/skills/"$skill_name"
             cp -a "$skill_dir" ~/.claude/skills/
         done
-        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, 含私有 skills)"
+        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, 含私有 skills, allowlist 过滤)"
     else
-        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个)"
+        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, allowlist 过滤)"
     fi
 
     # Gemini CLI skills linking (if gemini CLI is available)
     if command -v gemini &>/dev/null; then
         echo "  检测到 Gemini CLI，链接 Skills..."
-        local GEMINI_SKIP="bwrap-bypass session-handoff skill-creator vscode-reference"
+        # Gemini 不需要的 Claude 专属 skill (Gemini 已有等价能力或不适配)
+        local GEMINI_SKIP="session-handoff skill-creator"
         local gemini_linked=0
         for skill_dir in "$SCRIPT_DIR/skills/"*/; do
             local skill_name=$(basename "$skill_dir")
+            skill_allowed "$skill_name" || continue
             if echo "$GEMINI_SKIP" | grep -qw "$skill_name"; then
                 continue
             fi
@@ -655,6 +688,7 @@ install_cc() {
             for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name=$(basename "$skill_dir")
+                skill_allowed "$skill_name" || continue
                 if echo "$GEMINI_SKIP" | grep -qw "$skill_name"; then
                     continue
                 fi
@@ -953,12 +987,17 @@ with open(path, 'w') as f:
         fi
 
         # OpenClaw 不支持 symlink (symlink-escape 安全机制), 必须 cp -r
+        # 同样按 allowlist 过滤; archive 的 skill 主动从 workspace 清掉
         mkdir -p "$HOME/.openclaw/workspace/skills"
         local OC_SKILL_COUNT=0
         if [[ -d "$SCRIPT_DIR/skills" ]]; then
             for skill_dir in "$SCRIPT_DIR/skills"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name="$(basename "$skill_dir")"
+                if ! skill_allowed "$skill_name"; then
+                    rm -rf "$HOME/.openclaw/workspace/skills/$skill_name"
+                    continue
+                fi
                 # 跳过 Claude 专属 skill (清理历史残留)
                 if [[ "$skill_name" == "skill-creator" ]]; then
                     rm -rf "$HOME/.openclaw/workspace/skills/skill-creator"
@@ -974,6 +1013,10 @@ with open(path, 'w') as f:
             for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name="$(basename "$skill_dir")"
+                if ! skill_allowed "$skill_name"; then
+                    rm -rf "$HOME/.openclaw/workspace/skills/$skill_name"
+                    continue
+                fi
                 # bugged skill 仅在 gLinux 上保留 (CLI 直调), 云上机器删除
                 if [[ "$skill_name" == "bugged" && $IS_GLINUX -eq 0 ]]; then
                     rm -rf "$HOME/.openclaw/workspace/skills/bugged"
@@ -984,7 +1027,7 @@ with open(path, 'w') as f:
                 OC_SKILL_COUNT=$((OC_SKILL_COUNT + 1))
             done
         fi
-        echo "  已部署 $OC_SKILL_COUNT 个 skills 到 ~/.openclaw/workspace/skills/"
+        echo "  已部署 $OC_SKILL_COUNT 个 skills 到 ~/.openclaw/workspace/skills/ (allowlist 过滤)"
 
         # bugged MCP 仅在云上机器保留, gLinux 上删除以走 CLI 路径
         if [[ $IS_GLINUX -eq 1 ]]; then

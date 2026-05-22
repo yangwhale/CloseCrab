@@ -1,0 +1,37 @@
+# Skill Allowlist — deploy 时只 link/install 这里列出的 skill
+#
+# 一行一个 skill 名 (kebab-case). # 开头的行是注释.
+# 不在这里的 skill 会被 dispatch-bot.sh / install-private-skills.sh / deploy.sh 跳过.
+#
+# 源码完整保留在 ~/CloseCrab/skills/ (public) 和 ~/ClosedCrab/skills/ (private).
+# 临时需要某个 archive 的 skill, 在这里加一行 + 跑 deploy 即可恢复.
+#
+# 2026-05-22 初版 23 个 active (从 50 砍下来, 28 个 archive 到 ~/.claude/skills-archive/).
+# 见 ~/.claude/skills-archive/README.md 了解 archive 分档.
+
+# === A 档: 核心日常 (8) ===
+agent-teams
+chat-style
+evolution
+notify
+session-handoff
+smoke-test
+tts-generator
+wiki
+
+# === B 档: 周/月使用 (15) ===
+bot-config
+chrome-browser
+code-wiki-recon
+customer-qa-tracker
+feishu-mail
+fireworks-tech-graph
+frontend-slides
+gemini-cli
+go-eat
+google-internal-mcp
+imagen-generator
+internal-doc-site
+page-style
+skill-creator
+vector

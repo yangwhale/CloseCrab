@@ -221,10 +221,25 @@ ENVEOF
     # 远程 memory dir 使用 -home-<user> 格式
     ssh "$ssh_host" "PROJ_NAME=\$(echo \$HOME | tr '/' '-'); mkdir -p ~/.claude/skills ~/.claude/projects/\${PROJ_NAME}/memory" </dev/null
 
-    # Skills
-    rsync -az --exclude='learned' \
-        "$HOME/.claude/skills/" "$ssh_host:~/.claude/skills/" 2>&1 | sed 's/^/    /'
-    echo "    Skills synced"
+    # Skills — 用 allowlist 过滤, 只 sync 列表内的; --delete 清理远端 archive 残留
+    local allowlist="${PROJECT_DIR}/config/skill-allowlist.txt"
+    if [[ -f "$allowlist" ]]; then
+        # 从 allowlist 抽出名字 (跳过空行和注释), 生成 rsync include 规则
+        local include_args=()
+        while IFS= read -r name; do
+            [[ -z "$name" || "$name" =~ ^# ]] && continue
+            include_args+=("--include=${name}" "--include=${name}/**")
+        done < "$allowlist"
+        rsync -az --delete --delete-excluded --exclude='learned' \
+            "${include_args[@]}" --exclude='*' \
+            "$HOME/.claude/skills/" "$ssh_host:~/.claude/skills/" 2>&1 | sed 's/^/    /'
+        echo "    Skills synced ($(grep -cvE '^(#|$)' "$allowlist") allowlisted)"
+    else
+        # Fallback: 老行为镜像整个目录
+        rsync -az --exclude='learned' \
+            "$HOME/.claude/skills/" "$ssh_host:~/.claude/skills/" 2>&1 | sed 's/^/    /'
+        echo "    Skills synced (no allowlist, full mirror)"
+    fi
 
     # Memory (gLinux path → VM path)
     local local_memory_dir
