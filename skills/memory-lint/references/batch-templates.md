@@ -167,6 +167,33 @@ done
 
 **救援**：检查是否有重复 link（同一 cluster file 被 link 多次）。Cross-surface link ≤2 个 ok，>2 需要重新评估。
 
+### 失败 5: Write 报 "File has not been read yet"
+
+**症状**：覆盖已存在文件时 CC tool 报错 `File has not been read yet. Read it first before writing to it.`
+
+**根因**：CC tool state 要求 — 覆盖任何 disk 上已存在的文件前必须先 Read（让 tool state 记录文件指纹）。这次战役至少 3 次踩到（cert-expiry / pptx-text-in-shape / openclaw bunny shared/gcp-infra.md），每次都让 sub-file 内容暂时丢失。
+
+**救援步骤**：
+```python
+# 1. Read 让 tool state 记录
+Read(cluster_file)
+
+# 2. Write 重试，这次成功
+Write(cluster_file, content)
+
+# 3. 验证内容已更新（可选）
+Read(cluster_file)  # 看新内容
+```
+
+**预防模板**（写 cluster file 前显式 Read）：
+```python
+if cluster_file.exists():
+    Read(cluster_file)  # MANDATORY before Write to existing file
+Write(cluster_file, new_content)
+```
+
+**特别注意**：sync 后的 shared/X.md 也会触发这个 — 即使 file 是从 openclaw bot workspace rsync 来的，Write 前仍要 Read。
+
 ### 失败 4: 小爱回归测试 FAIL
 
 **症状**：bot 答不出 / 答案错 / 找不到 cluster file。
