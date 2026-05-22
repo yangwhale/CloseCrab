@@ -112,6 +112,8 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
         # LiveKit voice IO 配置 (顶层, 跟 channel 解耦):
         # {url, api_key, api_secret, frontend_url, enabled}
         "livekit": data.get("livekit") or {},
+        # GBrain index injection 配置: {list_limit, salience_days, base_url, creds_path, timeout, enabled}
+        "gbrain_index": data.get("gbrain_index") or {},
     }
 
     # Flatten channel-specific config to top level

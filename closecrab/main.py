@@ -116,6 +116,8 @@ def _resolve_config(bot_name: str) -> dict:
         "claude_proxy_url": cfg.get("claude_proxy_url"),
         # LiveKit voice IO 配置 (仅飞书 channel 用): {url, api_key, api_secret, frontend_url, enabled}
         "livekit": cfg.get("livekit") or {},
+        # GBrain index injection 配置: {list_limit, salience_days, base_url, creds_path, timeout, enabled}
+        "gbrain_index": cfg.get("gbrain_index") or {},
     }
 
 
