@@ -43,32 +43,58 @@ HOME = Path(os.path.expanduser("~"))
 MEM_DIR = HOME / ".claude" / "projects" / "-home-chrisya" / "memory"
 JSONL_DIR = HOME / ".claude" / "projects" / "-home-chrisya"
 MEMORY_MD = MEM_DIR / "MEMORY.md"
+MEMORY_ARCHIVE_MD = MEM_DIR / "MEMORY-archive.md"
+SHARED_DIR = MEM_DIR / "shared"
 
 # Regex matches a slug like feedback_xxx.md / project_yyy.md / user_zzz.md / reference_www.md.
 # We tolerate `.` in slugs (e.g. project_deepseek-v3.2-tpuv7.md) — the v0 audit missed those.
 SLUG_RE = re.compile(r"(?:feedback|project|user|reference)_[a-z0-9][a-z0-9.\-]*\.md", re.IGNORECASE)
+# Regex matches shared/X.md references in MEMORY.md trigger-keyword routing table.
+SHARED_RE = re.compile(r"shared/([a-z0-9_-]+\.md)", re.IGNORECASE)
 TIMESTAMP_RE = re.compile(r"\(updated\s+(\d{4}-\d{2}-\d{2})\)")
 WAKE_HEADER_RE = re.compile(r"^##\s+醒来第一件事", re.MULTILINE)
 NEXT_HEADER_RE = re.compile(r"^##\s+", re.MULTILINE)
 
 
 def list_disk_memories() -> set[str]:
-    """All *.md files in memory/ except MEMORY.md and shared/."""
+    """All *.md files in memory/ except MEMORY.md / MEMORY-archive.md / shared/."""
     out: set[str] = set()
     for p in MEM_DIR.glob("*.md"):
-        if p.name == "MEMORY.md":
+        if p.name in ("MEMORY.md", "MEMORY-archive.md"):
             continue
         out.add(p.name)
     return out
 
 
-def list_indexed_slugs(mem_md_text: str) -> dict[str, int]:
-    """Return slug -> occurrence count in MEMORY.md."""
+def list_indexed_slugs(mem_md_text: str, archive_text: str = "") -> dict[str, int]:
+    """Return slug -> occurrence count across MEMORY.md + MEMORY-archive.md.
+
+    MEMORY-archive.md (created 2026-05-22) is the second-tier index for
+    long-tail archive content. Without including it, all archived projects
+    appear as orphans.
+    """
     counts: dict[str, int] = {}
-    for m in SLUG_RE.finditer(mem_md_text):
+    combined = mem_md_text + "\n" + archive_text
+    for m in SLUG_RE.finditer(combined):
         slug = m.group(0).lower()
         counts[slug] = counts.get(slug, 0) + 1
     return counts
+
+
+def detect_shared_dead_links(mem_md_text: str) -> list[str]:
+    """Find shared/X.md references in MEMORY.md that don't exist on disk.
+
+    Added 2026-05-22 after discovering 9 dead shared/* references that had
+    been silently broken — MEMORY.md trigger-keyword routing pointed bots to
+    files that didn't exist on jarvis (they only lived in OpenClaw bot
+    workspaces). Bots followed the index and Read 404'd every time.
+    """
+    dead: list[str] = []
+    referenced = {m.group(1).lower() for m in SHARED_RE.finditer(mem_md_text)}
+    for fname in sorted(referenced):
+        if not (SHARED_DIR / fname).exists():
+            dead.append(f"shared/{fname}")
+    return dead
 
 
 def find_wake_section(text: str) -> str:
@@ -159,6 +185,7 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
         len(report["stale_timestamps"])
         + len(report["duplicates"])
         + len(report["dead_index"])
+        + len(report.get("shared_dead_links", []))
     )
 
     # action-only mode: 健康就 silent done
@@ -201,6 +228,18 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
         if report["dead_index"]:
             lines += ["### 💀 死索引 (MEMORY 有 disk 没)", ""]
             for s in report["dead_index"]:
+                lines.append(f"- `{s}`")
+            lines.append("")
+        if report.get("shared_dead_links"):
+            lines += [
+                "### 🪦 shared/ 死链 (索引指向但本机 disk 没该文件)",
+                "",
+                "MEMORY.md 触发关键词路由表里写了 `shared/X.md` 但本机 disk 不存在. "
+                "bot 跟着索引去 Read 会 404. 修复: `rsync ~/.closecrab/openclaw-workspace/bunny/memory/shared/ "
+                f"{SHARED_DIR}/` 或删 MEMORY.md 里的 shared/ 索引段.",
+                "",
+            ]
+            for s in report["shared_dead_links"]:
                 lines.append(f"- `{s}`")
             lines.append("")
 
@@ -279,14 +318,16 @@ def main():
         sys.exit(1)
 
     text = MEMORY_MD.read_text()
+    archive_text = MEMORY_ARCHIVE_MD.read_text() if MEMORY_ARCHIVE_MD.exists() else ""
     disk = list_disk_memories()
-    indexed = list_indexed_slugs(text)
+    indexed = list_indexed_slugs(text, archive_text)
     today = date.today()
 
     orphans, dead = detect_orphans_and_dead(disk, indexed)
     duplicates = detect_duplicates(indexed)
     stale = detect_stale_timestamps(text, today, args.stale_days)
     cold = detect_cold_links(indexed, args.cold_days)
+    shared_dead = detect_shared_dead_links(text)
 
     report = {
         "today": today.isoformat(),
@@ -296,6 +337,7 @@ def main():
         "indexed": sorted(indexed),
         "orphans": orphans,
         "dead_index": dead,
+        "shared_dead_links": shared_dead,
         "duplicates": duplicates,
         "stale_timestamps": stale,
         "cold_links": cold,
