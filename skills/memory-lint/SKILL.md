@@ -49,6 +49,8 @@ bash ~/CloseCrab/skills/memory-lint/scripts/full-health.sh
 
 ### Phase 2 — 集群合并设计（必须用户确认才执行）
 
+`cluster-scan.sh` 只做**前缀匹配**，会误聚跨主题文件（如 `use-jina-not-tavily` / `use-coding-mcp-directly` / `use-monitor-not-agent` 前缀都是 `use` 但主题完全不同）。**必须 LLM judgment 二次过滤**。
+
 按主题集群提议合并方案：
 
 | 集群规则 | 触发 | 示例 |
@@ -57,6 +59,12 @@ bash ~/CloseCrab/skills/memory-lint/scripts/full-health.sh
 | **同主题 sub-file 2** | 评估再定 | 内容互补则合，独立 topic 则留 |
 | **跨主题 sub-file** | **不合** | use-jina vs use-coding vs use-monitor 主题各异 |
 | **`project_*` 文件** | **保持独立** | Active 项目页是动态的，不合到 feedback cluster |
+
+**合并方案模板必须含 4 个字段**：
+- **Cluster name**: 主题
+- **Members**: sub-file list + 行数
+- **Merge to**: new cluster file name
+- **Non-merge explanation** *(必填)*：解释为啥不把这些文件合到别的现有 cluster，或者为啥这个集群可以独立成型。即使决定合并也要写"为什么是这几个文件而不是 N+1 个"
 
 **合并方案模板**（给用户拍板）：
 

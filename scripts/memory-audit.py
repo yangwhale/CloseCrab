@@ -261,14 +261,16 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
     # === ℹ️ INFO ONLY: deliberate duplicates (cross-surface links) ===
     if report["duplicates"]:
         lines += [
-            f"## ℹ️ INFO: 重复索引 ({len(report['duplicates'])} 个)",
+            f"## ℹ️ INFO: 重复索引 ({len(report['duplicates'])} 个) — **绝大多数是 deliberate cross-surface link**",
             "",
-            "_同 slug 在 MEMORY.md 出现 2+ 次. 通常是 deliberate cross-surface link "
-            "(同一 cluster file 从多个认知域 surface), **不算 actionable**. 检查时确认是 deliberate 还是误粘._",
+            "_同一 cluster file 从多个认知域 surface 是设计选择 (例如 feedback_botcore-api.md "
+            "在 C1 ClaudeCodeWorker / C5 BotCore + API / Vertex fallback 段都 link)._",
+            "",
+            "_**不算 actionable**. 但每年 review 一次, 确认 cross-surface 仍有 surface 价值不是误粘._",
             "",
         ]
         for slug, n in report["duplicates"]:
-            lines.append(f"- `{slug}` × {n} 次")
+            lines.append(f"- `{slug}` × {n} 次 (deliberate cross-surface)")
         lines.append("")
 
     # === ℹ️ INFO ONLY (cold links — 绝不强清) ===
