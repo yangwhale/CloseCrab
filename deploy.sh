@@ -844,6 +844,12 @@ for name, mcfg in cfg['mcpServers'].items():
         mcfg['type'] = 'sse'
         print(f'  [gemini] {name}: added type=sse')
         changed = True
+# Remove redundant stdio MCPs (parity with Claude side, ~7.8K tokens saved at cold start)
+for redundant in ('github', 'playwright'):
+    if redundant in cfg['mcpServers']:
+        del cfg['mcpServers'][redundant]
+        print(f'  [gemini] Removed redundant {redundant} stdio MCP')
+        changed = True
 if changed:
     with open(path, 'w') as f:
         json.dump(cfg, f, indent=2)
@@ -890,6 +896,12 @@ else:
 if 'pipecat' in cfg['mcpServers']:
     del cfg['mcpServers']['pipecat']
     print('  Removed deprecated pipecat MCP')
+# Remove redundant stdio MCPs covered by official plugins (~7.8K tokens saved per cold start)
+# These are historical npx installs superseded by github@/playwright@ plugins in settings.json.enabledPlugins
+for redundant in ('github', 'playwright'):
+    if redundant in cfg['mcpServers']:
+        del cfg['mcpServers'][redundant]
+        print(f'  Removed redundant {redundant} stdio MCP (use plugin version in settings.json instead)')
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
 "
