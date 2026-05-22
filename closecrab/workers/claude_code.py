@@ -773,7 +773,12 @@ class ClaudeCodeWorker(Worker):
                         if not result_text:
                             log.warning(f"Claude returned empty result. is_error={d.get('is_error')}, "
                                         f"session={self._session_id}, duration={d.get('duration_ms')}")
-                            if not empty_retry_done:
+                            # Slash commands (e.g. /compact, /clear) emit
+                            # <local-command-stdout> markers but no LLM text,
+                            # so empty result is EXPECTED — don't resend or
+                            # we'd double-trigger the command.
+                            is_slash_cmd = text.strip().startswith("/")
+                            if not empty_retry_done and not is_slash_cmd:
                                 empty_retry_done = True
                                 log.info("Empty result -- resending prompt once before giving up")
                                 accumulated_reply_text = ""
@@ -784,6 +789,9 @@ class ClaudeCodeWorker(Worker):
                                     log.warning(f"Empty-result retry resend failed: {e}")
                                     return "(Claude 处理完成但未生成文字回复)"
                                 continue
+                            if is_slash_cmd:
+                                log.info(f"Slash command {text.strip()[:20]} returned empty (expected), skipping retry")
+                                return f"Slash command {text.strip()[:30]} done"
                         return result_text or "(Claude 处理完成但未生成文字回复)"
 
                     # ── control_request 拦截 ──

@@ -3349,9 +3349,39 @@ class FeishuChannel(Channel):
             await self._handle_voice_command(user_key, chat_id)
 
         elif cmd == "/cmp":
-            await self._async_send_text(chat_id, "🗜 Compact 中...")
-            result = await self._core.compact_user_session(user_key)
-            await self._async_send_text(chat_id, f"✅ {result[:500]}")
+            import time as _time
+            await self._async_send_text(chat_id, "🗜 Compact 中... (预计 ~60s, 1MB ctx)")
+            _start = _time.monotonic()
+            _stop = asyncio.Event()
+
+            async def _heartbeat():
+                # 每 15s 报一次进度，直到 stop 被 set
+                while not _stop.is_set():
+                    try:
+                        await asyncio.wait_for(_stop.wait(), timeout=15.0)
+                        return  # stop set 期间内 → 退出
+                    except asyncio.TimeoutError:
+                        elapsed = int(_time.monotonic() - _start)
+                        try:
+                            await self._async_send_text(
+                                chat_id, f"🗜 还在压缩... ({elapsed}s elapsed)"
+                            )
+                        except Exception:
+                            return  # send 失败就停
+
+            hb_task = asyncio.create_task(_heartbeat())
+            try:
+                result = await self._core.compact_user_session(user_key)
+            finally:
+                _stop.set()
+                try:
+                    await asyncio.wait_for(hb_task, timeout=2.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    hb_task.cancel()
+            elapsed = int(_time.monotonic() - _start)
+            await self._async_send_text(
+                chat_id, f"✅ Compacted in {elapsed}s | {result[:400]}"
+            )
 
     async def _handle_voice_command(self, user_key: str, chat_id: str):
         """/voice 命令: 签 LiveKit JWT, 把加入链接发回飞书。
