@@ -349,8 +349,9 @@ def build_system_prompt(
         _guide_path = Path(__file__).parent / "prompts" / "gemini-worker-guide.md"
         try:
             _guide_text = _guide_path.read_text(encoding="utf-8")
-            # Kilo 没装 Chrome MCP, 跳过 "Chrome MCP 上下文管控" 段 (~300 tok)
-            if worker_type == "kilo":
+            # Kilo + OpenClaw 都不在 system prompt 展开 Chrome MCP 段
+            # (Kilo 没装 Chrome MCP; OpenClaw MCP 由 Gateway 管不需 inline 提示)
+            if worker_type in ("kilo", "openclaw"):
                 _cm_idx = _guide_text.find("## Chrome MCP")
                 if _cm_idx > 0:
                     _guide_text = _guide_text[:_cm_idx].rstrip()
