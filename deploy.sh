@@ -902,6 +902,11 @@ for redundant in ('github', 'playwright'):
     if redundant in cfg['mcpServers']:
         del cfg['mcpServers'][redundant]
         print(f'  Removed redundant {redundant} stdio MCP (use plugin version in settings.json instead)')
+# Remove low-utility MCPs (2026-05-22 usage audit: context7 had 2 calls in 30 sessions vs jina-ai 80 calls)
+# context7 ROI = 1.4K tokens / 0.4% calls = 689 tok/call (worst in the fleet). Removed.
+if 'context7' in cfg['mcpServers']:
+    del cfg['mcpServers']['context7']
+    print('  Removed low-utility context7 stdio MCP (~1.4K tokens saved)')
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
 "
