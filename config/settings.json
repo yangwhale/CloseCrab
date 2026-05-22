@@ -24,14 +24,14 @@
     ]
   },
   "enabledPlugins": {
-    "pyright-lsp@claude-plugins-official": true,
-    "context7@claude-plugins-official": true,
-    "planning-with-files@planning-with-files": true,
-    "commit-commands@claude-plugins-official": true,
+    "pyright-lsp@claude-plugins-official": false,
+    "context7@claude-plugins-official": false,
+    "planning-with-files@planning-with-files": false,
+    "commit-commands@claude-plugins-official": false,
     "explanatory-output-style@claude-plugins-official": true,
-    "github@claude-plugins-official": true,
-    "playwright@claude-plugins-official": true,
-    "ui-ux-pro-max@ui-ux-pro-max-skill": true
+    "github@claude-plugins-official": false,
+    "playwright@claude-plugins-official": false,
+    "ui-ux-pro-max@ui-ux-pro-max-skill": false
   },
   "extraKnownMarketplaces": {},
   "autoCompactWindow": 300000,
