@@ -181,9 +181,11 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
     cron 用 --action-only, 防止形成"每天清 5%"的冲动.
     """
     today = report["today"]
+    # Duplicates are deliberate cross-surface links (same cluster file linked from
+    # multiple cognitive domains in MEMORY.md) — not "must-clean". Demoted to
+    # INFO ONLY 2026-05-22 so they don't trigger daily warnings.
     action_count = (
         len(report["stale_timestamps"])
-        + len(report["duplicates"])
         + len(report["dead_index"])
         + len(report.get("shared_dead_links", []))
     )
@@ -220,11 +222,6 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
             for s in report["stale_timestamps"]:
                 lines.append(f"- `{s['date']}` ({s['age_days']}d ago): {s['line']}")
             lines.append("")
-        if report["duplicates"]:
-            lines += ["### ♊ 重复索引 (同 slug 2+ 次)", ""]
-            for slug, n in report["duplicates"]:
-                lines.append(f"- `{slug}` × **{n}** 次")
-            lines.append("")
         if report["dead_index"]:
             lines += ["### 💀 死索引 (MEMORY 有 disk 没)", ""]
             for s in report["dead_index"]:
@@ -259,6 +256,19 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
             lines.append(f"- `{s}`")
         if len(report["orphans"]) > 20:
             lines.append(f"- ... 还有 {len(report['orphans']) - 20} 个")
+        lines.append("")
+
+    # === ℹ️ INFO ONLY: deliberate duplicates (cross-surface links) ===
+    if report["duplicates"]:
+        lines += [
+            f"## ℹ️ INFO: 重复索引 ({len(report['duplicates'])} 个)",
+            "",
+            "_同 slug 在 MEMORY.md 出现 2+ 次. 通常是 deliberate cross-surface link "
+            "(同一 cluster file 从多个认知域 surface), **不算 actionable**. 检查时确认是 deliberate 还是误粘._",
+            "",
+        ]
+        for slug, n in report["duplicates"]:
+            lines.append(f"- `{slug}` × {n} 次")
         lines.append("")
 
     # === ℹ️ INFO ONLY (cold links — 绝不强清) ===
