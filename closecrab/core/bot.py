@@ -602,6 +602,27 @@ class BotCore:
             return "Session ended. Use /sessions to view history."
         return "No active session."
 
+    async def compact_user_session(self, user_key: str) -> str:
+        """触发 user 当前 session 的 manual /compact。
+
+        直接调 worker.send("/compact")，**绕过** handle_message 的 S1 recall
+        和 dirty-restart wrapper —— 必须发裸 "/compact"，CC binary 才会 intercept
+        为 slash command 而不是当文本传给 LLM。
+        """
+        if user_key not in self._workers:
+            return "No active session to compact."
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "send"):
+            return f"Worker {type(worker).__name__} does not support /compact."
+        try:
+            result = await worker.send("/compact")
+        except Exception as e:
+            log.error(f"compact_user_session failed: {e}")
+            return f"Compact failed: {e}"
+        return result or "Compacted (no result text)"
+
     async def switch_session(self, user_key: str, target_session_id: str) -> str:
         """切换用户到指定 session。"""
         # 归档当前 session

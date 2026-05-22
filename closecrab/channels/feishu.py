@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp"}
 
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
@@ -3347,6 +3347,11 @@ class FeishuChannel(Channel):
 
         elif cmd == "/voice":
             await self._handle_voice_command(user_key, chat_id)
+
+        elif cmd == "/cmp":
+            await self._async_send_text(chat_id, "🗜 Compact 中...")
+            result = await self._core.compact_user_session(user_key)
+            await self._async_send_text(chat_id, f"✅ {result[:500]}")
 
     async def _handle_voice_command(self, user_key: str, chat_id: str):
         """/voice 命令: 签 LiveKit JWT, 把加入链接发回飞书。
