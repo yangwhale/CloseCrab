@@ -522,6 +522,7 @@ class _LogBuffer:
 # =====================================================================
 _TASK_GC_DELAY_SEC = 1800  # done 后保留 30 min 供 UI 引用, 然后清
 _TASK_WATCHDOG_TIMEOUT_SEC = 600  # V20: 10 min 无 progress/done 算 worker 挂了
+_TASK_WATCHDOG_TICK_SEC = 60      # V21: global ticker 60s 扫一次 (精度 ±60s 可接受)
 
 
 @dataclass
@@ -537,7 +538,6 @@ class _TaskState:
     # progress_buffer: [{seq:int, label:str, content:str, ts:datetime}, ...]
     progress_buffer: list = field(default_factory=list)
     status: str = "active"    # "active" | "done" | "timeout"
-    watchdog_task: Optional[asyncio.Task] = None  # V20: 10 min reset 看门狗
 
 
 class FeishuChannel(Channel):
@@ -2253,10 +2253,8 @@ class FeishuChannel(Channel):
             await loop.run_in_executor(
                 None, self._inbox.mark_done, record_id, "kickoff received"
             )
-        # V20: 启 watchdog. 10 min 无 progress/done → patch 主卡 + 派 jarvis 自查
-        task.watchdog_task = asyncio.create_task(
-            self._task_watchdog(task_id)
-        )
+        # V21: global ticker (channel.start 启动) 扫 _task_registry 找超时任务,
+        # 不再 per-task watchdog. last_update_at 字段就是 ticker 的判断依据.
         log.info(
             f"Task kickoff registered: id={task_id} name={task_name!r} "
             f"from={from_bot} chat={chat_id or 'N/A'} "
@@ -2306,13 +2304,7 @@ class FeishuChannel(Channel):
         })
         task.progress_buffer.sort(key=lambda b: b["seq"])
         task.last_update_at = datetime.now(timezone.utc)
-
-        # V20: reset watchdog. progress 一来说明 worker 还活着, 重 10 min 计时.
-        if task.watchdog_task and not task.watchdog_task.done():
-            task.watchdog_task.cancel()
-        task.watchdog_task = asyncio.create_task(
-            self._task_watchdog(task_id)
-        )
+        # V21: ticker 直接看 last_update_at, 不需要每 progress 都 reset asyncio.Task.
 
         # V1.1: patch 主聚合卡片 (旁路 BotCore, 不触发 turn)
         # 进度内容按 seq 排序整齐展示, 即使乱序到达
@@ -2361,11 +2353,7 @@ class FeishuChannel(Channel):
 
         task.status = "done"
         task.last_update_at = datetime.now(timezone.utc)
-
-        # V20: 任务正常完成, cancel watchdog
-        if task.watchdog_task and not task.watchdog_task.done():
-            task.watchdog_task.cancel()
-            task.watchdog_task = None
+        # V21: ticker 看 status != "active" 就跳过, 不需要单独 cancel watchdog.
 
         # V19: done 一到立即撤主聚合卡. 不再 patch ✅ 完成区域 (省一次 API call).
         # 理由 (chris 拍板): done summary 内容跟接下来 jarvis 综合分析 reply
@@ -2448,79 +2436,143 @@ class FeishuChannel(Channel):
         except asyncio.CancelledError:
             pass
 
-    async def _task_watchdog(self, task_id: str) -> None:
-        """V20: 10 min 无 progress/done 触发. worker 大概率挂了, 派 jarvis 自查.
+    async def _task_watchdog_ticker(self) -> None:
+        """V21: 全局看门狗 ticker. 每 60s 扫一次 _task_registry, 找超时 task 批量处理.
 
-        Reset 机制: 每收到 progress 都 cancel old + start new (在 _handle_task_progress).
-        Done 时也 cancel (在 _handle_task_done 入口). 真正 fire 时 worker 至少 10 min
-        没动静, jarvis 应该主动查 ps/log/重启 worker.
+        替代 V20 per-task asyncio.Task 设计. 优点:
+        - N 个 task 同时超时 → 合并成 1 个 self-diagnose turn, jarvis 看全局
+          (3 bot 都挂 → 大概率 host/Gateway 问题, 不是各自挂)
+        - 省 jarvis turn (per-user lock 串行 3 个 turn 也是浪费)
+        - 卡片少 (1 个 self-diagnose vs N 个)
+        - 实现简单 (1 个 task, 无需 per-task lifecycle 管理)
+
+        判断: status=='active' 且 (now - last_update_at) > _TASK_WATCHDOG_TIMEOUT_SEC.
+        Fire 时: 标 status='timeout' 防重 + 撤主卡 + 按 chat_id 分组 batch self-diagnose.
         """
-        try:
-            await asyncio.sleep(_TASK_WATCHDOG_TIMEOUT_SEC)
-        except asyncio.CancelledError:
-            return  # progress/done reset 或 jarvis shutdown
-
-        task = self._task_registry.get(task_id)
-        if not task or task.status != "active":
-            return  # done/timeout 之后不重复 fire
-
-        log.warning(
-            f"Task watchdog timeout: id={task_id} name={task.task_name!r} "
-            f"worker={task.worker_bot} {_TASK_WATCHDOG_TIMEOUT_SEC}s no update"
+        log.info(
+            f"Task watchdog ticker started: tick={_TASK_WATCHDOG_TICK_SEC}s "
+            f"timeout={_TASK_WATCHDOG_TIMEOUT_SEC}s"
         )
-
-        task.status = "timeout"  # 防 race: 此时 done 来也不再处理
-
-        # 撤主聚合卡 (跟 V19 done 行为一致)
-        if task.main_card_id:
+        while True:
             try:
-                await self._async_delete_message(task.main_card_id)
-            except Exception as e:
+                await asyncio.sleep(_TASK_WATCHDOG_TICK_SEC)
+            except asyncio.CancelledError:
+                log.info("Task watchdog ticker cancelled")
+                return
+
+            try:
+                now = datetime.now(timezone.utc)
+                timed_out = [
+                    t for t in self._task_registry.values()
+                    if t.status == "active"
+                    and (now - t.last_update_at).total_seconds() > _TASK_WATCHDOG_TIMEOUT_SEC
+                ]
+                if not timed_out:
+                    continue
+
+                # 标 status 防 race (同一 task done 来了不重复处理)
+                for t in timed_out:
+                    t.status = "timeout"
+
                 log.warning(
-                    f"Watchdog main card delete failed "
-                    f"(task={task_id}, card={task.main_card_id}): {e}"
+                    f"Task watchdog: {len(timed_out)} task(s) timed out: "
+                    f"{[t.task_id for t in timed_out]}"
                 )
-            task.main_card_id = None
 
-        chat_id = task.chat_id or self._resolve_task_chat(task.worker_bot)
-        if not chat_id:
-            log.warning(
-                f"Watchdog {task_id}: no chat resolvable, skip self-diagnose turn"
-            )
-            asyncio.create_task(self._gc_task_state(task_id, delay=_TASK_GC_DELAY_SEC))
-            return
+                # 撤所有超时 task 主卡 (并发)
+                async def _del_card(t: _TaskState):
+                    if not t.main_card_id:
+                        return
+                    try:
+                        await self._async_delete_message(t.main_card_id)
+                    except Exception as e:
+                        log.warning(
+                            f"Watchdog main card delete failed "
+                            f"(task={t.task_id}, card={t.main_card_id}): {e}"
+                        )
+                    t.main_card_id = None
 
-        # 派 jarvis 自查 turn — 给完整上下文让 jarvis 主动诊断
+                await asyncio.gather(*(_del_card(t) for t in timed_out), return_exceptions=True)
+
+                # 按 chat_id 分组 (不同 chat 不能合并 self-diagnose turn)
+                by_chat: dict[str, list[_TaskState]] = {}
+                for t in timed_out:
+                    chat = t.chat_id or self._resolve_task_chat(t.worker_bot)
+                    if chat:
+                        by_chat.setdefault(chat, []).append(t)
+                    else:
+                        log.warning(
+                            f"Watchdog {t.task_id}: no chat resolvable, "
+                            f"skip self-diagnose turn"
+                        )
+                        asyncio.create_task(
+                            self._gc_task_state(t.task_id, delay=_TASK_GC_DELAY_SEC)
+                        )
+
+                # 每个 chat 一个 batch self-diagnose turn
+                for chat_id, tasks in by_chat.items():
+                    asyncio.create_task(
+                        self._fire_watchdog_batch(chat_id, tasks)
+                    )
+            except Exception as e:
+                log.error(f"Watchdog ticker iteration failed: {e}", exc_info=True)
+
+    async def _fire_watchdog_batch(
+        self, chat_id: str, tasks: list[_TaskState],
+    ) -> None:
+        """V21: 一批超时 task 在同一 chat 内 fire 1 个 jarvis self-diagnose turn."""
         now = datetime.now(timezone.utc)
-        elapsed_min = (now - task.kickoff_at).total_seconds() / 60
-        last_update_min = (now - task.last_update_at).total_seconds() / 60
-        progress_summary = "\n".join(
-            f"- seq={b['seq']} label={b.get('label') or '?'} "
-            f"ts={b['ts'].isoformat(timespec='seconds')}"
-            for b in task.progress_buffer
-        ) or "(无进度)"
-        prompt = (
-            f"# 任务超时未完成 — {task.task_name}\n\n"
-            f"派给 `{task.worker_bot}` 的多阶段任务 **{_TASK_WATCHDOG_TIMEOUT_SEC // 60} min** "
-            f"没收到 progress 或 done. 大概率 worker bot 挂了.\n\n"
-            f"## 任务状态\n"
-            f"- task_id: `{task_id}`\n"
-            f"- 派活时间: {task.kickoff_at.isoformat(timespec='seconds')}\n"
-            f"- 已经过: {elapsed_min:.1f} min\n"
-            f"- 最后一次更新: {last_update_min:.1f} min 前 "
-            f"({task.last_update_at.isoformat(timespec='seconds')})\n"
-            f"- 已收 progress: {len(task.progress_buffer)} 个\n\n"
-            f"## 已收 progress 摘要\n{progress_summary}\n\n"
-            f"## 建议下一步\n"
-            f"请主动诊断 `{task.worker_bot}` 状态 — 查进程 (ps aux), 查最近日志 "
-            f"(~/.claude/closecrab/{task.worker_bot}/bot.log), "
-            f"必要时重启它. 如果是远程 bot 通过 SSH 查. 修复后告诉我结论, "
-            f"或者按用户授权重新派活."
-        )
+        worker_set = sorted({t.worker_bot for t in tasks})
+        lines = [
+            f"# 任务超时未完成 — {len(tasks)} 个任务 (worker: {', '.join(worker_set)})",
+            "",
+            f"派出去的 **{_TASK_WATCHDOG_TIMEOUT_SEC // 60} min** 没收到 progress 或 done. "
+            f"大概率对应 worker bot(s) 挂了.",
+            "",
+            "## 超时任务清单",
+            "",
+        ]
+        for t in tasks:
+            elapsed_min = (now - t.kickoff_at).total_seconds() / 60
+            last_update_min = (now - t.last_update_at).total_seconds() / 60
+            prog_summary = ", ".join(
+                f"seq{b['seq']}({b.get('label') or '?'})"
+                for b in t.progress_buffer
+            ) or "无"
+            lines.extend([
+                f"### {t.task_name}",
+                f"- worker: `{t.worker_bot}` | task_id: `{t.task_id}`",
+                f"- 派活: {t.kickoff_at.isoformat(timespec='seconds')} "
+                f"({elapsed_min:.1f} min 前)",
+                f"- 最后更新: {t.last_update_at.isoformat(timespec='seconds')} "
+                f"({last_update_min:.1f} min 前)",
+                f"- 已收 progress ({len(t.progress_buffer)} 个): {prog_summary}",
+                "",
+            ])
+        lines.extend([
+            "## 建议下一步",
+            "",
+        ])
+        if len(worker_set) > 1:
+            lines.append(
+                f"⚠️ **{len(worker_set)} 个 worker 同时超时** — 大概率是共享基础设施问题 "
+                f"(host 死 / OpenClaw Gateway port 18789 死 / Anthropic API 全 region 5xx). "
+                f"先查 host 级原因 (ps + uptime + Gateway), 再决定 per-bot 处理."
+            )
+        else:
+            wb = worker_set[0]
+            lines.append(
+                f"请主动诊断 `{wb}`: 查进程 (ps aux), 查最近日志 "
+                f"(~/.claude/closecrab/{wb}/bot.log), 必要时重启它. "
+                f"如果是远程 bot 通过 SSH 查."
+            )
+        prompt = "\n".join(lines)
 
+        # 用第一个 task_id 当 watchdog turn id (防重 dedup)
+        first_task_id = tasks[0].task_id
         try:
             await self._execute_task(
-                task_id=f"watchdog-{task_id}",
+                task_id=f"watchdog-batch-{first_task_id}",
                 summary=prompt,
                 description="",
                 chat_id=chat_id, id_type="chat_id",
@@ -2528,9 +2580,10 @@ class FeishuChannel(Channel):
                 inbox_record_id="",
             )
         except Exception as e:
-            log.error(f"Watchdog self-diagnose turn failed: {e}", exc_info=True)
+            log.error(f"Watchdog batch self-diagnose failed: {e}", exc_info=True)
 
-        asyncio.create_task(self._gc_task_state(task_id, delay=_TASK_GC_DELAY_SEC))
+        for t in tasks:
+            asyncio.create_task(self._gc_task_state(t.task_id, delay=_TASK_GC_DELAY_SEC))
 
     def _route_card_answer_as_message(self, open_id: str, answer: str):
         """将卡片按钮答案作为新用户消息路由到 bot core。"""
@@ -4519,6 +4572,11 @@ class FeishuChannel(Channel):
             self._inbox.set_handler(self._on_inbox_message)
             self._inbox.start(loop)
             log.info("Inbox started")
+
+        # V21: 启动 V1 任务超时看门狗 ticker (global, 60s tick / 10min timeout)
+        self._watchdog_ticker_task = asyncio.ensure_future(
+            self._task_watchdog_ticker(), loop=loop,
+        )
 
         # 启动 Registry 心跳
         from ..utils.registry import heartbeat_loop
