@@ -641,12 +641,6 @@ class FeishuChannel(Channel):
         # 不顶聊天主流, chris 想看进度点开 thread 即可
         self._last_user_msg_id_per_chat: dict[str, str] = {}
 
-        # V14: jarvis worker step card 最近 message_id (per chat) — 更准的 inbox reply anchor.
-        # jarvis 派活 turn 完成后 step card 仍在飞书 (idle), 所有相关 bot 的 inbox 回报
-        # reply 到这张 step card 下, 按"jarvis 哪次 turn 触发"归组 (比 chris 消息更准).
-        # 派 init progress card 时存进来; 优先级高于 _last_user_msg_id_per_chat.
-        self._last_step_card_id_per_chat: dict[str, str] = {}
-
         # P3-3: 入站防抖（合并 1 秒内连续短消息为 1 次 worker turn）
         # 镜像 OpenClaw extensions/feishu/src/auto-reply/inbound-debounce.ts
         # 仅对真人用户文本消息生效；语音/文件/team-bot 直通
@@ -2229,14 +2223,10 @@ class FeishuChannel(Channel):
         card = self._build_reply_card(md)
 
         if not task.main_card_id:
-            # V14: 优先以 reply 形式发主卡. anchor 优先级:
-            #   1. jarvis worker step card (派活 turn 的卡片, 按 turn 归组最准)
-            #   2. chris user message (退而求其次, V13 行为)
-            #   3. 都没有 → 顶层 send
-            anchor = (
-                self._last_step_card_id_per_chat.get(task.chat_id)
-                or self._last_user_msg_id_per_chat.get(task.chat_id)
-            )
+            # V13: 优先以 reply 形式发主卡, anchor = chris 最近 user message_id.
+            # 这让主卡折叠进 chris 派活消息的 thread, 不顶 jarvis step card.
+            # 没 anchor (jarvis 启动后没收到 chris 消息) → fallback 顶层 send.
+            anchor = self._last_user_msg_id_per_chat.get(task.chat_id)
             try:
                 if anchor:
                     mid = await self._async_reply_card_with_id(
@@ -2764,9 +2754,6 @@ class FeishuChannel(Channel):
             usage=self._core.get_context_usage(user_key) or {},
         )
         _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
-        # V14: voice 路径同样存 step card anchor (inbox reply 用)
-        if _progress_card_id[0] and chat_id:
-            self._last_step_card_id_per_chat[chat_id] = _progress_card_id[0]
 
         # 启动更新循环
         _anim_task[0] = asyncio.create_task(_card_update_loop())
@@ -3247,9 +3234,6 @@ class FeishuChannel(Channel):
                 usage=self._core.get_context_usage(user_key) or {},
             )
             _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
-            # V14: 存 jarvis worker step card message_id 作 inbox reply anchor
-            if _progress_card_id[0] and chat_id:
-                self._last_step_card_id_per_chat[chat_id] = _progress_card_id[0]
 
             # 启动统一更新循环
             _anim_task[0] = asyncio.create_task(_card_update_loop())
