@@ -124,7 +124,21 @@ def main() -> int:
     _validate_protocol(args)
 
     task_id, auto_generated = _ensure_task_id(args)
-    sender = os.environ.get("BOT_NAME", "unknown")
+    # V15: BOT_NAME 优先 env; OpenClaw 的 Bash tool 不传 env 但传 cwd,
+    # 从 ~/.closecrab/openclaw-workspace/{bot}/ 推断 bot name. 这给所有
+    # 不继承 env 的 worker 一个 fallback (cwd-based identity).
+    sender = os.environ.get("BOT_NAME", "")
+    if not sender:
+        try:
+            import re as _re
+            cwd = os.getcwd()
+            m = _re.match(r".*/\.closecrab/openclaw-workspace/([^/]+)", cwd)
+            if m:
+                sender = m.group(1)
+        except Exception:
+            pass
+    if not sender:
+        sender = "unknown"
 
     from closecrab.constants import FIRESTORE_DATABASE, FIRESTORE_PROJECT
     from google.cloud import firestore
