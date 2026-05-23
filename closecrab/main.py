@@ -359,21 +359,25 @@ def build_system_prompt(
             "wiki_status / wiki_graph_neighbors / wiki_graph_path"
         )
 
-    # 非 Claude worker 行为指导（从模板文件加载）
-    # Gemini ACP、Kilo Code、OpenClaw worker 都需要这些通用行为准则
+    # 非 Claude worker 行为指导 — 拆 2 层:
+    #   common-worker-guide.md = 通用核心准则 (大文档分步/CC Pages/事实核查/HTML/独立判断/共享记忆)
+    #   gemini-extras.md       = Gemini 专属 (MCP 工具列表用 Gemini 工具名 + Chrome MCP 管控)
+    # Kilo/OpenClaw 只加 common, 因为:
+    #   - Kilo 自己 anthropic.txt 已 cover "responses short/concise" 等基础原则
+    #   - Kilo/OpenClaw 通常不配 Chrome MCP, 配的 MCP 通过自己配置文件加载
     if worker_type in ("gemini", "kilo", "openclaw"):
-        _guide_path = Path(__file__).parent / "prompts" / "gemini-worker-guide.md"
+        _prompts_dir = Path(__file__).parent / "prompts"
         try:
-            _guide_text = _guide_path.read_text(encoding="utf-8")
-            # Kilo + OpenClaw 都不在 system prompt 展开 Chrome MCP 段
-            # (Kilo 没装 Chrome MCP; OpenClaw MCP 由 Gateway 管不需 inline 提示)
-            if worker_type in ("kilo", "openclaw"):
-                _cm_idx = _guide_text.find("## Chrome MCP")
-                if _cm_idx > 0:
-                    _guide_text = _guide_text[:_cm_idx].rstrip()
-            prompt += "\n\n" + _guide_text
+            _common = (_prompts_dir / "common-worker-guide.md").read_text(encoding="utf-8")
+            prompt += "\n\n" + _common
         except FileNotFoundError:
             pass
+        if worker_type == "gemini":
+            try:
+                _extras = (_prompts_dir / "gemini-extras.md").read_text(encoding="utf-8")
+                prompt += "\n\n" + _extras
+            except FileNotFoundError:
+                pass
 
     # OpenClaw 专属 sub-agent 规则（sessions_spawn 工具行为）
     # 端口自 OpenClaw 飞书 channel 的 subagent_hooks 设计 — 没有 plugin runtime
