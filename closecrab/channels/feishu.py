@@ -636,11 +636,6 @@ class FeishuChannel(Channel):
         # task_id -> _TaskState. 进程内存, jarvis 重启即丢 (V1 接受).
         self._task_registry: dict[str, _TaskState] = {}
 
-        # V13: chris 最近发的 user message_id (per chat) — inbox V1 主卡用作 reply parent
-        # 当 inbox kickoff 创建主卡时, reply 到这个 anchor 让卡片折叠进 chris 派活消息的 thread
-        # 不顶聊天主流, chris 想看进度点开 thread 即可
-        self._last_user_msg_id_per_chat: dict[str, str] = {}
-
         # P3-3: 入站防抖（合并 1 秒内连续短消息为 1 次 worker turn）
         # 镜像 OpenClaw extensions/feishu/src/auto-reply/inbound-debounce.ts
         # 仅对真人用户文本消息生效；语音/文件/team-bot 直通
@@ -852,43 +847,6 @@ class FeishuChannel(Channel):
 
         log.error(f"Reply failed: {resp.code} {resp.msg}")
         return False
-
-    def _reply_card(self, parent_msg_id: str, card: dict,
-                    fallback_chat_id: Optional[str] = None) -> Optional[str]:
-        """V13: 同步用 interactive card 回复指定消息. 返回 reply message_id.
-
-        parent 被撤回/不存在 (code 230011/231003) 时 fallback 到顶层 send,
-        跟 `_reply_text` 一致.
-        """
-        body = ReplyMessageRequestBody.builder() \
-            .msg_type("interactive") \
-            .content(json.dumps(card)) \
-            .build()
-        req = ReplyMessageRequest.builder() \
-            .message_id(parent_msg_id) \
-            .request_body(body) \
-            .build()
-        resp = self._client.im.v1.message.reply(req)
-        if resp.success():
-            return resp.data.message_id if resp.data else None
-        if resp.code in self._REPLY_FALLBACK_CODES and fallback_chat_id:
-            log.info(
-                f"Reply card target {parent_msg_id} unavailable "
-                f"(code={resp.code} {resp.msg}), falling back to top-level send"
-            )
-            return self._send_card(fallback_chat_id, card)
-        log.error(f"Reply card failed: {resp.code} {resp.msg}")
-        return None
-
-    async def _async_reply_card_with_id(
-        self, parent_msg_id: str, card: dict,
-        fallback_chat_id: Optional[str] = None,
-    ) -> Optional[str]:
-        """V13: 异步包装 _reply_card."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._reply_card, parent_msg_id, card, fallback_chat_id
-        )
 
     async def _async_send_text(self, chat_id: str, text: str):
         """异步发送文本消息（在 executor 中运行同步 API）。"""
@@ -2223,17 +2181,9 @@ class FeishuChannel(Channel):
         card = self._build_reply_card(md)
 
         if not task.main_card_id:
-            # V13: 优先以 reply 形式发主卡, anchor = chris 最近 user message_id.
-            # 这让主卡折叠进 chris 派活消息的 thread, 不顶 jarvis step card.
-            # 没 anchor (jarvis 启动后没收到 chris 消息) → fallback 顶层 send.
-            anchor = self._last_user_msg_id_per_chat.get(task.chat_id)
+            # 发新主卡
             try:
-                if anchor:
-                    mid = await self._async_reply_card_with_id(
-                        anchor, card, fallback_chat_id=task.chat_id
-                    )
-                else:
-                    mid = await self._async_send_card_with_id(task.chat_id, card)
+                mid = await self._async_send_card_with_id(task.chat_id, card)
                 if mid:
                     task.main_card_id = mid
                     return
@@ -2810,12 +2760,6 @@ class FeishuChannel(Channel):
             # 忽略 bot 自身消息
             if sender_open_id == self._bot_open_id:
                 return
-
-            # V13: 记录真人用户最近 message_id 作 inbox V1 主卡的 reply anchor.
-            # 必须在鉴权 / mention 检查之前记 — 即使消息没被处理 (e.g. 群里没 @),
-            # 后续 inbox 主卡也用得上这个 anchor.
-            if sender_type == "user" and chat_id and message_id:
-                self._last_user_msg_id_per_chat[chat_id] = message_id
 
             # Team bot 消息处理
             is_team_msg = False
