@@ -524,8 +524,9 @@ _TASK_GC_DELAY_SEC = 1800  # done 后保留 30 min 供 UI 引用, 然后清
 # V22: 全局 watchdog — 把 fleet 当一个 bot. 只要任何 bot 还在发 inbox 消息
 # (progress/done/任何 from_bot), 全局 activity 就被刷新. 全 fleet 静默 N 分钟
 # 且 _task_registry 还有 active task → 报警让 jarvis 自查 (找静默 task).
-_GLOBAL_INBOX_SILENCE_TIMEOUT_SEC = 1200  # 20 min (chris 拍板)
-_GLOBAL_WATCHDOG_TICK_SEC = 60            # 60s 扫一次, 精度 ±60s
+# 临时测试值: 30s + 10s tick. 测试完改回 production 值 (600s + 60s tick).
+_GLOBAL_INBOX_SILENCE_TIMEOUT_SEC = int(os.environ.get("CC_WATCHDOG_SILENCE_SEC", "600"))  # 10 min, prod
+_GLOBAL_WATCHDOG_TICK_SEC = int(os.environ.get("CC_WATCHDOG_TICK_SEC", "60"))      # 60s tick, prod
 
 
 @dataclass
@@ -2496,11 +2497,13 @@ class FeishuChannel(Channel):
                 if silent_for < _GLOBAL_INBOX_SILENCE_TIMEOUT_SEC:
                     continue
 
-                # 防 spam: fire 后必须再静默 N min 才再 fire
-                if self._last_watchdog_fired_at:
-                    since_fire = (now - self._last_watchdog_fired_at).total_seconds()
-                    if since_fire < _GLOBAL_INBOX_SILENCE_TIMEOUT_SEC:
-                        continue
+                # 防 spam: fire 后只在"有新 inbox activity 之后再静默"时才再 fire.
+                # (持续静默不 spam — 一次 alert 就够, jarvis 会去诊断处理.
+                #  bot 修复后会发消息 → activity 刷新 → 下次再静默时才再 fire.)
+                if (self._last_watchdog_fired_at
+                        and self._last_inbox_activity_at
+                        and self._last_watchdog_fired_at >= self._last_inbox_activity_at):
+                    continue
 
                 log.warning(
                     f"Global watchdog fire: fleet silent {silent_for:.0f}s, "
