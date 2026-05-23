@@ -1874,7 +1874,12 @@ class FeishuChannel(Channel):
         _start_time = asyncio.get_running_loop().time()
         _progress_card_id: list = [None]
         _progress_history: list = []
-        _pending_action: list = [f"📋 执行任务: {summary[:40]}"]
+        # V18: placeholder 必须 sanitize, 否则 done turn 把整个 markdown prompt
+        # 当 summary 传进来时, summary[:40] 会截到 `**`/`` ` ``/`\n\n` 中间, 外层
+        # `**{...}**` 包裹后飞书 lark_md 因跨行 + 孤儿反引号渲染失败, 全字符裸露.
+        _safe_pl = re.sub(r"[`*_#~|<>\\]+", "", summary)
+        _safe_pl = re.sub(r"\s+", " ", _safe_pl).strip()
+        _pending_action: list = [f"📋 执行任务: {_safe_pl[:40]}"]
         _card_dirty = [True]
         _anim_task: list = [None]
 
