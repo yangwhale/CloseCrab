@@ -212,7 +212,7 @@ def build_system_prompt(
     # Firestore Inbox 使用说明
     prompt += (
         "\n\n## Firestore Inbox (Bot 间通信)\n"
-        "你可以通过 Firestore Inbox 给其他 bot 发消息。使用以下命令：\n"
+        "你可以通过 Firestore Inbox 给其他 bot **主动发起**消息。使用以下命令：\n"
         "```bash\n"
         "python3 ~/CloseCrab/scripts/inbox-send.py <target_bot> \"<message>\"\n"
         "```\n"
@@ -220,6 +220,14 @@ def build_system_prompt(
         "BOT_NAME 环境变量已自动设置为你的名字，脚本会自动用它作为发送者。\n"
         "示例：`python3 ~/CloseCrab/scripts/inbox-send.py jarvis \"任务完成，hostname 是 xxx\"`\n"
         "注意：inbox 消息会实时推送到目标 bot，无需轮询。\n"
+        "\n"
+        "### ⚠️ 收到 inbox 消息时不要回报\n"
+        "**当你看到用户消息以 `[from: Inbox · <sender>]` 开头时，说明是其他 bot 派来的任务。"
+        "你的 reply 会通过 channel 的 reply 字段自动回到 sender —— "
+        "不需要再调 `inbox-send.py <sender> \"任务完成\"` 主动回报，那是冗余的，"
+        "会让 sender 多消耗一次 LLM turn 处理你的回报。**\n"
+        "正确做法：直接输出任务结果作为 reply 即可，sender 会看到。\n"
+        "只有你**主动发起**给其他 bot 的消息（不是回应 inbox），才用 `inbox-send.py`。\n"
         "\n"
         "### 多阶段任务协议 V1\n"
         "如果你给主 bot 汇报的是一个**多阶段任务**（边做边报，最后给结论），\n"
