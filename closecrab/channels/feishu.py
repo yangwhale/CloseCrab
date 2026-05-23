@@ -2338,19 +2338,23 @@ class FeishuChannel(Channel):
         task.status = "done"
         task.last_update_at = datetime.now(timezone.utc)
 
-        # patch 主聚合卡片加 ✅ 完成区域 — chris 唯一的 UI, 含完整 progress 时间线 + done text
+        # V1.1: 先 patch 主聚合卡片加 ✅ 完成区域 (用户立刻看到任务收尾)
         await self._send_or_patch_task_card(
             task, done_text=done_text, done_label=phase_label,
         )
 
-        # V16: 不再触发 jarvis Claude turn 做综合分析 (省 1 LLM call / task).
-        # done text 本身已经是 sender bot 的最终结论, 用户看主聚合卡片即可.
-        # 想要 jarvis 综合分析的话, 用户主动问即可.
-        if self._inbox:
-            await loop.run_in_executor(
-                None, self._inbox.mark_done, record_id,
-                f"task {task_id} done (card patched, no LLM turn)",
-            )
+        prompt = self._assemble_done_prompt(task, done_text, phase_label)
+        chat_id = task.chat_id or self._resolve_task_chat(from_bot)
+
+        # _execute_task 的 summary 字段就是 prompt body, 直接传组装好的 prompt
+        # 这是一个新的螃蟹动画卡 (LLM 处理 turn), 跟聚合卡区分
+        await self._execute_task(
+            task_id=record_id,  # 用 firestore record_id 做防重 dedup
+            summary=prompt,
+            description="",
+            chat_id=chat_id, id_type="chat_id",
+            inbox_from=from_bot, inbox_record_id=record_id,
+        )
 
         # GC: 保留 30 min 供 UI 引用, 然后从 registry 移除
         asyncio.create_task(self._gc_task_state(task_id, delay=_TASK_GC_DELAY_SEC))
