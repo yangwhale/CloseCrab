@@ -2349,10 +2349,24 @@ class FeishuChannel(Channel):
         task.status = "done"
         task.last_update_at = datetime.now(timezone.utc)
 
-        # V1.1: 先 patch 主聚合卡片加 ✅ 完成区域 (用户立刻看到任务收尾)
-        await self._send_or_patch_task_card(
-            task, done_text=done_text, done_label=phase_label,
-        )
+        # V19: done 一到立即撤主聚合卡. 不再 patch ✅ 完成区域 (省一次 API call).
+        # 理由 (chris 拍板): done summary 内容跟接下来 jarvis 综合分析 reply
+        # 高度重叠, 留着主卡是冗余. 视觉: 进度卡 → [done 立即消失] → 螃蟹卡
+        # (jarvis 综合中) → reply. jarvis turn 失败也无所谓 — 用户已经在 inbox
+        # done 触发的 user prompt 里看到了 done 原文 (作为新 turn 的输入).
+        if task.main_card_id:
+            try:
+                await self._async_delete_message(task.main_card_id)
+                log.info(
+                    f"Task main card deleted on done (V19): "
+                    f"task={task.task_id} card={task.main_card_id}"
+                )
+            except Exception as e:
+                log.warning(
+                    f"Task main card delete failed "
+                    f"(task={task.task_id}, card={task.main_card_id}): {e}"
+                )
+            task.main_card_id = None
 
         prompt = self._assemble_done_prompt(task, done_text, phase_label)
         chat_id = task.chat_id or self._resolve_task_chat(from_bot)
