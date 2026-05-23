@@ -1923,7 +1923,13 @@ class FeishuChannel(Channel):
                         usage=self._core.get_context_usage(user_key) or {},
                     )
                     if _card_dirty[0]:
-                        if current != _pending_action[0][:40] and (not _progress_history or _progress_history[-1] != current):
+                        # V17: skip initial "📋 执行任务:" placeholder — it's already shown
+                        # as current_action; appending it to history caused the visible
+                        # "duplicate display" bug (current + history[0] both render the
+                        # same task summary, second one with markdown bold).
+                        is_initial_placeholder = current.startswith("📋 执行任务:")
+                        if (not is_initial_placeholder
+                                and (not _progress_history or _progress_history[-1] != current)):
                             _progress_history.append(current)
                             if len(_progress_history) > 20:
                                 _progress_history[:] = _progress_history[-20:]
