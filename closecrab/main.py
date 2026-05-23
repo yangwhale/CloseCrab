@@ -247,7 +247,7 @@ def build_system_prompt(
         "- 派活后立刻 reply ('已派给 xxx, 等回报') → **当前 turn 结束** → user_lock 释放\n"
         "- 对方 bot 跑完发 `phase=done` → 自动触发**新的 jarvis turn 处理**, 你在那个新 turn 里看到 worker 报告\n"
         "- V1 协议 done turn 设计就是承接 worker 结果的, sleep wait 等于反协议、阻塞自己\n"
-        "- **不要**用 sleep 给"等结果", **不要**用 while loop 轮询 firestore, **不要**用任何方式阻塞当前 turn\n"
+        "- **不要**用 sleep 给「等结果」, **不要**用 while loop 轮询 firestore, **不要**用任何方式阻塞当前 turn\n"
         "\n"
         "### 多阶段任务协议 V1\n"
         "如果你给主 bot 汇报的是一个**多阶段任务**（边做边报，最后给结论），\n"
