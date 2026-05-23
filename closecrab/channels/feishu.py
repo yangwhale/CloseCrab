@@ -521,6 +521,7 @@ class _LogBuffer:
 # 多阶段任务协议 (V1) — 详见 docs/inbox-task-protocol.md
 # =====================================================================
 _TASK_GC_DELAY_SEC = 1800  # done 后保留 30 min 供 UI 引用, 然后清
+_TASK_WATCHDOG_TIMEOUT_SEC = 600  # V20: 10 min 无 progress/done 算 worker 挂了
 
 
 @dataclass
@@ -535,7 +536,8 @@ class _TaskState:
     main_card_id: str = ""    # kickoff 主消息 id (V1 用 _send_long, id 暂存空)
     # progress_buffer: [{seq:int, label:str, content:str, ts:datetime}, ...]
     progress_buffer: list = field(default_factory=list)
-    status: str = "active"    # "active" | "done"
+    status: str = "active"    # "active" | "done" | "timeout"
+    watchdog_task: Optional[asyncio.Task] = None  # V20: 10 min reset 看门狗
 
 
 class FeishuChannel(Channel):
@@ -2251,6 +2253,10 @@ class FeishuChannel(Channel):
             await loop.run_in_executor(
                 None, self._inbox.mark_done, record_id, "kickoff received"
             )
+        # V20: 启 watchdog. 10 min 无 progress/done → patch 主卡 + 派 jarvis 自查
+        task.watchdog_task = asyncio.create_task(
+            self._task_watchdog(task_id)
+        )
         log.info(
             f"Task kickoff registered: id={task_id} name={task_name!r} "
             f"from={from_bot} chat={chat_id or 'N/A'} "
@@ -2301,6 +2307,13 @@ class FeishuChannel(Channel):
         task.progress_buffer.sort(key=lambda b: b["seq"])
         task.last_update_at = datetime.now(timezone.utc)
 
+        # V20: reset watchdog. progress 一来说明 worker 还活着, 重 10 min 计时.
+        if task.watchdog_task and not task.watchdog_task.done():
+            task.watchdog_task.cancel()
+        task.watchdog_task = asyncio.create_task(
+            self._task_watchdog(task_id)
+        )
+
         # V1.1: patch 主聚合卡片 (旁路 BotCore, 不触发 turn)
         # 进度内容按 seq 排序整齐展示, 即使乱序到达
         await self._send_or_patch_task_card(task)
@@ -2348,6 +2361,11 @@ class FeishuChannel(Channel):
 
         task.status = "done"
         task.last_update_at = datetime.now(timezone.utc)
+
+        # V20: 任务正常完成, cancel watchdog
+        if task.watchdog_task and not task.watchdog_task.done():
+            task.watchdog_task.cancel()
+            task.watchdog_task = None
 
         # V19: done 一到立即撤主聚合卡. 不再 patch ✅ 完成区域 (省一次 API call).
         # 理由 (chris 拍板): done summary 内容跟接下来 jarvis 综合分析 reply
@@ -2429,6 +2447,90 @@ class FeishuChannel(Channel):
                 )
         except asyncio.CancelledError:
             pass
+
+    async def _task_watchdog(self, task_id: str) -> None:
+        """V20: 10 min 无 progress/done 触发. worker 大概率挂了, 派 jarvis 自查.
+
+        Reset 机制: 每收到 progress 都 cancel old + start new (在 _handle_task_progress).
+        Done 时也 cancel (在 _handle_task_done 入口). 真正 fire 时 worker 至少 10 min
+        没动静, jarvis 应该主动查 ps/log/重启 worker.
+        """
+        try:
+            await asyncio.sleep(_TASK_WATCHDOG_TIMEOUT_SEC)
+        except asyncio.CancelledError:
+            return  # progress/done reset 或 jarvis shutdown
+
+        task = self._task_registry.get(task_id)
+        if not task or task.status != "active":
+            return  # done/timeout 之后不重复 fire
+
+        log.warning(
+            f"Task watchdog timeout: id={task_id} name={task.task_name!r} "
+            f"worker={task.worker_bot} {_TASK_WATCHDOG_TIMEOUT_SEC}s no update"
+        )
+
+        task.status = "timeout"  # 防 race: 此时 done 来也不再处理
+
+        # 撤主聚合卡 (跟 V19 done 行为一致)
+        if task.main_card_id:
+            try:
+                await self._async_delete_message(task.main_card_id)
+            except Exception as e:
+                log.warning(
+                    f"Watchdog main card delete failed "
+                    f"(task={task_id}, card={task.main_card_id}): {e}"
+                )
+            task.main_card_id = None
+
+        chat_id = task.chat_id or self._resolve_task_chat(task.worker_bot)
+        if not chat_id:
+            log.warning(
+                f"Watchdog {task_id}: no chat resolvable, skip self-diagnose turn"
+            )
+            asyncio.create_task(self._gc_task_state(task_id, delay=_TASK_GC_DELAY_SEC))
+            return
+
+        # 派 jarvis 自查 turn — 给完整上下文让 jarvis 主动诊断
+        now = datetime.now(timezone.utc)
+        elapsed_min = (now - task.kickoff_at).total_seconds() / 60
+        last_update_min = (now - task.last_update_at).total_seconds() / 60
+        progress_summary = "\n".join(
+            f"- seq={b['seq']} label={b.get('label') or '?'} "
+            f"ts={b['ts'].isoformat(timespec='seconds')}"
+            for b in task.progress_buffer
+        ) or "(无进度)"
+        prompt = (
+            f"# 任务超时未完成 — {task.task_name}\n\n"
+            f"派给 `{task.worker_bot}` 的多阶段任务 **{_TASK_WATCHDOG_TIMEOUT_SEC // 60} min** "
+            f"没收到 progress 或 done. 大概率 worker bot 挂了.\n\n"
+            f"## 任务状态\n"
+            f"- task_id: `{task_id}`\n"
+            f"- 派活时间: {task.kickoff_at.isoformat(timespec='seconds')}\n"
+            f"- 已经过: {elapsed_min:.1f} min\n"
+            f"- 最后一次更新: {last_update_min:.1f} min 前 "
+            f"({task.last_update_at.isoformat(timespec='seconds')})\n"
+            f"- 已收 progress: {len(task.progress_buffer)} 个\n\n"
+            f"## 已收 progress 摘要\n{progress_summary}\n\n"
+            f"## 建议下一步\n"
+            f"请主动诊断 `{task.worker_bot}` 状态 — 查进程 (ps aux), 查最近日志 "
+            f"(~/.claude/closecrab/{task.worker_bot}/bot.log), "
+            f"必要时重启它. 如果是远程 bot 通过 SSH 查. 修复后告诉我结论, "
+            f"或者按用户授权重新派活."
+        )
+
+        try:
+            await self._execute_task(
+                task_id=f"watchdog-{task_id}",
+                summary=prompt,
+                description="",
+                chat_id=chat_id, id_type="chat_id",
+                inbox_from="",
+                inbox_record_id="",
+            )
+        except Exception as e:
+            log.error(f"Watchdog self-diagnose turn failed: {e}", exc_info=True)
+
+        asyncio.create_task(self._gc_task_state(task_id, delay=_TASK_GC_DELAY_SEC))
 
     def _route_card_answer_as_message(self, open_id: str, answer: str):
         """将卡片按钮答案作为新用户消息路由到 bot core。"""
