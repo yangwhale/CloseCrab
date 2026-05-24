@@ -957,9 +957,20 @@ class KiloWorker(Worker):
                 log.info("Resumed session: %s", self._session_id)
                 return
 
-        # Create new session
+        # Create new session.
+        # Pass `directory` (Working directory) + `worktree` (Workspace root folder)
+        # both pointing to bot work_dir. Without these Kilo falls back to "/" for
+        # worktree, which: (1) makes its glob/grep/list_files scan from filesystem
+        # root (slow + permission errors on /proc /sys /var/log), (2) leaks
+        # "Workspace root folder: /" into LLM's <environment_details>, (3) breaks
+        # relative path resolution. Field names verified via binary strings on
+        # @kilocode/cli@7.3.1: yP(H) emits both keys from session metadata.
         url = f"{self._base_url}/session"
-        async with self._http.post(url, json={}) as resp:
+        session_body = {
+            "directory": self._work_dir,
+            "worktree": self._work_dir,
+        }
+        async with self._http.post(url, json=session_body) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"Failed to create session: {resp.status} {body[:200]}")
