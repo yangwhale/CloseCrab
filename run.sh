@@ -47,6 +47,18 @@ export BOT_NAME
 # bash 不加载 .zshenv，需要显式 source（内容全是 export，bash 兼容）
 [ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv"
 
+# Kilo 7.x serve 强制 HTTP Basic Auth（password from $KILO_SERVER_PASSWORD）。
+# Bot 的 kilo serve 是子进程，靠继承此 env var 启动；KiloWorker 用同一个值发请求。
+# 如果已经从 .zshenv 继承（VSCode 扩展会自动设），优先用继承的；否则生成一个稳定的。
+if [ -z "${KILO_SERVER_PASSWORD:-}" ]; then
+    KILO_PW_FILE="$HOME/.closecrab-kilo-pw"
+    if [ ! -f "$KILO_PW_FILE" ]; then
+        head -c 32 /dev/urandom | xxd -p -c 32 > "$KILO_PW_FILE"
+        chmod 600 "$KILO_PW_FILE"
+    fi
+    export KILO_SERVER_PASSWORD="$(cat "$KILO_PW_FILE")"
+fi
+
 # ── gcsfuse 挂载检测 ─────────────────────────────────────────
 # gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失
 # 在 Bot 启动前自动检测并恢复，确保 CC Pages 和 shared memory 可用

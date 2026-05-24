@@ -254,8 +254,16 @@ class KiloWorker(Worker):
         self._start_wall = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
         await self._ensure_server()
+        # Kilo 7.x serve enforces HTTP Basic auth (password from $KILO_SERVER_PASSWORD).
+        # Older kilo (<=0.25) had no auth → password unset → no header sent.
+        auth = None
+        _pw = os.environ.get("KILO_SERVER_PASSWORD")
+        if _pw:
+            _user = os.environ.get("KILO_SERVER_USERNAME", "kilo")
+            auth = aiohttp.BasicAuth(login=_user, password=_pw)
         self._http = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, sock_read=None),
+            auth=auth,
         )
         # _started must be True BEFORE SSE task starts, otherwise
         # the _sse_reader loop condition (self._started or not self._sse_task)
@@ -474,7 +482,10 @@ class KiloWorker(Worker):
 
     async def _health_check(self) -> bool:
         try:
-            async with aiohttp.ClientSession() as s:
+            _pw = os.environ.get("KILO_SERVER_PASSWORD")
+            _user = os.environ.get("KILO_SERVER_USERNAME", "kilo")
+            _auth = aiohttp.BasicAuth(login=_user, password=_pw) if _pw else None
+            async with aiohttp.ClientSession(auth=_auth) as s:
                 async with s.get(f"{self._base_url}/global/health", timeout=aiohttp.ClientTimeout(total=5)) as r:
                     return r.status == 200
         except Exception:
