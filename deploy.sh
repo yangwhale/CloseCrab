@@ -1059,6 +1059,26 @@ with open(path, 'w') as f:
             echo "  models.json 已存在, 跳过"
         fi
 
+        # 装 anthropic-vertex provider plugin (external, 不在 OpenClaw stock)
+        # 这是 ~/.openclaw/openclaw.json 里 "plugins.entries.anthropic-vertex.enabled=true"
+        # 必需的实际 npm 包. 缺了 Gateway 启动报 "Unable to resolve bundled plugin
+        # public surface anthropic-vertex/api.js" 然后 fallback 全失败.
+        if [[ ! -d "$HOME/.openclaw/npm/node_modules/@openclaw/anthropic-vertex-provider" ]]; then
+            echo "  装 anthropic-vertex provider plugin..."
+            "$OPENCLAW_BIN" plugins install @openclaw/anthropic-vertex-provider 2>&1 | tail -3
+        else
+            echo "  anthropic-vertex plugin 已装, 跳过"
+        fi
+
+        # 提示: Gateway 是 daemon, deploy.sh 不自动起 (按需), 手动跑:
+        #   nohup openclaw gateway > /tmp/openclaw-gateway.log 2>&1 &
+        if ! ss -tlnp 2>/dev/null | grep -q ":18789 "; then
+            echo "  ⚠ OpenClaw Gateway (port 18789) 未起. 切到 openclaw worker 前手动跑:"
+            echo "    nohup openclaw gateway > /tmp/openclaw-gateway.log 2>&1 &"
+        else
+            echo "  Gateway 已 running on :18789"
+        fi
+
         # bugged 双路径: gLinux (有 CLI) 用 skill 直调, 云上机器用 SSE MCP
         local IS_GLINUX=0
         if command -v bugged &>/dev/null; then
