@@ -248,22 +248,29 @@ def load_feishu_style() -> str:
 
 
 def _shorten_model_name(raw: str) -> str:
-    """将原始 model ID 转为简短显示名。"""
+    """将原始 model ID 转为简短显示名 (chris 的简写规则: G/C/O + 版本数 + 后缀)."""
     if not raw:
         return ""
     name = raw.rsplit("/", 1)[-1] if "/" in raw else raw
     name = name.split("@")[0]
     _MAP = {
-        "claude-opus-4-6": "Opus 4.6",
-        "claude-opus-4-7": "Opus 4.7",
-        "claude-sonnet-4-6": "Sonnet 4.6",
-        "claude-sonnet-4-5": "Sonnet 4.5",
-        "claude-haiku-4-5": "Haiku 4.5",
-        "gemini-3.1-pro": "Gemini 3.1 Pro",
-        "gemini-3.1-flash": "Gemini 3.1 Flash",
-        "gemini-3-flash": "Gemini 3 Flash",
-        "gemini-2.5-pro": "Gemini 2.5 Pro",
-        "gemini-2.5-flash": "Gemini 2.5 Flash",
+        # Claude
+        "claude-opus-4-6": "C46O",
+        "claude-opus-4-7": "C47O",
+        "claude-sonnet-4-6": "C46S",
+        "claude-sonnet-4-5": "C45S",
+        "claude-haiku-4-5": "C45H",
+        # Gemini
+        "gemini-3.5-flash": "G35F",
+        "gemini-3.5-flash-preview": "G35F-prev",
+        "gemini-3.1-pro": "G31P",
+        "gemini-3.1-flash": "G31F",
+        "gemini-3.1-flash-lite": "G31FL",
+        "gemini-3.1-flash-lite-preview": "G31FL-prev",
+        "gemini-3-flash": "G3F",
+        "gemini-3-pro": "G3P",
+        "gemini-2.5-pro": "G25P",
+        "gemini-2.5-flash": "G25F",
     }
     return _MAP.get(name, name)
 
@@ -1049,6 +1056,91 @@ class FeishuChannel(Channel):
                 f"Progress card terminal-patch fallback also failed "
                 f"(card_id={card_id}, ctx={log_context}): {type(e).__name__}: {e}"
             )
+
+    async def _fetch_quoted_message_text(self, message_id: str) -> str:
+        """拉被引用消息的文本内容. 用于把 chris 引用的上下文一并传给 Worker.
+
+        飞书 message event 带 `parent_id` 字段标记引用源消息, 但 SDK 不自动 fetch
+        被引消息内容. 没这个 helper 时 Worker 只看到当前 user message, 不知道
+        chris 在引用什么 → 答非所问 ("ACP initialize failed 怎么来的?" 但 worker
+        看不到引用的报错文本, 自信地胡编 — 2026-05-24 实测).
+
+        支持类型:
+          - text: 拿 content.text
+          - post (富文本): flatten 所有 text element
+          - interactive (bot 卡片): 拿 header.title 或 elements 的 text
+
+        失败 (消息被撤回 / API 错 / 不支持类型) 返回空 string, 调用方 fallback 到
+        只发当前 text. 永不抛异常阻塞消息处理.
+        """
+        if not message_id:
+            return ""
+        try:
+            from lark_oapi.api.im.v1 import GetMessageRequest
+            req = GetMessageRequest.builder().message_id(message_id).build()
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                None, self._client.im.v1.message.get, req
+            )
+            if not resp.success() or not resp.data or not resp.data.items:
+                return ""
+            item = resp.data.items[0]
+            mtype = item.msg_type or ""
+            body_content = ""
+            if item.body and item.body.content:
+                body_content = item.body.content
+            if not body_content:
+                return ""
+            data = json.loads(body_content)
+            if mtype == "text":
+                return (data.get("text") or "").strip()
+            elif mtype == "post":
+                # post 富文本: flatten 所有 paragraph 的 text element
+                # locale 包装: {"zh_cn": {"title": ..., "content": [[{...},{...}], ...]}}
+                # 或者直接 {"title":..., "content": [...]}
+                body = None
+                for locale in ("zh_cn", "en_us", "ja_jp"):
+                    if locale in data:
+                        body = data[locale]
+                        break
+                if body is None:
+                    body = data
+                title = body.get("title", "") or ""
+                parts = [title] if title else []
+                for paragraph in body.get("content", []) or []:
+                    if not isinstance(paragraph, list):
+                        continue
+                    para_text = []
+                    for elem in paragraph:
+                        if isinstance(elem, dict) and elem.get("tag") == "text":
+                            para_text.append(elem.get("text", "") or "")
+                    if para_text:
+                        parts.append("".join(para_text))
+                return "\n".join(parts).strip()
+            elif mtype == "interactive":
+                # bot 发的卡片 — 提取 header.title 作为概要
+                header = data.get("header") or {}
+                title = (header.get("title") or {}).get("content", "") or ""
+                # 也试 elements 第一段 plain_text
+                elements = data.get("elements") or data.get("body", {}).get("elements", []) or []
+                extra = []
+                for el in elements[:3]:  # 只取前 3 段避免过长
+                    if isinstance(el, dict):
+                        if el.get("tag") == "div":
+                            txt = (el.get("text") or {}).get("content", "")
+                            if txt:
+                                extra.append(txt)
+                summary = title
+                if extra:
+                    summary = (title + "\n" + "\n".join(extra)).strip() if title else "\n".join(extra)
+                return summary[:500]  # 卡片可能很长, 截断
+            elif mtype in ("image", "file", "audio"):
+                return f"[引用了一个 {mtype} 消息]"
+            else:
+                return f"[引用了 {mtype} 类型消息, 无法提取文本]"
+        except Exception as e:
+            log.warning(f"_fetch_quoted_message_text({message_id}) failed: {e}")
+            return ""
 
     async def _async_reply_text(self, message_id: str, text: str):
         """异步回复消息。"""
@@ -3098,6 +3190,21 @@ class FeishuChannel(Channel):
 
             if not content:
                 return
+
+            # 引用消息处理: 飞书 message.parent_id 标记 chris 在引用某条原消息.
+            # 拉原消息内容 prepend 到 content, 让 Worker 看到完整上下文. 没这段
+            # Worker 只看到 user 当前文字, 不知道在问哪条消息 → 答非所问.
+            parent_id = getattr(message, "parent_id", "") or ""
+            if parent_id:
+                quoted_text = await self._fetch_quoted_message_text(parent_id)
+                if quoted_text:
+                    # 多行 quoted 每行加 "> " 前缀, 跟 markdown blockquote 一致
+                    quoted_block = "\n".join(f"> {line}" for line in quoted_text.split("\n"))
+                    content = f"[引用消息]\n{quoted_block}\n\n{content}"
+                    log.info(
+                        f"Injected quoted message (parent_id={parent_id[:16]}..., "
+                        f"quoted_len={len(quoted_text)})"
+                    )
 
             # 提前声明，确保 exception handler 可安全访问
             _progress_card_id: list = [None]
