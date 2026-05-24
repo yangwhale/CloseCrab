@@ -438,11 +438,30 @@ class KiloWorker(Worker):
         ]
         log.info("Starting kilo serve: %s", " ".join(cmd))
 
+        # Kilo populates the LLM's <environment_details> "Workspace root folder:"
+        # field by running `git rev-parse --show-toplevel` from its cwd. If cwd
+        # is not inside any git repo (e.g. self._work_dir = $HOME), the command
+        # fails and Kilo falls back to "/" — which then makes glob/grep scan from
+        # filesystem root (slow, permission errors on /proc /sys /var/log) and
+        # leaks "Workspace root folder: /" to the LLM.
+        #
+        # Workaround: use the CloseCrab project root as cwd. It's guaranteed to
+        # be a git repo (CloseCrab itself is checked out from GitHub) and stable
+        # across bot identities. Kilo's <environment_details> then shows the
+        # CloseCrab repo root.
+        kilo_cwd = self._work_dir
+        try:
+            cc_root = Path(__file__).resolve().parent.parent.parent
+            if (cc_root / ".git").exists():
+                kilo_cwd = str(cc_root)
+        except Exception:
+            pass
+
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=self._work_dir,
+            cwd=kilo_cwd,
             start_new_session=True,
         )
 
@@ -957,20 +976,9 @@ class KiloWorker(Worker):
                 log.info("Resumed session: %s", self._session_id)
                 return
 
-        # Create new session.
-        # Pass `directory` (Working directory) + `worktree` (Workspace root folder)
-        # both pointing to bot work_dir. Without these Kilo falls back to "/" for
-        # worktree, which: (1) makes its glob/grep/list_files scan from filesystem
-        # root (slow + permission errors on /proc /sys /var/log), (2) leaks
-        # "Workspace root folder: /" into LLM's <environment_details>, (3) breaks
-        # relative path resolution. Field names verified via binary strings on
-        # @kilocode/cli@7.3.1: yP(H) emits both keys from session metadata.
+        # Create new session
         url = f"{self._base_url}/session"
-        session_body = {
-            "directory": self._work_dir,
-            "worktree": self._work_dir,
-        }
-        async with self._http.post(url, json=session_body) as resp:
+        async with self._http.post(url, json={}) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise RuntimeError(f"Failed to create session: {resp.status} {body[:200]}")
