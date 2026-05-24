@@ -1,18 +1,6 @@
 {
   "$schema": "https://app.kilo.ai/config.json",
   "provider": {
-    "google-vertex": {
-      "options": {
-        "project": "${ANTHROPIC_VERTEX_PROJECT_ID}",
-        "location": "global",
-        "providerOptions": {
-          "thinkingConfig": {
-            "thinkingLevel": "low",
-            "includeThoughts": false
-          }
-        }
-      }
-    },
     "google-vertex-anthropic": {
       "options": {
         "project": "${ANTHROPIC_VERTEX_PROJECT_ID}",

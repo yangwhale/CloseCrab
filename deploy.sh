@@ -1143,11 +1143,13 @@ with open(path, 'w') as f:
 
         if [[ ! -f "$HOME/.config/kilo/kilo.json" ]]; then
             if [[ -f "$SCRIPT_DIR/config/kilo.json" ]]; then
-                # envsubst with HOME + ANTHROPIC_VERTEX_PROJECT_ID + JINA_API_KEY
+                # envsubst SHELL-FORMAT: 只替换指定 3 个 vars, 否则 envsubst 会把
+                # JSON 的 "$schema" 字段当 shell var 替换成空 string -> Kilo 报
+                # "Configuration is invalid: Unrecognized key:" (因为 $schema 变成 "")
                 HOME="$HOME" \
                 ANTHROPIC_VERTEX_PROJECT_ID="${ANTHROPIC_VERTEX_PROJECT_ID:-gpu-launchpad-playground}" \
                 JINA_API_KEY="${JINA_API_KEY:-}" \
-                envsubst < "$SCRIPT_DIR/config/kilo.json" > "$HOME/.config/kilo/kilo.json"
+                envsubst '${HOME} ${ANTHROPIC_VERTEX_PROJECT_ID} ${JINA_API_KEY}' < "$SCRIPT_DIR/config/kilo.json" > "$HOME/.config/kilo/kilo.json"
                 echo "  已生成 ~/.config/kilo/kilo.json (provider=google-vertex-anthropic + jina/wiki MCP)"
             else
                 echo "  ⚠ 未找到 config/kilo.json 模板, 跳过"
