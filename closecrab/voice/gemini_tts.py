@@ -14,6 +14,7 @@ Supports both aistudio (api_key) and Vertex AI modes. Voice is configurable
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
@@ -25,6 +26,8 @@ from livekit.agents import (
     tts,
     utils,
 )
+
+log = logging.getLogger("closecrab.voice.gemini_tts")
 
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_NUM_CHANNELS = 1
@@ -120,12 +123,43 @@ class _GeminiChunkedStream(tts.ChunkedStream):
             config=config,
         )
 
+        # Safety filter or other server-side issues can yield candidates=[] or
+        # candidates[0].content.parts=None even on HTTP 200. Without this guard
+        # the livekit TTS pipeline crashes and the whole utterance is lost.
         pcm = bytearray()
-        for part in response.candidates[0].content.parts:
-            inline = getattr(part, "inline_data", None)
-            if inline and inline.data:
-                pcm.extend(inline.data)
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            log.warning(
+                "Gemini TTS: empty candidates (text=%r, prompt_feedback=%s)",
+                self._input_text[:80],
+                getattr(response, "prompt_feedback", None),
+            )
+        else:
+            cand = candidates[0]
+            finish_reason = getattr(cand, "finish_reason", None)
+            content = getattr(cand, "content", None)
+            parts = getattr(content, "parts", None) if content is not None else None
+            if not parts:
+                log.warning(
+                    "Gemini TTS: no parts (text=%r, finish_reason=%s)",
+                    self._input_text[:80],
+                    finish_reason,
+                )
+            else:
+                for part in parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and inline.data:
+                        pcm.extend(inline.data)
+                if not pcm:
+                    log.warning(
+                        "Gemini TTS: parts present but no inline audio "
+                        "(text=%r, finish_reason=%s)",
+                        self._input_text[:80],
+                        finish_reason,
+                    )
 
+        # Always initialize + flush so the livekit pipeline finalizes cleanly,
+        # even when pcm is empty (silent frame = graceful degradation).
         output_emitter.initialize(
             request_id=utils.shortuuid(),
             sample_rate=GEMINI_TTS_SAMPLE_RATE,
