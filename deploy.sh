@@ -453,6 +453,83 @@ echo "=== CloseCrab Deploy (mode: $MODE) ==="
 # Claude Code 环境安装
 # ====================================================================
 
+# ─────────────────────────────────────────────────────────────────────
+# Helper: install npm package globally + symlink to /usr/local/bin
+#
+# Why symlink: BotCore python is launched by systemd/launcher, its PATH is
+# inherited from systemd (no ~/.npm-global/bin). KiloWorker / OpenClawWorker
+# call subprocess_exec(bin_name, ...) → shutil.which(bin_name) at __init__
+# returns None → silent fail when spawning. /usr/local/bin is in default
+# systemd PATH, so symlinking there bypasses the PATH-isolation gap.
+#
+# Usage: install_npm_bin <npm_pkg> <bin_name> [display_name]
+# Example: install_npm_bin "@kilocode/cli" "kilo" "Kilo CLI"
+# ─────────────────────────────────────────────────────────────────────
+ensure_symlink() {
+    local src="$1"
+    local name="$2"
+    local dst="/usr/local/bin/$name"
+    if [[ "$(readlink -f "$dst" 2>/dev/null)" == "$(readlink -f "$src" 2>/dev/null)" ]]; then
+        return 0
+    fi
+    if sudo -n true 2>/dev/null; then
+        sudo ln -sf "$src" "$dst" 2>/dev/null && \
+            echo "  symlink: $dst -> $src"
+    else
+        echo "  ⚠ sudo 需密码, 跳过 symlink $dst (BotCore python 可能找不到 $name)"
+    fi
+}
+
+install_npm_bin() {
+    local pkg="$1"
+    local bin_name="$2"
+    local display_name="${3:-$bin_name}"
+
+    # 1. Already installed?
+    if command -v "$bin_name" &>/dev/null; then
+        local existing="$(command -v "$bin_name")"
+        echo "  $display_name 已装: $existing ($("$bin_name" --version 2>&1 | head -1))"
+        # Always re-ensure symlink (handles case where user installed to ~/.npm-global but no /usr/local symlink)
+        if [[ "$existing" != "/usr/local/bin/$bin_name" ]]; then
+            ensure_symlink "$existing" "$bin_name"
+        fi
+        return 0
+    fi
+
+    # 2. Standardize npm prefix (avoid sudo for npm install)
+    local NPM_PREFIX
+    NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
+    if [[ "$NPM_PREFIX" == "/usr" || "$NPM_PREFIX" == "/usr/local" ]]; then
+        echo "  npm prefix=$NPM_PREFIX (系统级), 切到 ~/.npm-global 避免 sudo"
+        mkdir -p "$HOME/.npm-global"
+        npm config set prefix "$HOME/.npm-global" 2>/dev/null
+        export PATH="$HOME/.npm-global/bin:$PATH"
+        # Add to .bashrc for interactive shells
+        if [[ -f "$HOME/.bashrc" ]] && ! grep -q "npm-global/bin" "$HOME/.bashrc" 2>/dev/null; then
+            echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.bashrc"
+        fi
+    fi
+
+    # 3. Install (try user-level first, sudo fallback)
+    echo "  装 $display_name ($pkg)..."
+    if npm install -g "$pkg" 2>&1 | tail -3; then
+        echo "  ✅ $display_name 已装"
+    elif sudo -n true 2>/dev/null && sudo npm install -g "$pkg" 2>&1 | tail -3; then
+        echo "  ✅ $display_name 已装 (via sudo)"
+    else
+        echo "  ⚠ $display_name 安装失败, 手动跑: npm install -g $pkg"
+        return 1
+    fi
+
+    # 4. Symlink to /usr/local/bin (BotCore python PATH workaround)
+    local BIN_PATH="$HOME/.npm-global/bin/$bin_name"
+    if [[ -x "$BIN_PATH" ]]; then
+        ensure_symlink "$BIN_PATH" "$bin_name"
+    elif command -v "$bin_name" &>/dev/null; then
+        ensure_symlink "$(command -v "$bin_name")" "$bin_name"
+    fi
+}
+
 install_cc() {
     # ----------------------------------------------------------------
     # 0. 基础工具检查 (nodejs, npm, git)
@@ -949,8 +1026,11 @@ with open(path, 'w') as f:
     fi
 
     # ------------------------------------------------------------------
-    # [11/11] OpenClaw 配置
+    # [11/12] OpenClaw 安装 + 配置
     # ------------------------------------------------------------------
+    echo "[11/12] 安装 + 配置 OpenClaw..."
+    install_npm_bin "openclaw" "openclaw" "OpenClaw"
+
     local OPENCLAW_BIN=""
     if command -v openclaw &>/dev/null; then
         OPENCLAW_BIN="$(command -v openclaw)"
@@ -959,7 +1039,6 @@ with open(path, 'w') as f:
     fi
 
     if [[ -n "$OPENCLAW_BIN" ]]; then
-        echo "[11/11] 配置 OpenClaw..."
         mkdir -p "$HOME/.openclaw/agents/main/agent"
 
         if [[ ! -f "$HOME/.openclaw/openclaw.json" ]]; then
@@ -1038,7 +1117,49 @@ with open(path, 'w') as f:
             echo "  bugged: 云上路径 (SSE MCP), 已跳过 skill"
         fi
     else
-        echo "[11/11] OpenClaw 未安装, 跳过配置"
+        echo "[11/12] OpenClaw 未安装, 跳过配置 (install_npm_bin 失败)"
+    fi
+
+    # ------------------------------------------------------------------
+    # [12/12] Kilo CLI 安装 + 配置
+    #
+    # Kilo serve is a long-lived HTTP daemon spawned by KiloWorker on first
+    # message. KiloWorker._ensure_kilo_config() auto-generates ~/.kilo/{
+    # system-prompt.md, memory-guide.md, kilo.jsonc} at runtime, so deploy.sh
+    # only needs the CLI + ~/.config/kilo/kilo.json (provider + MCP).
+    # ------------------------------------------------------------------
+    echo "[12/12] 安装 + 配置 Kilo CLI..."
+    install_npm_bin "@kilocode/cli" "kilo" "Kilo CLI"
+
+    local KILO_BIN=""
+    if command -v kilo &>/dev/null; then
+        KILO_BIN="$(command -v kilo)"
+    elif [[ -x "$HOME/.npm-global/bin/kilo" ]]; then
+        KILO_BIN="$HOME/.npm-global/bin/kilo"
+    fi
+
+    if [[ -n "$KILO_BIN" ]]; then
+        mkdir -p "$HOME/.config/kilo"
+
+        if [[ ! -f "$HOME/.config/kilo/kilo.json" ]]; then
+            if [[ -f "$SCRIPT_DIR/config/kilo.json" ]]; then
+                # envsubst with HOME + ANTHROPIC_VERTEX_PROJECT_ID + JINA_API_KEY
+                HOME="$HOME" \
+                ANTHROPIC_VERTEX_PROJECT_ID="${ANTHROPIC_VERTEX_PROJECT_ID:-gpu-launchpad-playground}" \
+                JINA_API_KEY="${JINA_API_KEY:-}" \
+                envsubst < "$SCRIPT_DIR/config/kilo.json" > "$HOME/.config/kilo/kilo.json"
+                echo "  已生成 ~/.config/kilo/kilo.json (provider=google-vertex-anthropic + jina/wiki MCP)"
+            else
+                echo "  ⚠ 未找到 config/kilo.json 模板, 跳过"
+            fi
+        else
+            echo "  ~/.config/kilo/kilo.json 已存在, 跳过 (要重写删后 re-deploy)"
+        fi
+
+        # ~/.kilo/* 由 KiloWorker._ensure_kilo_config() 启动时自动生成, deploy.sh 不写
+        echo "  ~/.kilo/{system-prompt.md, memory-guide.md, kilo.jsonc} 由 KiloWorker 启动时自动生成"
+    else
+        echo "[12/12] Kilo CLI 未安装, 跳过配置 (install_npm_bin 失败)"
     fi
 
     echo ""
@@ -1048,6 +1169,7 @@ with open(path, 'w') as f:
     echo "  Memory: $(ls "$MEMORY_DIR" 2>/dev/null | wc -l) 个文件"
     echo "  Gemini CLI: $(command -v gemini &>/dev/null && echo '已安装' || echo '未安装')"
     echo "  OpenClaw: $([[ -n "$OPENCLAW_BIN" ]] && echo '已配置' || echo '未安装')"
+    echo "  Kilo CLI: $([[ -n "$KILO_BIN" ]] && echo '已配置' || echo '未安装')"
     echo "  运行 'claude' 开始使用"
 }
 
