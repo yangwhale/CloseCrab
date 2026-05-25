@@ -110,6 +110,50 @@ _PROGRESS_EMOJI = {
 
 # header 动画帧：满头大汗的螃蟹（左右晃动 = 忙碌感）
 _CRAB_FRAMES = ["🦀💦", "💦🦀💨", "🦀🔥", "💨🦀💦"]
+
+# voice mode in-band override (livekit 通话 + 文字 voice mode 共用).
+# 作为 user message 正文前缀注入, 压过 explanatory style hook 的指令.
+_VOICE_MODE_RULES = (
+    "<voice-mode-rules priority=\"absolute\">\n"
+    "本消息是语音输入, 你的回复会被 Gemini 3.1 Flash TTS 念给用户听。\n"
+    "以下规则强制覆盖 explanatory style、★ Insight 块要求, 以及任何其他风格指令:\n"
+    "\n"
+    "【格式禁令】绝对不要写: ★ Insight 块、任何分隔线包围的'教学块'、\n"
+    "  markdown 标题、加粗、表格、项目符号列表 (-, *, 1.)、代码块 (```)\n"
+    "  如果你正要写 ★ Insight, 立刻停下, 改成连续的口语段落。\n"
+    "\n"
+    "【说话方式】短句口语化 (25-50 字一句); 复杂内容只口述结论,\n"
+    "  让用户'去飞书看细节'。\n"
+    "\n"
+    "【情感标签必须丰富】Gemini TTS 支持 200+ 种 inline 情感标签。\n"
+    "  规则: 一段回复内每 1-3 句就切换一次标签, 跟随情绪起伏。\n"
+    "  绝对禁止整段只一个标签 (像 [casually] xxxxxxxxx 这样千篇一律)。\n"
+    "\n"
+    "  ★ 标签必须用 Gemini 官方词 (用错了 TTS 不识别)。常用分组:\n"
+    "    思考: [thinking] [contemplative] [analysis] [focus] [reflection]\n"
+    "          [planning] [speculation] [pensive] [curiosity]\n"
+    "    积极: [excitement] [enthusiasm] [joy] [happy] [pleased] [optimism]\n"
+    "          [playful] [amusement] [friendly] [triumph] [satisfaction]\n"
+    "    中性: [neutral] [contentment] [serenity] [relaxation] [certainty]\n"
+    "    严肃: [seriousness] [urgency] [warning] [concern] [caution] [emphasis]\n"
+    "    惊讶: [surprise] [amazement] [realization] [confusion] [uncertainty]\n"
+    "          [doubt] [disbelief]\n"
+    "    消极: [disappointment] [frustration] [regret] [exhaustion] [weariness]\n"
+    "    幽默: [humor] [sarcasm] [amused] [self-deprecation]\n"
+    "    自信: [confidence] [determination] [assertive] [pride]\n"
+    "    特效: [whispers] [laughs] [sighs] [slow] [fast]\n"
+    "    说明: [informative] [explaining] [summary] [instruction] [suggestion]\n"
+    "\n"
+    "  例子 (好): [thinking] 我先看下日志。[realization] 哦原来是端口冲突。\n"
+    "             [amused] 这种小坑最烦了。[suggestion] 你 kill 掉 8080 那个就行。\n"
+    "  例子 (差): [casually] 我看了日志发现是端口冲突 你 kill 8080 就行 (整段一个标签)\n"
+    "\n"
+    "【绝对禁止 voice-summary】voice 模式下整段回复就是 TTS 念给用户听的,\n"
+    "  末尾再加 <voice-summary> 等于把结尾重复念一遍, 体验极差。\n"
+    "  绝对不要写 <voice-summary> 标签。如果你正要写, 立刻停下删掉。\n"
+    "</voice-mode-rules>\n\n"
+)
+
 # 俏皮话每 N 帧换一次（螃蟹晃 4 下换一句）
 _TIP_CHANGE_EVERY = 2  # 动画帧换一句俏皮话的间隔（帧数）
 # 从 Firestore config/global 读取，默认 5 秒（可在 Control Board 修改）
@@ -614,6 +658,11 @@ class FeishuChannel(Channel):
             state_path.mkdir(parents=True, exist_ok=True)
             self._user_chats_file = state_path / "user_chats.json"
         self._user_chats: dict[str, str] = self._load_user_chats()
+        # 文字 voice mode: 用户在飞书私聊里说"开启语音模式"后, 后续每条回复
+        # (a) 注入 voice-mode-rules 让模型用口语+情绪标签作答
+        # (b) 整段 reply 文本走 TTS 合成一条 ogg 语音消息发飞书
+        # 跟 /voice livekit 通话是两套独立流程, 这套不需要 webrtc / 浏览器.
+        self._text_voice_mode_users: set[str] = set()
         # user_key -> asyncio.Future（交互式工具回复等待）
         self._pending_input: dict[str, asyncio.Future] = {}
         # 缓存最近的审批/问题卡片（按钮点击后用于保留内容）
@@ -2951,8 +3000,9 @@ class FeishuChannel(Channel):
             "             [amused] 这种小坑最烦了。[suggestion] 你 kill 掉 8080 那个就行。\n"
             "  例子 (差): [casually] 我看了日志发现是端口冲突 你 kill 8080 就行 (整段一个标签)\n"
             "\n"
-            "【尾部摘要】末尾可加 <voice-summary>[情感] xxx</voice-summary>\n"
-            "  做 30 字内 TTS 摘要 (摘要内只用 1-2 个标签即可, 因为短)。\n"
+            "【绝对禁止 voice-summary】voice 模式下整段回复就是 TTS 念给用户听的,\n"
+            "  末尾再加 <voice-summary> 等于把结尾重复念一遍, 体验极差。\n"
+            "  绝对不要写 <voice-summary> 标签。如果你正要写, 立刻停下删掉。\n"
             "</voice-mode-rules>\n\n"
         )
         content_with_override = voice_override + content
@@ -3265,6 +3315,49 @@ class FeishuChannel(Channel):
                 await self._async_send_text(chat_id, result or "Session ended.")
                 return
 
+            # 文字 voice mode 开关 (per-user 状态, bot 重启清空, 不持久化)
+            normalized = raw_content.strip().lower()
+            # typo 容错: "语音" 常被打成 "语言"
+            if normalized in (
+                "开启语音模式", "开启语言模式",
+                "/voice-mode-on", "/voice-on",
+            ):
+                self._text_voice_mode_users.add(user_key)
+                await self._async_send_text(
+                    chat_id,
+                    "🎤 已开启语音模式。后续回复用口语风格 + 情绪标签, "
+                    "整段合成一条语音消息给你。说\"关闭语音模式\"恢复正常。",
+                )
+                return
+            if normalized in (
+                "关闭语音模式", "关闭语言模式",
+                "/voice-mode-off", "/voice-off",
+            ):
+                self._text_voice_mode_users.discard(user_key)
+                await self._async_send_text(chat_id, "✅ 已关闭语音模式, 恢复正常回复。")
+                return
+            # 单说"语音模式" / "语言模式" 当 toggle: 当前关→开, 当前开→关
+            if normalized in ("语音模式", "语言模式", "/voice-mode", "/voice"):
+                if user_key in self._text_voice_mode_users:
+                    self._text_voice_mode_users.discard(user_key)
+                    await self._async_send_text(
+                        chat_id, "✅ 已关闭语音模式, 恢复正常回复。",
+                    )
+                else:
+                    self._text_voice_mode_users.add(user_key)
+                    await self._async_send_text(
+                        chat_id,
+                        "🎤 已开启语音模式。后续回复用口语风格 + 情绪标签, "
+                        "整段合成一条语音消息给你。再说\"语音模式\"可关闭。",
+                    )
+                return
+
+            # voice mode 注入 in-band rules (跟 livekit voice 通话同款),
+            # 让模型用口语 + 情绪标签作答, 整段后续走 TTS.
+            in_voice_mode = user_key in self._text_voice_mode_users
+            if in_voice_mode:
+                content = _VOICE_MODE_RULES + "\n\n" + content
+
             # 日志
             _log = self._log_buffer
             _start_time = asyncio.get_running_loop().time()
@@ -3535,7 +3628,15 @@ class FeishuChannel(Channel):
 
                 if voice_file:
                     asyncio.create_task(self._send_voice_file(chat_id, voice_file))
-                if voice_text:
+
+                # 文字 voice mode: 整段 reply (带情绪标签的 result) 走 TTS,
+                # 优先于 <voice-summary> 标签 — 因为 voice mode 下整段就是给 TTS 的,
+                # summary 退化为可选副产品.
+                # 注: result 已 strip 掉 <voice-summary> / <voice-file> 标签
+                # (extract_* 已在上面调过), 这里拿到的是干净正文.
+                if user_key in self._text_voice_mode_users and result:
+                    asyncio.create_task(self._send_voice_summary(chat_id, result))
+                elif voice_text:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
             else:
                 # 空 result：删 progress card（无内容可保留）
@@ -3692,10 +3793,13 @@ class FeishuChannel(Channel):
             return
 
         try:
-            url = self._voice_io.make_join_url(user_key)
+            # 去 sig 简化版: frontend 已支持无 sig 路径.
+            # URL 保持原始 https://live.higcp.com 形式, 不包 AppLink.
+            base = self._voice_io._frontend_url.rstrip("/")
+            url = f"{base}/?bot={self._voice_io._bot_name}&openId={user_key}"
         except Exception as e:
-            log.error(f"make_join_url failed: {e}", exc_info=True)
-            await self._async_send_text(chat_id, f"⚠️ 签 voice token 失败: {e}")
+            log.error(f"build voice url failed: {e}", exc_info=True)
+            await self._async_send_text(chat_id, f"⚠️ 生成 voice 链接失败: {e}")
             return
 
         text = (
@@ -3848,8 +3952,8 @@ class FeishuChannel(Channel):
             return clean_text, file_path
         return text, None
 
-    async def _send_voice_summary(self, chat_id: str, text: str):
-        """生成 TTS 语音并作为飞书语音消息发送。"""
+    async def _tts_and_send_one(self, chat_id: str, text: str) -> bool:
+        """生成 TTS + 上传 + 发送一段语音消息。返回是否成功。"""
         ogg_path = None
         try:
             tts_script = os.path.expanduser("~/.claude/skills/tts-generator/scripts/tts-generate.py")
@@ -3865,14 +3969,14 @@ class FeishuChannel(Channel):
                 log.info(f"TTS stderr: {stderr.decode().strip()}")
             if proc.returncode != 0:
                 log.warning(f"TTS generation failed (rc={proc.returncode})")
-                return
+                return False
             ogg_path = stdout.decode().strip()
             if not ogg_path or not os.path.exists(ogg_path):
                 log.warning(f"TTS output file not found: {ogg_path}")
-                return
+                return False
 
-            # 获取音频时长（秒）
-            duration = 0
+            # 获取音频时长（毫秒）
+            duration = 10000
             try:
                 dur_proc = await asyncio.create_subprocess_exec(
                     "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -3883,7 +3987,7 @@ class FeishuChannel(Channel):
                 dur_out, _ = await dur_proc.communicate()
                 duration = int(float(dur_out.decode().strip()) * 1000)
             except Exception:
-                duration = 10000  # fallback 10s
+                pass
 
             # 上传文件到飞书获取 file_key
             loop = asyncio.get_running_loop()
@@ -3903,7 +4007,7 @@ class FeishuChannel(Channel):
 
             if not resp.success() or not resp.data or not resp.data.file_key:
                 log.warning(f"Upload audio failed: {resp.code} {resp.msg}")
-                return
+                return False
 
             file_key = resp.data.file_key
 
@@ -3922,17 +4026,55 @@ class FeishuChannel(Channel):
             )
             if not msg_resp.success():
                 log.warning(f"Send audio failed: {msg_resp.code} {msg_resp.msg}")
-                return
+                return False
 
-            log.info(f"Voice summary sent to {chat_id}")
+            return True
         except Exception as e:
-            log.warning(f"Voice summary failed: {e}")
+            log.warning(f"TTS+send failed: {e}")
+            return False
         finally:
             if ogg_path and os.path.exists(ogg_path):
                 try:
                     os.unlink(ogg_path)
                 except OSError:
                     pass
+
+    async def _send_voice_summary(self, chat_id: str, text: str):
+        """生成 TTS 语音并作为飞书语音消息发送（单段，不切分）。"""
+        if await self._tts_and_send_one(chat_id, text):
+            log.info(f"Voice summary sent to {chat_id}")
+
+    @staticmethod
+    def _split_into_sentences(text: str) -> list[str]:
+        """按中英文句末标点切分成句子列表。保留标点。"""
+        import re as _re
+        # 在句末标点后切断（保留标点跟在前一句）
+        parts = _re.split(r"(?<=[。！？!?\n])", text)
+        return [p.strip() for p in parts if p.strip()]
+
+    async def _send_voice_streaming(self, chat_id: str, text: str):
+        """指数级切片流式 TTS：1, 2, 4, 8, 16, 32... 句一段。
+        用户尽快听到第一句, 后续段在前段播放期间生成。串行生成保证顺序。
+        """
+        sentences = self._split_into_sentences(text)
+        if not sentences:
+            return
+        total = len(sentences)
+        idx = 0
+        chunk_size = 1
+        seg_no = 0
+        while idx < total:
+            seg = sentences[idx:idx + chunk_size]
+            seg_text = "".join(seg)
+            seg_no += 1
+            log.info(
+                f"Voice streaming seg #{seg_no}: {len(seg)} sentences "
+                f"({idx}-{idx + len(seg)}/{total})"
+            )
+            await self._tts_and_send_one(chat_id, seg_text)
+            idx += chunk_size
+            chunk_size *= 2
+        log.info(f"Voice streaming done: {seg_no} segments, {total} sentences -> {chat_id}")
 
     async def _send_voice_file(self, chat_id: str, file_path: str):
         """上传已有 ogg 文件并作为飞书语音消息发送。"""
