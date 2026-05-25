@@ -2,11 +2,14 @@
 """Send email via Feishu enterprise SMTP."""
 
 import argparse
+import mimetypes
 import os
 import smtplib
 import sys
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email import encoders
 from pathlib import Path
 
 # Load email config from Firestore (fallback to env vars)
@@ -33,29 +36,56 @@ SMTP_USER = _email_cfg.get("user") or os.environ.get("FEISHU_SMTP_USER", "")
 SMTP_PASS = _email_cfg.get("pass") or os.environ.get("FEISHU_SMTP_PASS", "")
 
 
-def send_mail(to: list[str], subject: str, body: str, cc: list[str] = None, html: bool = False):
+def send_mail(to: list[str], subject: str, body: str, cc: list[str] = None,
+              html: bool = False, attach: list[str] = None):
     if not SMTP_PASS:
         print("ERROR: FEISHU_SMTP_PASS not set", file=sys.stderr)
         sys.exit(1)
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
+    # If we have attachments, outer container must be multipart/mixed
+    has_attach = bool(attach)
+    outer = MIMEMultipart("mixed") if has_attach else MIMEMultipart("alternative")
+    outer["Subject"] = subject
     sender_name = os.environ.get("BOT_NAME", SMTP_USER.split("@")[0]).title()
-    msg["From"] = f"{sender_name} <{SMTP_USER}>"
-    msg["To"] = ", ".join(to)
+    outer["From"] = f"{sender_name} <{SMTP_USER}>"
+    outer["To"] = ", ".join(to)
     if cc:
-        msg["Cc"] = ", ".join(cc)
+        outer["Cc"] = ", ".join(cc)
 
     content_type = "html" if html else "plain"
-    msg.attach(MIMEText(body, content_type, "utf-8"))
+    body_part = MIMEText(body, content_type, "utf-8")
+
+    if has_attach:
+        # multipart/mixed → wrap body in its own alternative part, then attach files
+        alt = MIMEMultipart("alternative")
+        alt.attach(body_part)
+        outer.attach(alt)
+        for path in attach:
+            p = Path(path)
+            if not p.is_file():
+                print(f"ERROR: attachment not found: {path}", file=sys.stderr)
+                sys.exit(2)
+            ctype, encoding = mimetypes.guess_type(str(p))
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            with p.open("rb") as f:
+                part = MIMEBase(maintype, subtype)
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=p.name)
+            outer.attach(part)
+    else:
+        outer.attach(body_part)
 
     recipients = list(to) + (cc or [])
 
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as s:
         s.login(SMTP_USER, SMTP_PASS)
-        s.send_message(msg, to_addrs=recipients)
+        s.send_message(outer, to_addrs=recipients)
 
-    print(f"OK: sent to {', '.join(recipients)}")
+    suffix = f" (with {len(attach)} attachment(s))" if has_attach else ""
+    print(f"OK: sent to {', '.join(recipients)}{suffix}")
 
 
 def main():
@@ -65,12 +95,15 @@ def main():
     parser.add_argument("--body", required=True, help="Email body")
     parser.add_argument("--cc", default="", help="CC recipients (comma-separated)")
     parser.add_argument("--html", action="store_true", help="Treat body as HTML")
+    parser.add_argument("--attach", action="append", default=[],
+                        help="File path to attach (can repeat for multiple files)")
     args = parser.parse_args()
 
     to = [a.strip() for a in args.to.split(",") if a.strip()]
     cc = [a.strip() for a in args.cc.split(",") if a.strip()] if args.cc else None
+    attach = args.attach or None
 
-    send_mail(to, args.subject, args.body, cc, args.html)
+    send_mail(to, args.subject, args.body, cc, args.html, attach)
 
 
 if __name__ == "__main__":
