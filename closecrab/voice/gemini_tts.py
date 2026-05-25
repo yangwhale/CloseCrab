@@ -160,6 +160,13 @@ class _GeminiChunkedStream(tts.ChunkedStream):
 
         # Always initialize + flush so the livekit pipeline finalizes cleanly,
         # even when pcm is empty (silent frame = graceful degradation).
+        # 关键修复: livekit-agents 见到 push(b"") 仍判定 "no audio frames"
+        # 触发 APIError + retry, 而 PROHIBITED_CONTENT 是永久错重试无意义.
+        # 推一帧 100ms 静音 PCM (16-bit signed @ 24kHz) 让 livekit 认为有 output,
+        # 跳过这一句对话继续, 不让一个被 ban 的字搞崩整段 TTS.
+        if not pcm:
+            silent_frame_samples = int(GEMINI_TTS_SAMPLE_RATE * 0.1)  # 100ms
+            pcm = bytearray(silent_frame_samples * 2 * GEMINI_TTS_NUM_CHANNELS)  # 16-bit = 2 bytes
         output_emitter.initialize(
             request_id=utils.shortuuid(),
             sample_rate=GEMINI_TTS_SAMPLE_RATE,

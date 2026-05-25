@@ -50,6 +50,7 @@ from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
     JobContext,
     JobExecutorType,
+    RoomInputOptions,
     WorkerOptions,
     llm,
     tokenize,
@@ -795,6 +796,9 @@ async def _voice_entrypoint(ctx: JobContext):
 
     await session.start(agent=agent, room=ctx.room)
     # 不主动打招呼 — 等用户说话
+    # NOTE: 原本想加 RoomInputOptions(close_on_disconnect=False) 解决断开重连
+    # warning, 但实测会让 livekit server 认为旧 room 还有 active agent 不派新 job,
+    # 导致重启后第一次 /voice 就 "Agent did not join the room". 已回退.
 
     # 兜底显式 publish lk.agent.state="listening" 到 local_participant attribute。
     # SDK 内部 AgentSession.start() 完成会 emit "agent_state_changed" event,
