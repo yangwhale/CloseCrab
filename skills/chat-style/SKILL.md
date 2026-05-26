@@ -81,22 +81,9 @@ Discord 列表格式（适合少量字段或中文标签）：
 
 复杂内容（大表格、图表、报告）不适合聊天消息时，生成 HTML 页面到 CC Pages：
 
-1. 写 HTML 到 `$CC_PAGES_WEB_ROOT/pages/{topic}-{YYYYMMDD-HHmmss}.html`
-2. 用 Playwright 截图(1200x630) 保存到 `$CC_PAGES_WEB_ROOT/assets/og-{topic}.png`
-3. 页面 og:image 指向专属截图
-4. 发送链接 `$CC_PAGES_URL_PREFIX/pages/{filename}`
-
-### OG 标签模板
-
-```html
-<meta property="og:title" content="页面标题">
-<meta property="og:description" content="简短描述">
-<meta property="og:image" content="$CC_PAGES_URL_PREFIX/assets/og-{topic}.png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="theme-color" content="#22C55E">
-```
+1. 写 HTML 到 `$CC_PAGES_WEB_ROOT/pages/{topic}-{YYYYMMDD-HHmmss}.html`（公开发给客户走 `assets/` 子目录）
+2. 用 `~/CloseCrab/scripts/publish-cc-page.sh <html-path> [--to pages|assets|both]` 上传 + 自动验证 URL
+3. 发送链接 `$CC_PAGES_URL_PREFIX/pages/{filename}` 或 `$CC_PAGES_URL_PREFIX/assets/{filename}`
 
 ## 进度更新
 
