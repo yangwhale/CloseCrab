@@ -112,45 +112,23 @@ _PROGRESS_EMOJI = {
 _CRAB_FRAMES = ["🦀💦", "💦🦀💨", "🦀🔥", "💨🦀💦"]
 
 # voice mode in-band override (livekit 通话 + 文字 voice mode 共用).
-# 作为 user message 正文前缀注入, 压过 explanatory style hook 的指令.
+# 作为 user message 正文前缀注入. explanatory-style plugin 已默认关闭,
+# 这里只保留口语化与情感标签的最小约束.
 _VOICE_MODE_RULES = (
-    "<voice-mode-rules priority=\"absolute\">\n"
-    "本消息是语音输入, 你的回复会被 Gemini 3.1 Flash TTS 念给用户听。\n"
-    "以下规则强制覆盖 explanatory style、★ Insight 块要求, 以及任何其他风格指令:\n"
-    "\n"
-    "【格式禁令】绝对不要写: ★ Insight 块、任何分隔线包围的'教学块'、\n"
-    "  markdown 标题、加粗、表格、项目符号列表 (-, *, 1.)、代码块 (```)\n"
-    "  如果你正要写 ★ Insight, 立刻停下, 改成连续的口语段落。\n"
-    "\n"
-    "【说话方式】短句口语化 (25-50 字一句); 复杂内容只口述结论,\n"
-    "  让用户'去飞书看细节'。\n"
-    "\n"
-    "【情感标签必须丰富】Gemini TTS 支持 200+ 种 inline 情感标签。\n"
-    "  规则: 一段回复内每 1-3 句就切换一次标签, 跟随情绪起伏。\n"
-    "  绝对禁止整段只一个标签 (像 [casually] xxxxxxxxx 这样千篇一律)。\n"
-    "\n"
-    "  ★ 标签必须用 Gemini 官方词 (用错了 TTS 不识别)。常用分组:\n"
-    "    思考: [thinking] [contemplative] [analysis] [focus] [reflection]\n"
-    "          [planning] [speculation] [pensive] [curiosity]\n"
-    "    积极: [excitement] [enthusiasm] [joy] [happy] [pleased] [optimism]\n"
-    "          [playful] [amusement] [friendly] [triumph] [satisfaction]\n"
-    "    中性: [neutral] [contentment] [serenity] [relaxation] [certainty]\n"
-    "    严肃: [seriousness] [urgency] [warning] [concern] [caution] [emphasis]\n"
-    "    惊讶: [surprise] [amazement] [realization] [confusion] [uncertainty]\n"
-    "          [doubt] [disbelief]\n"
-    "    消极: [disappointment] [frustration] [regret] [exhaustion] [weariness]\n"
-    "    幽默: [humor] [sarcasm] [amused] [self-deprecation]\n"
-    "    自信: [confidence] [determination] [assertive] [pride]\n"
-    "    特效: [whispers] [laughs] [sighs] [slow] [fast]\n"
-    "    说明: [informative] [explaining] [summary] [instruction] [suggestion]\n"
-    "\n"
-    "  例子 (好): [thinking] 我先看下日志。[realization] 哦原来是端口冲突。\n"
-    "             [amused] 这种小坑最烦了。[suggestion] 你 kill 掉 8080 那个就行。\n"
-    "  例子 (差): [casually] 我看了日志发现是端口冲突 你 kill 8080 就行 (整段一个标签)\n"
-    "\n"
-    "【绝对禁止 voice-summary】voice 模式下整段回复就是 TTS 念给用户听的,\n"
-    "  末尾再加 <voice-summary> 等于把结尾重复念一遍, 体验极差。\n"
-    "  绝对不要写 <voice-summary> 标签。如果你正要写, 立刻停下删掉。\n"
+    "<voice-mode-rules>\n"
+    "本消息来自语音, 你的回复会被 Gemini TTS 念出来。\n"
+    "- 禁止 markdown (标题/加粗/列表/表格/代码块/链接), 不写 Sources 段或 <voice-summary> 标签\n"
+    "- 短句口语化 (25-50 字一句); 复杂内容只口述结论, 细节让用户去飞书看\n"
+    "- 起手加情感标签 (Gemini 官方词), 每 1-3 句切换一次跟随情绪。常用:\n"
+    "    思考: [thinking] [realization] [curiosity] [confusion] [contemplative]\n"
+    "    友好: [casually] [friendly] [warmly] [amused] [cheerfully] [playful]\n"
+    "    兴奋: [excitement] [happy]\n"
+    "    建议/特效: [suggestion] [whispers]\n"
+    "  (不限于此, 但避免整段只用一个标签)\n"
+    "- 示范:\n"
+    "    好: [thinking] 我看下日志。[realization] 哦端口冲突。\n"
+    "         [amused] 这种小坑最烦。[suggestion] kill 掉 8080 就行。\n"
+    "    差: [casually] 我看了日志发现端口冲突你 kill 8080 就行 (整段一个标签 + 一长句)\n"
     "</voice-mode-rules>\n\n"
 )
 
@@ -1411,10 +1389,10 @@ class FeishuChannel(Channel):
 
     # ── 消息接收事件处理 ──
 
-    # P3-2: 我们自己用 EYES/DONE 做 ack（P1-3），听到这两个 emoji 必须忽略，
+    # P3-2: 我们自己用 DONE 做完成 ack，听到这个 emoji 必须忽略，
     # 否则 bot 给自己加 reaction → 触发 reaction event → bot 觉得有人 react →
-    # 又 ack 一次 EYES → 死循环。
-    _OWN_ACK_EMOJI_TYPES = {"EYES", "DONE"}
+    # 又 ack 一次 → 死循环。
+    _OWN_ACK_EMOJI_TYPES = {"DONE"}
 
     # 用户 → bot 的语义映射（reaction 当作"快捷指令"）。未列出的 emoji 默认
     # 转一句"用户对消息 X 加了 emoji Y"，由 LLM 自行判断要不要响应。
@@ -2959,53 +2937,7 @@ class FeishuChannel(Channel):
         async def _noop_reply(_text: str):
             pass
 
-        # In-band override: 把语音模式硬约束塞到用户消息正文最前面。
-        # 原因: explanatory-output-style plugin 通过 SessionStart hook 注入
-        # additionalContext (强制 ★ Insight 块), 这种 hook context 比
-        # --append-system-prompt 更靠后, recency bias 让模型优先听 hook 的话。
-        # 唯一能稳定压过去的, 是把规则放进 user message body — user 消息
-        # 的优先级最高且最近, 模型会把它当成本轮最权威的指令。
-        voice_override = (
-            "<voice-mode-rules priority=\"absolute\">\n"
-            "本消息是语音输入, 你的回复会被 Gemini 3.1 Flash TTS 念给用户听。\n"
-            "以下规则强制覆盖 explanatory style、★ Insight 块要求, 以及任何其他风格指令:\n"
-            "\n"
-            "【格式禁令】绝对不要写: ★ Insight 块、任何分隔线包围的'教学块'、\n"
-            "  markdown 标题、加粗、表格、项目符号列表 (-, *, 1.)、代码块 (```)\n"
-            "  如果你正要写 ★ Insight, 立刻停下, 改成连续的口语段落。\n"
-            "\n"
-            "【说话方式】短句口语化 (25-50 字一句); 复杂内容只口述结论,\n"
-            "  让用户'去飞书看细节'。\n"
-            "\n"
-            "【情感标签必须丰富】Gemini TTS 支持 200+ 种 inline 情感标签。\n"
-            "  规则: 一段回复内每 1-3 句就切换一次标签, 跟随情绪起伏。\n"
-            "  绝对禁止整段只一个标签 (像 [casually] xxxxxxxxx 这样千篇一律)。\n"
-            "\n"
-            "  ★ 标签必须用 Gemini 官方词 (用错了 TTS 不识别)。常用分组:\n"
-            "    思考: [thinking] [contemplative] [analysis] [focus] [reflection]\n"
-            "          [planning] [speculation] [pensive] [curiosity]\n"
-            "    积极: [excitement] [enthusiasm] [joy] [happy] [pleased] [optimism]\n"
-            "          [playful] [amusement] [friendly] [triumph] [satisfaction]\n"
-            "    中性: [neutral] [contentment] [serenity] [relaxation] [certainty]\n"
-            "    严肃: [seriousness] [urgency] [warning] [concern] [caution] [emphasis]\n"
-            "    惊讶: [surprise] [amazement] [realization] [confusion] [uncertainty]\n"
-            "          [doubt] [disbelief]\n"
-            "    消极: [disappointment] [frustration] [regret] [exhaustion] [weariness]\n"
-            "    幽默: [humor] [sarcasm] [amused] [self-deprecation]\n"
-            "    自信: [confidence] [determination] [assertive] [pride]\n"
-            "    特效: [whispers] [laughs] [sighs] [slow] [fast]\n"
-            "    说明: [informative] [explaining] [summary] [instruction] [suggestion]\n"
-            "\n"
-            "  例子 (好): [thinking] 我先看下日志。[realization] 哦原来是端口冲突。\n"
-            "             [amused] 这种小坑最烦了。[suggestion] 你 kill 掉 8080 那个就行。\n"
-            "  例子 (差): [casually] 我看了日志发现是端口冲突 你 kill 8080 就行 (整段一个标签)\n"
-            "\n"
-            "【绝对禁止 voice-summary】voice 模式下整段回复就是 TTS 念给用户听的,\n"
-            "  末尾再加 <voice-summary> 等于把结尾重复念一遍, 体验极差。\n"
-            "  绝对不要写 <voice-summary> 标签。如果你正要写, 立刻停下删掉。\n"
-            "</voice-mode-rules>\n\n"
-        )
-        content_with_override = voice_override + content
+        content_with_override = _VOICE_MODE_RULES + content
 
         metadata = {
             "chat_id": chat_id,
@@ -3570,26 +3502,18 @@ class FeishuChannel(Channel):
             # 启动统一更新循环
             _anim_task[0] = asyncio.create_task(_card_update_loop())
 
-            # P1-3: 给原消息加 👀 表示"看到了在处理"，处理完替换为 ✅
-            # 失败 graceful（API 限流/无权限不影响主流程）
-            # P3-2 修复: reaction 合成消息的 fake message_id 不是真飞书 ID（含 :reaction: 标记），
-            #          飞书 API 会返回 99992354 拒绝；跳过 ack 避免污染日志
-            _reaction_id: list = [None]
-            if message_id and ":reaction:" not in message_id:
-                async def _ack_reaction():
-                    _reaction_id[0] = await self._async_add_reaction(message_id, "EYES")
-                asyncio.create_task(_ack_reaction())
-
             result = await self._core.handle_message(msg)
 
             # 停止卡片更新循环
             if _anim_task[0]:
                 _anim_task[0].cancel()
 
-            # P1-3: 替换 👀 为 ✅ 表示完成
-            if message_id and _reaction_id[0] and ":reaction:" not in message_id:
-                async def _done_reaction(rid=_reaction_id[0]):
-                    await self._async_remove_reaction(message_id, rid)
+            # P1-3: 处理完给原消息加 ✅ 表示完成
+            # 失败 graceful（API 限流/无权限不影响主流程）
+            # P3-2 修复: reaction 合成消息的 fake message_id 不是真飞书 ID（含 :reaction: 标记），
+            #          飞书 API 会返回 99992354 拒绝；跳过 ack 避免污染日志
+            if message_id and ":reaction:" not in message_id:
+                async def _done_reaction():
                     await self._async_add_reaction(message_id, "DONE")
                 asyncio.create_task(_done_reaction())
 
