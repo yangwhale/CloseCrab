@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 from google import genai
@@ -31,6 +32,41 @@ log = logging.getLogger("closecrab.voice.gemini_tts")
 
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_NUM_CHANNELS = 1
+
+
+# Strip markdown noise before TTS sees it. Voice mode rules tell the LLM not to
+# emit markdown, but tool reminders (WebSearch "MUST include sources") and old
+# habits leak through. Filtering here means the user never hears "open bracket
+# wiki link close bracket open paren https colon slash slash...".
+#
+# Order matters: Sources block + code blocks first (drop whole region), then
+# inline transforms. Emotion tags like [thinking] are safe because the link
+# regex requires `](` immediately after `]`.
+_RE_SOURCES_SECTION = re.compile(
+    r"(?:^|\n)\s*Sources?\s*[:：][\s\S]*\Z", re.IGNORECASE
+)
+_RE_CODE_BLOCK = re.compile(r"```[\s\S]*?```")
+_RE_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+_RE_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_RE_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_RE_HEADING = re.compile(r"^#+\s+", re.MULTILINE)
+_RE_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
+_RE_LIST_BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
+_RE_BLANK_LINES = re.compile(r"\n{3,}")
+
+
+def _clean_text_for_tts(text: str) -> str:
+    """Strip markdown / Sources / code blocks before TTS, keep emotion tags."""
+    text = _RE_SOURCES_SECTION.sub("", text)
+    text = _RE_CODE_BLOCK.sub("", text)
+    text = _RE_TABLE_ROW.sub("", text)
+    text = _RE_MD_LINK.sub(r"\1", text)
+    text = _RE_INLINE_CODE.sub(r"\1", text)
+    text = _RE_HEADING.sub("", text)
+    text = _RE_BOLD.sub(r"\1", text)
+    text = _RE_LIST_BULLET.sub("", text)
+    text = _RE_BLANK_LINES.sub("\n\n", text)
+    return text.strip()
 
 
 def _build_genai_client(api_key: str | None) -> genai.Client:
@@ -86,8 +122,9 @@ class GeminiTTS(tts.TTS):
         *,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> tts.ChunkedStream:
+        cleaned = _clean_text_for_tts(text)
         return _GeminiChunkedStream(
-            tts=self, input_text=text, conn_options=conn_options
+            tts=self, input_text=cleaned, conn_options=conn_options
         )
 
 
@@ -105,6 +142,21 @@ class _GeminiChunkedStream(tts.ChunkedStream):
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         opts = self._gemini_tts._opts
         client = self._gemini_tts._client
+
+        # If the cleaner stripped everything (e.g. sentence was just a Sources
+        # block or a code block), skip the API call entirely and emit silence.
+        # Saves a round-trip and avoids "empty contents" errors from Gemini.
+        if not self._input_text.strip():
+            silent_frame_samples = int(GEMINI_TTS_SAMPLE_RATE * 0.1)
+            output_emitter.initialize(
+                request_id=utils.shortuuid(),
+                sample_rate=GEMINI_TTS_SAMPLE_RATE,
+                num_channels=GEMINI_TTS_NUM_CHANNELS,
+                mime_type="audio/pcm",
+            )
+            output_emitter.push(bytes(silent_frame_samples * 2 * GEMINI_TTS_NUM_CHANNELS))
+            output_emitter.flush()
+            return
 
         config = genai_types.GenerateContentConfig(
             response_modalities=["AUDIO"],
