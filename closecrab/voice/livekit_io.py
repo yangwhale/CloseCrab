@@ -206,7 +206,10 @@ _TOOL_PREFIX_HINTS = [
         "[focus] 查个文档",
     ]),
     ("mcp__", [
-        "[informative] 调个外部工具",
+        "[playful] 让我翻翻百宝箱",
+        "[amused] 借个外挂使一下",
+        "[curiosity] 让我去打听打听",
+        "[whispers] 偷偷查一下",
     ]),
 ]
 
@@ -929,7 +932,8 @@ class LiveKitVoiceIO:
             # 关键: THREAD executor 让 job 跑在同一个 process,
             # 不然 _VOICE_IO_SINGLETON 闭包丢失。
             job_executor_type=JobExecutorType.THREAD,
-            num_idle_processes=0,
+            # 预热 1 个 worker 进程, 消除冷启动 warning + 接电话快 1-3s
+            num_idle_processes=1,
             port=health_port,
             # explicit dispatch: worker 不会被自动派发, 只接收 token
             # RoomConfiguration 里点名给本 bot agent_name 的 room。
