@@ -3248,7 +3248,8 @@ class FeishuChannel(Channel):
                 return
 
             # 文字 voice mode 开关 (per-user 状态, bot 重启清空, 不持久化)
-            normalized = raw_content.strip().lower()
+            # 去尾标点 (中英文句号/感叹号/问号/逗号), 用户语音转写常带终标点
+            normalized = raw_content.strip().lower().rstrip("。.!！?？,，")
             # typo 容错: "语音" 常被打成 "语言"
             if normalized in (
                 "开启语音模式", "开启语言模式",
