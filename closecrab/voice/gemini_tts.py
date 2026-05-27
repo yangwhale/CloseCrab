@@ -143,17 +143,17 @@ class _GeminiChunkedStream(tts.ChunkedStream):
         opts = self._gemini_tts._opts
         client = self._gemini_tts._client
 
-        # If the cleaner stripped everything (e.g. sentence was just a Sources
-        # block or a code block), skip the API call entirely and emit silence.
-        # Saves a round-trip and avoids "empty contents" errors from Gemini.
+        output_emitter.initialize(
+            request_id=utils.shortuuid(),
+            sample_rate=GEMINI_TTS_SAMPLE_RATE,
+            num_channels=GEMINI_TTS_NUM_CHANNELS,
+            mime_type="audio/pcm",
+        )
+
+        # 清理空文本: 推一帧静音让 pipeline finalize, 别让 livekit 当成"no frames"
+        # 触发 retry (PROHIBITED_CONTENT 重试也救不回来).
         if not self._input_text.strip():
             silent_frame_samples = int(GEMINI_TTS_SAMPLE_RATE * 0.1)
-            output_emitter.initialize(
-                request_id=utils.shortuuid(),
-                sample_rate=GEMINI_TTS_SAMPLE_RATE,
-                num_channels=GEMINI_TTS_NUM_CHANNELS,
-                mime_type="audio/pcm",
-            )
             output_emitter.push(bytes(silent_frame_samples * 2 * GEMINI_TTS_NUM_CHANNELS))
             output_emitter.flush()
             return
@@ -169,61 +169,36 @@ class _GeminiChunkedStream(tts.ChunkedStream):
             ),
         )
 
-        response = await client.aio.models.generate_content(
+        # Streaming 改造: 用 generate_content_stream 边收边推, 首字延迟从 ~2s 掉到 ~0.9s.
+        # 每帧 1920 字节 (40ms @ 24kHz mono s16) 一来就 push 给 livekit emitter,
+        # 不再攒完整段才返回. capabilities.streaming 保持 False 让 livekit 仍套
+        # StreamAdapter 做 sentence splitting, 但每句内部已是真流式.
+        total_bytes = 0
+        finish_reason = None
+        stream = await client.aio.models.generate_content_stream(
             model=opts.model,
             contents=self._input_text,
             config=config,
         )
-
-        # Safety filter or other server-side issues can yield candidates=[] or
-        # candidates[0].content.parts=None even on HTTP 200. Without this guard
-        # the livekit TTS pipeline crashes and the whole utterance is lost.
-        pcm = bytearray()
-        candidates = getattr(response, "candidates", None) or []
-        if not candidates:
-            log.warning(
-                "Gemini TTS: empty candidates (text=%r, prompt_feedback=%s)",
-                self._input_text[:80],
-                getattr(response, "prompt_feedback", None),
-            )
-        else:
-            cand = candidates[0]
-            finish_reason = getattr(cand, "finish_reason", None)
-            content = getattr(cand, "content", None)
-            parts = getattr(content, "parts", None) if content is not None else None
-            if not parts:
-                log.warning(
-                    "Gemini TTS: no parts (text=%r, finish_reason=%s)",
-                    self._input_text[:80],
-                    finish_reason,
-                )
-            else:
-                for part in parts:
+        async for chunk in stream:
+            for cand in getattr(chunk, "candidates", None) or []:
+                finish_reason = getattr(cand, "finish_reason", None) or finish_reason
+                content = getattr(cand, "content", None)
+                for part in getattr(content, "parts", None) or []:
                     inline = getattr(part, "inline_data", None)
                     if inline and inline.data:
-                        pcm.extend(inline.data)
-                if not pcm:
-                    log.warning(
-                        "Gemini TTS: parts present but no inline audio "
-                        "(text=%r, finish_reason=%s)",
-                        self._input_text[:80],
-                        finish_reason,
-                    )
+                        output_emitter.push(bytes(inline.data))
+                        total_bytes += len(inline.data)
 
-        # Always initialize + flush so the livekit pipeline finalizes cleanly,
-        # even when pcm is empty (silent frame = graceful degradation).
-        # 关键修复: livekit-agents 见到 push(b"") 仍判定 "no audio frames"
-        # 触发 APIError + retry, 而 PROHIBITED_CONTENT 是永久错重试无意义.
-        # 推一帧 100ms 静音 PCM (16-bit signed @ 24kHz) 让 livekit 认为有 output,
-        # 跳过这一句对话继续, 不让一个被 ban 的字搞崩整段 TTS.
-        if not pcm:
-            silent_frame_samples = int(GEMINI_TTS_SAMPLE_RATE * 0.1)  # 100ms
-            pcm = bytearray(silent_frame_samples * 2 * GEMINI_TTS_NUM_CHANNELS)  # 16-bit = 2 bytes
-        output_emitter.initialize(
-            request_id=utils.shortuuid(),
-            sample_rate=GEMINI_TTS_SAMPLE_RATE,
-            num_channels=GEMINI_TTS_NUM_CHANNELS,
-            mime_type="audio/pcm",
-        )
-        output_emitter.push(bytes(pcm))
+        # 整段都没拿到音频 (safety filter / empty candidates): 兜底 100ms 静音,
+        # 跳过这句, 不让 livekit 因 "no audio frames" retry.
+        if total_bytes == 0:
+            log.warning(
+                "Gemini TTS: no audio in stream (text=%r, finish_reason=%s)",
+                self._input_text[:80],
+                finish_reason,
+            )
+            silent_frame_samples = int(GEMINI_TTS_SAMPLE_RATE * 0.1)
+            output_emitter.push(bytes(silent_frame_samples * 2 * GEMINI_TTS_NUM_CHANNELS))
+
         output_emitter.flush()
