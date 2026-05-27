@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<meta property="og:title" content="{{OG_TITLE}}">
+<meta property="og:description" content="{{OG_DESC}}">
+<meta name="theme-color" content="#1A73E8">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --primary: #1A73E8;
+  --primary-light: #E8F0FE;
+  --primary-dark: #0F4FAB;
+  --text: #202124;
+  --text-2: #5F6368;
+  --border: #DADCE0;
+  --bg: #FFFFFF;
+  --bg-alt: #F8F9FA;
+  --bg-code: #F1F3F4;
+  --success: #1E8E3E;
+  --success-light: #E6F4EA;
+  --warning: #F9AB00;
+  --warning-light: #FEF7E0;
+  --warning-dark: #B06000;
+  --error: #D93025;
+  --error-light: #FCE8E6;
+  --error-dark: #A50E0E;
+  --purple: #7627bb;
+  --purple-light: #F3E8FD;
+  --shadow-sm: 0 1px 2px rgba(60,64,67,0.08);
+  --shadow-md: 0 1px 3px rgba(60,64,67,0.12), 0 4px 8px rgba(60,64,67,0.04);
+}
+* { box-sizing: border-box; }
+body {
+  font-family: 'Google Sans', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  margin: 0; color: var(--text); line-height: 1.85;
+  background: var(--bg-alt); font-size: 15.5px;
+}
+.app-bar {
+  background: var(--bg); border-bottom: 1px solid var(--border);
+  padding: 14px 24px; position: sticky; top: 0; z-index: 100;
+  box-shadow: var(--shadow-sm);
+}
+.app-bar-inner {
+  max-width: 1280px; margin: 0 auto;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.app-bar-title { font-size: 17px; font-weight: 500; color: var(--primary); }
+.app-bar-title .icon { font-size: 20px; margin-right: 8px; }
+.app-bar-meta { font-size: 13px; color: var(--text-2); }
+.app-bar-meta .tag {
+  display: inline-block; background: var(--success-light); color: var(--success);
+  padding: 2px 9px; border-radius: 12px; font-weight: 500; margin-left: 8px; font-size: 11px;
+}
+.layout {
+  max-width: 1280px; margin: 0 auto;
+  display: grid; grid-template-columns: 240px 1fr; gap: 24px;
+  padding: 24px;
+}
+.sidenav {
+  position: sticky; top: 70px; align-self: start;
+  background: var(--bg); border-radius: 12px; padding: 16px;
+  box-shadow: var(--shadow-sm); max-height: calc(100vh - 90px); overflow-y: auto;
+  font-size: 13.5px;
+}
+.sidenav h3 { font-size: 11px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.8px; color: var(--text-2); margin: 0 0 8px; padding: 0 8px; }
+.sidenav a {
+  display: block; padding: 7px 12px; color: var(--text-2);
+  text-decoration: none; border-radius: 6px; line-height: 1.4;
+  margin: 1px 0; transition: all 0.15s;
+}
+.sidenav a:hover { background: var(--primary-light); color: var(--primary); }
+.sidenav a.section { font-weight: 500; color: var(--text); margin-top: 8px; }
+.sidenav .divider { height: 1px; background: var(--border); margin: 10px 8px; }
+.content { min-width: 0; }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; padding: 12px; }
+  .sidenav { position: static; max-height: none; }
+}
+
+.hero {
+  background: var(--bg); border-radius: 12px; padding: 32px 36px;
+  margin-bottom: 20px; box-shadow: var(--shadow-md);
+  border-top: 4px solid var(--primary);
+}
+.hero h1 { font-size: 26px; font-weight: 500; margin: 0 0 10px; line-height: 1.3; }
+.hero .subtitle { font-size: 15px; color: var(--text-2); margin-bottom: 18px; }
+.hero-meta {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px; padding-top: 18px; border-top: 1px solid var(--border);
+}
+.hero-meta-item .label { color: var(--text-2); display: block; margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.hero-meta-item .value { font-weight: 500; font-size: 14px; }
+
+.voice-overview {
+  background: var(--bg);
+  border: 2px solid var(--primary);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin: 20px 0;
+  box-shadow: var(--shadow-md);
+}
+.voice-overview h3 {
+  margin: 0 0 12px; font-size: 16px; color: var(--primary-dark);
+  padding-left: 0; border: none;
+}
+.voice-overview .ov-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.voice-overview .ov-item {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-alt); padding: 8px 12px; border-radius: 8px;
+  font-size: 13px;
+}
+.voice-overview .ov-num {
+  background: var(--primary); color: white;
+  border-radius: 50%; width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600; flex-shrink: 0;
+}
+.voice-overview .ov-name { flex: 1; color: var(--text); text-decoration: none; }
+.voice-overview .ov-name:hover { color: var(--primary); }
+.voice-overview .ov-dur { color: var(--text-2); font-size: 11px; }
+
+.voice-player {
+  background: linear-gradient(135deg, #E8F0FE 0%, #F3E8FD 100%);
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin: 4px 0 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--primary-light);
+}
+.voice-player .voice-label {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13.5px; color: var(--primary-dark);
+}
+.voice-player .voice-icon { font-size: 18px; }
+.voice-player .voice-title { font-weight: 500; }
+.voice-player .voice-duration {
+  margin-left: auto;
+  background: var(--bg); padding: 2px 10px; border-radius: 10px;
+  font-size: 11.5px; color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.voice-player audio { width: 100%; height: 36px; }
+
+.card {
+  background: var(--bg); border-radius: 12px; padding: 28px 36px;
+  margin-bottom: 18px; box-shadow: var(--shadow-md);
+  scroll-margin-top: 70px;
+}
+.card h2 {
+  font-size: 22px; font-weight: 500; margin: 0 0 6px;
+  color: var(--primary-dark);
+}
+.card .card-desc {
+  font-size: 14px; color: var(--text-2); margin-bottom: 22px;
+  padding-bottom: 14px; border-bottom: 2px solid var(--primary-light);
+}
+.card h3 {
+  font-size: 17px; font-weight: 500; margin: 26px 0 10px;
+  color: var(--text); padding-left: 12px; border-left: 4px solid var(--primary);
+}
+.card h3:first-of-type { margin-top: 8px; }
+.card h4 {
+  font-size: 15px; font-weight: 500; margin: 18px 0 6px;
+  color: var(--text);
+}
+
+p { margin: 8px 0; }
+strong { color: var(--text); font-weight: 600; }
+code {
+  font-family: 'Roboto Mono', monospace;
+  background: var(--bg-code);
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 13px; color: var(--purple);
+}
+pre {
+  background: var(--bg-code); padding: 14px 16px; border-radius: 8px;
+  font-family: 'Roboto Mono', monospace; font-size: 12.5px;
+  line-height: 1.6; overflow-x: auto;
+  margin: 12px 0; border: 1px solid var(--border);
+}
+
+table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 14px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--bg-alt); font-weight: 500; color: var(--text-2); font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; }
+tbody tr:hover { background: var(--bg-alt); }
+
+ul { padding-left: 24px; margin: 8px 0 14px; }
+li { margin-bottom: 6px; }
+li::marker { color: var(--primary); }
+
+.callout {
+  border-radius: 0 8px 8px 0;
+  padding: 14px 18px; margin: 14px 0;
+  font-size: 14px;
+}
+.callout.tip {
+  background: var(--primary-light); border-left: 4px solid var(--primary);
+  color: var(--primary-dark);
+}
+.callout.warn {
+  background: var(--warning-light); border-left: 4px solid var(--warning);
+  color: var(--warning-dark);
+}
+.callout.fact {
+  background: var(--success-light); border-left: 4px solid var(--success);
+  color: var(--success);
+}
+.callout.red {
+  background: var(--error-light); border-left: 4px solid var(--error);
+  color: var(--error-dark);
+}
+.callout strong { color: inherit; }
+
+.analogy {
+  background: var(--purple-light);
+  border-left: 4px solid var(--purple);
+  padding: 12px 18px; border-radius: 0 8px 8px 0;
+  margin: 12px 0; font-size: 14px; color: #4a1a73;
+}
+.analogy::before {
+  content: "💡 类比 — ";
+  font-weight: 600; color: var(--purple);
+}
+
+.term {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 18px; margin: 12px 0;
+}
+.term .term-name {
+  font-weight: 600; color: var(--primary-dark);
+  font-size: 15.5px; margin-bottom: 4px;
+  display: block;
+}
+.term .term-en {
+  font-style: italic; color: var(--text-2);
+  font-weight: 400; font-size: 14px;
+  margin-left: 6px;
+}
+.term .term-def { font-size: 14.5px; line-height: 1.7; }
+.term .term-example {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 13.5px; color: var(--text-2);
+}
+.term .term-example::before {
+  content: "例: ";
+  font-weight: 600; color: var(--text);
+}
+
+.flow-diagram {
+  background: var(--bg-alt);
+  border-radius: 10px; padding: 20px;
+  margin: 16px 0; text-align: center;
+  font-family: 'Roboto Mono', monospace; font-size: 13px;
+  line-height: 1.8;
+  border: 1px solid var(--border);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.pill {
+  display: inline-block; padding: 2px 9px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 500; white-space: nowrap;
+}
+.pill.green { background: var(--success-light); color: var(--success); }
+.pill.amber { background: var(--warning-light); color: var(--warning-dark); }
+.pill.red   { background: var(--error-light); color: var(--error-dark); }
+.pill.blue  { background: var(--primary-light); color: var(--primary-dark); }
+.pill.purple { background: var(--purple-light); color: var(--purple); }
+.pill.gray  { background: var(--bg-code); color: var(--text-2); }
+
+@media print {
+  .app-bar, .sidenav { display: none; }
+  .layout { grid-template-columns: 1fr; padding: 0; }
+  body { background: white; font-size: 12px; }
+  .card, .hero { box-shadow: none; border: 1px solid var(--border); page-break-inside: avoid; }
+  .voice-player { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="app-bar">
+  <div class="app-bar-inner">
+    <div class="app-bar-title"><span class="icon">▤</span>{{TITLE_SHORT}}</div>
+    <div class="app-bar-meta">{{DATE}} · {{SUBTITLE}} <span class="tag">{{VISIBILITY_TAG}}</span></div>
+  </div>
+</div>
+
+<div class="layout">
+
+  <nav class="sidenav">
+    <h3>导览</h3>
+    <a href="#hero" class="section">🏠 引子</a>
+    <a href="#sec-0" class="section">0. 全景图</a>
+    <div class="divider"></div>
+    <a href="#sec-1" class="section">1. {{SECTION_1_TITLE}}</a>
+    <a href="#sec-1-1">1.1 {{SUB_1_1}}</a>
+    <a href="#sec-1-2">1.2 {{SUB_1_2}}</a>
+    <div class="divider"></div>
+    <a href="#sec-2" class="section">2. {{SECTION_2_TITLE}}</a>
+    <!-- ... add more sections ... -->
+    <div class="divider"></div>
+    <a href="#sec-N" class="section">N. 客户场景串讲</a>
+  </nav>
+
+  <div class="content">
+
+    <div class="hero" id="hero">
+      <h1>{{MAIN_TITLE}}</h1>
+      <div class="subtitle">{{SUBTITLE}}</div>
+      <div class="hero-meta">
+        <div class="hero-meta-item"><span class="label">受众</span><span class="value">{{AUDIENCE}}</span></div>
+        <div class="hero-meta-item"><span class="label">覆盖概念</span><span class="value">{{CONCEPT_COUNT}}</span></div>
+        <div class="hero-meta-item"><span class="label">读法建议</span><span class="value">{{READING_GUIDE}}</span></div>
+        <div class="hero-meta-item"><span class="label">背景</span><span class="value">{{CONTEXT}}</span></div>
+      </div>
+    </div>
+
+    <!-- Global voice overview -->
+    <div class="voice-overview">
+      <h3>🎧 {{N}} 段语音讲解 · 总时长约 {{TOTAL_DURATION}}</h3>
+      <p style="font-size: 13px; color: var(--text-2); margin: 0 0 14px;">{{LISTENING_GUIDANCE}}</p>
+      <div class="ov-list">
+        <div class="ov-item"><span class="ov-num">0</span><a href="#sec-0" class="ov-name">全景图</a><span class="ov-dur">1m53s</span></div>
+        <div class="ov-item"><span class="ov-num">1</span><a href="#sec-1" class="ov-name">{{SECTION_1_TITLE}}</a><span class="ov-dur">2m46s</span></div>
+        <!-- ... add more ... -->
+      </div>
+    </div>
+
+    <!-- Section 0: Overview -->
+    <div class="card" id="sec-0">
+      <h2>0. 全景图 — {{OVERVIEW_SUBTITLE}}</h2>
+      <div class="card-desc">{{OVERVIEW_DESC}}</div>
+
+      <div class="voice-player">
+        <div class="voice-label">
+          <span class="voice-icon">🎧</span>
+          <span class="voice-title">语音讲解 · 全景图</span>
+          <span class="voice-duration">1m53s</span>
+        </div>
+        <audio controls preload="none">
+          <source src="voice/01-overview.ogg" type="audio/ogg">
+          您的浏览器不支持 audio。
+        </audio>
+      </div>
+
+      <div class="flow-diagram">{{ASCII_FLOW_DIAGRAM}}</div>
+
+      <div class="callout tip">
+        <strong>核心理解</strong>：{{KEY_INSIGHT}}
+      </div>
+    </div>
+
+    <!-- Section 1: Foundational concepts -->
+    <div class="card" id="sec-1">
+      <h2>1. {{SECTION_1_TITLE}}</h2>
+      <div class="card-desc">{{SECTION_1_DESC}}</div>
+
+      <div class="voice-player">
+        <div class="voice-label">
+          <span class="voice-icon">🎧</span>
+          <span class="voice-title">语音讲解 · {{SECTION_1_TITLE}}</span>
+          <span class="voice-duration">2m46s</span>
+        </div>
+        <audio controls preload="none">
+          <source src="voice/02-section1.ogg" type="audio/ogg">
+        </audio>
+      </div>
+
+      <h3 id="sec-1-1">1.1 {{SUB_1_1}}</h3>
+      <p>...</p>
+
+      <div class="term">
+        <span class="term-name">{{TERM_CN}} <span class="term-en">({{TERM_EN}}, {{TERM_CN_ALT}})</span></span>
+        <div class="term-def">{{DEFINITION}}</div>
+        <div class="term-example">{{EXAMPLE}}</div>
+      </div>
+
+      <div class="analogy">{{ANALOGY_TEXT}}</div>
+
+      <div class="callout warn"><strong>注意</strong>：{{WARNING}}</div>
+    </div>
+
+    <!-- ... more sections ... -->
+
+    <!-- Final section: Worked example -->
+    <div class="card" id="sec-N">
+      <h2>{{N}}. 客户场景串讲 — 把所有概念用一次</h2>
+      <div class="card-desc">把前面所有概念用真实场景走一遍 — 看完这段，所有术语都该串起来了。</div>
+
+      <div class="voice-player">
+        <div class="voice-label">
+          <span class="voice-icon">🎧</span>
+          <span class="voice-title">语音讲解 · 客户场景串讲（最长一段 + 自测题）</span>
+          <span class="voice-duration">4m36s</span>
+        </div>
+        <audio controls preload="none">
+          <source src="voice/N-customer-scenario.ogg" type="audio/ogg">
+        </audio>
+      </div>
+
+      <h3>场景：{{SCENARIO_TITLE}}</h3>
+
+      <h4>① 起点：{{STAGE_1}}</h4>
+      <ul>
+        <li>...</li>
+      </ul>
+
+      <h4>② 阶段二：{{STAGE_2}}</h4>
+      <ul>
+        <li>...</li>
+      </ul>
+
+      <div class="callout fact">
+        <strong>读到这里你应该能答的问题</strong>：(1) ... (2) ... (3) ... (4) ... (5) ...
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="card" style="text-align: center; color: var(--text-2); font-size: 12px; padding: 20px;">
+      文档创建于 {{DATE}} · {{FOOTER_NOTES}}
+    </div>
+
+  </div>
+
+</div>
+
+</body>
+</html>
