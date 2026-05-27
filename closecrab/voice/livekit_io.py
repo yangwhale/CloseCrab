@@ -219,6 +219,22 @@ _TOOL_DEFAULT_HINTS = [
 ]
 
 
+# Broadcast 模式开场脱口秀池, /broadcast 用户连进 room 时随机一条作开场。
+# 普通 voice 通话不念 (会打断 endpointing 节奏)。
+_BROADCAST_OPENERS = [
+    "[playful] 各位听众朋友, 欢迎来到天猫精灵的免费付费电台。",
+    "[amused] 别紧张, 你麦没开, 我听不见你, 只能你听我念。",
+    "[whispers] 嘘, 你偷偷听就行, 不许聊天。",
+    "[cheerfully] 直播间开张, 一个发字一个念, 这就叫互联网早期的浪漫。",
+    "[playful] 欢迎收听天猫精灵广播站, 本台节目由飞书私聊全程驱动。",
+    "[friendly] 收音机调好啦, 你只管在飞书唠, 我这边念。",
+    "[amused] 这是我作为 LLM 离脱口秀演员最近的一次。",
+    "[whispers] 单声道直播, 双向断网, 享受闭嘴的快乐。",
+    "[playful] 飞书发字, 我念出来, 中间隔着一整个 LiveKit 和一个 TTS。",
+    "[cheerfully] 节目开始, 请系好安全带, 准备听我念点废话。",
+]
+
+
 def pick_tool_voice_phrase(tool_name: str) -> str:
     """根据 tool name 选一句"话痨"短语 (随机变体)。
 
@@ -798,7 +814,29 @@ async def _voice_entrypoint(ctx: JobContext):
     )
 
     await session.start(agent=agent, room=ctx.room)
-    # 不主动打招呼 — 等用户说话
+    # 注册到全局 active_sessions, 让飞书文字 voice mode 的 _send_voice_summary
+    # 能找到对应 open_id 的 session 调 say() 实时推 TTS。
+    # 同时记下 voice loop, 跨 loop 调用时用。
+    voice_io._active_sessions[open_id] = session
+    voice_io._active_session_loops[open_id] = asyncio.get_running_loop()
+    log.info(f"voice: registered active session for open_id={open_id[:8]}")
+
+    # Broadcast 模式 (canPublish=False) 自动播一段开场词, 让用户立刻确认连上了。
+    # 普通 voice 通话不念 — 用户开 mic 等着对话, 念开场词会打断节奏。
+    # 通过 token grants 区分: token route 在 broadcast 时签 canPublish=false。
+    is_broadcast = (
+        hasattr(participant, "permissions")
+        and participant.permissions is not None
+        and not participant.permissions.can_publish
+    )
+    if is_broadcast:
+        opener = random.choice(_BROADCAST_OPENERS)
+        log.info(f"broadcast: opening with {opener!r}")
+        try:
+            session.say(opener, allow_interruptions=False)
+        except Exception as e:
+            log.warning(f"broadcast: opener say() failed: {e}")
+    # voice 通话: 不主动打招呼 — 等用户说话
     # NOTE: 原本想加 RoomInputOptions(close_on_disconnect=False) 解决断开重连
     # warning, 但实测会让 livekit server 认为旧 room 还有 active agent 不派新 job,
     # 导致重启后第一次 /voice 就 "Agent did not join the room". 已回退.
@@ -817,7 +855,14 @@ async def _voice_entrypoint(ctx: JobContext):
 
     # 阻塞 entrypoint 直到 participant 断开 (LiveKit 1.5.x 合约)
     log.info(f"Voice job holding for disconnect: {identity}")
-    await disconnect_event.wait()
+    try:
+        await disconnect_event.wait()
+    finally:
+        # 清除 active_sessions, 这样飞书 _send_voice_summary 不会推到已断开的 session
+        # (LiveKit SDK 在 session close 后 say() 会 raise, 但提前清掉更干净)。
+        voice_io._active_sessions.pop(open_id, None)
+        voice_io._active_session_loops.pop(open_id, None)
+        log.info(f"voice: unregistered active session for open_id={open_id[:8]}")
     log.info(f"Voice job done: {identity}")
 
 
@@ -867,6 +912,14 @@ class LiveKitVoiceIO:
         self._vertex_location = vertex_location
         self._server: AgentServer | None = None
         self._server_task: asyncio.Task | None = None
+        # 当前 active 的 voice/broadcast session, key=open_id, value=AgentSession。
+        # entrypoint 起 session 后注册, participant 断开时清除。
+        # 飞书文字 voice mode 推 TTS 时用 say_to_user(open_id, text) 找对应 session
+        # 直接调 session.say(text), 走 LiveKit TTS pipeline 实时推 audio 给浏览器。
+        # voice loop 写, feishu loop 读 (跨 loop 通过 call_soon_threadsafe), 单值无锁。
+        self._active_sessions: dict[str, AgentSession] = {}
+        # 同 open_id 对应的 voice loop, 用于 say_to_user 跨 loop 调度 session.say。
+        self._active_session_loops: dict[str, asyncio.AbstractEventLoop] = {}
 
     @property
     def hmac_secret(self) -> str:
@@ -978,6 +1031,56 @@ class LiveKitVoiceIO:
                 pass
         _VOICE_IO_SINGLETON = None
         log.info("LiveKitVoiceIO stopped")
+
+    def has_active_session(self, open_id: str) -> bool:
+        """是否有 open_id 对应的 active broadcast/voice session (用户开着 LiveKit page)。"""
+        return open_id in self._active_sessions
+
+    async def say_to_user(self, open_id: str, text: str, wait_for_playout: bool = False) -> bool:
+        """跨 loop 调 active session.say(text), 让 LiveKit TTS 把 text 念到浏览器。
+
+        飞书文字 voice mode 双发使用: 文字回复同时通过 ogg 发飞书 + 推 LiveKit broadcast room。
+        - 用户没开 broadcast page → has_active_session=False, 直接 return False, 调用方只发飞书 ogg
+        - 用户开着 → 通过 voice loop 调 session.say, allow_interruptions=False 避免被 VAD 误触发打断
+        - wait_for_playout=False (默认): handle 拿到就 return (fire-and-forget, 适合 tool hints)
+        - wait_for_playout=True: 等到 audio 实际播完才 return (适合最终回复, 让飞书 ogg 在 broadcast
+          drain 完之后才发, 避免两边声音重叠/抢拍)。AgentSession 串行排队, 等当前 handle 隐含等齐
+          所有更早入队的 hints/opener。
+
+        Args:
+            open_id: 飞书用户 open_id (active_sessions 字典 key)
+            text: 已剥过 voice tag 的纯念词文本 (含 Gemini [emotion] 标签)
+            wait_for_playout: 是否等 audio 实际播完才 return
+
+        Returns:
+            True 表示 say 调度成功; False 表示无 active session 或失败。
+        """
+        session = self._active_sessions.get(open_id)
+        voice_loop = self._active_session_loops.get(open_id)
+        if session is None or voice_loop is None:
+            return False
+        if not text or not text.strip():
+            return False
+
+        # session.say + handle.wait_for_playout 都要在 voice loop 跑。
+        # 一并放进 _do_say, 跨 loop 一次 run_coroutine_threadsafe 调度完。
+        async def _do_say():
+            handle = session.say(text, allow_interruptions=False)
+            if wait_for_playout:
+                await handle.wait_for_playout()
+            return handle
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_do_say(), voice_loop)
+            await asyncio.wrap_future(future)
+            suffix = " (drained)" if wait_for_playout else ""
+            log.info(
+                f"broadcast: say_to_user open_id={open_id[:8]} pushed {len(text)} chars to LiveKit{suffix}"
+            )
+            return True
+        except Exception as e:
+            log.warning(f"broadcast: say_to_user open_id={open_id[:8]} failed: {e}")
+            return False
 
     def make_join_url(self, open_id: str) -> str:
         """为指定 open_id 生成浏览器加入链接。

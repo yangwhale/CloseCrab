@@ -3404,6 +3404,43 @@ class FeishuChannel(Channel):
                     log.error(f"Team msg from {sender_open_id} but no known users, dropping")
                     return
 
+            # voice mode + broadcast 在听: tool_use 触发 progressive hint, 跨 loop 推 TTS
+            # dedup 复刻 voice call (livekit_io.py:447): 同 tool 连发 ≥2 次跳过
+            _last_tool_hint = [None]
+            _tool_hint_repeat = [0]
+
+            async def on_tool_use(tool_name: str, _tool_input: dict):
+                if not in_voice_mode or self._voice_io is None:
+                    return
+                if not self._voice_io.has_active_session(user_key):
+                    return
+                if tool_name == _last_tool_hint[0]:
+                    _tool_hint_repeat[0] += 1
+                    if _tool_hint_repeat[0] >= 2:
+                        return
+                else:
+                    _last_tool_hint[0] = tool_name
+                    _tool_hint_repeat[0] = 0
+                try:
+                    from ..voice.livekit_io import pick_tool_voice_phrase
+                    phrase = pick_tool_voice_phrase(tool_name)
+                except Exception as e:
+                    log.debug(f"pick_tool_voice_phrase failed: {e}")
+                    return
+                log.info(f"text-voice broadcast hint: tool={tool_name} → {phrase!r}")
+                asyncio.create_task(self._voice_io.say_to_user(user_key, phrase))
+
+            # voice mode + broadcast: Claude 在调工具前那段 "[thinking] 我去看..." 也推到 broadcast,
+            # 否则只有 tool hints 和最终 ogg, 用户听不见思考过程。最终 ogg 走 _send_voice_summary,
+            # 那个是工具链跑完后的最后一段, 不含 opener — 必须在这里独立推一次。
+            async def on_voice_opening_text(text: str):
+                if not in_voice_mode or self._voice_io is None:
+                    return
+                if not self._voice_io.has_active_session(user_key):
+                    return
+                log.info(f"text-voice broadcast opening: {text[:60]!r}")
+                asyncio.create_task(self._voice_io.say_to_user(user_key, text))
+
             # 构造 UnifiedMessage
             metadata = {
                 "chat_id": chat_id,
@@ -3412,6 +3449,8 @@ class FeishuChannel(Channel):
                 "on_input_needed": on_input_needed,
                 "on_log": on_log if _log else None,
                 "on_text_chunk": on_text_chunk,
+                "on_tool_use": on_tool_use,
+                "on_voice_opening_text": on_voice_opening_text,
             }
             if is_team_msg:
                 metadata["is_team_task"] = True
@@ -3965,7 +4004,26 @@ class FeishuChannel(Channel):
                     pass
 
     async def _send_voice_summary(self, chat_id: str, text: str):
-        """生成 TTS 语音并作为飞书语音消息发送（单段，不切分）。"""
+        """生成 TTS 语音并作为飞书语音消息发送（单段，不切分）。
+
+        双发: 同时通过 LiveKit broadcast 把 text 念给浏览器 (如果用户开着 /broadcast page),
+        让飞书文字 voice mode 同时有"飞书 ogg 兜底" + "LiveKit 流式收音机"两条通路。
+        没开 broadcast page 则 say_to_user 静默 return False, 只发飞书 ogg, 跟以前一样。
+
+        反查 open_id: 从 chat_id 反查 _user_chats (单用户单 chat 场景小, O(n) 可忽略),
+        反查不到就只走飞书 ogg。
+        """
+        # 串行: 先把最终回复推到 broadcast 并等播完 (drain opener + tool hints + 这条),
+        # 再生成飞书 ogg。AgentSession 是 FIFO 队列, await 最后一句的 wait_for_playout
+        # 就意味着前面排队的 hint 都已播完, 飞书 ogg 不会跟广播抢拍。
+        # 没开 broadcast 时 say_to_user 立刻 return False, 走原路径。
+        if self._voice_io is not None and text and text.strip():
+            open_id = next(
+                (oid for oid, cid in self._user_chats.items() if cid == chat_id), None
+            )
+            if open_id and self._voice_io.has_active_session(open_id):
+                await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
+
         if await self._tts_and_send_one(chat_id, text):
             log.info(f"Voice summary sent to {chat_id}")
 
