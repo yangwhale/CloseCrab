@@ -60,6 +60,12 @@ from livekit.agents import (
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 from livekit.agents.llm import ChatContext, Tool, ToolChoice
 from livekit.plugins import silero
+# google plugin 必须在 main thread 注册 (Plugin.register_plugin 跑在 import-time);
+# 放 _build_stt 里 lazy import 会因 voice worker thread 触发
+# "RuntimeError: Plugins must be registered on the main thread". 这里 top-level
+# import 保证主线程注册, 即使 STT_PROVIDER 不选 chirp3_stream 也只多一次 import 开销。
+from livekit.plugins import google as _lk_google
+from google.cloud.speech_v2.types import cloud_speech as _cs2
 
 from .chirp_stt import ChirpSTT, _DEFAULT_PHRASE_BOOST
 from .chirp_phrases import default_phrases as _default_chirp_phrases
@@ -746,9 +752,8 @@ def _build_stt():
         # 官方 plugin 的流式 Chirp3: server-side endpointing 比 silero 准,
         # interim_results=True 走 StreamingRecognize. 与自写 ChirpSTT 同一底层
         # API, 只是走的接口不同 — batch (recognize) vs stream (streamingRecognize).
-        from livekit.plugins import google as _lk_google
-        from google.cloud.speech_v2.types import cloud_speech as _cs2
-
+        # 注意: _lk_google / _cs2 在 module top 已 import (main-thread 注册 plugin),
+        # 不要在这里 lazy import — 会触发 "Plugins must be registered on the main thread".
         boost_flag = (os.environ.get("STT_PHRASE_BOOST") or "").strip().lower()
         phrases = _default_chirp_phrases() if boost_flag in ("1", "true", "default", "on") else None
         adaptation = ChirpSTT._build_adaptation(phrases, _DEFAULT_PHRASE_BOOST) if phrases else None
