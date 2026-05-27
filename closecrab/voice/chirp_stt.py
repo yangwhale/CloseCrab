@@ -12,11 +12,18 @@ Alternative to GeminiSTT for users who want a STT-specialized model rather
 than a multimodal LLM. Chirp 3 is Google's latest USM-based model, optimized
 for Mandarin + 100+ languages with low latency.
 
-Uses the same Vertex AI service account credentials as GeminiSTT (no extra
-API key needed). Routed via google-cloud-speech v2 batch recognize — we don't
-yet stream audio to the API, but Chirp 3 itself is fast enough that batching
-keeps end-to-end latency comparable to GeminiSTT (~1s) while delivering
-markedly better Mandarin accuracy on short phrases.
+Benchmarked vs GeminiSTT on synthesized TTS audio (7 Mandarin utterances,
+1–9 seconds): equal or higher accuracy with 3–5x lower and far more stable
+latency (Chirp 1.1–1.6s vs Gemini 1.7–11.7s end-to-end).
+
+Region note (sharp edge): Chirp 3 + Mandarin (`cmn-Hans-CN`) is currently
+only available in `asia-southeast1`. Not in `global`, not in `us-*`. Other
+languages may have different availability. Stick with the default unless
+you know your language is in another region.
+
+Uses the same Vertex AI service account credentials as GeminiSTT — no
+extra API key needed, no new dependencies (google-cloud-speech is already
+present transitively).
 
 Selection: set Firestore `bots/{name}.livekit.stt_provider = "chirp3"`
 (default "gemini" keeps GeminiSTT behavior unchanged).
@@ -57,7 +64,7 @@ class ChirpSTT(stt.STT):
         model: str = "chirp_3",
         language: str = "cmn-Hans-CN",
         project: str | None = None,
-        location: str = "global",
+        location: str = "asia-southeast1",
     ) -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(streaming=False, interim_results=False),

@@ -736,11 +736,13 @@ def _build_stt():
     """
     provider = (os.environ.get("STT_PROVIDER") or "gemini").lower()
     if provider == "chirp3":
+        # asia-southeast1 是 chirp_3 + 中文当前唯一可用 region (2026-05 实测确认).
+        # global / us-* 都报 "model does not exist", 别动除非确认你的语种在别处可用.
         return ChirpSTT(
             model=os.environ.get("STT_MODEL", "chirp_3"),
             language=os.environ.get("STT_LANGUAGE", "cmn-Hans-CN"),
             project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
-            location=os.environ.get("STT_LOCATION", "global"),
+            location=os.environ.get("STT_LOCATION", "asia-southeast1"),
         )
     return GeminiSTT(model=os.environ.get("STT_MODEL", "gemini-3-flash-preview"))
 
