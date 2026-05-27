@@ -43,7 +43,14 @@ from livekit import rtc
 from livekit.agents import APIConnectionError, APIConnectOptions, stt, utils
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 
+from .chirp_phrases import default_phrases
+
 log = logging.getLogger("closecrab.voice.chirp_stt")
+
+# Cloud Speech caps boost in [0, 20]. 10 is the documented sweet spot for
+# strong-but-not-trigger-happy biasing; per-phrase overrides bump proper
+# nouns higher (see chirp_phrases.py).
+_DEFAULT_PHRASE_BOOST = 10.0
 
 
 def _build_speech_client(location: str) -> speech_v2.SpeechAsyncClient:
@@ -65,7 +72,19 @@ class ChirpSTT(stt.STT):
         language: str = "cmn-Hans-CN",
         project: str | None = None,
         location: str = "asia-southeast1",
+        phrases: list[tuple[str, float | None]] | list[str] | None = None,
+        phrase_boost: float = _DEFAULT_PHRASE_BOOST,
     ) -> None:
+        """
+        Args:
+            phrases: Vocabulary biasing list. Either ["Gemini", "Claude", ...]
+                (all phrases share `phrase_boost`) or [("Higcp", 18.0),
+                ("Gemini", None), ...] (per-phrase override; None falls back
+                to `phrase_boost`). None disables adaptation entirely; pass
+                `chirp_phrases.default_phrases()` to use the built-in list.
+            phrase_boost: PhraseSet-level boost in (0, 20]. Per-phrase
+                overrides win. 10 is a good starting point.
+        """
         super().__init__(
             capabilities=stt.STTCapabilities(streaming=False, interim_results=False),
         )
@@ -82,6 +101,37 @@ class ChirpSTT(stt.STT):
         # each request via recognition_config. Best for ad-hoc usage.
         self._recognizer = f"projects/{self._project}/locations/{location}/recognizers/_"
         self._client = _build_speech_client(location)
+        self._adaptation = self._build_adaptation(phrases, phrase_boost)
+
+    @staticmethod
+    def _build_adaptation(
+        phrases: list[tuple[str, float | None]] | list[str] | None,
+        default_boost: float,
+    ) -> cloud_speech.SpeechAdaptation | None:
+        if not phrases:
+            return None
+        proto_phrases = []
+        for entry in phrases:
+            if isinstance(entry, tuple):
+                value, boost_override = entry
+            else:
+                value, boost_override = entry, None
+            # Per-phrase boost=0 means "use PhraseSet default" in the API,
+            # so we leave it unset when no override is given.
+            kwargs = {"value": value}
+            if boost_override is not None:
+                kwargs["boost"] = float(boost_override)
+            proto_phrases.append(cloud_speech.PhraseSet.Phrase(**kwargs))
+        return cloud_speech.SpeechAdaptation(
+            phrase_sets=[
+                cloud_speech.SpeechAdaptation.AdaptationPhraseSet(
+                    inline_phrase_set=cloud_speech.PhraseSet(
+                        phrases=proto_phrases,
+                        boost=default_boost,
+                    )
+                )
+            ]
+        )
 
     @property
     def model(self) -> str:
@@ -104,7 +154,7 @@ class ChirpSTT(stt.STT):
         pcm = frame.data.tobytes()
         lang_tag: Any = language if language else self._language
 
-        config = cloud_speech.RecognitionConfig(
+        config_kwargs: dict[str, Any] = dict(
             explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                 encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
                 sample_rate_hertz=frame.sample_rate,
@@ -117,6 +167,9 @@ class ChirpSTT(stt.STT):
                 enable_automatic_punctuation=True,
             ),
         )
+        if self._adaptation is not None:
+            config_kwargs["adaptation"] = self._adaptation
+        config = cloud_speech.RecognitionConfig(**config_kwargs)
         request = cloud_speech.RecognizeRequest(
             recognizer=self._recognizer,
             config=config,

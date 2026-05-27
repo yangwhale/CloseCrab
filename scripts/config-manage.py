@@ -281,6 +281,15 @@ def cmd_set_livekit(args):
         livekit_cfg["hmac_secret"] = existing["hmac_secret"]
         print(f"保留已有 hmac_secret (前 8 字符: {existing['hmac_secret'][:8]}...)")
 
+    # stt_phrase_boost: 三态 (on/off/不传). 不传时保留已有值, 避免 set-livekit 重跑
+    # 把用户手动开过的词表 boost 静默关掉。
+    if args.stt_phrase_boost == "on":
+        livekit_cfg["stt_phrase_boost"] = True
+    elif args.stt_phrase_boost == "off":
+        livekit_cfg["stt_phrase_boost"] = False
+    elif "stt_phrase_boost" in existing:
+        livekit_cfg["stt_phrase_boost"] = existing["stt_phrase_boost"]
+
     doc_ref.update({"livekit": livekit_cfg})
 
     print(f"\n已写入 bots/{args.bot_name}.livekit:")
@@ -579,6 +588,9 @@ def main():
     p_lk.add_argument("--stt-provider", choices=["gemini", "chirp3"], default="",
                       help="STT 模型: gemini (默认, Gemini 3 Flash 多模态) 或 chirp3 "
                            "(Cloud Speech v2 Chirp 3, 中文识别更稳)")
+    p_lk.add_argument("--stt-phrase-boost", choices=["on", "off"], default="",
+                      help="仅 chirp3 生效: on=开内置词表 (Gemini/Claude/Higcp/粤海街道 等) "
+                           "降低专有名词识别错误率, off=关. 不传则保留 Firestore 现有值")
     p_lk.add_argument("--enable", action="store_true",
                       help="启用 voice IO (bot 启动时会拉起 LiveKit worker)")
 

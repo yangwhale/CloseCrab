@@ -62,6 +62,7 @@ from livekit.agents.llm import ChatContext, Tool, ToolChoice
 from livekit.plugins import silero
 
 from .chirp_stt import ChirpSTT
+from .chirp_phrases import default_phrases as _default_chirp_phrases
 from .gemini_stt import GeminiSTT
 from .gemini_tts import GeminiTTS
 
@@ -738,11 +739,16 @@ def _build_stt():
     if provider == "chirp3":
         # asia-southeast1 是 chirp_3 + 中文当前唯一可用 region (2026-05 实测确认).
         # global / us-* 都报 "model does not exist", 别动除非确认你的语种在别处可用.
+        # STT_PHRASE_BOOST: "1" / "true" / "default" → 上 chirp_phrases.default_phrases()
+        # 内置词表 (Gemini/Claude/Higcp/粤海街道 等); 其他值或 unset → 关掉 adaptation.
+        boost_flag = (os.environ.get("STT_PHRASE_BOOST") or "").strip().lower()
+        phrases = _default_chirp_phrases() if boost_flag in ("1", "true", "default", "on") else None
         return ChirpSTT(
             model=os.environ.get("STT_MODEL", "chirp_3"),
             language=os.environ.get("STT_LANGUAGE", "cmn-Hans-CN"),
             project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
             location=os.environ.get("STT_LOCATION", "asia-southeast1"),
+            phrases=phrases,
         )
     return GeminiSTT(model=os.environ.get("STT_MODEL", "gemini-3-flash-preview"))
 
@@ -915,6 +921,7 @@ class LiveKitVoiceIO:
         vertex_project: str | None = None,
         vertex_location: str = "global",
         stt_provider: str | None = None,
+        stt_phrase_boost: bool = False,
     ):
         self._feishu = feishu_channel
         self._feishu_loop: asyncio.AbstractEventLoop | None = None  # start() 时填
@@ -934,6 +941,10 @@ class LiveKitVoiceIO:
         self._vertex_location = vertex_location
         # gemini (default) | chirp3 — controls which STT _voice_entrypoint builds
         self._stt_provider = stt_provider or "gemini"
+        # Only meaningful when stt_provider="chirp3": turn on the built-in
+        # vocabulary biasing list (chirp_phrases.default_phrases). Helps with
+        # 'Gemini' / 'Claude' / 'Higcp' / 粤海街道 等容易被 STT 听错的词。
+        self._stt_phrase_boost = bool(stt_phrase_boost)
         self._server: AgentServer | None = None
         self._server_task: asyncio.Task | None = None
         # 当前 active 的 voice/broadcast session, key=open_id, value=AgentSession。
@@ -986,7 +997,15 @@ class LiveKitVoiceIO:
 
         # STT provider selection (gemini default, chirp3 = Cloud Speech v2)
         os.environ["STT_PROVIDER"] = self._stt_provider
-        log.info(f"Voice IO STT provider: {self._stt_provider}")
+        if self._stt_provider == "chirp3" and self._stt_phrase_boost:
+            os.environ["STT_PHRASE_BOOST"] = "1"
+        else:
+            os.environ.pop("STT_PHRASE_BOOST", None)
+        log.info(
+            "Voice IO STT provider: %s%s",
+            self._stt_provider,
+            " (+phrase boost)" if self._stt_provider == "chirp3" and self._stt_phrase_boost else "",
+        )
 
         # 把 HMAC secret 落盘到本地共享文件 (next.js token endpoint 会读)。
         # 用 0600 权限保护,只允许 chrisya 用户读 —— next.js 也跑在 chrisya 下。
