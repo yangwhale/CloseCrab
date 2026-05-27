@@ -147,6 +147,7 @@ def build_system_prompt(
     channel_type: str = "discord",
     livekit_enabled: bool = False,
     worker_type: str = "claude",
+    model: str = "",
 ) -> str:
     """构造 system prompt = channel style + safety rule + team info。
 
@@ -390,6 +391,14 @@ def build_system_prompt(
                 prompt += "\n\n" + _extras
             except FileNotFoundError:
                 pass
+        # G35F (Gemini 3.5 Flash) 专属规则 — 不限 worker_type, 任何 worker 用 G35F
+        # 都吃这套 (Kilo + G35F 是 tiemu 的当前组合, 将来 OpenClaw + G35F 也复用)
+        if "gemini-3.5-flash" in (model or ""):
+            try:
+                _g35f = (_prompts_dir / "g35f-extras.md").read_text(encoding="utf-8")
+                prompt += "\n\n" + _g35f
+            except FileNotFoundError:
+                pass
 
     # OpenClaw 专属 sub-agent 规则（sessions_spawn 工具行为）
     # 端口自 OpenClaw 飞书 channel 的 subagent_hooks 设计 — 没有 plugin runtime
@@ -517,6 +526,7 @@ def main():
         channel_type=channel_type,
         livekit_enabled=livekit_enabled,
         worker_type=worker_type,
+        model=cfg.get("model", ""),
     )
 
     stt = STTEngine(
@@ -742,23 +752,36 @@ def main():
     ).start()
 
     # 启动 Channel
+    # Why os._exit instead of sys.exit / return: LiveKit Rust SDK spawns
+    # native OS threads (tokio-rt-worker, AudioDevice, AudioSourceCapt,
+    # network_thread, signaling_thread) that Python's interpreter cannot
+    # join during normal shutdown. Without os._exit, the process hangs
+    # indefinitely after channel.run() returns — the bot becomes a zombie
+    # that holds Firestore `status=online` but ignores all incoming events.
+    # LiveKit room won't disconnect gracefully (server reaps via heartbeat
+    # timeout ~30s), but that's acceptable vs a hung bot.
+    exit_code = 0
     try:
         log.info(f"Starting {channel_type} channel for '{bot_name}'...")
         channel.run(core)
     except KeyboardInterrupt:
         log.info(f"Bot '{bot_name}' stopped by KeyboardInterrupt")
+        exit_code = 130
     except SystemExit as e:
         log.warning(f"Bot '{bot_name}' stopped by SystemExit: {e}")
-        raise
+        exit_code = e.code if isinstance(e.code, int) else 1
     except Exception as e:
         if channel.restart_requested:
             log.info(f"Restart shutdown (ignored error: {e})")
         else:
             log.error(f"Bot '{bot_name}' crashed: {e}", exc_info=True)
+            exit_code = 1
 
     if channel.restart_requested:
         log.info(f"Restart requested for '{bot_name}', exiting with code 42")
-        sys.exit(RESTART_EXIT_CODE)
+        exit_code = RESTART_EXIT_CODE
+
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":
