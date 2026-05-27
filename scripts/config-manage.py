@@ -272,6 +272,8 @@ def cmd_set_livekit(args):
         livekit_cfg["vertex_project"] = args.vertex_project
     if args.vertex_location:
         livekit_cfg["vertex_location"] = args.vertex_location
+    if args.stt_provider:
+        livekit_cfg["stt_provider"] = args.stt_provider
 
     # merge — 不覆盖已存在的 hmac_secret (bot 启动时生成的, 不要踩)
     existing = doc_ref.get().to_dict().get("livekit", {}) or {}
@@ -574,6 +576,9 @@ def main():
                       help="GCP Vertex AI project (Gemini STT/TTS 用), 默认从 GOOGLE_CLOUD_PROJECT 推")
     p_lk.add_argument("--vertex-location", default="",
                       help="Vertex region, 默认 global")
+    p_lk.add_argument("--stt-provider", choices=["gemini", "chirp3"], default="",
+                      help="STT 模型: gemini (默认, Gemini 3 Flash 多模态) 或 chirp3 "
+                           "(Cloud Speech v2 Chirp 3, 中文识别更稳)")
     p_lk.add_argument("--enable", action="store_true",
                       help="启用 voice IO (bot 启动时会拉起 LiveKit worker)")
 

@@ -61,6 +61,7 @@ from livekit.agents.types import NOT_GIVEN, NotGivenOr
 from livekit.agents.llm import ChatContext, Tool, ToolChoice
 from livekit.plugins import silero
 
+from .chirp_stt import ChirpSTT
 from .gemini_stt import GeminiSTT
 from .gemini_tts import GeminiTTS
 
@@ -726,6 +727,24 @@ async def _voice_tts_node(
 _VOICE_IO_SINGLETON: "LiveKitVoiceIO | None" = None
 
 
+def _build_stt():
+    """根据 STT_PROVIDER env var 选 STT 实现 (默认 GeminiSTT 不变).
+
+    LiveKitVoiceIO.start() 会从 bot config 的 livekit.stt_provider 字段读出后
+    export 到 env, 这里只关心 env, 跟现有 STT_MODEL / TTS_VOICE 同模式。
+    chirp3 走 Cloud Speech v2 Chirp 3 模型, 复用 Vertex 凭据零额外 token。
+    """
+    provider = (os.environ.get("STT_PROVIDER") or "gemini").lower()
+    if provider == "chirp3":
+        return ChirpSTT(
+            model=os.environ.get("STT_MODEL", "chirp_3"),
+            language=os.environ.get("STT_LANGUAGE", "cmn-Hans-CN"),
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            location=os.environ.get("STT_LOCATION", "global"),
+        )
+    return GeminiSTT(model=os.environ.get("STT_MODEL", "gemini-3-flash-preview"))
+
+
 async def _voice_entrypoint(ctx: JobContext):
     """LiveKit Worker 的 job entrypoint — 每个 room dispatch 进来一次。
 
@@ -777,7 +796,7 @@ async def _voice_entrypoint(ctx: JobContext):
                 "min_duration": 1.0,
             },
         },
-        stt=GeminiSTT(model=os.environ.get("STT_MODEL", "gemini-3-flash-preview")),
+        stt=_build_stt(),
         llm=closecrab_llm,
         tts=GeminiTTS(
             model=os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview"),
@@ -893,6 +912,7 @@ class LiveKitVoiceIO:
         hmac_secret: str | None = None,
         vertex_project: str | None = None,
         vertex_location: str = "global",
+        stt_provider: str | None = None,
     ):
         self._feishu = feishu_channel
         self._feishu_loop: asyncio.AbstractEventLoop | None = None  # start() 时填
@@ -910,6 +930,8 @@ class LiveKitVoiceIO:
         self._hmac_secret_was_generated = hmac_secret is None
         self._vertex_project = vertex_project
         self._vertex_location = vertex_location
+        # gemini (default) | chirp3 — controls which STT _voice_entrypoint builds
+        self._stt_provider = stt_provider or "gemini"
         self._server: AgentServer | None = None
         self._server_task: asyncio.Task | None = None
         # 当前 active 的 voice/broadcast session, key=open_id, value=AgentSession。
@@ -959,6 +981,10 @@ class LiveKitVoiceIO:
                 "vertex_project not set; GeminiSTT/TTS will use GEMINI_API_KEY "
                 "(may fail with 'User location is not supported' from HK/CN VMs)"
             )
+
+        # STT provider selection (gemini default, chirp3 = Cloud Speech v2)
+        os.environ["STT_PROVIDER"] = self._stt_provider
+        log.info(f"Voice IO STT provider: {self._stt_provider}")
 
         # 把 HMAC secret 落盘到本地共享文件 (next.js token endpoint 会读)。
         # 用 0600 权限保护,只允许 chrisya 用户读 —— next.js 也跑在 chrisya 下。

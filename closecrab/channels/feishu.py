@@ -4837,6 +4837,7 @@ class FeishuChannel(Channel):
                     hmac_secret=self._livekit_config.get("hmac_secret"),
                     vertex_project=self._livekit_config.get("vertex_project"),
                     vertex_location=self._livekit_config.get("vertex_location", "global"),
+                    stt_provider=self._livekit_config.get("stt_provider"),
                 )
                 loop.run_until_complete(self._voice_io.start())
                 # 如果 secret 是新生成的, 回写 Firestore 持久化, 重启后复用
