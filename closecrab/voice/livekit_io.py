@@ -61,7 +61,7 @@ from livekit.agents.types import NOT_GIVEN, NotGivenOr
 from livekit.agents.llm import ChatContext, Tool, ToolChoice
 from livekit.plugins import silero
 
-from .chirp_stt import ChirpSTT
+from .chirp_stt import ChirpSTT, _DEFAULT_PHRASE_BOOST
 from .chirp_phrases import default_phrases as _default_chirp_phrases
 from .gemini_stt import GeminiSTT
 from .gemini_tts import GeminiTTS
@@ -733,9 +733,49 @@ def _build_stt():
 
     LiveKitVoiceIO.start() 会从 bot config 的 livekit.stt_provider 字段读出后
     export 到 env, 这里只关心 env, 跟现有 STT_MODEL / TTS_VOICE 同模式。
-    chirp3 走 Cloud Speech v2 Chirp 3 模型, 复用 Vertex 凭据零额外 token。
+
+    Providers:
+      - "gemini" (默认): GeminiSTT 多模态, 自写.
+      - "chirp3": 自写 ChirpSTT, Speech v2 batch recognize, 准但非流式.
+      - "chirp3_stream": 官方 livekit-plugins-google STT, chirp_3 真流式 +
+        partial + server-side endpointing. 同样的 Vertex 凭据, 同样的 phrase
+        boost (复用 ChirpSTT._build_adaptation 转 SpeechAdaptation 对象).
     """
     provider = (os.environ.get("STT_PROVIDER") or "gemini").lower()
+    if provider == "chirp3_stream":
+        # 官方 plugin 的流式 Chirp3: server-side endpointing 比 silero 准,
+        # interim_results=True 走 StreamingRecognize. 与自写 ChirpSTT 同一底层
+        # API, 只是走的接口不同 — batch (recognize) vs stream (streamingRecognize).
+        from livekit.plugins import google as _lk_google
+        from google.cloud.speech_v2.types import cloud_speech as _cs2
+
+        boost_flag = (os.environ.get("STT_PHRASE_BOOST") or "").strip().lower()
+        phrases = _default_chirp_phrases() if boost_flag in ("1", "true", "default", "on") else None
+        adaptation = ChirpSTT._build_adaptation(phrases, _DEFAULT_PHRASE_BOOST) if phrases else None
+
+        es_env = (os.environ.get("STT_ENDPOINTING") or "short").lower()
+        _es_enum = _cs2.StreamingRecognitionFeatures.EndpointingSensitivity
+        es_map = {
+            "short": _es_enum.ENDPOINTING_SENSITIVITY_SHORT,
+            "standard": _es_enum.ENDPOINTING_SENSITIVITY_STANDARD,
+            "supershort": _es_enum.ENDPOINTING_SENSITIVITY_SUPERSHORT,
+        }
+
+        kwargs = dict(
+            model=os.environ.get("STT_MODEL", "chirp_3"),
+            languages=[os.environ.get("STT_LANGUAGE", "cmn-Hans-CN")],
+            location=os.environ.get("STT_LOCATION", "asia-southeast1"),
+            interim_results=True,
+            use_streaming=True,
+            spoken_punctuation=False,
+            punctuate=True,
+            detect_language=False,
+            endpointing_sensitivity=es_map.get(es_env, _es_enum.ENDPOINTING_SENSITIVITY_SHORT),
+        )
+        if adaptation is not None:
+            kwargs["adaptation"] = adaptation
+        return _lk_google.STT(**kwargs)
+
     if provider == "chirp3":
         # asia-southeast1 是 chirp_3 + 中文当前唯一可用 region (2026-05 实测确认).
         # global / us-* 都报 "model does not exist", 别动除非确认你的语种在别处可用.
@@ -782,9 +822,10 @@ async def _voice_entrypoint(ctx: JobContext):
 
     # 起 STT/TTS/LLM/VAD
     # min_silence_duration: VAD 觉得"用户在停顿"需要的最小静音长度.
-    # 调到 1.0s, 配合 endpointing.min_delay=1.5s, 让"我说完一段话停一下又接一句"
-    # 不会被切成两个 transcript (那样会触发 worker 跑两次, 第二次 turn cancel 第一次).
-    vad = silero.VAD.load(min_silence_duration=1.0)
+    # 2026-05-27: 由 1.0 → 0.6s. 配合 chirp3_stream 流式 STT 把 STT 部分提速,
+    # 把这块也砍 0.4s. 风险是用户句中停顿被切成两段 transcript, 但 CloseCrabLLM
+    # 有 batch_debounce=1.5s 做二次合并, 短停顿仍会被攒到同一轮 LLM 调用。
+    vad = silero.VAD.load(min_silence_duration=0.6)
     closecrab_llm = CloseCrabLLM(
         feishu_channel=feishu, feishu_loop=feishu_loop, open_id=open_id
     )
@@ -793,10 +834,12 @@ async def _voice_entrypoint(ctx: JobContext):
         vad=vad,
         turn_handling={
             # endpointing.min_delay: 用户最后一个 word 后, 等多久才认为"这一轮说完了".
-            # 1.5s 是经典的"自然停顿"阈值 —— 人停 1.5s 大概率真说完, 不是只是换气.
-            # 调短了会切碎 (用户报告: 一句话被拆成两个 transcript, worker 跑两次).
-            # 调长了用户会觉得 agent 反应慢.
-            "endpointing": {"min_delay": 1.5, "max_delay": 6.0},
+            # 2026-05-27: 由 1.5 → 0.8s. 配合 chirp3_stream 上线一起调。原 1.5s 是
+            # silero+batch chirp 时代的安全阈值, 用户停顿一拍就被切。换上 chirp3_stream
+            # 后 STT 那段稳定, 切碎风险下降, 0.8s 是新平衡点。再短 (<0.6) 容易把"嗯
+            # 我想想"这种思考停顿当结束。CloseCrabLLM 的 batch_debounce 在 LLM 这层
+            # 再做 1.5s 合并兜底, 即使 STT 被切两段也只触发一次 worker。
+            "endpointing": {"min_delay": 0.8, "max_delay": 6.0},
             "interruption": {
                 "mode": "vad",
                 # 用户必须连续说 1.0s 才能打断 agent (原 0.5s 太敏感, agent 念到一半
@@ -995,16 +1038,19 @@ class LiveKitVoiceIO:
                 "(may fail with 'User location is not supported' from HK/CN VMs)"
             )
 
-        # STT provider selection (gemini default, chirp3 = Cloud Speech v2)
+        # STT provider selection (gemini default, chirp3 = batch v2, chirp3_stream = official streaming plugin)
         os.environ["STT_PROVIDER"] = self._stt_provider
-        if self._stt_provider == "chirp3" and self._stt_phrase_boost:
+        # phrase boost 适用于所有 chirp3 变体 (batch + stream), 不只是原 chirp3。
+        # startswith 覆盖未来新增 chirp3_xxx 而无需再改 gating。
+        _is_chirp = self._stt_provider.startswith("chirp3")
+        if _is_chirp and self._stt_phrase_boost:
             os.environ["STT_PHRASE_BOOST"] = "1"
         else:
             os.environ.pop("STT_PHRASE_BOOST", None)
         log.info(
             "Voice IO STT provider: %s%s",
             self._stt_provider,
-            " (+phrase boost)" if self._stt_provider == "chirp3" and self._stt_phrase_boost else "",
+            " (+phrase boost)" if _is_chirp and self._stt_phrase_boost else "",
         )
 
         # 把 HMAC secret 落盘到本地共享文件 (next.js token endpoint 会读)。

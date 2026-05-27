@@ -585,9 +585,10 @@ def main():
                       help="GCP Vertex AI project (Gemini STT/TTS 用), 默认从 GOOGLE_CLOUD_PROJECT 推")
     p_lk.add_argument("--vertex-location", default="",
                       help="Vertex region, 默认 global")
-    p_lk.add_argument("--stt-provider", choices=["gemini", "chirp3"], default="",
-                      help="STT 模型: gemini (默认, Gemini 3 Flash 多模态) 或 chirp3 "
-                           "(Cloud Speech v2 Chirp 3, 中文识别更稳)")
+    p_lk.add_argument("--stt-provider", choices=["gemini", "chirp3", "chirp3_stream"], default="",
+                      help="STT 模型: gemini (默认, Gemini 3 Flash 多模态) / chirp3 "
+                           "(Cloud Speech v2 Chirp 3 batch) / chirp3_stream "
+                           "(官方 livekit-plugins-google 真流式 + server endpointing)")
     p_lk.add_argument("--stt-phrase-boost", choices=["on", "off"], default="",
                       help="仅 chirp3 生效: on=开内置词表 (Gemini/Claude/Higcp/粤海街道 等) "
                            "降低专有名词识别错误率, off=关. 不传则保留 Firestore 现有值")
