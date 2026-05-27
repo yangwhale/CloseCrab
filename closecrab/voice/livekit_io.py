@@ -771,6 +771,11 @@ def _build_stt():
             punctuate=True,
             detect_language=False,
             endpointing_sensitivity=es_map.get(es_env, _es_enum.ENDPOINTING_SENSITIVITY_SHORT),
+            # 关键: 让 chirp_3 server emit SPEECH_ACTIVITY_END 事件 (→ END_OF_SPEECH),
+            # AgentSession turn_detection="stt" 模式才能拿到 EOU 信号, 把 silero+min_delay
+            # 那套 VAD-based 端点检测从决策链下掉。否则即使设了 turn_detection=stt,
+            # STT 不发 END_OF_SPEECH, 系统会 fallback 到 VAD。
+            enable_voice_activity_events=True,
         )
         if adaptation is not None:
             kwargs["adaptation"] = adaptation
@@ -833,17 +838,21 @@ async def _voice_entrypoint(ctx: JobContext):
     session = AgentSession(
         vad=vad,
         turn_handling={
-            # endpointing.min_delay: 用户最后一个 word 后, 等多久才认为"这一轮说完了".
-            # 2026-05-27: 由 1.5 → 0.8s. 配合 chirp3_stream 上线一起调。原 1.5s 是
-            # silero+batch chirp 时代的安全阈值, 用户停顿一拍就被切。换上 chirp3_stream
-            # 后 STT 那段稳定, 切碎风险下降, 0.8s 是新平衡点。再短 (<0.6) 容易把"嗯
-            # 我想想"这种思考停顿当结束。CloseCrabLLM 的 batch_debounce 在 LLM 这层
-            # 再做 1.5s 合并兜底, 即使 STT 被切两段也只触发一次 worker。
-            "endpointing": {"min_delay": 0.8, "max_delay": 6.0},
+            # turn_detection="stt": EOU (end-of-utterance) 由 STT 的 END_OF_SPEECH
+            # 事件驱动, 不再依赖本地 silero VAD + min_delay 那套. chirp_3 server
+            # endpointing (SHORT 档 + enable_voice_activity_events=True) 在云端
+            # 准确判断"用户说完了", 比本地 VAD 准, 比固定 min_delay 快。
+            # 注意: 这要求 stt 是真流式 + 发 END_OF_SPEECH (即 chirp3_stream 路径).
+            # gemini / chirp3 batch 路径下 SDK 会 fallback 到 VAD 模式, 不会出错。
+            "turn_detection": "stt",
+            # min_delay: STT 已经决定 EOU 后的最小额外等待 (debounce 短促回声 /
+            # 多 utterance 合并). 0.3s 是低位安全网, 真正阻塞延迟由 chirp 决定。
+            "endpointing": {"min_delay": 0.3, "max_delay": 6.0},
             "interruption": {
                 "mode": "vad",
                 # 用户必须连续说 1.0s 才能打断 agent (原 0.5s 太敏感, agent 念到一半
-                # 用户随口"嗯"一下都会被打断).
+                # 用户随口"嗯"一下都会被打断). 这一支独立于 turn_detection, 只管
+                # "agent 说话时用户能不能插话", silero VAD 一直在跑负责检测。
                 "min_duration": 1.0,
             },
         },
