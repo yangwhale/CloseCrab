@@ -385,7 +385,11 @@ _PER_PHRASE_BOOST: dict[str, float] = {
     "Gemini": 16.0,
     "Claude": 16.0,
     "Anthropic": 16.0,
-    "DeepSeek": 16.0,
+    "DeepSeek": 20.0,         # max boost — was getting parsed as "第四个" in fast Chinese speech
+    "DeepSeek V3": 20.0,
+    "DeepSeek V4": 20.0,
+    "DeepSeek R1": 20.0,
+    "DeepSeek R2": 20.0,
     "Kimi": 16.0,
     "Moonshot": 16.0,
     "MiniMax": 15.0,

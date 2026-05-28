@@ -65,7 +65,6 @@ from livekit.plugins import silero
 # "RuntimeError: Plugins must be registered on the main thread". 这里 top-level
 # import 保证主线程注册, 即使 STT_PROVIDER 不选 chirp3_stream 也只多一次 import 开销。
 from livekit.plugins import google as _lk_google
-from google.cloud.speech_v2.types import cloud_speech as _cs2
 
 from .chirp_stt import ChirpSTT, _DEFAULT_PHRASE_BOOST
 from .chirp_phrases import default_phrases as _default_chirp_phrases
@@ -694,6 +693,10 @@ async def _voice_tts_node(
       - min_sentence_len=1, stream_context_len=1: 任何带终止符的 chunk 立即 emit
       - retain_format=True: 保留情绪标签前面的 \\n 空白 (TTS 不读它们, 但
         StreamAdapter 后续做 timed transcript 对齐时需要原始位置)
+
+    TTS_BATCHING=on 时走自管 batching loop: 第一句快出 (低首字延迟),
+    后续合成时把"上一次合成期间累积的所有句子"合并送 TTS, 减少 API 调用 +
+    句间韵律连贯。OFF (默认) 走原 StreamAdapter 路径。
     """
     activity = agent._get_activity_or_raise()
     if activity.tts is None:
@@ -701,20 +704,12 @@ async def _voice_tts_node(
             "tts_node called but no TTS node is available."
         )
 
-    wrapped_tts = activity.tts
     if not activity.tts.capabilities.streaming:
-        wrapped_tts = lk_tts.StreamAdapter(
-            tts=wrapped_tts,
-            sentence_tokenizer=tokenize.blingfire.SentenceTokenizer(
-                retain_format=True,
-                # 3 是 latency 与自然度的折中: 1-2 字的碎片 ("嗯"、"是、好的")
-                # 还是会被攒着, 6+ 字的 tool hint 立即 flush, 主体长回复每句
-                # 独立合成的"切分感"也比 =1 稍轻 (相邻短句更可能合并)。
-                min_sentence_len=3,
-                stream_context_len=3,
-            ),
-        )
+        async for frame in _batching_tts_loop(activity, text):
+            yield frame
+        return
 
+    wrapped_tts = activity.tts
     conn_options = activity.session.conn_options.tts_conn_options
     async with wrapped_tts.stream(conn_options=conn_options) as stream:
         async def _forward_input() -> None:
@@ -728,6 +723,82 @@ async def _voice_tts_node(
                 yield ev.frame
         finally:
             await agents_utils.aio.cancel_and_wait(forward_task)
+
+
+_MAX_BATCH_CHARS = 500  # Gemini TTS 单次音频上限. 实测 568c 末尾被截断 (09:16 红烧排骨),
+# 458c OK (09:03 酸辣土豆丝). 600 太激进, 设 500 留裕度。
+# 历史: 957c 时末 2-3 句无音频 (老经验值定 600, 现在收紧)。
+
+
+async def _batching_tts_loop(
+    activity: Any, text: AsyncIterable[str]
+) -> AsyncGenerator[Any, None]:
+    """简化版 batching: 全收 → 切句 → 按 _MAX_BATCH_CHARS 打包合成。
+
+    背景: CC stream-JSON 是 turn-level (整段一次性吐, 不是 token-level 流式),
+    所以"边出边送 TTS"等于零收益 — 等第一句拿到时 LLM 整段已经在手。
+
+    之前的 producer-consumer + Queue + carry_over 流式 batching 反而引入副作用:
+    第一次 drain 后 producer 还在 push 剩余句子, 等 batch #1 合成完 (10+秒),
+    queue 里堆积的尾部句子被孤零零吐成 batch #2 (常见 1 句 17-24 字)。
+    单句独立合成 → Gemini TTS 给的 prosody 跟主段脱节 → 听感"最后一句口气不一样"。
+
+    新流程: 收完 → 一次 tokenize → 按 _MAX_BATCH_CHARS 装 batch → 依次合成。
+    250-500 字回复永远是 1 个 batch, >600 字才拆。
+    """
+    tts = activity.tts
+    conn_options = activity.session.conn_options.tts_conn_options
+
+    parts: list[str] = []
+    async for chunk in text:
+        if chunk:
+            parts.append(chunk)
+    full_text = "".join(parts).strip()
+    if not full_text:
+        return
+
+    tokenizer = tokenize.blingfire.SentenceTokenizer(
+        retain_format=True, min_sentence_len=3, stream_context_len=3
+    )
+    sent_stream = tokenizer.stream()
+    sent_stream.push_text(full_text)
+    sent_stream.end_input()
+
+    sentences: list[str] = []
+    async for sd in sent_stream:
+        if sd.token:
+            sentences.append(sd.token)
+    if not sentences:
+        sentences = [full_text]
+
+    batches: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for s in sentences:
+        s_len = len(s) + (1 if current else 0)
+        if current and current_chars + s_len > _MAX_BATCH_CHARS:
+            batches.append(" ".join(current).strip())
+            current = [s]
+            current_chars = len(s)
+        else:
+            current.append(s)
+            current_chars += s_len
+    if current:
+        batches.append(" ".join(current).strip())
+
+    log.info(
+        f"TTS plan: {len(full_text)}c → {len(sentences)} sentences → "
+        f"{len(batches)} batch(es)"
+    )
+
+    for idx, batch_text in enumerate(batches, 1):
+        log.info(f"TTS batch #{idx}: {len(batch_text)} chars")
+        chunked = tts.synthesize(batch_text, conn_options=conn_options)
+        try:
+            async for sa in chunked:
+                yield sa.frame
+        finally:
+            await chunked.aclose()
 
 
 # 全局单例引用,供 entrypoint() 拿 feishu_channel + feishu_loop
@@ -758,12 +829,18 @@ def _build_stt():
         phrases = _default_chirp_phrases() if boost_flag in ("1", "true", "default", "on") else None
         adaptation = ChirpSTT._build_adaptation(phrases, _DEFAULT_PHRASE_BOOST) if phrases else None
 
-        es_env = (os.environ.get("STT_ENDPOINTING") or "short").lower()
-        _es_enum = _cs2.StreamingRecognitionFeatures.EndpointingSensitivity
+        # livekit-plugins-google 用 getattr(EndpointingSensitivity, str) 拿 proto enum,
+        # 所以这里必须传字符串 attribute name, 不能传 enum value (TypeError).
+        # chirp_3 只支持 3 档: SUPERSHORT (~200ms 停顿就切) < SHORT (~500ms) <
+        # STANDARD (~800ms+, 默认推荐). 用 SHORT 时用户句中喘口气就被切成多段,
+        # 哪怕 batch leader 能合并, 跟下游 turn detection 协调也乱。改 STANDARD
+        # 是最稳的, 代价是 EOU 触发整体晚 200-300ms。
+        es_env = (os.environ.get("STT_ENDPOINTING") or "standard").lower()
         es_map = {
-            "short": _es_enum.ENDPOINTING_SENSITIVITY_SHORT,
-            "standard": _es_enum.ENDPOINTING_SENSITIVITY_STANDARD,
-            "supershort": _es_enum.ENDPOINTING_SENSITIVITY_SUPERSHORT,
+            "short": "ENDPOINTING_SENSITIVITY_SHORT",
+            "standard": "ENDPOINTING_SENSITIVITY_STANDARD",
+            "supershort": "ENDPOINTING_SENSITIVITY_SUPERSHORT",
+            "medium": "ENDPOINTING_SENSITIVITY_STANDARD",  # alias: 没有真 MEDIUM
         }
 
         kwargs = dict(
@@ -775,7 +852,7 @@ def _build_stt():
             spoken_punctuation=False,
             punctuate=True,
             detect_language=False,
-            endpointing_sensitivity=es_map.get(es_env, _es_enum.ENDPOINTING_SENSITIVITY_SHORT),
+            endpointing_sensitivity=es_map.get(es_env, "ENDPOINTING_SENSITIVITY_STANDARD"),
             # 关键: 让 chirp_3 server emit SPEECH_ACTIVITY_END 事件 (→ END_OF_SPEECH),
             # AgentSession turn_detection="stt" 模式才能拿到 EOU 信号, 把 silero+min_delay
             # 那套 VAD-based 端点检测从决策链下掉。否则即使设了 turn_detection=stt,
@@ -830,37 +907,49 @@ async def _voice_entrypoint(ctx: JobContext):
     open_id = identity.removeprefix("feishu:")
     log.info(f"Voice participant joined: identity={identity} open_id={open_id}")
 
-    # 起 STT/TTS/LLM/VAD
-    # min_silence_duration: VAD 觉得"用户在停顿"需要的最小静音长度.
-    # 2026-05-27: 由 1.0 → 0.6s. 配合 chirp3_stream 流式 STT 把 STT 部分提速,
-    # 把这块也砍 0.4s. 风险是用户句中停顿被切成两段 transcript, 但 CloseCrabLLM
-    # 有 batch_debounce=1.5s 做二次合并, 短停顿仍会被攒到同一轮 LLM 调用。
-    vad = silero.VAD.load(min_silence_duration=0.6)
+    # 两套 turn 配置, 由 STT_PROVIDER 决定:
+    #
+    # stream 模式 (chirp3_stream): chirp_3 server-side endpointing 实时检测停顿,
+    #   emit END_OF_SPEECH event → AgentSession turn_detection="stt" 驱动结束.
+    #   VAD min_silence 0.6s 仅为兜底, interruption manual 防 race cancel turn.
+    #   优点: 起步延迟 ~0.8s. 缺点: agent 念时用户不能 VAD 打断.
+    #
+    # batch 模式 (chirp3 batch / gemini): STT 不发 EOU, 全靠本地 silero VAD 决断.
+    #   VAD min_silence 1.0s + endpointing min_delay 1.5s 一共要 2.5s 连续静音才切.
+    #   interruption vad + min_duration 1.0s 让用户能打断 agent.
+    #   优点: 不切碎、可打断、无 race bug. 缺点: 起步延迟 ~3s.
+    _stt_provider = (os.environ.get("STT_PROVIDER") or "gemini").lower()
+    _is_streaming = _stt_provider == "chirp3_stream"
+
+    if _is_streaming:
+        _vad_silence = 0.6
+        _turn_handling = {
+            "turn_detection": "stt",
+            "endpointing": {"min_delay": 0.3, "max_delay": 6.0},
+            "interruption": {"mode": "manual"},
+        }
+    else:
+        _vad_silence = 0.55
+        _turn_handling = {
+            # 无 turn_detection key → SDK 走默认 VAD-driven 端点检测
+            "endpointing": {"min_delay": 0.5, "max_delay": 3.0},
+            "interruption": {"mode": "vad", "min_duration": 0.5},
+        }
+    vad = silero.VAD.load(min_silence_duration=_vad_silence)
+    log.info(
+        f"Voice turn config: mode={'stream' if _is_streaming else 'batch'} "
+        f"vad_silence={_vad_silence}s "
+        f"min_delay={_turn_handling['endpointing']['min_delay']}s "
+        f"interrupt={_turn_handling['interruption']['mode']}"
+    )
+
     closecrab_llm = CloseCrabLLM(
         feishu_channel=feishu, feishu_loop=feishu_loop, open_id=open_id
     )
 
     session = AgentSession(
         vad=vad,
-        turn_handling={
-            # turn_detection="stt": EOU (end-of-utterance) 由 STT 的 END_OF_SPEECH
-            # 事件驱动, 不再依赖本地 silero VAD + min_delay 那套. chirp_3 server
-            # endpointing (SHORT 档 + enable_voice_activity_events=True) 在云端
-            # 准确判断"用户说完了", 比本地 VAD 准, 比固定 min_delay 快。
-            # 注意: 这要求 stt 是真流式 + 发 END_OF_SPEECH (即 chirp3_stream 路径).
-            # gemini / chirp3 batch 路径下 SDK 会 fallback 到 VAD 模式, 不会出错。
-            "turn_detection": "stt",
-            # min_delay: STT 已经决定 EOU 后的最小额外等待 (debounce 短促回声 /
-            # 多 utterance 合并). 0.3s 是低位安全网, 真正阻塞延迟由 chirp 决定。
-            "endpointing": {"min_delay": 0.3, "max_delay": 6.0},
-            "interruption": {
-                "mode": "vad",
-                # 用户必须连续说 1.0s 才能打断 agent (原 0.5s 太敏感, agent 念到一半
-                # 用户随口"嗯"一下都会被打断). 这一支独立于 turn_detection, 只管
-                # "agent 说话时用户能不能插话", silero VAD 一直在跑负责检测。
-                "min_duration": 1.0,
-            },
-        },
+        turn_handling=_turn_handling,
         stt=_build_stt(),
         llm=closecrab_llm,
         tts=GeminiTTS(
@@ -1061,6 +1150,33 @@ class LiveKitVoiceIO:
             os.environ["STT_PHRASE_BOOST"] = "1"
         else:
             os.environ.pop("STT_PHRASE_BOOST", None)
+
+        # Chirp 走 Cloud Speech v2, 需要 GOOGLE_CLOUD_PROJECT 解析 recognizer
+        # `projects/{id}/locations/.../recognizers/_`. ChirpSTT(batch) 直接读这个
+        # env, livekit-plugins-google STT (stream) 走 google.auth.default() → 该
+        # env 是 project 解析的第一优先级。如果 vertex_project 没配, 这里从 ADC
+        # 的 quota_project_id 推导一个 fallback (user creds 不带 .project_id).
+        # 不覆盖已有值, 也不影响 Vertex (它前面已 setdefault 过)。
+        if _is_chirp and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+            try:
+                import google.auth
+                _adc_creds, _adc_proj = google.auth.default()
+                if not _adc_proj:
+                    _adc_proj = getattr(_adc_creds, "quota_project_id", None)
+                if _adc_proj:
+                    os.environ["GOOGLE_CLOUD_PROJECT"] = _adc_proj
+                    log.info(
+                        "Chirp STT: GOOGLE_CLOUD_PROJECT not set, "
+                        "fell back to ADC project=%s", _adc_proj,
+                    )
+                else:
+                    log.warning(
+                        "Chirp STT: GOOGLE_CLOUD_PROJECT not set and ADC has no "
+                        "project; recognizer path will be 'projects/None/...' → 403"
+                    )
+            except Exception as e:
+                log.warning("Chirp STT: failed to derive GOOGLE_CLOUD_PROJECT from ADC: %s", e)
+
         log.info(
             "Voice IO STT provider: %s%s",
             self._stt_provider,
