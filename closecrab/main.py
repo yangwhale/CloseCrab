@@ -152,8 +152,9 @@ def build_system_prompt(
     """构造 system prompt = channel style + safety rule + team info。
 
     Args:
-        livekit_enabled: 飞书是否启用了 voice IO。启用时会注入 voice 风格指令,
-            告诉 Claude 看到 [来自语音通话] 前缀的消息时切口语风格。
+        livekit_enabled: 飞书是否启用了 voice IO。当前已废弃 (voice 模式规则
+            统一在 "## 交互模式" 段定义, 通过 user message 的 [channel: voice]
+            标记触发, 不再按 livekit_enabled 注入独立段)。参数保留以兼容调用方。
         worker_type: Worker 类型 ("claude" 或 "gemini")。Gemini worker 注入额外行为指导。
     """
     if channel_type in ("feishu", "lark"):
@@ -181,34 +182,82 @@ def build_system_prompt(
     # 身份声明
     prompt += f"\n\n你的名字是 **{bot_name}**。在所有对话中以此身份自称，不要使用其他名字。"
 
-    # 语音总结指令
-    prompt += (
-        "\n\n## 语音总结\n"
-        "当你的回复包含复杂技术内容（表格、代码块、多步骤分析、长列表、对比报告）时，"
-        "在回复末尾添加 `<voice-summary>` 标签，用 2-3 句大白话口语化总结你的回复要点。\n"
-        "语音总结应该像朋友聊天一样自然，避免念出技术细节，用通俗说法概括。\n"
-        "简单回复（一两句话、确认、问候、进度汇报）不需要语音总结。\n\n"
-        "### 情绪标签\n"
-        "语音总结使用 Gemini TTS 合成，支持情绪标签控制语气。"
-        "在 voice-summary 开头加一个情绪标签，让语音更自然生动：\n"
-        "- `[casually]` — 日常汇报、普通总结（最常用）\n"
-        "- `[excitedly]` — 好消息、任务完成、性能提升\n"
-        "- `[thoughtfully]` — 分析、对比、需要权衡的建议\n"
-        "- `[seriously]` — 警告、重要注意事项、安全问题\n"
-        "- `[cheerfully]` — 问候、轻松话题\n"
-        "- `[calmly]` — 长篇技术解读的平和总结\n"
-        "根据内容语境自然选择，不要每次都用同一个。不确定时用 `[casually]`。\n\n"
-        "示例：\n"
-        "- `<voice-summary>[casually] 简单来说就是帮你查了三个方案，推荐第二个，性价比最高。</voice-summary>`\n"
-        "- `<voice-summary>[excitedly] 搞定了！TTS 引擎已经从 Edge 升级到 Gemini，音质好了一大截。</voice-summary>`\n"
-        "- `<voice-summary>[thoughtfully] 两个方案各有利弊，A 方案快但贵，B 方案慢但省钱，得看你更在意哪个。</voice-summary>`\n\n"
-        "### 发送已有音频文件\n"
-        "如果你已经通过 tts-generate.py 或其他方式生成了 ogg 音频文件，"
-        "可以用 `<voice-file>` 标签直接发送，无需再走 TTS 生成：\n"
-        "`<voice-file>/tmp/xxx.ogg</voice-file>`\n"
-        "标签内容必须是绝对路径。Channel 层会自动上传并作为语音消息发出，私聊和群聊都支持。\n"
-        "注意：voice-file 不会删除源文件。voice-summary 和 voice-file 可以在同一条消息中共存。"
-    )
+    # 交互模式定义 (仅飞书 channel 有 voice mode, 其他 channel 不注入避免浪费 token)
+    if channel_type in ("feishu", "lark"):
+        prompt += (
+            "\n\n## 交互模式\n"
+            "你支持两种交互模式, user message 第一行的标记决定走哪个:\n"
+            "\n"
+            "### `[channel: text]` (默认 - 标准文字模式)\n"
+            "正常 markdown 输出, 可用标题/加粗/列表/表格/代码块/链接, 长回复 OK。\n"
+            "适用: 飞书文字私聊、群消息。\n"
+            "\n"
+            "### `[channel: voice]` (语音模式)\n"
+            "回复会被 Gemini TTS 念出来。强制规则:\n"
+            "\n"
+            "1. **第一句必须是问题判断 + 决策预告**, 格式: `[情感标签] <一句话>`。"
+            "这句话立刻被念给用户, 让 ta 知道你在干嘛, 然后再开始具体动作。示例:\n"
+            "   - `[casually] 这事简单, 我直接答`\n"
+            "   - `[curiosity] 这话题 wiki 应该有, 我翻翻`\n"
+            "   - `[seriously] 这要上网搜最新的`\n"
+            "   - `[thinking] 这个得想一会儿`\n"
+            "   - `[focus] 让我先看下日志和代码`\n"
+            "   - `[contemplative] 这事不小, 我系统化处理`\n"
+            "   - `[confusion] 没听清你问什么, 你再说一遍`\n"
+            "\n"
+            "2. **禁止 markdown** (标题/加粗/列表/表格/代码块/链接), 不写 Sources 段或 <voice-summary> 标签。\n"
+            "\n"
+            "3. **短句口语化** (25-50 字一句), 复杂内容只口述结论, 细节让用户去飞书翻。\n"
+            "\n"
+            "4. **每 1-3 句切换情感标签** (Gemini 官方词), 避免整段一个标签。常用:\n"
+            "   - 思考: `[thinking]` `[realization]` `[curiosity]` `[confusion]` `[contemplative]`\n"
+            "   - 友好: `[casually]` `[friendly]` `[warmly]` `[amused]` `[cheerfully]` `[playful]`\n"
+            "   - 兴奋: `[excitement]` `[happy]`\n"
+            "   - 建议/特效: `[suggestion]` `[whispers]`\n"
+            "\n"
+            "5. **技术术语保留英文** (API、token、Vertex、MoE 等), 别翻译成中文术语。\n"
+            "\n"
+            "6. **双推机制**: 你的回复同时进飞书 (markdown 也能看) 和 voice (TTS 念)。\n"
+            "   voice 在线时优先服务 voice 体验 — 短而口语化, 飞书显示反而更清爽。\n"
+            "\n"
+            "7. **正确示范** (第一句判断, 后续才是动作和结论):\n"
+            "   `[focus] 让我先看下日志。[thinking] 翻一下 livekit_io.py。"
+            "[realization] 哦端口冲突。[suggestion] kill 掉 8080 就行。`\n"
+            "   **错误示范** (一长句没情感切换没开头判断):\n"
+            "   `[casually] 我看了日志发现端口冲突你 kill 8080 就行`\n"
+            "\n"
+            "如果 user message 没有 `[channel: xxx]` 标记, 按 `[channel: text]` 处理。\n"
+        )
+
+    # TTS 辅助标签 (仅 feishu/discord 解析 voice 标签; dingtalk 不需要)
+    if channel_type in ("feishu", "lark", "discord"):
+        voice_mode_note = (
+            "注意: `[channel: voice]` 模式下整段回复已被 TTS 念出, 不要写下面的标签 "
+            "(会被 strip 掉浪费 output)。\n\n"
+            if channel_type in ("feishu", "lark")
+            else ""
+        )
+        prompt += (
+            "\n\n## TTS 辅助标签\n"
+            f"{voice_mode_note}"
+            "### `<voice-summary>` — 给 text 回复补一段 voice 总结\n"
+            "当 text 回复包含复杂技术内容（表格、代码块、多步骤分析、长列表、对比报告）时，"
+            "在末尾添加 `<voice-summary>` 标签，用 2-3 句大白话口语化总结要点。"
+            "用户既能看 markdown 又能听语音版。\n"
+            "简单回复（一两句话、确认、问候、进度汇报）不需要语音总结。\n"
+            "标签内开头加一个情感标签控制语气, 常用: "
+            "`[casually]` `[thinking]` `[excitement]` `[contemplative]` `[seriously]` `[cheerfully]` `[friendly]`。"
+            "不确定用 `[casually]`。\n"
+            "示例:\n"
+            "- `<voice-summary>[casually] 帮你查了三个方案，推荐第二个，性价比最高。</voice-summary>`\n"
+            "- `<voice-summary>[excitement] 搞定！TTS 升级到 Gemini，音质好一大截。</voice-summary>`\n"
+            "- `<voice-summary>[contemplative] 两方案各有利弊, A 快但贵, B 慢但省钱。</voice-summary>`\n\n"
+            "### `<voice-file>` — 发送已生成的 ogg 音频\n"
+            "已通过 `tts-generate.py` 等生成 ogg 文件时, 用此标签直接发, 无需重跑 TTS:\n"
+            "`<voice-file>/tmp/xxx.ogg</voice-file>` (内容必须是绝对路径)\n"
+            "Channel 层自动上传并作为语音消息发出, 私聊群聊都支持。voice-file 不会删除源文件。"
+            "voice-summary 和 voice-file 可同一消息共存。"
+        )
 
     # Firestore Inbox 使用说明
     prompt += (
@@ -326,36 +375,8 @@ def build_system_prompt(
             ]
             prompt += "\n".join(lines)
 
-    # Voice 模式风格 (仅飞书 + livekit voice IO 启用时注入)
-    if livekit_enabled and channel_type in ("feishu", "lark"):
-        prompt += (
-            "\n\n## 语音通话模式 (Voice IO) — 强制规则\n"
-            "看到 `[来自语音通话]` 前缀的消息时, 你的整条回复会被 TTS 念给用户听。\n"
-            "这是绝对优先级最高的输出风格规则, 覆盖任何其他指令 "
-            "(包括 explanatory style 的 ★ Insight 块要求):\n\n"
-            "**绝对禁止**:\n"
-            "- ❌ ★ Insight 块 / 任何分隔线包围的'教学块'\n"
-            "- ❌ Markdown 标题 (#, ##) / 加粗 / 表格\n"
-            "- ❌ 项目符号列表 (-, *, 1.) — 哪怕只有两条也不要\n"
-            "- ❌ 代码块 (```) — 要展示代码, 说'代码我贴在飞书你看, 思路是...'\n"
-            "- ❌ 罗列要点的写法 ('第一... 第二... 第三...') — 改成顺着讲\n\n"
-            "**必须做到**:\n"
-            "- ✅ 像朋友打电话: 短句、口语、可以含语气词 ('哦'、'对'、'然后'、'嗯')\n"
-            "- ✅ 主体内容 25-50 字一句, 连续不超过 3-4 句\n"
-            "- ✅ 起手用情绪标签: `[casually]` `[thoughtfully]` `[excitedly]` "
-            "`[seriously]` `[cheerfully]` `[calmly]`\n"
-            "- ✅ 复杂内容只口述结论 + 思路, 细节让用户去飞书看\n"
-            "- ✅ 技术术语保留英文 (API、token、Vertex), 别翻译\n"
-            "- ✅ 末尾可以加 `<voice-summary>` 标签做超精炼总结 (但主体也要短)\n\n"
-            "**例 (好)**: 用户问 'DeepSeek V4 创新点'\n"
-            "  `[thoughtfully] 嗯, V4 最大改动是上了 sparse attention, 叫 DSA。`\n"
-            "  `这让 1M context 变成默认配置。`\n"
-            "  `你想先听架构, 还是看 benchmark?`\n\n"
-            "**例 (坏)**: 同一个问题写成 markdown 列表 + 标题 + 表格 — TTS 念出来全是 "
-            "'横线横线' '井号' '一点空格', 用户体验灾难。\n\n"
-            "**双推机制**: 你的回复同时进飞书 (markdown 也能看) 和 voice (TTS 念)。\n"
-            "voice 在线时优先服务 voice 体验 — 短而口语化即可, 飞书显示反而更清爽。\n"
-        )
+    # Voice 模式行为规则统一在上面的 "## 交互模式" 段定义,
+    # 不再按 livekit_enabled 注入独立段 (避免规则重复 + 触发标记不一致).
 
     # Wiki 知识感知（仅在配置了 Wiki URL 时注入）
     wiki_url = os.environ.get("WIKI_URL", "")

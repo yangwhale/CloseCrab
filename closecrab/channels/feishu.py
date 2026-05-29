@@ -111,26 +111,9 @@ _PROGRESS_EMOJI = {
 # header 动画帧：满头大汗的螃蟹（左右晃动 = 忙碌感）
 _CRAB_FRAMES = ["🦀💦", "💦🦀💨", "🦀🔥", "💨🦀💦"]
 
-# voice mode in-band override (livekit 通话 + 文字 voice mode 共用).
-# 作为 user message 正文前缀注入. explanatory-style plugin 已默认关闭,
-# 这里只保留口语化与情感标签的最小约束.
-_VOICE_MODE_RULES = (
-    "<voice-mode-rules>\n"
-    "本消息来自语音, 你的回复会被 Gemini TTS 念出来。\n"
-    "- 禁止 markdown (标题/加粗/列表/表格/代码块/链接), 不写 Sources 段或 <voice-summary> 标签\n"
-    "- 短句口语化 (25-50 字一句); 复杂内容只口述结论, 细节让用户去飞书看\n"
-    "- 起手加情感标签 (Gemini 官方词), 每 1-3 句切换一次跟随情绪。常用:\n"
-    "    思考: [thinking] [realization] [curiosity] [confusion] [contemplative]\n"
-    "    友好: [casually] [friendly] [warmly] [amused] [cheerfully] [playful]\n"
-    "    兴奋: [excitement] [happy]\n"
-    "    建议/特效: [suggestion] [whispers]\n"
-    "  (不限于此, 但避免整段只用一个标签)\n"
-    "- 示范:\n"
-    "    好: [thinking] 我看下日志。[realization] 哦端口冲突。\n"
-    "         [amused] 这种小坑最烦。[suggestion] kill 掉 8080 就行。\n"
-    "    差: [casually] 我看了日志发现端口冲突你 kill 8080 就行 (整段一个标签 + 一长句)\n"
-    "</voice-mode-rules>\n\n"
-)
+# voice mode 切换标记: 在 user message 第一行加 [channel: voice],
+# 实际行为规则在 system prompt 的"交互模式"段定义 (main.py:build_system_prompt).
+# 这样改规则只动 system prompt, 每条 user message 只多 5 个 token 不是 350.
 
 # 俏皮话每 N 帧换一次（螃蟹晃 4 下换一句）
 _TIP_CHANGE_EVERY = 2  # 动画帧换一句俏皮话的间隔（帧数）
@@ -2938,7 +2921,7 @@ class FeishuChannel(Channel):
         async def _noop_reply(_text: str):
             pass
 
-        content_with_override = _VOICE_MODE_RULES + content
+        content_with_override = "[channel: voice]\n" + content
 
         metadata = {
             "chat_id": chat_id,
@@ -3286,11 +3269,11 @@ class FeishuChannel(Channel):
                     )
                 return
 
-            # voice mode 注入 in-band rules (跟 livekit voice 通话同款),
+            # voice mode 注入 channel 标记 (规则在 system prompt 的"交互模式"段),
             # 让模型用口语 + 情绪标签作答, 整段后续走 TTS.
             in_voice_mode = user_key in self._text_voice_mode_users
             if in_voice_mode:
-                content = _VOICE_MODE_RULES + "\n\n" + content
+                content = "[channel: voice]\n" + content
 
             # 日志
             _log = self._log_buffer
