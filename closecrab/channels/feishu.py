@@ -277,11 +277,12 @@ def _shorten_model_name(raw: str) -> str:
     name = name.split("@")[0]
     _MAP = {
         # Claude
-        "claude-opus-4-6": "C46O",
-        "claude-opus-4-7": "C47O",
-        "claude-sonnet-4-6": "C46S",
-        "claude-sonnet-4-5": "C45S",
-        "claude-haiku-4-5": "C45H",
+        "claude-opus-4-6": "Opus 4.6",
+        "claude-opus-4-7": "Opus 4.7",
+        "claude-opus-4-8": "Opus 4.8",
+        "claude-sonnet-4-6": "Sonnet 4.6",
+        "claude-sonnet-4-5": "Sonnet 4.5",
+        "claude-haiku-4-5": "Haiku 4.5",
         # Gemini
         "gemini-3.5-flash": "G35F",
         "gemini-3.5-flash-preview": "G35F-prev",

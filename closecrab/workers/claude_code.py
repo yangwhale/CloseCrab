@@ -63,6 +63,12 @@ class ClaudeCodeWorker(Worker):
         # spawning the Claude CLI subprocess — making config-manage.py
         # set-model name-and-actuality consistent.
         self._model = model
+        # Actual model running in the spawned binary (extracted from
+        # stream-JSON assistant messages). Populated after first assistant
+        # event. Used by get_context_usage() so the feishu card shows the
+        # real model rather than the Firestore-configured one.
+        # See feedback_anthropic-betas-1m-context.md (2026-05-29 R1).
+        self._actual_model: Optional[str] = None
         self.proc: Optional[subprocess.Popen] = None
         self.sock_in: Optional[socket.socket] = None   # bot -> claude (stdin)
         self.sock_out: Optional[socket.socket] = None   # claude -> bot (stdout)
@@ -136,6 +142,14 @@ class ClaudeCodeWorker(Worker):
             cmd.extend(["--append-system-prompt", self._system_prompt])
         if self._session_id:
             cmd.extend(["--resume", self._session_id])
+        if self._model:
+            # --model CLI flag 优先级最高, 覆盖 settings.json env. Anthropic
+            # binary 启动时用 Object.assign(process.env, settings.env) 把
+            # settings 的 env 块直接砸到 process.env 上, 覆盖了 caller 注入
+            # 的 ANTHROPIC_MODEL. 走 CLI flag 才能 100% 让 per-bot model 生效.
+            # 剥 @default / @20251001 等 Vertex endpoint 后缀, --model 只
+            # 接受 model alias (claude-opus-4-8 而不是 claude-opus-4-8@default).
+            cmd.extend(["--model", self._model.split("@", 1)[0]])
 
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
@@ -844,6 +858,13 @@ class ClaudeCodeWorker(Worker):
                     #   (老代码 `=` 让 output 永远 == 最后 1 个 message 的 output,
                     #   多步 turn 经常变成 output=1, Firestore 日志失真)
                     if d.get("type") == "assistant":
+                        # 抓 actual model — 飞书卡片显示用这个 (不是 Firestore cfg).
+                        msg_model = d.get("message", {}).get("model")
+                        if msg_model and msg_model not in ("<synthetic>",):
+                            if self._actual_model != msg_model:
+                                if self._actual_model:
+                                    log.info(f"Claude actual model changed: {self._actual_model} -> {msg_model}")
+                                self._actual_model = msg_model
                         msg_usage = d.get("message", {}).get("usage", {})
                         msg_id = d.get("message", {}).get("id")
                         if msg_usage and msg_id and msg_id != self._last_usage_msg_id:
@@ -922,6 +943,11 @@ class ClaudeCodeWorker(Worker):
         u["total_context_tokens"] = total_ctx
         u["context_window"] = 1_000_000  # Opus 4.6 / 4.7 + Sonnet 4.6 on Vertex AI
         u["usage_pct"] = round(total_ctx / 1_000_000 * 100, 1) if total_ctx else 0
+        # 飞书卡片显示用这个 (feishu.py:4638 优先 session_model fallback backbone_model).
+        # 真实 model 来自 stream-JSON assistant message; 第一个 assistant turn
+        # 完成前为 None, channel 层会 fallback backbone_model.
+        if self._actual_model:
+            u["session_model"] = self._actual_model
         # Session 时长（秒）
         if self._start_time is not None:
             u["session_duration_s"] = int(time.monotonic() - self._start_time)
