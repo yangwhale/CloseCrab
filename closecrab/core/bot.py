@@ -100,6 +100,11 @@ class BotCore:
         # 单条用户消息的处理超时（秒）。超时后强制 interrupt 老任务释放 lock。
         # 默认 30 min（OpenClaw 用 ~60 min；30 min 对绝大多数 turn 足够）。
         self._user_task_timeout: float = 30 * 60.0
+        # user_key -> 本次对话中已注入过的 S1 召回 row id 集合。跨轮去重：
+        # 同一条历史只召回一次，越往后聊召回的都是没进过上下文的新内容。
+        # session 结束/切换时清空（见 end_session / switch_session），新对话
+        # 重新召回。进程重启会丢（in-memory），等价于一次新对话，可接受。
+        self._recall_seen: dict[str, set[int]] = {}
         # Channel 实例引用（on_channel_ready 时设置）
         self._channel: Optional["Channel"] = None
 
@@ -192,33 +197,33 @@ class BotCore:
         # S1 Background Review: auto-recall relevant history from FTS5
         # index and prepend as a context block. Silent-skip on any failure
         # so this can never block the worker.send() path.
-        # CLOSECRAB_RECALL_DISABLED=1 disables injection (used by
-        # scripts/benchmark-recall.py to A/B test recall impact).
-        if os.getenv("CLOSECRAB_RECALL_DISABLED", "").lower() in ("1", "true", "yes"):
-            log.debug("S1 recall disabled by CLOSECRAB_RECALL_DISABLED env var")
-        else:
-            try:
-                from closecrab.utils.session_recall import recall_history
-                loop = asyncio.get_event_loop()
-                recall_block = await loop.run_in_executor(
-                    None,
-                    lambda: recall_history(
-                        self.bot_name,
-                        msg.user_id,
-                        original_user_text,
-                        limit=5,
-                        days=60,
-                    ),
+        try:
+            from closecrab.utils.session_recall import recall_history
+            loop = asyncio.get_event_loop()
+            # Per-conversation dedup set: rows injected earlier this
+            # conversation are filtered out, and newly-injected rows are
+            # added back into this set inside recall_history (mutated).
+            seen_ids = self._recall_seen.setdefault(msg.user_id, set())
+            recall_block = await loop.run_in_executor(
+                None,
+                lambda: recall_history(
+                    self.bot_name,
+                    msg.user_id,
+                    original_user_text,
+                    limit=5,
+                    days=60,
+                    exclude_ids=seen_ids,
+                ),
+            )
+            if recall_block:
+                content = recall_block + "\n\n---\n\n" + content
+                log.info(
+                    "S1 recall: injected %d chars (%d history lines)",
+                    len(recall_block),
+                    recall_block.count("\n"),
                 )
-                if recall_block:
-                    content = recall_block + "\n\n---\n\n" + content
-                    log.info(
-                        "S1 recall: injected %d chars (%d history lines)",
-                        len(recall_block),
-                        recall_block.count("\n"),
-                    )
-            except Exception as e:
-                log.debug("S1 recall skipped: %s", e)
+        except Exception as e:
+            log.debug("S1 recall skipped: %s", e)
 
         on_input_needed = msg.metadata.get("on_input_needed")
 
@@ -602,6 +607,7 @@ class BotCore:
             session_id = worker.session_id
             await worker.stop()
             del self._workers[user_key]
+            self._recall_seen.pop(user_key, None)  # 新对话重新召回
             if session_id:
                 self.session_mgr.archive(user_key, session_id)
             return "Session ended. Use /sessions to view history."
@@ -638,6 +644,7 @@ class BotCore:
             del self._workers[user_key]
             if old_sid:
                 self.session_mgr.archive(user_key, old_sid)
+        self._recall_seen.pop(user_key, None)  # 切 session = 新对话，重新召回
 
         # 启动目标 session
         worker = self._create_worker(session_id=target_session_id)

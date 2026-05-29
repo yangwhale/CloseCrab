@@ -20,3 +20,6 @@ python-dotenv
 py-cord            # Discord
 lark-oapi          # 飞书 / Lark
 dingtalk-stream    # 钉钉
+
+# ---- NLP ----
+jieba              # 中文分词 — S1 召回选词 (缺失则降级 bigram，非硬依赖)

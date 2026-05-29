@@ -1249,6 +1249,8 @@ install_bot() {
             lark-oapi
             # 钉钉
             dingtalk-stream
+            # 中文分词 (S1 召回选词，缺失则降级 bigram)
+            jieba
         )
         if [[ "$INSTALL_VOICE" == "true" ]]; then
             DEPS+=(

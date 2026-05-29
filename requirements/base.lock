@@ -38,6 +38,7 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.6
+jieba==0.42.1
 lark-oapi==1.6.0
 multidict==6.7.1
 propcache==0.4.1
