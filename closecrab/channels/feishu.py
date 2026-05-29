@@ -1307,16 +1307,29 @@ class FeishuChannel(Channel):
                 elements.extend(FeishuChannel._md_table_to_column_sets(table_lines))
                 continue
 
-            # 代码块 ```...```
+            # 代码块 ```...``` → 单独用 markdown 组件渲染
+            # 飞书 lark_md(div.text)不支持 fenced code block, 会把 ``` 围栏和内容
+            # 原样当普通文字吐出来; 而 markdown 组件(tag: markdown)支持代码块(7.6+)。
+            # 所以这里先 flush 前面的普通文本(继续走 lark_md), 代码块自己走 markdown。
+            # 官方语法对照见 docs: lark_md ⊂ markdown 组件。
             if line.strip().startswith('```'):
-                text_buf.append(line)
+                FeishuChannel._flush_text_buffer(text_buf, elements)
+                text_buf = []
+                code_lines = [line]
                 i += 1
                 while i < len(content_lines):
-                    text_buf.append(content_lines[i])
+                    code_lines.append(content_lines[i])
                     if content_lines[i].strip().startswith('```'):
                         i += 1
                         break
                     i += 1
+                else:
+                    # 未闭合围栏: 补一个, 避免 markdown 组件解析异常
+                    code_lines.append('```')
+                elements.append({
+                    'tag': 'markdown',
+                    'content': '\n'.join(code_lines),
+                })
                 continue
 
             # > 引用 → 💬 粗体
@@ -2070,7 +2083,8 @@ class FeishuChannel(Channel):
 
         # 构造消息送入 Claude
         sender_tag = f"Inbox · {inbox_from}" if inbox_from else "Inbox"
-        content = f"[from: {sender_tag}]\n{instruction}"
+        # inbox 是 bot-to-bot, 始终文字模式 (无 TTS), 显式贴 [channel: text] 保持对称
+        content = f"[channel: text]\n[from: {sender_tag}]\n{instruction}"
         metadata = {
             "chat_id": chat_id,
             "on_progress": on_progress,
@@ -2745,10 +2759,12 @@ class FeishuChannel(Channel):
                 "on_input_needed": self._make_input_callback(chat_id, open_id),
                 "on_log": None,
             }
+            # 卡片按钮答案跟随用户当前模式, 保持标签对称
+            _tag = "voice" if open_id in self._text_voice_mode_users else "text"
             msg = UnifiedMessage(
                 channel_type="feishu",
                 user_id=open_id,
-                content=answer,
+                content=f"[channel: {_tag}]\n{answer}",
                 reply=reply_fn_local,
                 metadata=metadata,
             )
@@ -3269,11 +3285,13 @@ class FeishuChannel(Channel):
                     )
                 return
 
-            # voice mode 注入 channel 标记 (规则在 system prompt 的"交互模式"段),
-            # 让模型用口语 + 情绪标签作答, 整段后续走 TTS.
+            # 始终注入 channel 标记 (规则在 system prompt 的"交互模式"段), 对称设计:
+            # voice mode → [channel: voice] 走口语 + 情绪标签 + TTS;
+            # 否则     → [channel: text]  走正常 markdown 文字.
+            # 时刻都有标签, 避免"有时有有时无"让模型困惑.
             in_voice_mode = user_key in self._text_voice_mode_users
-            if in_voice_mode:
-                content = "[channel: voice]\n" + content
+            _channel_tag = "voice" if in_voice_mode else "text"
+            content = f"[channel: {_channel_tag}]\n" + content
 
             # 日志
             _log = self._log_buffer
