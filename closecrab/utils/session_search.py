@@ -333,6 +333,40 @@ class SessionIndex:
                 break
         return unique
 
+    def total_docs(self) -> int:
+        """Total indexed message count — the denominator N for IDF weighting."""
+        self.init_db()
+        with _connect(self.db_path) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+            return int(row[0]) if row else 0
+
+    def document_frequency(self, term: str) -> int:
+        """Number of messages containing ``term`` — the df for IDF weighting.
+
+        Queries the unicode61 FTS table first (better for Latin/whole-word
+        terms), falling back to the trigram table only if unicode61 errors
+        (e.g. an FTS5 syntax edge). A genuine 0 from unicode61 is returned as
+        0 — it means the term really doesn't appear, not that we should retry
+        on trigram. Returns 0 on total failure so the caller's IDF math
+        degrades gracefully instead of crashing recall.
+        """
+        self.init_db()
+        term = (term or "").strip()
+        if not term:
+            return 0
+        match_arg = '"' + term.replace('"', '""') + '"'
+        with _connect(self.db_path) as conn:
+            for table in ("messages_fts", "messages_fts_trigram"):
+                try:
+                    row = conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE text MATCH ?",
+                        (match_arg,),
+                    ).fetchone()
+                    return int(row[0]) if row else 0
+                except sqlite3.OperationalError:
+                    continue
+        return 0
+
     def stats(self) -> dict:
         self.init_db()
         with _connect(self.db_path) as conn:

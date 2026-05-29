@@ -91,6 +91,57 @@ def _clean_noise(text: str) -> str:
         out = pat.sub(" ", out)
     return out
 
+
+# Emails: keep the local part as a keyword, drop the @domain. "@google.com"
+# is a near-universal generic suffix — without this, "maxwell@google.com"
+# recalls every email mention via "google"/"com". The local part ("maxwell")
+# is the discriminating token. Run before _clean_noise so the domain doesn't
+# survive as a generic-word keyword.
+_EMAIL_RE = re.compile(r"\b([\w.+-]+)@[\w.-]+\.\w+\b")
+
+
+def _preprocess_email(text: str) -> str:
+    return _EMAIL_RE.sub(lambda m: " " + m.group(1) + " ", text)
+
+
+# ---- IDF weighting support ----
+# Down-weight rows matched only by generic words (e.g. "worker", "系统") and
+# let rare, discriminating terms dominate ranking. idf(term) = log(N / (df+1)),
+# clamped at 0 so a term in (nearly) every doc contributes nothing rather than
+# a negative factor. df is a COUNT query per distinct keyword (≤6/turn); we
+# cache per process and refresh the whole cache every _IDF_TTL so N/df don't
+# drift stale on a long-lived bot process. Recall runs in a thread executor,
+# so a plain dict is safe — worst case a redundant COUNT on a race.
+_IDF_TTL = 300.0  # seconds; recompute N and clear df cache every 5 min
+_idf_epoch = -1
+_idf_bot: str | None = None
+_idf_ndocs = 0
+_idf_df_cache: dict[str, int] = {}
+
+
+def _idf_for(idx: SessionIndex, bot_name: str, term: str, now_ts: int) -> float:
+    """Cached IDF for ``term`` against ``bot_name``'s index. Never raises."""
+    global _idf_epoch, _idf_bot, _idf_ndocs, _idf_df_cache
+    epoch = int(now_ts // _IDF_TTL)
+    if epoch != _idf_epoch or bot_name != _idf_bot:
+        _idf_epoch = epoch
+        _idf_bot = bot_name
+        _idf_df_cache = {}
+        try:
+            _idf_ndocs = idx.total_docs()
+        except Exception:
+            _idf_ndocs = 0
+    if _idf_ndocs <= 0:
+        return 0.0
+    df = _idf_df_cache.get(term)
+    if df is None:
+        try:
+            df = idx.document_frequency(term)
+        except Exception:
+            df = 0
+        _idf_df_cache[term] = df
+    return max(0.0, math.log(_idf_ndocs / (df + 1)))
+
 # Stopwords filtered out of keyword extraction. Tuned for the kinds of
 # things users actually say to bots in this repo, not corpus-wide.
 _STOP_CN = {
@@ -358,16 +409,17 @@ def recall_history(
     the session ends/switches so a new conversation recalls from scratch.
     """
     try:
-        stripped = _clean_noise(_strip_channel_prefix(query or ""))
+        stripped = _clean_noise(_preprocess_email(_strip_channel_prefix(query or "")))
         keywords = _pick_keywords(stripped, max_keywords=6)
         if not keywords:
             return ""
 
         idx = SessionIndex(bot_name)
-        # Track how many distinct keywords each row matched. Relevance signal:
-        # a row hit by 3 of the query's keywords is far more on-topic than one
-        # hit by a single common word.
-        match_cnt: dict[int, int] = {}
+        # Track which distinct keywords each row matched (not just how many).
+        # The set count is the relevance signal (3 keywords ≫ 1), and the
+        # specific keywords let scoring sum their IDF — a row hit only by a
+        # generic word ("worker") ranks far below one hit by a rare term.
+        match_kws: dict[int, set[str]] = {}
         row_by_id: dict[int, dict] = {}
         # Pull 4x candidates so the score-based picker has room to filter.
         per_kw_limit = limit * 4
@@ -398,22 +450,26 @@ def recall_history(
                 if rid in seen_this_kw:   # one keyword counts once per row
                     continue
                 seen_this_kw.add(rid)
-                match_cnt[rid] = match_cnt.get(rid, 0) + 1
+                match_kws.setdefault(rid, set()).add(kw)
                 row_by_id[rid] = r
 
         if not row_by_id:
             return ""
 
-        # Rank by relevance-weighted score: match_count² × (log(len) ×
-        # recency × density). The match_count² term makes keyword relevance
-        # dominate — a row matching 3 keywords beats a longer/newer row that
-        # only matched 1. Without this, one long recent message would hijack
-        # the top slot of every unrelated query (the deepest pre-fix defect).
+        # Rank by relevance-weighted score:
+        #   match_count² × Σ idf(matched keywords) × (log(len) × recency × density)
+        # The match_count² term makes a row matching 3 keywords beat one that
+        # matched 1; the Σidf term makes rare/discriminating words dominate over
+        # generic ones (a row matched only by "worker"/"系统" ranks far below
+        # one matched by a rare term). Together they stop a long recent message
+        # matched by a single common word from hijacking the top slot.
         now_ts = int(time.time())
-        scored = [
-            ((match_cnt[rid] ** 2) * _score(r, now_ts), r)
-            for rid, r in row_by_id.items()
-        ]
+        idf_by_kw = {kw: _idf_for(idx, bot_name, kw, now_ts) for kw in keywords}
+        scored = []
+        for rid, r in row_by_id.items():
+            kws_hit = match_kws[rid]
+            idf_sum = sum(idf_by_kw.get(k, 0.0) for k in kws_hit)
+            scored.append(((len(kws_hit) ** 2) * idf_sum * _score(r, now_ts), r))
         scored.sort(key=lambda x: -x[0])
         unique = [r for _, r in scored[:limit]]
         # Final display order: newest-first, so the LLM reads chronologically.
