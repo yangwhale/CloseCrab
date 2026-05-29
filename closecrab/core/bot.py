@@ -192,28 +192,33 @@ class BotCore:
         # S1 Background Review: auto-recall relevant history from FTS5
         # index and prepend as a context block. Silent-skip on any failure
         # so this can never block the worker.send() path.
-        try:
-            from closecrab.utils.session_recall import recall_history
-            loop = asyncio.get_event_loop()
-            recall_block = await loop.run_in_executor(
-                None,
-                lambda: recall_history(
-                    self.bot_name,
-                    msg.user_id,
-                    original_user_text,
-                    limit=5,
-                    days=60,
-                ),
-            )
-            if recall_block:
-                content = recall_block + "\n\n---\n\n" + content
-                log.info(
-                    "S1 recall: injected %d chars (%d history lines)",
-                    len(recall_block),
-                    recall_block.count("\n"),
+        # CLOSECRAB_RECALL_DISABLED=1 disables injection (used by
+        # scripts/benchmark-recall.py to A/B test recall impact).
+        if os.getenv("CLOSECRAB_RECALL_DISABLED", "").lower() in ("1", "true", "yes"):
+            log.debug("S1 recall disabled by CLOSECRAB_RECALL_DISABLED env var")
+        else:
+            try:
+                from closecrab.utils.session_recall import recall_history
+                loop = asyncio.get_event_loop()
+                recall_block = await loop.run_in_executor(
+                    None,
+                    lambda: recall_history(
+                        self.bot_name,
+                        msg.user_id,
+                        original_user_text,
+                        limit=5,
+                        days=60,
+                    ),
                 )
-        except Exception as e:
-            log.debug("S1 recall skipped: %s", e)
+                if recall_block:
+                    content = recall_block + "\n\n---\n\n" + content
+                    log.info(
+                        "S1 recall: injected %d chars (%d history lines)",
+                        len(recall_block),
+                        recall_block.count("\n"),
+                    )
+            except Exception as e:
+                log.debug("S1 recall skipped: %s", e)
 
         on_input_needed = msg.metadata.get("on_input_needed")
 
