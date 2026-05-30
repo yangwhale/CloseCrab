@@ -615,9 +615,11 @@ class FeishuChannel(Channel):
         # user_key -> 最后活跃的 chat_id
         # 从磁盘加载持久化的 user_chats
         self._user_chats_file = None
+        self._state_path: Path | None = None
         if state_dir:
             state_path = Path(state_dir)
             state_path.mkdir(parents=True, exist_ok=True)
+            self._state_path = state_path
             self._user_chats_file = state_path / "user_chats.json"
         self._user_chats: dict[str, str] = self._load_user_chats()
         # 文字 voice mode: 用户在飞书私聊里说"开启语音模式"后, 后续每条回复
@@ -3660,6 +3662,58 @@ class FeishuChannel(Channel):
             except Exception:
                 pass
 
+    async def _post_restart_greet(self):
+        """boot 时消费 .restart_greet marker：暖 worker + 主动报到。
+
+        只有用户显式 /restart 才会留下 marker，崩溃重启走 .dirty_restart
+        另一条路径（下条消息加前缀）。读到就删，一次性消费。
+        """
+        if not self._state_path:
+            return
+        marker = self._state_path / ".restart_greet"
+        if not marker.exists():
+            return
+        try:
+            info = json.loads(marker.read_text())
+        except Exception as e:
+            log.warning(f"Failed to read .restart_greet marker: {e}")
+            try:
+                marker.unlink()
+            except Exception:
+                pass
+            return
+        # 先删 marker，避免暖 worker 中途崩溃导致下次 boot 重复报到
+        try:
+            marker.unlink()
+        except Exception:
+            pass
+
+        user_key = info.get("user_key")
+        chat_id = info.get("chat_id")
+        if not user_key or not chat_id:
+            return
+
+        # 暖 worker：主动 spawn CC 子进程 + resume 上个 session，
+        # 这样用户不用先发一条消息来触发懒加载。
+        warmed = False
+        try:
+            await self._core._get_or_create_worker(user_key)
+            warmed = True
+        except Exception as e:
+            log.warning(f"Post-restart worker warm-up failed: {e}")
+
+        # 主动报到。这条消息本身就是「我知道刚被重启」的体现。
+        msg = (
+            "✅ 重启完成，session 已就绪，有事直接说。"
+            if warmed else
+            "✅ 重启完成（session 将在你下一条消息时就绪）。"
+        )
+        try:
+            await self._async_send_text(chat_id, msg)
+        except Exception as e:
+            log.warning(f"Post-restart greet send failed: {e}")
+        log.info(f"Post-restart greet sent to {user_key} (warmed={warmed})")
+
     # ── 文本指令处理 ──
 
     async def _handle_text_command(self, cmd: str, user_key: str, chat_id: str, message_id: str, arg: str = ""):
@@ -3679,6 +3733,18 @@ class FeishuChannel(Channel):
                 return
             await self._async_send_text(chat_id, "Restarting bot...")
             log.info(f"Restart requested by {user_key}")
+            # 留个条：boot 时读它 → 暖 worker + 主动报到，不用用户先开口
+            if self._state_path:
+                try:
+                    (self._state_path / ".restart_greet").write_text(
+                        json.dumps({
+                            "user_key": user_key,
+                            "chat_id": chat_id,
+                            "ts": time.time(),
+                        })
+                    )
+                except Exception as e:
+                    log.warning(f"Failed to write .restart_greet marker: {e}")
             self._restart_requested = True
             # 停止 event loop，让 run() 的 finally 块清理资源
             if self._loop:
@@ -4895,6 +4961,11 @@ class FeishuChannel(Channel):
             self._inbox.set_handler(self._on_inbox_message)
             self._inbox.start(loop)
             log.info("Inbox started")
+
+        # /restart 后主动报到 + 暖 worker（读 .restart_greet marker）
+        self._restart_greet_task = asyncio.ensure_future(
+            self._post_restart_greet(), loop=loop,
+        )
 
         # V22: 启动 V1 任务全局看门狗 ticker (fleet-level, 60s tick / 20min silence)
         self._watchdog_ticker_task = asyncio.ensure_future(
