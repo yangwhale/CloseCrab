@@ -301,8 +301,10 @@ class ClaudeCodeWorker(Worker):
         buf = b""
         try:
             while True:
-                if self._interrupted:
-                    break
+                # 注意：不在这里 break on _interrupted。软中断（interrupt
+                # control_request）会保活进程，reader 必须继续读 sock_out 才能
+                # 把被中断 turn 的 result 入队、并服务下一条消息。硬杀兜底路径
+                # 下 proc 已死，靠下面的 is_alive() 检查自然退出。
                 try:
                     chunk = await loop.run_in_executor(None, self._blocking_recv)
                 except asyncio.CancelledError:
@@ -313,7 +315,7 @@ class ClaudeCodeWorker(Worker):
                     continue
 
                 if not chunk:
-                    if not self.is_alive() or self._interrupted:
+                    if not self.is_alive():
                         break
                     continue
 
@@ -333,6 +335,17 @@ class ClaudeCodeWorker(Worker):
 
                     if evt_type == "control_cancel_request":
                         log.info(f"control_cancel_request: {d.get('request_id', '?')}")
+                        continue
+
+                    # control_response：binary 对我们发出的 control_request
+                    # （interrupt / set_model / set_thinking 等）的回执。当前都是
+                    # fire-and-forget，无人等待，reader 层直接消费不入队（避免
+                    # 污染 send() 的事件流 + 触发 unknown event 警告）。未来 L0
+                    # 关联式查询会在此挂 _pending_ctrl future 解析。
+                    if evt_type == "control_response":
+                        resp = d.get("response", {})
+                        log.debug(f"control_response: rid={resp.get('request_id', '?')} "
+                                  f"subtype={resp.get('subtype', '?')}")
                         continue
 
                     if evt_type == "control_request":
@@ -822,6 +835,17 @@ class ClaudeCodeWorker(Worker):
                     # Claude 可能合并后台任务和用户消息到同一轮，不发 system:init。
                     if d.get("type") == "result":
                         result_text = d.get("result", "")
+                        # 软中断：interrupt() 已把 interrupt control_request 发给 binary，
+                        # binary 停掉当前 turn 后吐一个 result(subtype=error_during_execution,
+                        # 无 result 文本)。这里靠 _interrupted 标志消费掉它并干净返回 ""，
+                        # 不能往下走 empty-retry（否则会重发刚被用户中断的 prompt）。
+                        # 进程保活，session_id 保留，下一条 send() 直接复用 warm proc。
+                        if self._interrupted:
+                            self._interrupted = False
+                            self._session_id = d.get("session_id", self._session_id)
+                            log.info(f"send() consumed soft-interrupt result "
+                                     f"(subtype={d.get('subtype')}), proc warm, returning empty")
+                            return ""
                         if saw_task_notification or self._is_stale_dismiss_result(result_text):
                             # task-notification 的自动 dismiss 回复，跳过
                             saw_task_notification = False
@@ -1045,15 +1069,34 @@ class ClaudeCodeWorker(Worker):
         return u
 
     async def interrupt(self) -> bool:
-        """中断当前执行（急刹车）。
+        """中断当前执行（软中断，保活进程）。
 
-        杀死进程但保留 session_id，下次 send() 会自动 --resume 恢复。
-        不需要持有 lock，直接操作进程。send() 通过 queue 接收
-        _interrupted sentinel 并释放 lock。
+        优先发 interrupt control_request：binary 停掉当前 turn 但进程保活，
+        warm MCP 连接 + prompt cache 全部保留，下一条 send() 直接复用、
+        无需 --resume 冷重启。send() 在 result 分支靠 _interrupted 标志消费
+        掉 binary 吐回的 error_during_execution result 并干净返回 ""。
+
+        软中断发送失败才兜底硬杀（proc.kill + _interrupted sentinel），
+        保留 session_id，下次 send() 自动 --resume 恢复。
         """
         if not self.is_alive():
             return False
         self._interrupted = True
+        # ── 软中断：发 interrupt control_request，进程保活 ──
+        if self.sock_in:
+            try:
+                req = json.dumps({
+                    "type": "control_request",
+                    "request_id": f"interrupt-{uuid.uuid4().hex[:8]}",
+                    "request": {"subtype": "interrupt"},
+                }) + "\n"
+                self.sock_in.sendall(req.encode())
+                log.info(f"Sent soft interrupt control_request "
+                         f"(proc warm, session preserved): {self._session_id}")
+                return True
+            except Exception as e:
+                log.warning(f"Soft interrupt send failed ({e}), falling back to proc.kill()")
+        # ── 兜底：硬杀 ──
         if self.proc and self.proc.poll() is None:
             self.proc.kill()
             self.proc.wait()
@@ -1063,7 +1106,7 @@ class ClaudeCodeWorker(Worker):
             self._event_queue.put_nowait({"type": "_interrupted"})
         except Exception:
             pass
-        log.info(f"Claude session interrupted (session_id preserved): {self._session_id}")
+        log.info(f"Claude session hard-interrupted (session_id preserved): {self._session_id}")
         return True
 
     async def stop(self):
