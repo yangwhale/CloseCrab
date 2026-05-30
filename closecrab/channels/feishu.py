@@ -3663,10 +3663,16 @@ class FeishuChannel(Channel):
                 pass
 
     async def _post_restart_greet(self):
-        """boot 时消费 .restart_greet marker：暖 worker + 主动报到。
+        """boot 时消费 .restart_greet marker：跑一个真 LLM turn 报到。
 
         只有用户显式 /restart 才会留下 marker，崩溃重启走 .dirty_restart
         另一条路径（下条消息加前缀）。读到就删，一次性消费。
+
+        关键：不是发硬编码字符串 + 只 spawn 子进程（那样 LLM 没真正
+        prefill，用户第一句仍要现付 prefill）。这里构造一条合成消息走
+        完整 `_handle_message_async`，让模型实际处理一遍 —— prefill 完成
+        且被服务端 cache，报到语是模型真说的，用户下一句直接命中暖 cache。
+        套路同 emoji reaction 合成事件。
         """
         if not self._state_path:
             return
@@ -3682,7 +3688,7 @@ class FeishuChannel(Channel):
             except Exception:
                 pass
             return
-        # 先删 marker，避免暖 worker 中途崩溃导致下次 boot 重复报到
+        # 先删 marker，避免 turn 中途崩溃导致下次 boot 重复报到
         try:
             marker.unlink()
         except Exception:
@@ -3693,26 +3699,52 @@ class FeishuChannel(Channel):
         if not user_key or not chat_id:
             return
 
-        # 暖 worker：主动 spawn CC 子进程 + resume 上个 session，
-        # 这样用户不用先发一条消息来触发懒加载。
-        warmed = False
-        try:
-            await self._core._get_or_create_worker(user_key)
-            warmed = True
-        except Exception as e:
-            log.warning(f"Post-restart worker warm-up failed: {e}")
-
-        # 主动报到。这条消息本身就是「我知道刚被重启」的体现。
-        msg = (
-            "✅ 重启完成，session 已就绪，有事直接说。"
-            if warmed else
-            "✅ 重启完成（session 将在你下一条消息时就绪）。"
+        synthetic_text = (
+            "[系统事件] 你刚刚被用户通过 /restart 重启完毕，session 已恢复。"
+            "请主动跟用户打个招呼报到：一句话、自然口语、可带点性格，"
+            "让他知道你回来了、随时待命。这不是用户提问，不要追问任何东西，"
+            "也不要复述这条系统事件。"
         )
+        synthetic_id = (
+            f"restart-greet:{int(asyncio.get_running_loop().time()*1000)}"
+        )
+        fake_data = {
+            "schema": "2.0",
+            "header": {
+                "event_id": synthetic_id,
+                "event_type": "im.message.receive_v1",
+                "create_time": "0",
+                "token": "",
+                "app_id": self._app_id,
+                "tenant_key": "",
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {"open_id": user_key},
+                    "sender_type": "user",
+                    "tenant_key": "",
+                },
+                "message": {
+                    "message_id": synthetic_id,
+                    "create_time": "0",
+                    "chat_id": chat_id,
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": json.dumps({"text": synthetic_text}),
+                    "mentions": [],
+                },
+            },
+        }
         try:
-            await self._async_send_text(chat_id, msg)
+            synthetic_event = P2ImMessageReceiveV1(fake_data)
         except Exception as e:
-            log.warning(f"Post-restart greet send failed: {e}")
-        log.info(f"Post-restart greet sent to {user_key} (warmed={warmed})")
+            log.warning(f"Post-restart greet synthetic event failed: {e}")
+            return
+        log.info(f"Post-restart greet: running warm-up turn for {user_key}")
+        try:
+            await self._handle_message_async(synthetic_event)
+        except Exception as e:
+            log.warning(f"Post-restart greet turn failed: {e}")
 
     # ── 文本指令处理 ──
 
