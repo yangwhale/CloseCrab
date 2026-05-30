@@ -97,6 +97,10 @@ class ClaudeCodeWorker(Worker):
         self._waiting = False  # True when send() is consuming from queue
         self._bg_result_callback: Optional[Callable[[str], Awaitable[None]]] = None
         self._saw_bg_task_notification = False
+        # L0 control_request 关联：发查询类 control_request（mcp_status /
+        # mcp_reconnect 等）时建 future，reader 收到同 request_id 的
+        # control_response 时 resolve。与 _waiting / _lock 无关，空闲忙碌都能用。
+        self._pending_ctrl: dict = {}
 
     @property
     def session_id(self) -> Optional[str]:
@@ -338,14 +342,20 @@ class ClaudeCodeWorker(Worker):
                         continue
 
                     # control_response：binary 对我们发出的 control_request
-                    # （interrupt / set_model / set_thinking 等）的回执。当前都是
-                    # fire-and-forget，无人等待，reader 层直接消费不入队（避免
-                    # 污染 send() 的事件流 + 触发 unknown event 警告）。未来 L0
-                    # 关联式查询会在此挂 _pending_ctrl future 解析。
+                    # （interrupt / set_model / set_thinking / mcp_status 等）的回执。
+                    # reader 层直接消费不入队（避免污染 send() 的事件流 + 触发
+                    # unknown event 警告）。L0 关联：若有等待该 request_id 的
+                    # future（send_control 建的），在此 resolve；否则视为
+                    # fire-and-forget 回执，只 log。
                     if evt_type == "control_response":
                         resp = d.get("response", {})
-                        log.debug(f"control_response: rid={resp.get('request_id', '?')} "
-                                  f"subtype={resp.get('subtype', '?')}")
+                        rid = resp.get("request_id", "?")
+                        fut = self._pending_ctrl.pop(rid, None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(resp)
+                        else:
+                            log.debug(f"control_response (no waiter): rid={rid} "
+                                      f"subtype={resp.get('subtype', '?')}")
                         continue
 
                     if evt_type == "control_request":
@@ -592,6 +602,69 @@ class ClaudeCodeWorker(Worker):
         }) + "\n"
         self.sock_in.sendall(req.encode())
         log.info(f"Sent set_permission_mode mode={mode}")
+
+    async def send_control(self, subtype: str, payload: Optional[dict] = None,
+                           timeout: float = 10.0) -> dict:
+        """L0：发查询类 control_request 并等 binary 的 control_response。
+
+        与 fire-and-forget 不同，这里建一个 future 挂到 _pending_ctrl[request_id]，
+        reader 收到同 request_id 的 control_response 后 resolve。返回 binary 的
+        response dict（含 subtype="success"/"error" 和 response/error 载荷）。
+
+        不走 _lock：control_request 是带外通道，binary 在 turn 中/turn 间都能处理，
+        与 send() 的 prompt 流互不干扰（同 set_model_live 直接 sendall 的前提）。
+        """
+        if not self.sock_in:
+            raise RuntimeError("Worker not started (sock_in is None)")
+        if not self.is_alive():
+            raise RuntimeError("Worker process not alive")
+        rid = f"{subtype}-{uuid.uuid4().hex[:8]}"
+        req_body = {"subtype": subtype}
+        if payload:
+            req_body.update(payload)
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending_ctrl[rid] = fut
+        line = json.dumps({
+            "type": "control_request",
+            "request_id": rid,
+            "request": req_body,
+        }) + "\n"
+        try:
+            self.sock_in.sendall(line.encode())
+            log.info(f"send_control sent: subtype={subtype} rid={rid}")
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            log.warning(f"send_control timeout: subtype={subtype} rid={rid} ({timeout}s)")
+            raise
+        finally:
+            self._pending_ctrl.pop(rid, None)
+
+    async def mcp_status(self) -> list:
+        """查所有 MCP server 的连接状态。
+
+        走 mcp_status control_request（binary fallback `??[]` 始终回 control_response）。
+        返回 mcpServers 数组：[{name, status, ...}]。status 常见 connected/failed/
+        needs-auth/pending。
+        """
+        resp = await self.send_control("mcp_status", timeout=10.0)
+        if resp.get("subtype") == "error":
+            raise RuntimeError(f"mcp_status error: {resp.get('error')}")
+        data = resp.get("response", {})
+        return data.get("mcpServers", []) if isinstance(data, dict) else []
+
+    async def mcp_reconnect(self, name: str) -> dict:
+        """重连指定 MCP server（不重启进程）。
+
+        走 mcp_reconnect control_request。主用途：LOAS2 cert 过期后重连内部 MCP，
+        免整 bot 冷重启。返回 binary 的 response 载荷。
+        """
+        # binary handler destructure `serverName`（非 `name`）— 实测 2.1.143
+        # offset 157555664 "Cannot destructure property 'serverName'"。
+        resp = await self.send_control("mcp_reconnect", {"serverName": name}, timeout=30.0)
+        if resp.get("subtype") == "error":
+            raise RuntimeError(f"mcp_reconnect error: {resp.get('error')}")
+        return resp.get("response", {}) if isinstance(resp.get("response"), dict) else {}
 
     @staticmethod
     def _event_to_progress(d: dict) -> Optional[str]:

@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/plan"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/plan", "/mcp"}
 
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
@@ -3793,6 +3793,29 @@ class FeishuChannel(Channel):
             _canon = {"acceptedits": "acceptEdits", "bypasspermissions": "bypassPermissions"}
             result = await self._core.set_permission_mode_cmd(user_key, _canon.get(mode, mode))
             await self._async_send_text(chat_id, result)
+
+        elif cmd == "/mcp":
+            parts = arg.split() if arg else []
+            sub = parts[0].lower() if parts else "status"
+            if sub == "status":
+                result = await self._core.mcp_status_cmd(user_key)
+                await self._async_send_text(chat_id, result)
+            elif sub == "reconnect":
+                if len(parts) < 2:
+                    await self._async_send_text(
+                        chat_id,
+                        "用法 `/mcp reconnect <name>` 重连指定 MCP server。\n"
+                        "先用 `/mcp` 看 server 名字。",
+                    )
+                    return
+                result = await self._core.mcp_reconnect_cmd(user_key, parts[1])
+                await self._async_send_text(chat_id, result)
+            else:
+                await self._async_send_text(
+                    chat_id,
+                    "用法 `/mcp` 查 MCP 连接状态，"
+                    "`/mcp reconnect <name>` 重连挂掉的 server（不重启不丢 session）。",
+                )
 
     async def _handle_voice_command(self, user_key: str, chat_id: str):
         """/voice 命令: 签 LiveKit JWT, 把加入链接发回飞书。

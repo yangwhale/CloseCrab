@@ -722,6 +722,58 @@ class BotCore:
             return f"切换失败: {e}"
         return f"✅ 权限模式 → {mode}（对下一条消息生效）"
 
+    async def mcp_status_cmd(self, user_key: str) -> str:
+        """查当前 session 的 MCP server 连接状态（带外查询，不重启不丢 session）。
+
+        走 worker.mcp_status()，发 mcp_status control_request 等 control_response。
+        仅 claude worker 支持。
+        """
+        if user_key not in self._workers:
+            return "当前没有活跃 session，先发条消息起 session 再查。"
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "mcp_status"):
+            return f"Worker {type(worker).__name__} 不支持 MCP 状态查询（仅 claude worker）。"
+        try:
+            servers = await worker.mcp_status()
+        except Exception as e:
+            log.error(f"mcp_status failed: {e}")
+            return f"查询失败: {e}"
+        if not servers:
+            return "当前没有挂载任何 MCP server。"
+        lines = [f"MCP servers（{len(servers)}）："]
+        for s in servers:
+            if isinstance(s, dict):
+                name = s.get("name", "?")
+                status = s.get("status", "?")
+                icon = "🟢" if status == "connected" else "🔴"
+                ntools = len(s.get("tools", []) or [])
+                lines.append(f"{icon} {name} — {status}（{ntools} tools）")
+            else:
+                lines.append(f"• {s}")
+        return "\n".join(lines)
+
+    async def mcp_reconnect_cmd(self, user_key: str, name: str) -> str:
+        """重连指定 MCP server（带外，不重启进程不丢 session）。
+
+        走 worker.mcp_reconnect(name)，发 mcp_reconnect control_request。
+        仅 claude worker 支持。
+        """
+        if user_key not in self._workers:
+            return "当前没有活跃 session，先发条消息起 session 再重连。"
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "mcp_reconnect"):
+            return f"Worker {type(worker).__name__} 不支持 MCP 重连（仅 claude worker）。"
+        try:
+            await worker.mcp_reconnect(name)
+        except Exception as e:
+            log.error(f"mcp_reconnect failed: {e}")
+            return f"重连失败: {e}"
+        return f"✅ 已发起重连 MCP server `{name}`，用 /mcp 查最新状态。"
+
     async def switch_session(self, user_key: str, target_session_id: str) -> str:
         """切换用户到指定 session。"""
         # 归档当前 session
