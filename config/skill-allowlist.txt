@@ -29,6 +29,7 @@ fireworks-tech-graph
 frontend-slides
 gemini-cli
 go-eat
+weather-forecast
 google-internal-mcp
 imagen-generator
 internal-doc-site
