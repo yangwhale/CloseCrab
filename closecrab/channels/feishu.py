@@ -93,6 +93,24 @@ _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停
 # 文本指令
 _TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp"}
 
+# Model 简写 map (chris 的约定: O/S/H + 版本数字)
+# 用于 /model 命令: `/model O46` 等价于 `/model claude-opus-4-6`
+# self-restart 冷却锁（秒）：boot 后这段时间内拒绝模型自重启，防无限循环。
+# 因为重启后的续接 turn 也是真 LLM turn，若它又写 marker 而无冷却就会自杀式
+# 循环；exit 42 不算 crash，run.sh 的 ">10 次连崩" 保护拦不住它。
+_SELF_RESTART_COOLDOWN = 45.0
+
+# Opus 4.6 配 ANTHROPIC_BETAS=context-1m-2025-08-07 解锁 1M ctx
+_MODEL_ALIASES: dict[str, tuple[str, str]] = {
+    # alias -> (raw_model_id, 一句话说明)
+    "O46": ("claude-opus-4-6", "Opus 4.6, 稳, 1M ctx"),
+    "O47": ("claude-opus-4-7", "新一代, 1M ctx (当前默认)"),
+    "O48": ("claude-opus-4-8", "最新最快, 1M ctx"),
+    "S45": ("claude-sonnet-4-5", "中速 Sonnet"),
+    "S46": ("claude-sonnet-4-6", "中速 Sonnet, 1M ctx"),
+    "H45": ("claude-haiku-4-5", "秒回 Haiku"),
+}
+
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
     "reading file": "📖 读取文件",
@@ -600,6 +618,8 @@ class FeishuChannel(Channel):
         self._auto_respond_chats = auto_respond_chats or set()
         self._stt = stt_engine or STTEngine()
         self._restart_requested = False
+        # boot 时刻 (run() 里设真值)；self-restart 冷却锁用，防无限重启循环
+        self._boot_time = 0.0
         self._known_team_bots: set[str] = known_team_bots or set()
         self._team_config = team_config
         self._log_chat_id = log_chat_id
@@ -3632,6 +3652,10 @@ class FeishuChannel(Channel):
                     f"✅ 回复完成 ({chars} chars, {elapsed:.1f}s){reply_preview}"
                 )
 
+            # 回复已发出 → 检测模型本轮是否写了 .self_restart marker。
+            # 放最后：保证用户先收到回复，再走干净的 exit-42 重启通道。
+            await self._check_self_restart(user_key, chat_id)
+
         except Exception as e:
             # 异常时也要停止 dots 动画
             if _anim_task[0]:
@@ -3661,6 +3685,74 @@ class FeishuChannel(Channel):
                         await self._async_send_text(chat_id, f"⚠️ Error: {e}")
             except Exception:
                 pass
+
+    async def _check_self_restart(self, user_key: str, chat_id: str):
+        """turn 结束 + 回复已发出后调用：检测模型写下的 .self_restart marker。
+
+        模型想自重启时（如改完自己代码要生效）写一个 marker
+        （见 scripts/self-restart.py），里面带一句续接 note。检测到就：
+          1. 冷却判断：boot 后 _SELF_RESTART_COOLDOWN 秒内拒绝，防无限重启循环。
+          2. 把 note + 当前 user_key/chat_id 写进 .restart_greet，让重启后第一轮
+             initiative 接着干（不只是打招呼）。
+          3. 走和 /restart 完全一样的干净通道：_restart_requested=True + loop.stop()
+             → exit 42 → run.sh 重启。绝不 kill 自己（kill = 子进程自杀 + 137 不重启）。
+        """
+        if not self._state_path:
+            return
+        marker = self._state_path / ".self_restart"
+        if not marker.exists():
+            return
+        # 先读再删，避免中途崩溃下次 boot 重复消费
+        try:
+            info = json.loads(marker.read_text())
+        except Exception:
+            info = {}
+        try:
+            marker.unlink()
+        except Exception:
+            pass
+
+        note = (info.get("note") or "").strip()
+        elapsed = time.time() - self._boot_time
+        if elapsed < _SELF_RESTART_COOLDOWN:
+            log.warning(
+                f"Self-restart refused: cooldown ({elapsed:.0f}s < "
+                f"{_SELF_RESTART_COOLDOWN}s since boot)"
+            )
+            try:
+                await self._async_send_text(
+                    chat_id,
+                    f"⚠️ 自重启被冷却锁拦下（boot 后仅 {elapsed:.0f}s，"
+                    f"需 ≥{int(_SELF_RESTART_COOLDOWN)}s）。防无限重启循环，已忽略。",
+                )
+            except Exception:
+                pass
+            return
+
+        # 写续接 marker，让重启后第一轮 initiative 接着干
+        if note and self._state_path:
+            try:
+                (self._state_path / ".restart_greet").write_text(
+                    json.dumps({
+                        "user_key": user_key,
+                        "chat_id": chat_id,
+                        "note": note,
+                        "ts": time.time(),
+                    })
+                )
+            except Exception as e:
+                log.warning(f"Failed to write .restart_greet for self-restart: {e}")
+
+        log.info(f"Self-restart triggered by model (note={note[:80]!r})")
+        try:
+            await self._async_send_text(
+                chat_id, "🔄 自重启中…（留言已存，重启后续接任务）",
+            )
+        except Exception:
+            pass
+        self._restart_requested = True
+        if self._loop:
+            self._loop.stop()
 
     async def _post_restart_greet(self):
         """boot 时消费 .restart_greet marker：跑一个真 LLM turn 报到。
@@ -3699,12 +3791,24 @@ class FeishuChannel(Channel):
         if not user_key or not chat_id:
             return
 
-        synthetic_text = (
-            "[系统事件] 你刚刚被用户通过 /restart 重启完毕，session 已恢复。"
-            "请主动跟用户打个招呼报到：一句话、自然口语、可带点性格，"
-            "让他知道你回来了、随时待命。这不是用户提问，不要追问任何东西，"
-            "也不要复述这条系统事件。"
-        )
+        note = (info.get("note") or "").strip()
+        if note:
+            # 自重启续接：不只是打招呼，要把重启前留给自己的任务接着做完
+            synthetic_text = (
+                "[系统事件] 你刚刚【自己触发了重启】并已恢复，session 健在。"
+                "下面是你重启前留给自己的续接留言。重启只是整个流程里的一步，"
+                "别停在“重启成功”就收尾——请据此把任务接着往下做完：\n\n"
+                f"{note}\n\n"
+                "（这不是用户提问。先用一句话跟用户说你回来了 + 在继续什么，"
+                "然后立刻继续执行，不要复述这条系统事件。）"
+            )
+        else:
+            synthetic_text = (
+                "[系统事件] 你刚刚被用户通过 /restart 重启完毕，session 已恢复。"
+                "请主动跟用户打个招呼报到：一句话、自然口语、可带点性格，"
+                "让他知道你回来了、随时待命。这不是用户提问，不要追问任何东西，"
+                "也不要复述这条系统事件。"
+            )
         synthetic_id = (
             f"restart-greet:{int(asyncio.get_running_loop().time()*1000)}"
         )
@@ -3851,14 +3955,21 @@ class FeishuChannel(Channel):
 
         elif cmd == "/model":
             if not arg:
-                await self._async_send_text(
-                    chat_id,
-                    "用法 `/model <alias>` 热切模型（不重启不丢 session），"
-                    "或 `/model default` 回退默认。\n"
-                    "例: `/model claude-opus-4-7` / `/model claude-haiku-4-5`",
-                )
+                lines = [
+                    "**用法**: `/model <简写或全名>` 热切模型（不重启不丢 session）",
+                    "回退默认: `/model default`",
+                    "",
+                    "| 简写 | Model ID | 说明 |",
+                    "| --- | --- | --- |",
+                ]
+                for alias, (mid, desc) in _MODEL_ALIASES.items():
+                    lines.append(f"| **{alias}** | `{mid}` | {desc} |")
+                lines.append("")
+                lines.append("例: `/model O46` 切到 Opus 4.6")
+                await self._async_send_text(chat_id, "\n".join(lines))
                 return
-            result = await self._core.set_model(user_key, arg)
+            resolved = _MODEL_ALIASES.get(arg.strip().upper(), (arg, ""))[0]
+            result = await self._core.set_model(user_key, resolved)
             await self._async_send_text(chat_id, result)
 
         elif cmd == "/think":
@@ -4967,6 +5078,7 @@ class FeishuChannel(Channel):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
+        self._boot_time = time.time()  # self-restart 冷却基准
 
         # 初始化日志
         if self._log_chat_id:

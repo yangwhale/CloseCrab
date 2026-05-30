@@ -172,10 +172,12 @@ def build_system_prompt(
 
     safety_rule = (
         f"CRITICAL SAFETY RULE: You are running as a child process of the {platform} bot. "
-        "NEVER kill, restart, or stop the bot process (bot.py). NEVER run commands like "
-        "'kill', 'pkill', 'killall' targeting bot.py or the bot's PID. "
-        f"If you modify bot.py and it needs a restart, tell the user to run /restart in {platform}. "
-        "Killing the bot process will terminate YOUR OWN process and disconnect the user."
+        "NEVER use 'kill', 'pkill', 'killall' or any signal-based command targeting bot.py or its PID — "
+        "that kills YOUR OWN parent process, exits 137, and run.sh refuses to restart (bot stays dead). "
+        "If you need to restart (e.g. to load code changes), use the SAFE self-restart mechanism: "
+        "`BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/self-restart.py --note '重启后要做的事'`. "
+        "This writes a marker; after your reply is sent, the channel does a clean exit-42 restart. "
+        "A 45-second cooldown after boot prevents infinite loops."
     )
     prompt = f"{channel_style}\n\n{safety_rule}"
 
