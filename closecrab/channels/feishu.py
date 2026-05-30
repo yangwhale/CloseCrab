@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model"}
 
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
@@ -3238,7 +3238,8 @@ class FeishuChannel(Channel):
             # 文本指令处理
             cmd = raw_content.strip().split()[0].lower() if raw_content.strip() else ""
             if cmd in _TEXT_COMMANDS:
-                await self._handle_text_command(cmd, user_key, chat_id, message_id)
+                arg = raw_content.strip()[len(cmd):].strip()
+                await self._handle_text_command(cmd, user_key, chat_id, message_id, arg)
                 return
 
             # 退出命令
@@ -3661,8 +3662,8 @@ class FeishuChannel(Channel):
 
     # ── 文本指令处理 ──
 
-    async def _handle_text_command(self, cmd: str, user_key: str, chat_id: str, message_id: str):
-        """处理文本指令。"""
+    async def _handle_text_command(self, cmd: str, user_key: str, chat_id: str, message_id: str, arg: str = ""):
+        """处理文本指令。arg 为命令后的剩余文本（如 /model 的模型名）。"""
         if cmd == "/status":
             info = self._core.get_status()
             card = self._build_status_card(info)
@@ -3744,6 +3745,23 @@ class FeishuChannel(Channel):
             await self._async_send_text(
                 chat_id, f"✅ Compacted in {elapsed}s | {result[:400]}"
             )
+
+        elif cmd in ("/low", "/medium", "/high", "/xhigh"):
+            level = cmd[1:]  # 去掉前导 /
+            result = await self._core.set_effort(user_key, level)
+            await self._async_send_text(chat_id, result)
+
+        elif cmd == "/model":
+            if not arg:
+                await self._async_send_text(
+                    chat_id,
+                    "用法 `/model <alias>` 热切模型（不重启不丢 session），"
+                    "或 `/model default` 回退默认。\n"
+                    "例: `/model claude-opus-4-7` / `/model claude-haiku-4-5`",
+                )
+                return
+            result = await self._core.set_model(user_key, arg)
+            await self._async_send_text(chat_id, result)
 
     async def _handle_voice_command(self, user_key: str, chat_id: str):
         """/voice 命令: 签 LiveKit JWT, 把加入链接发回飞书。

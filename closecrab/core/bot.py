@@ -634,6 +634,54 @@ class BotCore:
             return f"Compact failed: {e}"
         return result or "Compacted (no result text)"
 
+    async def set_effort(self, user_key: str, level: str) -> str:
+        """设置 user 当前 session 的 effort level (low/medium/high/xhigh)。
+
+        走 worker.set_effort_level()，发 apply_flag_settings control_request
+        （交互式 client 改 effort 的同款机制）。**不能用 /effort slash**：headless
+        stream-json 模式下 /effort 命中 local-jsx 变体被 gate，返回 "isn't
+        available in this environment"。control_request 对**下一条消息**生效。
+        仅 claude worker 支持；其他 worker 返回不支持。
+        """
+        if user_key not in self._workers:
+            return "当前没有活跃 session，先发条消息起 session 再设。"
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "set_effort_level"):
+            return f"Worker {type(worker).__name__} 不支持 effort（仅 claude worker）。"
+        try:
+            await worker.set_effort_level(level)
+        except Exception as e:
+            log.error(f"set_effort failed: {e}")
+            return f"设置失败: {e}"
+        return f"✅ effort → {level}（对下一条消息生效）"
+
+    async def set_model(self, user_key: str, model: str) -> str:
+        """运行时热切当前 session 的模型，**不重启、不丢 session**。
+
+        走 worker.set_model_live()，发 set_model control_request（binary 直接改
+        mainLoopModelForSession）。换 model 一直是重启第一大理由，这条让它零重启。
+        model 传 alias（剥掉 @ 后缀）或 "default"。对**下一条消息**生效。
+        仅 claude worker 支持。
+        """
+        if user_key not in self._workers:
+            return "当前没有活跃 session，先发条消息起 session 再切。"
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "set_model_live"):
+            return f"Worker {type(worker).__name__} 不支持热切 model（仅 claude worker）。"
+        alias = model.split("@", 1)[0].strip()
+        if not alias:
+            return "model 不能为空。用法 `/model <alias>` 或 `/model default`。"
+        try:
+            await worker.set_model_live(alias)
+        except Exception as e:
+            log.error(f"set_model failed: {e}")
+            return f"切换失败: {e}"
+        return f"✅ model → {alias}（对下一条消息生效，无需重启）"
+
     async def switch_session(self, user_key: str, target_session_id: str) -> str:
         """切换用户到指定 session。"""
         # 归档当前 session

@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional, Callable, Awaitable
 
@@ -493,6 +494,50 @@ class ClaudeCodeWorker(Worker):
                 "response": resp_data,
             }
         }) + "\n"
+
+    async def set_effort_level(self, level: str) -> None:
+        """运行时设置 effort level (low/medium/high/xhigh)，对**下一 turn** 生效。
+
+        走 apply_flag_settings control_request —— 这是交互式 client 改 effort 的
+        同款机制。**不能用 /effort slash**：headless stream-json 模式下 /effort 命中
+        local-jsx 变体 (requires ink) 被 gate，返回 "isn't available in this
+        environment"。control_request 是唯一能到达 remote process 的途径。
+        只 low/medium/high/xhigh 到达 remote（max/auto 是 session-scoped 到不了）。
+        必须在 turn 间隔调用（无活跃 send()）。
+        """
+        if not self.sock_in:
+            raise RuntimeError("Worker not started (sock_in is None)")
+        req = json.dumps({
+            "type": "control_request",
+            "request_id": f"effort-{uuid.uuid4().hex[:8]}",
+            "request": {
+                "subtype": "apply_flag_settings",
+                "settings": {"effortLevel": level},
+            },
+        }) + "\n"
+        self.sock_in.sendall(req.encode())
+        log.info(f"Sent apply_flag_settings effortLevel={level}")
+
+    async def set_model_live(self, model: str) -> None:
+        """运行时热切模型，对**下一 turn** 生效，**不需重启、不丢 session**。
+
+        走 set_model control_request —— binary 把 mainLoopModelForSession 直接改掉。
+        model 传 alias（如 "claude-opus-4-7"）或 "default"（回退到 settings 默认）。
+        必须在 turn 间隔调用（无活跃 send()）。换 model 一直是 CloseCrab 重启
+        第一大理由，这条让它变成零重启热切。
+        """
+        if not self.sock_in:
+            raise RuntimeError("Worker not started (sock_in is None)")
+        req = json.dumps({
+            "type": "control_request",
+            "request_id": f"setmodel-{uuid.uuid4().hex[:8]}",
+            "request": {
+                "subtype": "set_model",
+                "model": model,
+            },
+        }) + "\n"
+        self.sock_in.sendall(req.encode())
+        log.info(f"Sent set_model model={model}")
 
     @staticmethod
     def _event_to_progress(d: dict) -> Optional[str]:
