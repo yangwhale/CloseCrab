@@ -85,6 +85,15 @@ Discord 列表格式（适合少量字段或中文标签）：
 2. 用 `~/CloseCrab/scripts/publish-cc-page.sh <html-path> [--to pages|assets|both]` 上传 + 自动验证 URL
 3. 发送链接 `$CC_PAGES_URL_PREFIX/pages/{filename}` 或 `$CC_PAGES_URL_PREFIX/assets/{filename}`
 
+## 链接格式（强制）
+
+发链接时**一律裸发** URL，前后不加任何包裹符号——不加单引号 `'`、双引号 `"`、反引号 `` ` ``、markdown 代码标记、尖括号 `<>`、方括号 `[]()`。
+
+- ✅ 正确：`https://cc.higcp.com/wiki-v2/`
+- ❌ 错误：`'https://cc.higcp.com/wiki-v2/'`、`` `https://...` ``、`[wiki](https://...)`
+
+**原因**：飞书会把引号/反引号当成 URL 的一部分一起渲染进可点击区域，用户点击得到带引号的 URL → 404 打不开。裸 URL 飞书会自动识别成可点击链接，无需任何修饰。
+
 ## 进度更新
 
 长任务中主动汇报，但不要刷屏：
