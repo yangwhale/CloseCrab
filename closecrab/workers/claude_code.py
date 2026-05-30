@@ -560,6 +560,10 @@ class ClaudeCodeWorker(Worker):
             },
         }) + "\n"
         self.sock_in.sendall(req.encode())
+        # 立刻更新 _actual_model，让飞书卡片同步反映新 model，不用等下一 turn
+        # 的 assistant 事件。"default" 无法预知真实 model，留给 stream 学习。
+        if model and model != "default":
+            self._actual_model = model.split("@", 1)[0]
         log.info(f"Sent set_model model={model}")
 
     async def set_thinking_live(self, max_thinking_tokens: int) -> None:
