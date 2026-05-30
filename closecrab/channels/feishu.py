@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/plan", "/mcp"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp"}
 
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
@@ -3780,13 +3780,13 @@ class FeishuChannel(Channel):
             result = await self._core.set_thinking(user_key, n)
             await self._async_send_text(chat_id, result)
 
-        elif cmd == "/plan":
+        elif cmd == "/mode":
             mode = arg.split()[0].lower() if arg else "plan"
             _valid = {"plan", "default", "acceptedits", "bypasspermissions"}
             if mode not in _valid:
                 await self._async_send_text(
                     chat_id,
-                    "用法 `/plan` 进计划模式，或 `/plan default` 回默认。\n"
+                    "用法 `/mode` 进计划模式，或 `/mode default` 回默认。\n"
                     "可选: plan / default / acceptEdits / bypassPermissions。",
                 )
                 return

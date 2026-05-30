@@ -66,9 +66,9 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 ### 3. thinking budget 控制
 - subtype: `set_max_thinking_tokens {max_thinking_tokens:<int>}`
-- 价值：比 effort 更细的思考量硬上限；语音模式秒回
+- 价值：比 effort 更细的思考量硬上限
 - [x] **3.1 worker.set_max_thinking_tokens(n) → /think 命令** — commit 08eb176（`set_thinking_live` + bot.py `set_thinking` + feishu.py `/think <n>`，fire-and-forget）
-- [ ] **3.2 语音模式自动低 thinking** — voice channel path 自动设低，文字模式恢复（待做，task #16）
+- ~~3.2 语音模式自动低 thinking~~ — ⚠️ **废弃**。2026-05-30 benchmark 实测（16 cells，levels 0/2048/8192/32000 × 简单 2 + 难 2）：set_max_thinking_tokens 是**自适应上限不是目标**，level=0 不稳定加速（4 题里 2 题反而更慢），延迟大头卡 Vertex 路径（cc-tw 慢 gLinux 16x）不在思考段；Opus 4.7 强到两道难题 level 0 也全对，打不出质量差。结论：thinking 控制不是「秒回」杠杆，自动切换无收益。/think 手动开关保留。
 
 ---
 
@@ -86,7 +86,7 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 ### 6. set_permission_mode 动态权限
 - subtype: `set_permission_mode {mode, ultraplan}`
-- [x] **6.1 /plan 命令** — commit 08eb176（`set_permission_mode_live` + bot.py `set_permission_mode_cmd` + feishu.py `/plan [mode]`，校验 plan/default/acceptedits/bypasspermissions）
+- [x] **6.1 /mode 命令** — commit 08eb176（`set_permission_mode_live` + bot.py `set_permission_mode_cmd` + feishu.py `/mode [mode]`，校验 plan/default/acceptedits/bypasspermissions）。命令名 2026-05-30 从 `/plan` 改为 `/mode`（更精准，管的是权限 mode 不只 plan）。日常 bot 跑 `--dangerously-skip-permissions`（=bypassPermissions），此命令唯一实用场景是临时进 plan mode 先规划。
 - [ ] **6.2 按用户权限分级** — 信任用户 bypass，其他 default
 
 ---
@@ -105,7 +105,7 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 1. [x] **effort 控制** — a8ae9b8
 2. [x] **1.1–1.3 set_model 热切** — a8ae9b8
-3. [x] **A trio fire-and-forget**：3.1 /think + 6.1 /plan（08eb176）+ 5.1 软中断（bca5ca8）
+3. [x] **A trio fire-and-forget**：3.1 /think + 6.1 /mode（08eb176，原名 /plan）+ 5.1 软中断（bca5ca8）
 4. [x] **L0 基础设施** — `_pending_ctrl` future + `send_control` helper + reader future-resolve，完成
 5. [~] **2.x MCP 热管理** — 2.1 mcp_status + 2.2 mcp_reconnect + 2.3 /mcp 命令完成，2.4 懒加载待做
 6. [ ] **3.2 语音模式自动低 thinking**（task #16）
