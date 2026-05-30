@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/plan"}
 
 # 进度 emoji 映射
 _PROGRESS_EMOJI = {
@@ -3761,6 +3761,37 @@ class FeishuChannel(Channel):
                 )
                 return
             result = await self._core.set_model(user_key, arg)
+            await self._async_send_text(chat_id, result)
+
+        elif cmd == "/think":
+            if not arg:
+                await self._async_send_text(
+                    chat_id,
+                    "用法 `/think <tokens>` 设思考预算上限（对下一条消息生效）。\n"
+                    "例: `/think 0`（基本关思考，秒回）/ `/think 2000`（轻思考）/ "
+                    "`/think 32000`（深思考）。",
+                )
+                return
+            try:
+                n = int(arg.split()[0])
+            except ValueError:
+                await self._async_send_text(chat_id, "tokens 必须是整数，例 `/think 2000`。")
+                return
+            result = await self._core.set_thinking(user_key, n)
+            await self._async_send_text(chat_id, result)
+
+        elif cmd == "/plan":
+            mode = arg.split()[0].lower() if arg else "plan"
+            _valid = {"plan", "default", "acceptedits", "bypasspermissions"}
+            if mode not in _valid:
+                await self._async_send_text(
+                    chat_id,
+                    "用法 `/plan` 进计划模式，或 `/plan default` 回默认。\n"
+                    "可选: plan / default / acceptEdits / bypassPermissions。",
+                )
+                return
+            _canon = {"acceptedits": "acceptEdits", "bypasspermissions": "bypassPermissions"}
+            result = await self._core.set_permission_mode_cmd(user_key, _canon.get(mode, mode))
             await self._async_send_text(chat_id, result)
 
     async def _handle_voice_command(self, user_key: str, chat_id: str):

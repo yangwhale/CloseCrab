@@ -539,6 +539,47 @@ class ClaudeCodeWorker(Worker):
         self.sock_in.sendall(req.encode())
         log.info(f"Sent set_model model={model}")
 
+    async def set_thinking_live(self, max_thinking_tokens: int) -> None:
+        """运行时设思考预算上限，对**下一 turn** 生效，不重启不丢 session。
+
+        走 set_max_thinking_tokens control_request —— binary 直接改本 session 的
+        思考量硬上限。比 effort 更细的旋钮：语音模式设低（如 0~2000）秒回，
+        文字模式恢复高值。0 = 基本关思考。必须在 turn 间隔调用。
+        """
+        if not self.sock_in:
+            raise RuntimeError("Worker not started (sock_in is None)")
+        req = json.dumps({
+            "type": "control_request",
+            "request_id": f"think-{uuid.uuid4().hex[:8]}",
+            "request": {
+                "subtype": "set_max_thinking_tokens",
+                "max_thinking_tokens": max_thinking_tokens,
+            },
+        }) + "\n"
+        self.sock_in.sendall(req.encode())
+        log.info(f"Sent set_max_thinking_tokens={max_thinking_tokens}")
+
+    async def set_permission_mode_live(self, mode: str) -> None:
+        """运行时切权限模式，对**下一 turn** 生效，不重启不丢 session。
+
+        走 set_permission_mode control_request。mode: "default" / "plan" /
+        "acceptEdits" / "bypassPermissions"。plan = 临时进计划模式（风险任务先
+        出方案）。binary 在本 transport 已注册 onSetPermissionMode callback（实测
+        回 {mode}）。必须在 turn 间隔调用。
+        """
+        if not self.sock_in:
+            raise RuntimeError("Worker not started (sock_in is None)")
+        req = json.dumps({
+            "type": "control_request",
+            "request_id": f"permmode-{uuid.uuid4().hex[:8]}",
+            "request": {
+                "subtype": "set_permission_mode",
+                "mode": mode,
+            },
+        }) + "\n"
+        self.sock_in.sendall(req.encode())
+        log.info(f"Sent set_permission_mode mode={mode}")
+
     @staticmethod
     def _event_to_progress(d: dict) -> Optional[str]:
         """将中间事件转为面向用户的简短进度文本，返回 None 表示不汇报。"""

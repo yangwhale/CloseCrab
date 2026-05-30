@@ -682,6 +682,46 @@ class BotCore:
             return f"切换失败: {e}"
         return f"✅ model → {alias}（对下一条消息生效，无需重启）"
 
+    async def set_thinking(self, user_key: str, n: int) -> str:
+        """设当前 session 思考预算上限，对下一条消息生效，不重启不丢 session。
+
+        走 worker.set_thinking_live()，发 set_max_thinking_tokens control_request。
+        比 effort 更细：语音模式调低秒回，文字恢复高值。仅 claude worker 支持。
+        """
+        if user_key not in self._workers:
+            return "当前没有活跃 session，先发条消息起 session 再设。"
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "set_thinking_live"):
+            return f"Worker {type(worker).__name__} 不支持 thinking 预算（仅 claude worker）。"
+        try:
+            await worker.set_thinking_live(n)
+        except Exception as e:
+            log.error(f"set_thinking failed: {e}")
+            return f"设置失败: {e}"
+        return f"✅ thinking 上限 → {n} tokens（对下一条消息生效）"
+
+    async def set_permission_mode_cmd(self, user_key: str, mode: str) -> str:
+        """切当前 session 权限模式，对下一条消息生效，不重启不丢 session。
+
+        走 worker.set_permission_mode_live()，发 set_permission_mode control_request。
+        mode: default / plan / acceptEdits / bypassPermissions。仅 claude worker 支持。
+        """
+        if user_key not in self._workers:
+            return "当前没有活跃 session，先发条消息起 session 再切。"
+        worker = self._workers[user_key]
+        if not worker.is_alive():
+            return "Worker not alive."
+        if not hasattr(worker, "set_permission_mode_live"):
+            return f"Worker {type(worker).__name__} 不支持权限模式切换（仅 claude worker）。"
+        try:
+            await worker.set_permission_mode_live(mode)
+        except Exception as e:
+            log.error(f"set_permission_mode failed: {e}")
+            return f"切换失败: {e}"
+        return f"✅ 权限模式 → {mode}（对下一条消息生效）"
+
     async def switch_session(self, user_key: str, target_session_id: str) -> str:
         """切换用户到指定 session。"""
         # 归档当前 session
