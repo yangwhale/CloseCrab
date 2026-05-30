@@ -3781,17 +3781,26 @@ class FeishuChannel(Channel):
             await self._async_send_text(chat_id, result)
 
         elif cmd == "/mode":
-            mode = arg.split()[0].lower() if arg else "plan"
-            _valid = {"plan", "default", "acceptedits", "bypasspermissions"}
-            if mode not in _valid:
+            raw = arg.split()[0].lower() if arg else ""
+            _alias = {
+                "p": "plan", "plan": "plan",
+                "d": "default", "default": "default",
+                "a": "acceptEdits", "acceptedits": "acceptEdits",
+                "b": "bypassPermissions", "bypass": "bypassPermissions",
+                "bypasspermissions": "bypassPermissions",
+            }
+            if raw not in _alias:
                 await self._async_send_text(
                     chat_id,
-                    "用法 `/mode` 进计划模式，或 `/mode default` 回默认。\n"
-                    "可选: plan / default / acceptEdits / bypassPermissions。",
+                    "**`/mode <模式>` 热切权限模式**（不重启不丢 session）\n"
+                    "- `/mode P` — plan 计划模式（只读，先出方案给你审批）\n"
+                    "- `/mode D` — default 默认（敏感操作逐个审批）\n"
+                    "- `/mode A` — acceptEdits 自动批准改文件，跑命令仍审批\n"
+                    "- `/mode B` — bypassPermissions 全自动（当前 bot 默认）\n"
+                    "宽松度 P < D < A < B。可用全名或单字母。",
                 )
                 return
-            _canon = {"acceptedits": "acceptEdits", "bypasspermissions": "bypassPermissions"}
-            result = await self._core.set_permission_mode_cmd(user_key, _canon.get(mode, mode))
+            result = await self._core.set_permission_mode_cmd(user_key, _alias[raw])
             await self._async_send_text(chat_id, result)
 
         elif cmd == "/mcp":
