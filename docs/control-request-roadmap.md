@@ -23,11 +23,17 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 ## L0 — 基础设施（多项依赖，先做）
 
-- [ ] **0.1 control_response 请求/响应关联**
-  - 现状：effort 是 fire-and-forget，不读返回。但 `get_*`/`rewind_files` 需要读 binary 的 control_response。
-  - 做法：worker 维护 `_pending_ctrl: dict[request_id, asyncio.Future]`；发送时建 future，reader loop 收到 control_response 按 request_id resolve；`send_control(subtype, payload, timeout)` 封装。
-  - 影响文件：`workers/claude_code.py`（reader loop + 新 helper）
-  - 阻塞：3.x 之后所有 get_* 类
+- [~] **0.1 control_response 请求/响应关联**
+  - 现状：effort/set_model/think/interrupt 都是 fire-and-forget，不读返回。
+  - **已铺垫**（commit bca5ca8）：reader loop 现已在 reader 层消费 `control_response`（log debug + 不入队），并留注释标记未来在此挂 `_pending_ctrl` future。
+  - 待做：worker 维护 `_pending_ctrl: dict[request_id, asyncio.Future]`；发送时建 future，reader 收到 control_response 按 request_id resolve；`send_control(subtype, payload, timeout)` 封装。
+  - 影响文件：`workers/claude_code.py`（reader loop 已就位 + 新 helper）
+  - 阻塞：MCP 热管理（2.x mcp_status）。**注意：get_* 类（4.x）在 spawn 模式不可行，见下。**
+
+- ⚠️ **get_* 查询在 spawn 模式不可行（探针实证）**
+  - `get_context_usage` / `get_session_cost` / `get_settings` / `get_binary_version` 在 binary 里只作为 thin-client SEND 侧 `sendControlRequest({subtype})` + 独立 `--remote` responder 存在，**spawned agent 的 `[bridge:repl]` dispatch 没有对应 case**。
+  - 探针 `/tmp/getstar_probe.py` 确认：4 个全部 NO RESPONSE。
+  - 结论：`/context` `/cost` `/version` 拿不到 binary 权威数字，继续用 usage 事件估算。L2 §4 整段划掉。
 
 ---
 
@@ -35,7 +41,7 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 - [x] **effort 控制**（`apply_flag_settings.effortLevel`）— `/low /medium /high /xhigh` 飞书命令
   - 实测：4.7 上 low avg 74s vs xhigh >120s，生效确认
-  - commit: 待 push（claude_code.py `set_effort_level` + bot.py `set_effort` + feishu.py 命令）
+  - commit: a8ae9b8（claude_code.py `set_effort_level` + bot.py `set_effort` + feishu.py 命令）
 
 ---
 
@@ -62,26 +68,26 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 ### 3. thinking budget 控制
 - subtype: `set_max_thinking_tokens {max_thinking_tokens:<int>}`
 - 价值：比 effort 更细的思考量硬上限；语音模式秒回
-- [ ] **3.1 worker.set_max_thinking_tokens(n)**
-- [ ] **3.2 语音模式自动低 thinking** — voice channel path 自动设低，文字模式恢复
+- [x] **3.1 worker.set_max_thinking_tokens(n) → /think 命令** — commit 08eb176（`set_thinking_live` + bot.py `set_thinking` + feishu.py `/think <n>`，fire-and-forget）
+- [ ] **3.2 语音模式自动低 thinking** — voice channel path 自动设低，文字模式恢复（待做，task #16）
 
 ---
 
 ## L2 — 现有功能升级
 
-### 4. 实时状态查询（依赖 L0）
-- [ ] **4.1 get_context_usage → /context** — 权威实时 context 占用（替换 usage 事件估算）
-- [ ] **4.2 get_session_cost → /cost** — CC 算好的真实花费（替换 token×价表）
-- [ ] **4.3 get_settings → /status 增强** — 真·实时 model/effort/权限（非 Firestore 缓存）
-- [ ] **4.4 主动压缩触发** — context >85% 自动 `/cmp`（依赖 4.1）
+### 4. 实时状态查询 — ⚠️ spawn 模式不可行，整段废弃
+- ~~4.1 get_context_usage → /context~~ — get_* 无 agent dispatch，NO RESPONSE（见 L0）。`/context` 继续用 usage 事件估算（本就如此，不受影响）。
+- ~~4.2 get_session_cost → /cost~~ — 同上，用 token×价表估算。
+- ~~4.3 get_settings → /status~~ — 同上，用 Firestore 缓存 + worker 内存状态。
+- [ ] **4.4 主动压缩触发** — context >85% 自动 `/cmp`（可基于估算值做，不依赖 get_*）
 
 ### 5. interrupt 干净停
 - subtype: `interrupt`
-- [ ] **5.1 「停」改用 interrupt** — 停生成但保 session，不 kill worker（对比现状确认现在是怎么停的）
+- [x] **5.1 「停」改用 interrupt** — commit bca5ca8。软中断停 turn 但进程保活（warm MCP + cache 保留），下条消息复用 warm proc 无需 --resume；sendall 失败兜底硬杀。binary 探针 + worker 集成测试全 PASS。
 
 ### 6. set_permission_mode 动态权限
 - subtype: `set_permission_mode {mode, ultraplan}`
-- [ ] **6.1 /plan 命令** — 临时进 plan 模式（风险任务）
+- [x] **6.1 /plan 命令** — commit 08eb176（`set_permission_mode_live` + bot.py `set_permission_mode_cmd` + feishu.py `/plan [mode]`，校验 plan/default/acceptedits/bypasspermissions）
 - [ ] **6.2 按用户权限分级** — 信任用户 bypass，其他 default
 
 ---
@@ -96,11 +102,15 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 ---
 
-## 推荐实现顺序
+## 推荐实现顺序（进度）
 
-1. **1.1–1.3 set_model 热切**（性价比最高，跟 effort 同款 fire-and-forget，无需 L0）
-2. **L0 基础设施**（解锁所有 get_* 查询）
-3. **4.1–4.3 实时状态**（/context /cost /status）
-4. **2.x MCP 热管理**（重连 + 懒加载）
-5. **3.x thinking + 语音秒回**
-6. 其余按需
+1. [x] **effort 控制** — a8ae9b8
+2. [x] **1.1–1.3 set_model 热切** — a8ae9b8
+3. [x] **A trio fire-and-forget**：3.1 /think + 6.1 /plan（08eb176）+ 5.1 软中断（bca5ca8）
+4. [~] **L0 基础设施** — reader 层 control_response 已就位（bca5ca8），待补 `_pending_ctrl` future + `send_control` helper
+5. [ ] **2.x MCP 热管理**（mcp_status 重连 + 懒加载，依赖 L0）
+6. [ ] **3.2 语音模式自动低 thinking**（task #16）
+7. ~~4.1–4.3 实时状态~~ — get_* spawn 不可行，废弃
+8. 其余按需（L3 rewind/plugins/feedback…）
+
+> 全部在小爱（xiaoaitongxue）单 bot 验证，未铺给其他 bot。cc-tw bots 共享同一 checkout，铺开只需各自 SIGHUP 重启。
