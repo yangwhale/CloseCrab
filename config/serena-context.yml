@@ -1,0 +1,31 @@
+description: Serena LSP context for CloseCrab bots (8 code intelligence tools, no memory/editing overlap)
+prompt: |
+  You have access to Serena's code intelligence tools that exploit the symbolic 
+  structure of the code. Use them for structured code exploration and editing when appropriate.
+  For any code files, prefer Serena's tools (get_symbols_overview, find_symbol, find_referencing_symbols, 
+  find_implementations, find_declaration) over plain grep/read when you need symbolic understanding.
+
+excluded_tools:
+  - create_text_file
+  - read_file
+  - execute_shell_command
+  - find_file
+  - list_dir
+  - search_for_pattern
+  - write_memory
+  - read_memory
+  - delete_memory
+  - edit_memory
+  - rename_memory
+  - list_memories
+  - onboarding
+  - replace_symbol_body
+  - insert_after_symbol
+  - insert_before_symbol
+  - replace_content
+  - safe_delete_symbol
+  - get_current_config
+  - initial_instructions
+
+tool_description_overrides: {}
+single_project: true
