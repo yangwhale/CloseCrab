@@ -4319,6 +4319,15 @@ class FeishuChannel(Channel):
         if await self._tts_and_send_one(chat_id, text):
             log.info(f"Voice summary sent to {chat_id}")
 
+        # 镜像到 Discord 常驻语音频道: sidecar 开启且已常驻时把同一段口语文本
+        # 也念到 Discord(线程安全, 跨到 sidecar 自己的 loop)。sidecar 没跑时
+        # speak_text 内部静默 no-op, 不影响飞书。
+        try:
+            from ..voice.discord_voice_sidecar import speak_text
+            speak_text(text)
+        except Exception:
+            pass
+
     @staticmethod
     def _split_into_sentences(text: str) -> list[str]:
         """按中英文句末标点切分成句子列表。保留标点。"""

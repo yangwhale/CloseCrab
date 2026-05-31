@@ -1,26 +1,28 @@
 """Discord 语音小尾巴 (voice-only sidecar)。
 
-用途：当 bot 的 active_channel 是飞书时，仍想借用 Discord 的语音输出能力做
-测试。这个 sidecar 只做两件事——维持 Discord gateway 连接 (让 bot 在线、能进
-语音频道)，并注册 ``/say`` / ``/leave`` 两个 slash command 用 TTS 念话。
+用途：当 bot 的 active_channel 是飞书时，仍想借用 Discord 的语音输出能力。
+这个 sidecar 维持 Discord gateway 连接、**自动常驻**一个固定语音频道，并把
+飞书对话的口语回复 (voice-summary) 镜像念到该频道——用户进频道就能听。
 
-它**故意不注册** ``on_message`` / 任何消息处理 handler，所以「接收消息那条路」
-天然堵死——这正是 Chris 要的「只用语音输出做测试」。它也不依赖 BotCore，
-完全自包含，跑在独立后台 daemon 线程里，不影响主线程的飞书 channel。
+它**故意不注册** ``on_message`` / 任何消息处理 handler，所以「接收消息那条
+路」天然堵死。它不依赖 BotCore，完全自包含，跑在独立后台 daemon 线程里。
 
 启用方式 (Firestore ``bots/{name}``)::
 
     channels:
       discord:
         token: "<bot token>"
-        voice_sidecar: true        # 开关，缺省 false 不启动
+        voice_sidecar: true              # 总开关，缺省 false 不启动
+        voice_channel_id: "123..."       # 常驻的语音频道 id；缺省自动取
+                                         # server 第一个语音频道
 
-设计要点：
-- 用 ``bot.start(token)`` 而非 ``bot.run()``——后者会装 signal handler，
-  只能在主线程跑；sidecar 在子线程，必须用 start()。
-- intents 用 ``Intents.default()`` (含 voice_states)，不要 message_content，
-  本来也不收消息。
-- 进程退出时 daemon 线程随主进程一起走，无需额外清理。
+工作原理：
+- ``bot.start(token)`` 在子线程跑 (run() 会装 signal handler 只能在主线程)。
+- ``on_ready`` 后自动 connect 到常驻频道 (DAVE E2EE 由 py-cord 2.8.0 + davey
+  处理，发协议版本 1，不再被 4017 拒)。
+- 模块级 ``speak_text(text)`` 是给**飞书线程**调用的线程安全入口：用
+  ``run_coroutine_threadsafe`` 把 (TTS + play) 调度到 sidecar 自己的 loop。
+  飞书在 ``_send_voice_summary`` 末尾无脑调它；sidecar 没跑时静默 no-op。
 """
 
 import asyncio
@@ -30,12 +32,15 @@ import threading
 
 log = logging.getLogger("closecrab.discord_voice_sidecar")
 
+# 模块级状态：给飞书线程跨线程调用 speak_text() 用。sidecar 未启动时全为 None/0，
+# speak_text() 据此静默跳过。
+_sidecar_loop: "asyncio.AbstractEventLoop | None" = None
+_sidecar_bot = None
+_target_voice_channel_id: int = 0
+
 
 def _load_sidecar_config(bot_name: str) -> dict | None:
-    """直接从 Firestore 读 Discord 子配置 (active channel 是飞书时不会被扁平化)。
-
-    返回 ``{"token": ..., "enabled": bool}``，读失败返回 None。
-    """
+    """直接从 Firestore 读 Discord 子配置 (active channel 是飞书时不会被扁平化)。"""
     try:
         from google.cloud import firestore
         from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
@@ -49,7 +54,8 @@ def _load_sidecar_config(bot_name: str) -> dict | None:
         return {
             "token": discord_cfg.get("token", ""),
             "enabled": bool(discord_cfg.get("voice_sidecar", False)),
-            "guild_id": data.get("guild_id", ""),
+            "guild_id": str(data.get("guild_id", "")),
+            "voice_channel_id": str(discord_cfg.get("voice_channel_id", "")),
         }
     except Exception as e:
         log.warning("读取 Discord sidecar 配置失败 (non-fatal): %s", e)
@@ -62,8 +68,9 @@ async def _generate_tts(text: str) -> tuple[str, str]:
         "~/CloseCrab/skills/tts-generator/scripts/tts-generate.py"
     )
     try:
+        # --voice orus 对齐飞书 _tts_and_send_one 的音色, 两边听感一致
         proc = await asyncio.create_subprocess_exec(
-            "python3", tts_script, text,
+            "python3", tts_script, text, "--voice", "orus",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -80,11 +87,98 @@ async def _generate_tts(text: str) -> tuple[str, str]:
         return "", str(e)
 
 
-def _build_bot(bot_name: str, guild_id: str = ""):
-    """构造只含 /say /leave 的最小 discord.Bot (不挂任何消息 handler)。
+async def _resolve_voice_channel(bot, voice_channel_id: str):
+    """解析常驻语音频道：优先配置的 id，缺省取 server 第一个语音频道。"""
+    import discord
 
-    传入 guild_id 时用 debug_guilds 注册 guild-scoped 命令——客户端里**秒出**，
-    不传则全局注册 (最多 1 小时才传播)。
+    if voice_channel_id:
+        try:
+            ch = bot.get_channel(int(voice_channel_id))
+            if isinstance(ch, discord.VoiceChannel):
+                return ch
+        except (ValueError, TypeError):
+            pass
+    for g in bot.guilds:
+        if g.voice_channels:
+            return g.voice_channels[0]
+    return None
+
+
+async def _ensure_connected():
+    """确保已连到常驻频道，返回 VoiceClient 或 None。"""
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return None
+    guild = bot.guilds[0]
+    vc = guild.voice_client
+    if vc is not None and vc.is_connected():
+        return vc
+    # 残留僵尸先清掉
+    if vc is not None:
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+    ch = bot.get_channel(_target_voice_channel_id) if _target_voice_channel_id else None
+    if ch is None:
+        log.warning("常驻语音频道不可用 (id=%s)", _target_voice_channel_id)
+        return None
+    try:
+        vc = await ch.connect(timeout=20.0, reconnect=True)
+    except Exception:
+        log.exception("常驻语音频道连接失败")
+        return None
+    for _ in range(50):  # 等握手 (UDP + DAVE) 真完成
+        if vc.is_connected():
+            break
+        await asyncio.sleep(0.2)
+    return vc if vc.is_connected() else None
+
+
+async def _speak(text: str):
+    """在 sidecar loop 里执行：确保连上常驻频道 → TTS → 等上一段念完 → play。"""
+    import discord
+
+    vc = await _ensure_connected()
+    if vc is None:
+        return
+    ogg_path, err = await _generate_tts(text)
+    if err:
+        log.warning("Discord TTS 失败: %s", err)
+        return
+    for _ in range(300):  # 最多 ~60s 等上一段念完，避免叠音
+        if not vc.is_playing():
+            break
+        await asyncio.sleep(0.2)
+    try:
+        vc.play(discord.FFmpegOpusAudio(ogg_path))
+        log.info("Discord 念: %s", text[:50])
+    except Exception:
+        log.exception("Discord play 失败")
+
+
+def speak_text(text: str) -> bool:
+    """【飞书线程调用】把一段口语文本推到 Discord 常驻语音频道念。线程安全。
+
+    sidecar 未启动 / loop 未就绪时静默返回 False，不抛异常、不阻塞调用方。
+    """
+    if not text or not text.strip():
+        return False
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    try:
+        asyncio.run_coroutine_threadsafe(_speak(text), loop)
+        return True
+    except Exception:
+        log.exception("speak_text 跨线程调度失败")
+        return False
+
+
+def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
+    """构造只含 /leave 的最小 discord.Bot (不挂任何消息 handler)。
+
+    on_ready 后自动常驻 voice_channel_id 指定的语音频道。
     """
     import discord
 
@@ -99,106 +193,27 @@ def _build_bot(bot_name: str, guild_id: str = ""):
 
     @bot.event
     async def on_ready():
+        global _target_voice_channel_id
         log.info(
             "Discord 语音 sidecar 上线: %s (guilds=%d)",
             bot.user, len(bot.guilds),
         )
+        ch = await _resolve_voice_channel(bot, voice_channel_id)
+        if ch is None:
+            log.warning("找不到可常驻的语音频道，sidecar 仅在线不进频道")
+            return
+        _target_voice_channel_id = ch.id
+        vc = await _ensure_connected()
+        if vc is not None:
+            log.info("已常驻语音频道: %s (id=%s)", ch.name, ch.id)
 
     @bot.event
     async def on_application_command_error(ctx, error):
-        # 把 slash command 里抛出的异常完整打到 closecrab 日志, 否则只进 py-cord
-        # 自己的 stderr, 排查时看不到。
         log.error("slash command 出错: %s", error, exc_info=error)
         try:
             await ctx.respond(f"❌ 命令出错：{error}", ephemeral=True)
         except Exception:
             pass
-
-    @bot.slash_command(description="进语音频道用 TTS 念一段话")
-    async def say(ctx, text: str):
-        log.info(
-            "say 被调用: user=%s text=%r voice=%s",
-            getattr(ctx.author, "id", "?"),
-            text[:40],
-            bool(getattr(getattr(ctx.author, "voice", None), "channel", None)),
-        )
-        # 先 defer 抢下 3 秒窗口 (TTS 生成慢), 之后用 followup
-        try:
-            await ctx.defer()
-        except Exception as e:
-            log.exception("ctx.defer() 失败")
-            return
-        voice_state = getattr(ctx.author, "voice", None)
-        if not voice_state or not voice_state.channel:
-            await ctx.respond("⚠️ 你得先进一个语音频道，我才知道去哪念。", ephemeral=True)
-            return
-        channel = voice_state.channel
-
-        ogg_path, err = await _generate_tts(text)
-        if err:
-            await ctx.respond(f"❌ TTS 失败：{err}")
-            return
-
-        # 连接语音频道。py-cord 有个僵尸态: 上次 connect 握手没完成时,
-        # VoiceClient 仍挂在 guild 上 (is_connected()=False), 再 connect 会报
-        # "Already connected"。所以先无条件清掉残留, 再干净重连。
-        try:
-            existing = ctx.guild.voice_client
-            if existing is not None:
-                if existing.is_connected() and existing.channel and existing.channel.id == channel.id:
-                    vc = existing  # 已经在目标频道, 复用
-                else:
-                    try:
-                        await existing.disconnect(force=True)
-                    except Exception:
-                        pass
-                    vc = await channel.connect(timeout=20.0, reconnect=False)
-            else:
-                vc = await channel.connect(timeout=20.0, reconnect=False)
-        except discord.ClientException:
-            # "Already connected" 兜底: 强拆 guild 上的残留再连一次
-            existing = ctx.guild.voice_client
-            if existing is not None:
-                try:
-                    await existing.disconnect(force=True)
-                except Exception:
-                    pass
-            await asyncio.sleep(0.5)
-            try:
-                vc = await channel.connect(timeout=20.0, reconnect=False)
-            except Exception as e:
-                log.exception("进语音频道失败(重试后)")
-                await ctx.respond(f"❌ 进语音频道失败：{e}")
-                return
-        except Exception as e:
-            log.exception("进语音频道失败")
-            await ctx.respond(f"❌ 进语音频道失败：{e}")
-            return
-
-        # 等握手 (UDP + 加密) 真正完成, 否则 play() 报 "Not connected to voice"
-        for _ in range(50):  # 最多 ~10s
-            if vc.is_connected():
-                break
-            await asyncio.sleep(0.2)
-        if not vc.is_connected():
-            log.warning("语音握手超时, vc 未连上")
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                pass
-            await ctx.respond("❌ 语音握手超时(连上了但 UDP 没通), 可能是网络/防火墙挡了语音 UDP。")
-            return
-
-        try:
-            while vc.is_playing():
-                await asyncio.sleep(0.2)
-            source = discord.FFmpegOpusAudio(ogg_path)
-            vc.play(source)
-        except Exception as e:
-            log.exception("播放失败")
-            await ctx.respond(f"❌ 播放失败：{e}")
-            return
-        await ctx.respond(f"🔊 在 **{channel.name}** 念：{text[:80]}")
 
     @bot.slash_command(description="让机器人离开语音频道")
     async def leave(ctx):
@@ -215,7 +230,7 @@ def _build_bot(bot_name: str, guild_id: str = ""):
 def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
     """如配置启用，在后台 daemon 线程启动 Discord 语音 sidecar。
 
-    返回线程对象 (已 start)，未启用 / 不可用时返回 None。幂等：不开启时静默跳过。
+    返回线程对象 (已 start)，未启用 / 不可用时返回 None。
     """
     cfg = _load_sidecar_config(bot_name)
     if not cfg or not cfg["enabled"]:
@@ -232,15 +247,20 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         return None
 
     def _run():
+        global _sidecar_loop, _sidecar_bot
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        bot = _build_bot(bot_name, cfg.get("guild_id", ""))
+        _sidecar_loop = loop
+        bot = _build_bot(bot_name, cfg.get("guild_id", ""), cfg.get("voice_channel_id", ""))
+        _sidecar_bot = bot
         try:
             # 用 start() 而非 run()——run() 装 signal handler 只能在主线程
             loop.run_until_complete(bot.start(token))
         except Exception as e:
             log.error("Discord 语音 sidecar 崩溃: %s", e, exc_info=True)
         finally:
+            _sidecar_bot = None
+            _sidecar_loop = None
             try:
                 loop.run_until_complete(bot.close())
             except Exception:
