@@ -26,6 +26,7 @@
 """
 
 import asyncio
+import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采样)
 import logging
 import os
 import threading
@@ -172,6 +173,206 @@ def speak_text(text: str) -> bool:
         return True
     except Exception:
         log.exception("speak_text 跨线程调度失败")
+        return False
+
+
+# ─── 流式直生路径 (替代文件式 speak_text, 低延迟) ──────────────────────────
+# 不调 tts-generate.py skill / 不落盘 ogg / 不用 ffmpeg。直接学 livekit 那套
+# 流式调 Gemini TTS (gemini_tts.py 同 model/voice/config), 边收 24kHz PCM 边
+# resample 到 Discord 要的 48kHz stereo, 边推给一个流式 AudioSource。首帧延迟
+# = Gemini 首个 chunk 到达 (~0.9s), 而非"等整段生成完"。
+
+
+def is_voice_connected() -> bool:
+    """sidecar 当前是否已连在某个语音频道 (供飞书线程判断"没连就免")。"""
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return False
+    vc = bot.guilds[0].voice_client
+    return bool(vc is not None and vc.is_connected())
+
+
+async def _gemini_tts_stream(text: str):
+    """流式调 Gemini TTS, 逐 chunk yield 24kHz mono s16 PCM bytes。
+
+    复用 gemini_tts 的 client 构造 + 文本清洗 + config, 保证与飞书 ogg 同
+    model/voice (orus→"Orus")。
+    """
+    from google.genai import types as gt
+    from .gemini_tts import _build_genai_client, _clean_text_for_tts
+
+    cleaned = _clean_text_for_tts(text)
+    if not cleaned.strip():
+        return
+    client = _build_genai_client(None)
+    model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
+    voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")  # 对齐飞书 --voice orus
+    config = gt.GenerateContentConfig(
+        response_modalities=["AUDIO"],
+        speech_config=gt.SpeechConfig(
+            voice_config=gt.VoiceConfig(
+                prebuilt_voice_config=gt.PrebuiltVoiceConfig(voice_name=voice)
+            )
+        ),
+    )
+    stream = await client.aio.models.generate_content_stream(
+        model=model, contents=cleaned, config=config
+    )
+    async for chunk in stream:
+        for cand in getattr(chunk, "candidates", None) or []:
+            content = getattr(cand, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                inline = getattr(part, "inline_data", None)
+                if inline and inline.data:
+                    yield bytes(inline.data)
+
+
+_SOURCE_CLASS = None
+
+
+def _get_source_class():
+    """惰性定义 discord.AudioSource 子类 (延迟 import discord)。"""
+    global _SOURCE_CLASS
+    if _SOURCE_CLASS is not None:
+        return _SOURCE_CLASS
+    import discord
+
+    class _StreamPCMSource(discord.AudioSource):
+        """流式喂 48kHz/stereo/s16 PCM。read() 每 20ms 被 Discord 播放线程调一次。
+
+        - buffer 够一帧 → 给真音频
+        - buffer 不够且未结束 → 给静音帧 (保持流活着, 等下一 chunk; 这是 jitter
+          buffer 的欠载兜底)
+        - 已结束且 buffer 放空 → 返回 b'' 让 Discord 停止播放
+        read() 必须快速非阻塞 (在播放线程里), 故用 Lock 护 bytearray, 不阻塞。
+        """
+
+        FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
+
+        def __init__(self):
+            self._buf = bytearray()
+            self._lock = threading.Lock()
+            self._finished = False
+            self._written = 0   # 累计写入字节 (诊断)
+            self._real = 0      # 派发真音频帧数 (诊断)
+            self._silence = 0   # 派发欠载静音帧数 (诊断)
+
+        def write(self, pcm: bytes):
+            with self._lock:
+                self._buf.extend(pcm)
+                self._written += len(pcm)
+
+        def buffered(self) -> int:
+            with self._lock:
+                return len(self._buf)
+
+        def finish(self):
+            with self._lock:
+                self._finished = True
+
+        def read(self) -> bytes:
+            with self._lock:
+                if len(self._buf) >= self.FRAME:
+                    out = bytes(self._buf[: self.FRAME])
+                    del self._buf[: self.FRAME]
+                    self._real += 1
+                    return out
+                if self._finished:
+                    if self._buf:
+                        out = bytes(self._buf) + b"\x00" * (self.FRAME - len(self._buf))
+                        self._buf.clear()
+                        self._real += 1
+                        return out
+                    log.info(
+                        "Discord 播放结束: 写入 %d 字节(%.1fs), 真音频帧 %d(%.1fs), "
+                        "欠载静音帧 %d", self._written, self._written / 4 / 48000,
+                        self._real, self._real * 0.02, self._silence)
+                    return b""
+                self._silence += 1
+                return b"\x00" * self.FRAME  # 欠载未结束: 静音帧保持流活着
+
+        def is_opus(self) -> bool:
+            return False
+
+    _SOURCE_CLASS = _StreamPCMSource
+    return _SOURCE_CLASS
+
+
+async def _stream_speak(text: str):
+    """sidecar loop 内: 用现有常驻连接流式直生 → resample → 推 Discord。
+
+    不主动建连 (没连由调用方 is_voice_connected 拦掉)。排队等上一句念完避免叠音。
+    """
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return
+    vc = bot.guilds[0].voice_client
+    if vc is None or not vc.is_connected():
+        return
+    for _ in range(1200):  # 最多 ~60s 等上一句念完
+        if not vc.is_playing():
+            break
+        await asyncio.sleep(0.05)
+
+    source = _get_source_class()()
+    # 预充阈值: 攒够 ~0.8s 的 48k/stereo/s16 再开播, 抗 jitter。
+    PREBUFFER = int(48000 * 2 * 2 * 0.8)
+
+    # Gemini 生成挪到独立线程, 自带干净 event loop, 全速迭代。
+    # 原因: 之前在 sidecar loop 里跑, 那个 loop 还扛着 Discord 心跳 + voice
+    # keepalive + LiveKit Voice IO, 太忙 → chunk 消费被挤占变慢 → Vertex gRPC
+    # 流被服务端按 idle 提前关 → async for 正常结束但只拿到一半音频 (截断元凶)。
+    def _gen_worker():
+        async def _run():
+            state = None  # ratecv 跨块状态, 跨 chunk 传递保证边界无爆音
+            async for pcm24 in _gemini_tts_stream(text):
+                pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
+                source.write(audioop.tostereo(pcm48, 2, 1, 1))  # mono → stereo
+            log.info("Discord 流式念(生成完): %s", text[:40])
+        try:
+            asyncio.run(_run())
+        except Exception:
+            log.exception("流式 TTS 生成失败")
+        finally:
+            source.finish()  # 让 read() 放完残余后返回 b'' 结束播放
+
+    gen_thread = threading.Thread(
+        target=_gen_worker, daemon=True, name="discord-tts-gen")
+    gen_thread.start()
+
+    # sidecar loop 只做轻量轮询: 等预充够 (或生成已结束) 再开播。
+    for _ in range(2400):  # 最多 ~120s
+        if source.buffered() >= PREBUFFER or not gen_thread.is_alive():
+            break
+        await asyncio.sleep(0.05)
+    if source.buffered() > 0 or gen_thread.is_alive():
+        try:
+            vc.play(source)
+        except Exception:
+            log.exception("Discord vc.play(stream source) 失败")
+            source.finish()
+    else:
+        source.finish()  # 啥都没生成出来
+
+
+def stream_speak_text(text: str) -> bool:
+    """【飞书线程调用】流式直生 TTS 推 Discord 常驻语音频道。线程安全。
+
+    未连语音频道 / sidecar 未启动 → 静默返回 False (不主动建连, 不费劲)。
+    fire-and-forget: 立即返回, 不阻塞飞书后续 (飞书 ogg) 的生成。
+    """
+    if not text or not text.strip():
+        return False
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    if not is_voice_connected():
+        return False
+    try:
+        asyncio.run_coroutine_threadsafe(_stream_speak(text), loop)
+        return True
+    except Exception:
+        log.exception("stream_speak_text 跨线程调度失败")
         return False
 
 
