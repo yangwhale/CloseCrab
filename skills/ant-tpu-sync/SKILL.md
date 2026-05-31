@@ -16,8 +16,10 @@ hierarchical 总纲 `index.html`。
 对标 `customer-qa-tracker`（procedure skill）。
 
 ```
-enumerate (API) → diff vs manifest → extract 变化的 doc → clean+render → upload → 更新 manifest → render 总纲 → upload
+enumerate (API) → diff vs manifest → [snapshot 旧版] → extract 变化的 doc → clean+render → [show-diff 报告改了什么] → upload → 更新 manifest → render 总纲 → upload
 ```
+
+**「改了什么」可见**：钉钉 API 只给节点级 `contentUpdatedTime`，能认出*哪篇*变了但不知道*改了什么*。`scripts/show_diff.py` 补上这块——render 前 snapshot 旧镜像、render 后逐块对比新旧，报告「新增 X 块 / 改 Y 块 / 删 Z 块」+ 实际变更文本（详见 §2.5 / §3.5）。
 
 ## 存储布局（GCS-backed CC Pages）
 ```
@@ -47,6 +49,15 @@ chrome-mcp 在 gLinux，结果在 gLinux，拉回本地：
   --manifest ~/.cache/ant-tpu-sync/manifest.json --out /tmp/ant-worklist.json`
 `to_sync = new + stale`。日常通常只有 2-3 篇。
 
+### 2.5 snapshot 旧版（diff 的前提，render 之前跑）
+`python3 scripts/show_diff.py snapshot --worklist /tmp/ant-worklist.json`
+把每个 **stale** slug 当前的 `STAGE/docs/<slug>.html` 拷到 `STAGE/prev/<slug>.html`。
+**为什么 render 前必须先做**：本地 `docs/<slug>.html` 在 render 前 == 上次同步版（也 == GCS 版），
+render 一旦覆盖就拿不回旧版了。snapshot 是离线 `cp`，不需要 creds。
+`new`（全新文档）没有旧版可 snapshot，会跳过并在 diff 时报「全新文档」。
+> 旧版兜底来源：GCS 上的 `pages/ant-tpu/docs/<slug>.html` 在最后一步 upload 前一直是旧版，
+> 万一忘了 snapshot，可 `gsutil cp gs://chris-pgp-host-asia/cc-pages/pages/ant-tpu/docs/<slug>.html prev/<slug>.html` 补救。
+
 ### 3. extract + render（只处理 to_sync）
 - **adoc**：**实战用 raw CDP**（`scripts/cdp_extract.py`，在 gLinux 上跑），不靠
   chrome-devtools-mcp（它会 flaky / 卡）。cdp_extract 自己连 `http://127.0.0.1:9222/json`
@@ -63,6 +74,17 @@ chrome-mcp 在 gLinux，结果在 gLinux，拉回本地：
 - **md / 代码 py/json/yaml/sh**：file 类型，走 §4 文件下载拿 raw →
   `scripts/render_files.py`（自动按 ext 选 md/code 模式 shell render_doc.py，
   LANG 映射 py→python/sh→bash/...）。批量一把梭，输出 `STAGE/docs/<slug>.html`。
+
+### 3.5 show-diff（报告改了什么，render 之后跑）
+`python3 scripts/show_diff.py diff --worklist /tmp/ant-worklist.json`
+对每个 stale slug，bs4 抽取新旧两版的**块级语义文本**（标题/段落/列表/表格行/代码行/图片），
+`difflib` 块级对比，输出人读报告：`新增 X 块 · 改 Y 块 · 删 Z 块（段落 +1，表格行 ~2…）`
++ 每条变更的实际文本（改动显示 旧→新）。把这份报告念给 Chris，让他知道这次同步到底改了啥。
+- **为什么比对 render 后的 `docs/` 而非 `raw/`**：raw adoc innerHTML 满是 cangjie 编辑器
+  噪声（styled-component class / selection layer），跨 session 抖动会刷假阳性；clean_adoc
+  之后的语义 HTML 稳定，块级文本 diff 才有意义。
+- `pre` 代码块按行拆成「代码行」→ yaml/code 文件改 1 行只报 1 行，不是整块。
+- ad-hoc 两文件对比：`show_diff.py diff --old a.html --new b.html`；`--json` 出结构化结果。
 
 ### 4. 二进制 + 图片下载（已验证的真实机制）
 - **adoc 内嵌图片**：`alidocs.dingtalk.com/core/api/resources/img/...` 需 cookie。
