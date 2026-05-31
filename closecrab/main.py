@@ -779,6 +779,16 @@ def main():
         target=_audit_bg, daemon=True, name="prompt-audit-bg",
     ).start()
 
+    # Discord 语音 sidecar (旁路): active channel 非 discord 时, 如配置
+    # channels.discord.voice_sidecar=true, 额外拉起一个只做语音输出的 Discord
+    # 连接 (后台 daemon 线程, 不收消息)。用于「飞书主跑 + Discord 只念话」测试。
+    if channel_type != "discord":
+        try:
+            from .voice.discord_voice_sidecar import maybe_start_discord_voice_sidecar
+            maybe_start_discord_voice_sidecar(bot_name)
+        except Exception as e:
+            log.warning(f"Discord 语音 sidecar 启动失败 (non-fatal): {e}")
+
     # 启动 Channel
     # Why os._exit instead of sys.exit / return: LiveKit Rust SDK spawns
     # native OS threads (tokio-rt-worker, AudioDevice, AudioSourceCapt,
