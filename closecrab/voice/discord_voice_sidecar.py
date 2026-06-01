@@ -44,8 +44,12 @@ log = logging.getLogger("closecrab.discord_voice_sidecar")
 # speak_text() 据此静默跳过。
 _sidecar_loop: "asyncio.AbstractEventLoop | None" = None
 _sidecar_bot = None
+_sidecar_thread = None  # 运行时启停用：保存 sidecar 线程引用以便 stop 时 join
 _target_voice_channel_id: int = 0
 _heartbeat_task = None  # 后台 voice 健康检查 task，防重复启动
+
+# 没配 voice_channel_id 的 bot 默认连这个频道 (Discord General)。多 bot 共用。
+_DEFAULT_VOICE_CHANNEL_ID = "1471064068851761165"
 
 
 def _load_sidecar_config(bot_name: str) -> dict | None:
@@ -479,19 +483,42 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
     return bot
 
 
-def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
-    """如配置启用，在后台 daemon 线程启动 Discord 语音 sidecar。
+def _persist_sidecar_enabled(bot_name: str, enabled: bool) -> None:
+    """把长期开关写回 Firestore channels.discord.voice_sidecar，跨重启保持状态。
 
-    返回线程对象 (已 start)，未启用 / 不可用时返回 None。
+    /discordon → True, /discordoff → False。main.py 开机自启读这个字段恢复。
+    持久化失败只警告，不阻断连/断动作。
     """
-    cfg = _load_sidecar_config(bot_name)
-    if not cfg or not cfg["enabled"]:
-        return None
-    token = cfg["token"]
-    if not token:
-        log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
-        return None
+    try:
+        from google.cloud import firestore
+        from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
 
+        db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        db.collection("bots").document(bot_name).update(
+            {"channels.discord.voice_sidecar": enabled}
+        )
+        log.info("voice_sidecar 持久化为 %s (bot=%s)", enabled, bot_name)
+    except Exception as e:
+        log.warning("持久化 voice_sidecar 失败 (non-fatal): %s", e)
+
+
+def is_sidecar_running() -> bool:
+    """sidecar 线程是否在跑 (gateway 在线，不一定已进语音频道)。"""
+    return (
+        _sidecar_bot is not None
+        and _sidecar_thread is not None
+        and _sidecar_thread.is_alive()
+    )
+
+
+def _spawn_sidecar_thread(
+    bot_name: str, token: str, guild_id: str, voice_channel_id: str
+):
+    """拉起 sidecar daemon 线程 (独立 loop 跑 discord.Bot)。返回 thread 或 None。
+
+    开机自启 (maybe_start_discord_voice_sidecar) 和命令强制启动 (start_sidecar)
+    共用这段。调用方负责校验 token / enabled。
+    """
     try:
         import discord  # noqa: F401
     except ImportError:
@@ -499,7 +526,7 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         return None
 
     def _run():
-        global _sidecar_loop, _sidecar_bot
+        global _sidecar_loop, _sidecar_bot, _sidecar_thread
         import discord
         # TTS 流式播放路径用 _StreamPCMSource(is_opus=False), py-cord 要把 PCM
         # 编码成 opus 才能发, 故必须先手动加载 libopus (默认不自动加载)。
@@ -515,7 +542,7 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _sidecar_loop = loop
-        bot = _build_bot(bot_name, cfg.get("guild_id", ""), cfg.get("voice_channel_id", ""))
+        bot = _build_bot(bot_name, guild_id, voice_channel_id)
         _sidecar_bot = bot
         try:
             # 用 start() 而非 run()——run() 装 signal handler 只能在主线程
@@ -525,13 +552,96 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         finally:
             _sidecar_bot = None
             _sidecar_loop = None
+            _sidecar_thread = None
             try:
                 loop.run_until_complete(bot.close())
             except Exception:
                 pass
             loop.close()
 
+    global _sidecar_thread
     thread = threading.Thread(target=_run, daemon=True, name="discord-voice-sidecar")
+    _sidecar_thread = thread
     thread.start()
-    log.info("Discord 语音 sidecar 线程已启动 (active channel 之外的旁路)")
+    log.info("Discord 语音 sidecar 线程已启动")
     return thread
+
+
+def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
+    """开机自启：Firestore voice_sidecar=true 时后台拉起 sidecar 线程。
+
+    返回线程对象 (已 start)，未启用 / 缺 token / 不可用时返回 None。
+    这是状态持久化的重启恢复点 —— /discordon 会把该字段写成 true。
+    """
+    cfg = _load_sidecar_config(bot_name)
+    if not cfg or not cfg["enabled"]:
+        return None
+    if not cfg["token"]:
+        log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
+        return None
+    vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
+    return _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
+
+
+def start_sidecar(bot_name: str) -> tuple[bool, str]:
+    """【飞书线程调用】运行时连进 Discord 语音频道 + 持久化 voice_sidecar=true。"""
+    if is_sidecar_running():
+        _persist_sidecar_enabled(bot_name, True)
+        return True, "Discord 已经连着 General 了。"
+    cfg = _load_sidecar_config(bot_name)
+    if not cfg or not cfg["token"]:
+        return False, "这个 bot 没配 Discord token，连不了。"
+    vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
+    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
+    if thread is None:
+        return False, "启动失败 (py-cord 未装？看 bot.log)。"
+    import time
+    for _ in range(50):  # 轮询 ~10s 等 on_ready + 进频道
+        if is_voice_connected():
+            _persist_sidecar_enabled(bot_name, True)
+            return True, "✅ 已连进 Discord General，开始语音播报 (重启后保持)。"
+        time.sleep(0.2)
+    # 线程起来了但 10s 内没进频道：仍持久化 (心跳会稍后 rejoin)
+    _persist_sidecar_enabled(bot_name, True)
+    return True, "⚠️ sidecar 已启动但还没进频道，稍等或看 bot.log (已设为开)。"
+
+
+def stop_sidecar(bot_name: str) -> tuple[bool, str]:
+    """【飞书线程调用】断开 Discord 语音 + 持久化 voice_sidecar=false。"""
+    _persist_sidecar_enabled(bot_name, False)
+    if not is_sidecar_running():
+        return True, "本来就没开 (已确保关闭态)。"
+
+    global _heartbeat_task, _target_voice_channel_id, _sidecar_thread
+    loop = _sidecar_loop
+    bot = _sidecar_bot
+    thread = _sidecar_thread
+
+    async def _shutdown():
+        # 先停心跳，否则它会在 loop 关闭后报错；再 disconnect，最后 close。
+        if _heartbeat_task is not None and not _heartbeat_task.done():
+            _heartbeat_task.cancel()
+        try:
+            if bot is not None and bot.guilds:
+                vc = bot.guilds[0].voice_client
+                if vc is not None and vc.is_connected():
+                    await vc.disconnect(force=True)
+        except Exception:
+            log.exception("disconnect voice 失败")
+        if bot is not None:
+            await bot.close()  # 让线程里 run_until_complete(bot.start()) 返回
+
+    try:
+        if loop is not None and not loop.is_closed():
+            # 不 .result() 等：loop 会在 bot.close 后停，future 可能不 resolve。
+            # 靠 join 线程同步 —— 线程结束即 bot 已 close + finally 清理完。
+            asyncio.run_coroutine_threadsafe(_shutdown(), loop)
+    except Exception as e:
+        log.warning("调度 sidecar 关闭异常 (继续清理): %s", e)
+
+    if thread is not None:
+        thread.join(timeout=10)
+    _target_voice_channel_id = 0
+    _heartbeat_task = None
+    _sidecar_thread = None
+    return True, "👋 已断开 Discord 语音 (重启后也不连)。"

@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff"}
 
 # Model 简写 map (chris 的约定: O/S/H + 版本数字)
 # 用于 /model 命令: `/model O46` 等价于 `/model claude-opus-4-6`
@@ -3896,6 +3896,20 @@ class FeishuChannel(Channel):
         elif cmd == "/docs":
             from ..constants import G
             await self._async_send_text(chat_id, f"{G.CC_PAGES_URL}/pages/index.html")
+
+        elif cmd == "/discordon":
+            # 运行时连进 Discord General 语音频道 + 持久化 voice_sidecar=true。
+            # to_thread: 连接要等 ~数秒，别阻塞飞书 event loop。多 bot 通用 (各用各 token)。
+            from ..voice.discord_voice_sidecar import start_sidecar
+            await self._async_send_text(chat_id, "正在连 Discord 语音频道…")
+            ok, msg = await asyncio.to_thread(start_sidecar, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/discordoff":
+            # 断开 Discord 语音 + 持久化 voice_sidecar=false (重启后也不连)。
+            from ..voice.discord_voice_sidecar import stop_sidecar
+            ok, msg = await asyncio.to_thread(stop_sidecar, self._bot_name)
+            await self._async_send_text(chat_id, msg)
 
         elif cmd == "/context":
             usage = self._core.get_context_usage(user_key)
