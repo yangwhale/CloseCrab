@@ -21,12 +21,50 @@ from dataclasses import dataclass
 
 from google import genai
 from google.genai import types as genai_types
-from livekit.agents import (
-    DEFAULT_API_CONNECT_OPTIONS,
-    APIConnectOptions,
-    tts,
-    utils,
-)
+
+# livekit 仅 LiveKit 语音路径 (飞书 --voice) 需要。Discord 语音 sidecar 只复用本模块的
+# 纯 helper (_build_genai_client / _clean_text_for_tts)，不依赖 livekit。把 import 设为
+# 可选，缺 livekit (text-only / Discord-only bot) 时仍能 import helper，不会整模块崩掉。
+try:
+    from livekit.agents import (
+        DEFAULT_API_CONNECT_OPTIONS,
+        APIConnectOptions,
+        tts,
+        utils,
+    )
+
+    _HAS_LIVEKIT = True
+except ModuleNotFoundError:
+    _HAS_LIVEKIT = False
+    DEFAULT_API_CONNECT_OPTIONS = None
+    APIConnectOptions = object  # type: ignore[assignment,misc]
+
+    class _LiveKitStub:
+        """占位基类/工具，仅让下方 LiveKit 专用类能完成定义。
+
+        Discord 路径从不实例化 GeminiTTS，故 stub 永不在运行时被执行；
+        若无 livekit 却尝试实例化 GeminiTTS，__init__ 会抛清晰错误。
+        """
+
+        class TTS:  # noqa: D106
+            pass
+
+        class ChunkedStream:  # noqa: D106
+            pass
+
+        class TTSCapabilities:  # noqa: D106
+            def __init__(self, *a, **k):
+                pass
+
+        class AudioEmitter:  # noqa: D106
+            pass
+
+        @staticmethod
+        def shortuuid() -> str:
+            return ""
+
+    tts = _LiveKitStub()  # type: ignore[assignment]
+    utils = _LiveKitStub()  # type: ignore[assignment]
 
 log = logging.getLogger("closecrab.voice.gemini_tts")
 
@@ -100,6 +138,11 @@ class GeminiTTS(tts.TTS):
         voice: str = "Charon",
         api_key: str | None = None,
     ) -> None:
+        if not _HAS_LIVEKIT:
+            raise RuntimeError(
+                "GeminiTTS (LiveKit plugin) 需要 livekit-agents，但未安装。"
+                "请用 deploy.sh --voice 安装 voice 依赖，或改用 Discord sidecar 路径。"
+            )
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
             sample_rate=GEMINI_TTS_SAMPLE_RATE,
