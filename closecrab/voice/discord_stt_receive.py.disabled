@@ -1,0 +1,533 @@
+"""【已封存 · 当前不可用】Discord 语音接收 → STT → 发文字 (V2: 连续 PCM 流 + silero VAD)。
+
+══════════════════════════════════════════════════════════════════════════════
+⛔ 为什么这个文件是 .disabled (不参与运行、不被任何地方 import)
+══════════════════════════════════════════════════════════════════════════════
+Discord 已对所有非 Stage 语音/视频通话**强制 DAVE 端到端加密 (E2EE)**。
+实测结论: bot 端「接收」语音在整个生态 (py-cord 2.8.0 / discord.js 0.19.x /
+Snazzah/davey) 全部**拿不到音频** —— receive 死锁,与本仓库代码无关:
+
+  · UDP 网络层是通的: bot socket 每秒能收到 RTCP 控制包 (SenderReport, type=200)
+  · 但**零个 RTP 音频包**到达 bot: PacketRouter.decoders 永远空、_STTSink.write
+    从不被调用 (hits=0)、speaking 事件不触发、ssrc_user_map 里永远没有真人的 ssrc
+  · davey 装好了 (HAS_DAVEY=True, DAVE_PROTOCOL_VERSION=1) 也没用,
+    Discord 语音服务器**根本不向未建立有效 E2EE 接收上下文的 bot 转发音频包**
+
+这是上游 (Discord 服务端 + 库) 的死锁,2026 年**无 workaround**。参考:
+  · discord.js #11419 — "zero audio capture, no speaking events fire"
+  · Snazzah/davey #15 — davey 解密 ~95% 失败
+注意: **发送 (TTS 播报) 完全不受影响**,所以 discord_voice_sidecar.py 保留了 TTS。
+
+══════════════════════════════════════════════════════════════════════════════
+✅ 等 DAVE 接收被上游修好后,如何复活这套 STT
+══════════════════════════════════════════════════════════════════════════════
+1. 确认上游已修 (py-cord 能稳定收到 RTP 音频包 / decoders 非空 / hits>0)。
+2. 把本文件改名回 discord_stt_receive.py (去掉 .disabled),或把下面的函数/类
+   连同 _build_bot 里的 /listen /stoplisten 命令、_run 里的 monkey-patch
+   合并回 discord_voice_sidecar.py。
+3. 这套代码逻辑本身在「接收链路通」的前提下是完整的 (silero VAD 统一断句、
+   连续 PCM pump、AgentSession STT-only),只差 receive 真有包进来这一前提。
+4. 详见同目录 docs / memory: discord-dave-voice-receive-blocked。
+
+══════════════════════════════════════════════════════════════════════════════
+原始设计说明 (V2): 连续 PCM 流 → AgentSession(silero VAD 统一断句, STT-only)
+══════════════════════════════════════════════════════════════════════════════
+V1 用「Discord 静音不发包」当断句信号实测不可靠: 麦常开/语音激活模式下 Discord
+持续发包, "0.8s 无包"永不触发。V2 改为统一断句: Discord 端只灌一条连续 PCM 流,
+断句全交给 AgentSession 内的 silero VAD(听音频能量, 与发不发包无关)。
+
+链路: vc.start_recording(_STTSink) → 每个语音包触发 sink.write → stereo 降 mono
+入"真实帧缓冲" → _audio_pump_loop 每 20ms 取一帧(有真帧推真帧, 无则推静音帧)
+喂给 _DiscordAudioInput → AgentSession(stt=GeminiSTT, vad=silero, 无 llm/tts)
+内部 VAD 断句 + STT → user_input_transcribed 事件(is_final) → 发频道文字区。
+
+注意: 本文件里对 _sidecar_bot / _target_voice_channel_id 等全局变量的引用,
+原本是 discord_voice_sidecar.py 模块级状态。封存为独立文件后这些引用不可解析
+(本文件不运行、不 import),复活时需接回 sidecar 的模块级状态。
+"""
+
+import asyncio
+import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采样)
+import logging
+import threading
+
+log = logging.getLogger("closecrab.discord_voice_sidecar")
+
+# ─── STT 接收链路的模块级状态 (复活时接回 sidecar) ──────────────────────────
+_stt_engine = None          # GeminiSTT 单例
+_stt_sink = None            # 当前 _STTSink 实例
+_STT_SINK_CLASS = None      # 惰性定义的 Sink 子类
+_AUDIO_INPUT_CLASS = None    # 惰性定义的 AudioInput 子类
+_audio_input = None          # 当前 _DiscordAudioInput 实例
+_agent_session = None        # 当前 AgentSession 实例
+_audio_pump_task = None       # 连续推帧 task (20ms 节奏 + 静音填充)
+_ssrc_task = None             # ssrc 自动推断 + 录音自动重启巡检 task
+_listen_active = False       # 用户是否要求持续收音 (用于 corrupted 崩溃后自动重启)
+_listen_vc = None            # 当前收音的 voice client
+_listen_restart_n = 0        # 录音自动重启计数 (backoff + 上限保护)
+
+_LISTEN_RESTART_MAX = 8      # 录音崩溃后最多自动重启次数 (防 corrupted 死循环)
+
+# 单声道 20ms 帧 @ 48kHz/16-bit: 喂给 AudioInput 的基本单位。
+_MONO_FRAME_MS = 20
+_MONO_FRAME_SAMPLES = 48000 * _MONO_FRAME_MS // 1000   # 960
+_MONO_FRAME_BYTES = _MONO_FRAME_SAMPLES * 2             # 1920
+
+
+def _get_stt():
+    """惰性构造 GeminiSTT 单例 (复用 voice 模式同款 Vertex 凭据)。"""
+    global _stt_engine
+    if _stt_engine is None:
+        from .gemini_stt import GeminiSTT
+        _stt_engine = GeminiSTT()
+    return _stt_engine
+
+
+def _get_stt_sink_class():
+    """惰性定义 discord.sinks.Sink 子类 (延迟 import discord)。
+
+    py-cord 2.8.0 路径: PacketRouter 调 ``sink.write(VoiceData, source)``。
+    ``data.pcm`` 是解码后的 48kHz/16-bit/stereo PCM bytes; ``user`` 是
+    User/Member(有 .id / .display_name)。覆写 write 直取 data.pcm, 不走
+    基类 ``@Filters.container``(那是写 BytesIO 落盘的逻辑, 我们要实时流)。
+
+    【py-cord 2.8.0 半成品坑】新 ``voice/receive/`` 的 ``SinkEventRouter``
+    初始化要读 ``sink.__sink_listeners__`` + ``sink.walk_children()``, 但
+    ``discord.sinks.Sink`` 基类根本没定义这俩(连官方 WaveSink 也没), 直接
+    AttributeError —— 这就是 issue #3139 "voice receive currently broken"。
+    但送 PCM 的是另一条独立路径 ``PacketRouter`` (不碰这俩属性)。所以补上
+    空 ``__sink_listeners__`` + 空 ``walk_children`` 让 event router 注册空集
+    不崩, PCM 照样从 packet router 进来。只动自己子类, 不 patch py-cord。
+    """
+    global _STT_SINK_CLASS
+    if _STT_SINK_CLASS is not None:
+        return _STT_SINK_CLASS
+    import discord
+
+    class _STTSink(discord.sinks.Sink):
+        """按 user 累积 PCM。write 跑在 py-cord 解码线程, 故用 Lock 护 dict。"""
+
+        __sink_listeners__: list = []  # noqa: 让 SinkEventRouter 注册空集不崩
+
+        def walk_children(self):
+            return []
+
+        def is_opus(self) -> bool:
+            # False = 要 PacketDecoder 把 opus 解成 PCM (我们消费 data.pcm)。
+            # 基类同样没这方法 (半成品坑), PacketDecoder.__init__ 会调它。
+            return False
+
+        def __init__(self):
+            super().__init__()
+            self._lock = threading.Lock()
+            # 真实帧缓冲: 所有说话人的 PCM 降 mono 后混入同一条流(本步单人,
+            # 多人 diarization 后续)。pump 每 20ms 从这里取一帧。
+            self._pcm = bytearray()
+            self._last_name = "?"
+            self._hits = 0  # write 被调次数 (诊断: 验证 receive 真的有包进来)
+
+        def write(self, data, user):
+            pcm = getattr(data, "pcm", None)
+            if not pcm:
+                return
+            name = getattr(user, "display_name", None) or getattr(
+                user, "name", None) or str(getattr(user, "id", "?"))
+            # Discord 解码是 48kHz stereo 16-bit → 取声道平均降 mono。
+            try:
+                mono = audioop.tomono(pcm, 2, 0.5, 0.5)
+            except Exception:
+                return
+            with self._lock:
+                self._hits += 1
+                self._pcm.extend(mono)
+                self._last_name = name
+                # 限 backlog ~2s, 防 jitter 突发累积成持续延迟; 超出丢最旧。
+                cap = _MONO_FRAME_BYTES * 100
+                if len(self._pcm) > cap:
+                    del self._pcm[: len(self._pcm) - cap]
+
+        def pop_frame(self):
+            """取一帧 20ms mono PCM bytes, 不足一帧返回 None。"""
+            with self._lock:
+                if len(self._pcm) >= _MONO_FRAME_BYTES:
+                    out = bytes(self._pcm[:_MONO_FRAME_BYTES])
+                    del self._pcm[:_MONO_FRAME_BYTES]
+                    return out
+                return None
+
+        def last_name(self) -> str:
+            with self._lock:
+                return self._last_name
+
+        def hits(self) -> int:
+            with self._lock:
+                return self._hits
+
+        # 录音结束时基类 cleanup 会 format_audio(BytesIO)。我们没往 audio_data
+        # 写东西, 覆写成空操作避免它对空文件瞎折腾。
+        def cleanup(self):
+            self.finished = True
+
+    _STT_SINK_CLASS = _STTSink
+    return _STT_SINK_CLASS
+
+
+def _on_recording_done(exc):
+    """start_recording 的结束回调 (录音停止/出错时被调)。
+
+    corrupted stream 的根因: 用户刚开口时 voice gateway 还没下发该用户的
+    ssrc→uid 映射, py-cord reader 在 ssrc_user_map 查不到 uid 时会跳过 DAVE
+    解密、把密文直接喂 opus → OpusError 冒泡 → 整个录音线程终止。
+    此时若用户仍要求收音 (_listen_active), 交给 drain loop 自动重启录音 ——
+    重启后 ssrc 通常已映射好, 解密正常就不再崩。
+    """
+    if exc is not None:
+        log.warning("voice 录音结束并带异常 (将由 drain loop 自动重启): %s", exc)
+    else:
+        log.info("voice 录音已停止")
+
+
+def _get_audio_input_class():
+    """惰性定义 livekit AudioInput 子类 (延迟 import livekit.agents)。
+
+    AgentSession 通过 ``async for frame in audio_input`` 拉帧。基类 source=None
+    时 ``__anext__`` 抛 NotImplementedError, 故只覆写 ``__anext__`` 从队列取帧;
+    on_attached/on_detached 基类在 source=None 时已是 no-op, 无需覆写。
+    """
+    global _AUDIO_INPUT_CLASS
+    if _AUDIO_INPUT_CLASS is not None:
+        return _AUDIO_INPUT_CLASS
+    from livekit.agents.voice.io import AudioInput
+
+    class _DiscordAudioInput(AudioInput):
+        def __init__(self):
+            super().__init__(label="discord")
+            self._q: asyncio.Queue = asyncio.Queue()
+
+        async def __anext__(self):
+            return await self._q.get()
+
+        def feed_frame(self, frame):
+            # pump 在 sidecar loop 内调, 直接入队即可。
+            self._q.put_nowait(frame)
+
+    _AUDIO_INPUT_CLASS = _DiscordAudioInput
+    return _AUDIO_INPUT_CLASS
+
+
+async def _audio_pump_loop():
+    """连续推帧: 每 20ms 向 AudioInput 喂一帧。有真帧推真帧(并补 backlog),
+    无真帧推静音帧。把"Discord 发不发包"翻译成"人声帧 vs 静音帧", 让 silero VAD
+    纯靠能量统一断句 —— PTT 停发包(→静音帧)与常开麦(→低能量人声帧)都正确。
+    """
+    from livekit import rtc
+
+    silence = b"\x00" * _MONO_FRAME_BYTES
+    log.info("音频 pump 已启动 (20ms 节奏 + 静音填充)")
+
+    def _mk(pcm: bytes):
+        return rtc.AudioFrame(
+            data=pcm, sample_rate=48000, num_channels=1,
+            samples_per_channel=_MONO_FRAME_SAMPLES,
+        )
+
+    try:
+        while True:
+            await asyncio.sleep(_MONO_FRAME_MS / 1000)
+            ai = _audio_input
+            if ai is None:
+                continue
+            sink = _stt_sink
+            pushed = 0
+            # backlog 时一次最多补 5 帧(100ms)追上实时, 防 jitter 突发累积延迟。
+            while sink is not None and pushed < 5:
+                pcm = sink.pop_frame()
+                if pcm is None:
+                    break
+                ai.feed_frame(_mk(pcm))
+                pushed += 1
+            if pushed == 0:
+                ai.feed_frame(_mk(silence))  # 无真帧: 静音帧保持流连续
+    except asyncio.CancelledError:
+        log.info("音频 pump 已取消")
+        raise
+
+
+async def _start_agent_session(channel_id: int):
+    """装配并启动 STT-only AgentSession(silero VAD 断句, 无 llm/tts), 接 Discord
+    连续流。监听 user_input_transcribed(is_final) → 转写文字发频道文字区。
+    """
+    from livekit.agents import Agent, AgentSession
+    from livekit.plugins import silero
+
+    global _audio_input, _agent_session, _audio_pump_task
+
+    bot = _sidecar_bot  # noqa: F821  复活时接回 sidecar 的模块级 _sidecar_bot
+    stt = _get_stt()
+    vad = silero.VAD.load(min_silence_duration=0.6)
+    log.info("silero VAD 已加载")
+    session = AgentSession(stt=stt, vad=vad, turn_detection="vad")  # 不传 llm/tts
+    ai = _get_audio_input_class()()
+    session.input.audio = ai  # 预设 input → start() 不创建 RoomIO
+
+    def _on_transcribed(ev):
+        try:
+            if not getattr(ev, "is_final", False):
+                return
+            text = (getattr(ev, "transcript", "") or "").strip()
+            if not text:
+                return
+            name = _stt_sink.last_name() if _stt_sink is not None else "?"
+            ch = bot.get_channel(channel_id) if bot else None
+            if ch is not None:
+                asyncio.create_task(ch.send(f"🎤 {name}: {text}"))
+            log.info("STT 转写 [%s]: %s", name, text[:80])
+        except Exception:
+            log.exception("处理 user_input_transcribed 失败")
+
+    session.on("user_input_transcribed", _on_transcribed)
+    await session.start(Agent(instructions=" "))  # 无 room; instructions 无意义
+    _audio_input = ai
+    _agent_session = session
+    _audio_pump_task = asyncio.create_task(_audio_pump_loop())
+    log.info("AgentSession 已启动 (channel=%s, silero VAD 统一断句, STT-only)", channel_id)
+
+
+async def _ssrc_infer_loop(period: float = 0.3):
+    """后台巡检: ① 录音被 corrupted stream 冲垮时自动重启; ② ssrc 自动推断
+    (DAVE 解密前提, 不依赖 speaking 事件)。不再负责断句 —— 断句已交给 VAD。
+
+    ⚠️ 含诊断探针 (持续打印 dave ready/epoch + ssrc_map + hits + decoders),
+    复活后若不需要诊断可精简掉 diag 段。
+    """
+    global _stt_sink, _listen_restart_n
+    log.info("ssrc 推断 + 录音守护循环已启动")
+    diag_n = 0
+    _diag_last_map: tuple = ()
+    try:
+        while True:
+            await asyncio.sleep(period)
+            # 录音被 corrupted stream 冲垮后自动重启 (新 sink), 等 ssrc 映射好就能正常收
+            if _listen_active and _listen_vc is not None and not _listen_vc.is_recording():
+                if _listen_restart_n < _LISTEN_RESTART_MAX:
+                    _listen_restart_n += 1
+                    try:
+                        new_sink = _get_stt_sink_class()()
+                        new_sink.vc = _listen_vc
+                        _stt_sink = new_sink
+                        _listen_vc.start_recording(new_sink, _on_recording_done)
+                        log.info("录音已自动重启 (第 %d 次)", _listen_restart_n)
+                    except Exception:
+                        log.exception("录音自动重启失败")
+                continue
+            sink = _stt_sink
+            if sink is None:
+                continue
+            # 诊断探针: 持续打印 dave ready/epoch + ssrc 映射 + hits。
+            # 防刷屏: 每 10 轮 (~3s) 打一次, 但 hits 或 ssrc_map 一变化立即打。
+            try:
+                vc0 = getattr(sink, "vc", None)
+                st = getattr(vc0, "_connection", None)
+                dave = getattr(st, "dave_session", None)
+                smap = getattr(st, "ssrc_user_map", None)
+                cur_hits = sink.hits()
+                cur_map = dict(smap) if smap else {}
+                # UDP 实收探针: reader / packet_router / decoders 是否存在 + keys。
+                # decoders 非空 = UDP 层真收到了某些 ssrc 的包(哪怕解密失败); 空 =
+                # 包压根没到 bot(receive 死路, 与 DAVE/解密无关)。
+                reader0 = getattr(vc0, "_reader", None) if vc0 else None
+                pr0 = getattr(reader0, "packet_router", None) if reader0 else None
+                dec_keys = sorted(dict(pr0.decoders).keys()) if pr0 is not None else []
+                cur_diag = (cur_hits, tuple(sorted(cur_map.items())), tuple(dec_keys))
+                changed = cur_diag != _diag_last_map
+                diag_n += 1
+                if changed or diag_n % 10 == 0:
+                    log.info(
+                        "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s reader=%s pr=%s decoders=%s%s",
+                        diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
+                        cur_map, cur_hits, reader0 is not None, pr0 is not None, dec_keys,
+                        "  <<变化" if changed else "",
+                    )
+                    _diag_last_map = cur_diag
+            except Exception:
+                log.exception("诊断探针失败")
+            # ssrc 自动推断: 彻底摆脱对 speaking(op5) 事件的依赖。speaking 只在开/关麦
+            # 状态切换瞬间发一次、bot 重连后不重发, 是 hits=0 反复复发的根因。频道里只有
+            # bot + 唯一真人时, router 收到的任何非 bot ssrc 必然是那个真人, 直接 _add_ssrc
+            # 即可让 DAVE 解密。decoders.keys() = UDP 实际收到的所有 ssrc (解密失败也会建
+            # decoder), 同时也是"包到底到没到 bot"的可靠诊断。
+            try:
+                vc = getattr(sink, "vc", None)
+                reader = getattr(vc, "_reader", None) if vc else None
+                pr = getattr(reader, "packet_router", None) if reader else None
+                if pr is not None and vc is not None:
+                    active = set(dict(pr.decoders).keys())
+                    known = set(getattr(vc, "_ssrc_to_id", {}).keys())
+                    unknown = active - known
+                    # 真人 id 双源: channel.members 常因 member_connect 被 skip 而拿不到,
+                    # 用 channel.voice_states(VOICE_STATE_UPDATE 维护, 更可靠)兜底。
+                    # 动态排除 bot 自己(guild.me.id)。
+                    bot_id = None
+                    try:
+                        bot_id = vc.guild.me.id
+                    except Exception:
+                        pass
+                    human_ids = set()
+                    ch = getattr(vc, "channel", None)
+                    if ch is not None:
+                        for m in (getattr(ch, "members", None) or []):
+                            if not getattr(m, "bot", False) and m.id != bot_id:
+                                human_ids.add(m.id)
+                        for uid in (getattr(ch, "voice_states", None) or {}).keys():
+                            if uid != bot_id:
+                                human_ids.add(uid)
+                    if unknown:
+                        log.info("🔎 decoders=%s known=%s unknown=%s human_ids=%s bot=%s",
+                                 active, known, unknown, human_ids, bot_id)
+                    if unknown and len(human_ids) == 1:
+                        hid = next(iter(human_ids))
+                        for s in unknown:
+                            vc._add_ssrc(hid, s)
+                            log.info("🔧 自动推断 ssrc: user=%s ssrc=%s (频道唯一真人, 不靠 speaking)",
+                                     hid, s)
+            except Exception:
+                log.exception("ssrc 自动推断失败")
+    except asyncio.CancelledError:
+        log.info("ssrc 推断循环已取消")
+        raise
+
+
+# ─── /listen /stoplisten 命令体 (原注册在 discord_voice_sidecar._build_bot 内) ──
+# 复活时把这两个 @bot.slash_command 贴回 _build_bot, 与 /leave 并列。
+#
+# @bot.slash_command(description="开始把语音频道里的说话转成文字发到这里")
+# async def listen(ctx):
+#     global _stt_sink, _ssrc_task, _listen_active, _listen_vc, _listen_restart_n
+#     vc = ctx.guild.voice_client
+#     if vc is None or not vc.is_connected():
+#         await ctx.respond("我还没在语音频道里，稍等心跳重连或重启后再试。", ephemeral=True)
+#         return
+#     if vc.is_recording():
+#         await ctx.respond("已经在收音了。", ephemeral=True)
+#         return
+#     await ctx.defer(ephemeral=True)  # silero VAD 加载 + session 启动可能耗时
+#     sink = _get_stt_sink_class()()
+#     # 新 reader 不再调 sink.init(vc), 但解码路径里 _process_packet/_get_user
+#     # 要用 sink.client(=sink.vc) 解析说话人, 没设会 AssertionError。手动补。
+#     sink.vc = vc
+#     _stt_sink = sink
+#     _listen_vc = vc
+#     _listen_restart_n = 0
+#     try:
+#         vc.start_recording(sink, _on_recording_done)
+#     except Exception as e:
+#         log.exception("start_recording 失败")
+#         await ctx.respond(f"❌ 开始收音失败：{e}", ephemeral=True)
+#         return
+#     _listen_active = True  # 开启后, 录音被 corrupted 冲垮由守护循环自动重启
+#     try:
+#         await _start_agent_session(_target_voice_channel_id)
+#     except Exception as e:
+#         log.exception("AgentSession 启动失败")
+#         await ctx.respond(f"❌ AgentSession 启动失败：{e}", ephemeral=True)
+#         return
+#     if _ssrc_task is None or _ssrc_task.done():
+#         _ssrc_task = asyncio.create_task(_ssrc_infer_loop())
+#     await ctx.respond("🎤 开始收音，说几句中文试试（silero VAD 自动断句，常开麦也行）。", ephemeral=True)
+#
+# @bot.slash_command(description="停止语音转文字")
+# async def stoplisten(ctx):
+#     global _ssrc_task, _audio_pump_task, _agent_session, _audio_input, _listen_active
+#     _listen_active = False  # 先关, 防守护循环在停录后又自动重启
+#     vc = ctx.guild.voice_client
+#     if vc and vc.is_recording():
+#         vc.stop_recording()
+#     if _audio_pump_task is not None:
+#         _audio_pump_task.cancel()
+#         _audio_pump_task = None
+#     if _ssrc_task is not None:
+#         _ssrc_task.cancel()
+#         _ssrc_task = None
+#     if _agent_session is not None:
+#         try:
+#             await _agent_session.aclose()
+#         except Exception:
+#             log.exception("AgentSession 关闭异常")
+#         _agent_session = None
+#     _audio_input = None
+#     hits = _stt_sink.hits() if _stt_sink is not None else 0
+#     await ctx.respond(
+#         f"🛑 已停止收音。本次 voice 包命中 {hits} 次" +
+#         ("（>0 说明 receive 链路通）。" if hits else "（=0 说明 DAVE 拦了，receive 不可用）。"),
+#         ephemeral=True,
+#     )
+
+
+# ─── voice receive 相关 monkey-patch (原在 maybe_start_discord_voice_sidecar._run) ──
+# 复活时在 sidecar 线程启动 loop 前调一次 _install_receive_monkeypatches()。
+# 这些只在「接收链路」需要; 纯 TTS 播报不需要, 故从 sidecar 主路径移除。
+def _install_receive_monkeypatches():
+    """安装 voice receive 所需的两组 monkey-patch:
+    ① 诊断探针 (speaking/op/_add_ssrc 日志, 定位 hits=0 根因);
+    ② opus 坏包容错 (corrupted stream 不再杀死整个录音)。
+    """
+    import discord
+
+    # 诊断探针: monkey-patch voice gateway 收帧 + ssrc 填充, 定位 hits=0 根因
+    # (① Discord 没发 speaking op5 / ② 发了但 _add_ssrc 没被调)。
+    try:
+        from discord.voice.gateway import VoiceWebSocket, OpCodes
+        _known_ops = {int(getattr(OpCodes, n)) for n in (
+            "ready", "heartbeat_ack", "resumed", "session_description", "hello")}
+        _orig_recv = VoiceWebSocket.received_message
+
+        async def _probe_recv(self, msg, /):
+            try:
+                _op = msg.get("op")
+                if _op == int(OpCodes.speaking):
+                    log.info("📡 收到 speaking(op5): d=%s", msg.get("d"))
+                elif _op == int(OpCodes.clients_connect):
+                    log.info("📡 收到 clients_connect: d=%s", msg.get("d"))
+                elif _op not in _known_ops and _op < 12:
+                    log.info("📡 收到 op=%s d=%s", _op, msg.get("d"))
+            except Exception:
+                pass
+            return await _orig_recv(self, msg)
+
+        VoiceWebSocket.received_message = _probe_recv
+
+        _orig_add = discord.VoiceClient._add_ssrc
+
+        def _probe_add(self, user_id, ssrc):
+            log.info("✅ _add_ssrc: user=%s ssrc=%s", user_id, ssrc)
+            return _orig_add(self, user_id, ssrc)
+
+        discord.VoiceClient._add_ssrc = _probe_add
+        log.info("voice 诊断探针已挂载 (speaking/op/_add_ssrc)")
+    except Exception:
+        log.exception("voice 诊断探针挂载失败")
+
+    # 关键修复: opus 解码坏包容错。py-cord 的 PacketRouter 线程一遇 OpusError
+    # ("corrupted stream"，多来自 ssrc 映射建立前喂进的密文包) 就在 run() 的
+    # except 里 client.stop_recording() 杀死整个录音。_process_packet 是 router
+    # loop 取数据的唯一入口，返回 None 会被 _do_run 跳过 (if data is not None:
+    # sink.write)。catch 解码异常返回 None = 静默丢坏包、录音存活，好包继续累积
+    # 到静音阈值，STT 才有机会出文字。
+    try:
+        from discord.opus import PacketDecoder, OpusError
+        _orig_proc = PacketDecoder._process_packet
+
+        def _safe_process(self, packet):
+            try:
+                return _orig_proc(self, packet)
+            except OpusError as e:
+                log.debug("丢弃 opus 坏包(corrupted)，录音继续: %s", e)
+                return None
+            except Exception as e:
+                log.debug("丢弃坏包(解码异常)，录音继续: %s", e)
+                return None
+
+        PacketDecoder._process_packet = _safe_process
+        log.info("opus 坏包容错已挂载 (corrupted 不再杀死录音)")
+    except Exception:
+        log.exception("opus 坏包容错挂载失败")

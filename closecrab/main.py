@@ -219,10 +219,15 @@ def build_system_prompt(
             "\n"
             "5. **技术术语保留英文** (API、token、Vertex、MoE 等), 别翻译成中文术语。\n"
             "\n"
-            "6. **双推机制**: 你的回复同时进飞书 (markdown 也能看) 和 voice (TTS 念)。\n"
+            "6. **讲解原则 — 让耳朵跟得上**: 用户是在「听」、看不到代码/屏幕。"
+            "讲技术或原理时必须口语化, 多打比方、先给直觉再讲机制, "
+            "函数名/类名/行号能省则省 (代码细节自己用工具挖准, 口述时翻译成大白话)。"
+            "结构差异用「谁把活摊开、谁打包成一条流水线」这类生活化对比, 别罗列 symbol 名。\n"
+            "\n"
+            "7. **双推机制**: 你的回复同时进飞书 (markdown 也能看) 和 voice (TTS 念)。\n"
             "   voice 在线时优先服务 voice 体验 — 短而口语化, 飞书显示反而更清爽。\n"
             "\n"
-            "7. **正确示范** (第一句判断, 后续才是动作和结论):\n"
+            "8. **正确示范** (第一句判断, 后续才是动作和结论):\n"
             "   `[focus] 让我先看下日志。[thinking] 翻一下 livekit_io.py。"
             "[realization] 哦端口冲突。[suggestion] kill 掉 8080 就行。`\n"
             "   **错误示范** (一长句没情感切换没开头判断):\n"
@@ -773,6 +778,16 @@ def main():
     _threading.Thread(
         target=_audit_bg, daemon=True, name="prompt-audit-bg",
     ).start()
+
+    # Discord 语音 sidecar (旁路): active channel 非 discord 时, 如配置
+    # channels.discord.voice_sidecar=true, 额外拉起一个只做语音输出的 Discord
+    # 连接 (后台 daemon 线程, 不收消息)。用于「飞书主跑 + Discord 只念话」测试。
+    if channel_type != "discord":
+        try:
+            from .voice.discord_voice_sidecar import maybe_start_discord_voice_sidecar
+            maybe_start_discord_voice_sidecar(bot_name)
+        except Exception as e:
+            log.warning(f"Discord 语音 sidecar 启动失败 (non-fatal): {e}")
 
     # 启动 Channel
     # Why os._exit instead of sys.exit / return: LiveKit Rust SDK spawns

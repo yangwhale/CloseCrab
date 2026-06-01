@@ -1243,8 +1243,10 @@ install_bot() {
             fastapi
             uvicorn
             python-dotenv
-            # Discord
+            # Discord (py-cord 2.8.0+ 才有 DAVE E2EE; davey 是原生 DAVE 实现,
+            # 缺了语音连接会被 Discord 用 4017 拒)
             py-cord
+            davey
             # 飞书 / Lark
             lark-oapi
             # 钉钉

@@ -395,6 +395,75 @@ class DiscordChannel(Channel):
             from ..constants import G
             await ctx.respond(f"{G.CC_PAGES_URL}/pages/index.html")
 
+        @self._bot.slash_command(description="进语音频道用 TTS 念一段话")
+        async def say(ctx, text: str):
+            # 用户必须先在某个语音频道里, bot 才知道进哪个
+            voice_state = getattr(ctx.author, "voice", None)
+            if not voice_state or not voice_state.channel:
+                await ctx.respond("⚠️ 你得先进一个语音频道，我才知道去哪念。", ephemeral=True)
+                return
+            channel = voice_state.channel
+            await ctx.defer()
+
+            # 1) 调 tts-generator skill 生成 ogg (opus), stdout 末行是路径
+            ogg_path = ""
+            try:
+                tts_script = os.path.expanduser(
+                    "~/CloseCrab/skills/tts-generator/scripts/tts-generate.py"
+                )
+                proc = await asyncio.create_subprocess_exec(
+                    "python3", tts_script, text,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, err = await proc.communicate()
+                if proc.returncode != 0:
+                    await ctx.respond(f"❌ TTS 生成失败：{err.decode(errors='ignore')[:300]}")
+                    return
+                lines = [l.strip() for l in out.decode(errors="ignore").splitlines() if l.strip()]
+                ogg_path = lines[-1] if lines else ""
+            except Exception as e:
+                log.exception("TTS 生成异常")
+                await ctx.respond(f"❌ TTS 异常：{e}")
+                return
+            if not ogg_path or not os.path.exists(ogg_path):
+                await ctx.respond("❌ TTS 没产出音频文件。")
+                return
+
+            # 2) 连接 / 移动到目标语音频道
+            try:
+                vc = ctx.guild.voice_client
+                if vc and vc.is_connected():
+                    if vc.channel.id != channel.id:
+                        await vc.move_to(channel)
+                else:
+                    vc = await channel.connect()
+            except Exception as e:
+                log.exception("进语音频道失败")
+                await ctx.respond(f"❌ 进语音频道失败：{e}")
+                return
+
+            # 3) 等上一段播完再放, 避免叠音
+            try:
+                while vc.is_playing():
+                    await asyncio.sleep(0.2)
+                source = discord.FFmpegOpusAudio(ogg_path)
+                vc.play(source)
+            except Exception as e:
+                log.exception("播放失败")
+                await ctx.respond(f"❌ 播放失败：{e}")
+                return
+            await ctx.respond(f"🔊 在 **{channel.name}** 念：{text[:80]}")
+
+        @self._bot.slash_command(description="让机器人离开语音频道")
+        async def leave(ctx):
+            vc = ctx.guild.voice_client
+            if vc and vc.is_connected():
+                await vc.disconnect(force=True)
+                await ctx.respond("👋 已离开语音频道。")
+            else:
+                await ctx.respond("我不在任何语音频道里。")
+
         @self._bot.slash_command(description="Show context window usage")
         async def context(ctx):
             user_key = str(ctx.author.id)

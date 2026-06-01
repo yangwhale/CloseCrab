@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff"}
 
 # Model 简写 map (chris 的约定: O/S/H + 版本数字)
 # 用于 /model 命令: `/model O46` 等价于 `/model claude-opus-4-6`
@@ -3897,6 +3897,20 @@ class FeishuChannel(Channel):
             from ..constants import G
             await self._async_send_text(chat_id, f"{G.CC_PAGES_URL}/pages/index.html")
 
+        elif cmd == "/discordon":
+            # 运行时连进 Discord General 语音频道 + 持久化 voice_sidecar=true。
+            # to_thread: 连接要等 ~数秒，别阻塞飞书 event loop。多 bot 通用 (各用各 token)。
+            from ..voice.discord_voice_sidecar import start_sidecar
+            await self._async_send_text(chat_id, "正在连 Discord 语音频道…")
+            ok, msg = await asyncio.to_thread(start_sidecar, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/discordoff":
+            # 断开 Discord 语音 + 持久化 voice_sidecar=false (重启后也不连)。
+            from ..voice.discord_voice_sidecar import stop_sidecar
+            ok, msg = await asyncio.to_thread(stop_sidecar, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
         elif cmd == "/context":
             usage = self._core.get_context_usage(user_key)
             if not usage:
@@ -4305,10 +4319,20 @@ class FeishuChannel(Channel):
         反查 open_id: 从 chat_id 反查 _user_chats (单用户单 chat 场景小, O(n) 可忽略),
         反查不到就只走飞书 ogg。
         """
-        # 串行: 先把最终回复推到 broadcast 并等播完 (drain opener + tool hints + 这条),
-        # 再生成飞书 ogg。AgentSession 是 FIFO 队列, await 最后一句的 wait_for_playout
-        # 就意味着前面排队的 hint 都已播完, 飞书 ogg 不会跟广播抢拍。
-        # 没开 broadcast 时 say_to_user 立刻 return False, 走原路径。
+        # ── 1. (最优先, 不阻塞) Discord 常驻语音频道: 流式直生 TTS 边生成边推 ──
+        # 流式直接调 Gemini TTS (不落盘 ogg / 不走 ffmpeg), 首帧 ~0.9s 出声。
+        # 内部判 connected, 没连则静默跳过、不主动建连。fire-and-forget 让 Discord
+        # 最早开始出声, 不被后面飞书 ogg 的"整段生成+上传"拖住。
+        try:
+            from ..voice.discord_voice_sidecar import stream_speak_text
+            stream_speak_text(text)
+        except Exception:
+            pass
+
+        # ── 2. LiveKit broadcast (浏览器收音机, 开着 /broadcast page 才推) ──
+        # 串行: 把最终回复推到 broadcast 并等播完 (drain opener + tool hints + 这条)。
+        # AgentSession 是 FIFO 队列, await 最后一句的 wait_for_playout 就意味着前面
+        # 排队的 hint 都已播完。没开 broadcast 时 say_to_user 立刻 return False。
         if self._voice_io is not None and text and text.strip():
             open_id = next(
                 (oid for oid, cid in self._user_chats.items() if cid == chat_id), None
@@ -4316,6 +4340,7 @@ class FeishuChannel(Channel):
             if open_id and self._voice_io.has_active_session(open_id):
                 await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
 
+        # ── 3. (垫后) 飞书 ogg 兜底: 文件式生成 + 上传 + 发飞书语音消息 ──
         if await self._tts_and_send_one(chat_id, text):
             log.info(f"Voice summary sent to {chat_id}")
 
