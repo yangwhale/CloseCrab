@@ -656,6 +656,8 @@ class FeishuChannel(Channel):
         self._pending_input: dict[str, asyncio.Future] = {}
         # 缓存最近的审批/问题卡片（按钮点击后用于保留内容）
         self._last_interactive_card: dict[str, dict] = {}
+        # 语音控制卡片: fid -> card message_id（重播进度条 patch 用）
+        self._voice_cards: dict[str, str] = {}
         # bot 自身的 open_id（on_ready 时获取）
         self._bot_open_id: str = ""
         self._ready = False  # on_channel_ready 之前为 False
@@ -1982,6 +1984,58 @@ class FeishuChannel(Channel):
                     return P2CardActionTriggerResponse(
                         {"toast": {"type": "info", "content": f"切换到 {target_sid[:8]}…"}}
                     )
+
+            elif action_type in ("voice_pause", "voice_resume"):
+                # 控制服务器侧给 Discord 推帧的代码 (sidecar 跨线程 thread-safe)。
+                try:
+                    from ..voice.discord_voice_sidecar import (
+                        pause_stream, resume_stream,
+                    )
+                    if action_type == "voice_pause":
+                        ok = pause_stream()
+                        msg = "⏸ 已暂停推流" if ok else "当前没有正在推流的语音"
+                    else:
+                        ok = resume_stream()
+                        msg = "▶️ 已继续推流" if ok else "当前没有暂停中的语音"
+                except Exception as e:
+                    log.error(f"Voice stream control failed: {e}", exc_info=True)
+                    ok, msg = False, "推流控制失败"
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "info" if ok else "warning", "content": msg}}
+                )
+
+            elif action_type in ("voice_replay", "voice_rewind", "voice_forward"):
+                # voice_replay: 从落盘 buffer 整段重播。
+                # voice_rewind / voice_forward: 从当前位置往回/往前跳 10% 继续播。
+                # 三者都重置 active=True, 故都要重新拉起进度 updater (原 updater 可能已退出)。
+                fid = (decoded.get("metadata") or {}).get("fid", "") or ""
+                try:
+                    if action_type == "voice_replay":
+                        from ..voice.discord_voice_sidecar import replay_file
+                        ok = bool(fid) and replay_file(fid)
+                        msg = "🔁 开始重播" if ok else "重播失败 (buffer 不存在或未连语音)"
+                    elif action_type == "voice_rewind":
+                        from ..voice.discord_voice_sidecar import rewind_file
+                        ok = bool(fid) and rewind_file(fid, 0.1)
+                        msg = "⏪ 已倒退 10%" if ok else "倒退失败 (buffer 不存在或未连语音)"
+                    else:
+                        from ..voice.discord_voice_sidecar import forward_file
+                        ok = bool(fid) and forward_file(fid, 0.1)
+                        msg = "⏩ 已前进 10%" if ok else "前进失败 (buffer 不存在或未连语音)"
+                except Exception as e:
+                    log.error(f"Voice {action_type} failed: {e}", exc_info=True)
+                    ok, msg = False, "操作失败"
+                if ok and self._loop:
+                    card_id = self._voice_cards.get(fid, "")
+                    if card_id:
+                        asyncio.run_coroutine_threadsafe(
+                            self._voice_progress_updater(
+                                fid, card_id, open_id, chat_id),
+                            self._loop,
+                        )
+                return P2CardActionTriggerResponse(
+                    {"toast": {"type": "info" if ok else "warning", "content": msg}}
+                )
 
             return P2CardActionTriggerResponse(
                 {"toast": {"type": "info", "content": "收到"}}
@@ -4346,24 +4400,41 @@ class FeishuChannel(Channel):
         text = self._keep_tagged_paragraphs_for_tts(text)
         if not text or not text.strip():
             return
+        # 反查 open_id (供 Discord 控制卡片签名 + LiveKit 推送复用)
+        open_id = next(
+            (oid for oid, cid in self._user_chats.items() if cid == chat_id), None
+        )
         # ── 1. (最优先, 不阻塞) Discord 常驻语音频道: 流式直生 TTS 边生成边推 ──
         # 流式直接调 Gemini TTS (不落盘 ogg / 不走 ffmpeg), 首帧 ~0.9s 出声。
         # 内部判 connected, 没连则静默跳过、不主动建连。fire-and-forget 让 Discord
         # 最早开始出声, 不被后面飞书 ogg 的"整段生成+上传"拖住。
+        streaming = False
+        fid = f"{int(time.time() * 1000):x}"  # 这次播报的 buffer 标识 (落盘 + 重播)
         try:
             from ..voice.discord_voice_sidecar import stream_speak_text
-            stream_speak_text(text)
+            streaming = stream_speak_text(text, fid=fid)
         except Exception:
             pass
+        # Discord 真在推流 → 发暂停/继续/重播控制卡片。控制的是服务器侧给 Discord
+        # 推帧的代码 (vc.pause/resume/replay), 不是飞书客户端的播放器。
+        if streaming:
+            try:
+                card = self._build_voice_control_card(open_id, chat_id, fid=fid)
+                card_id = await self._async_send_card_with_id(chat_id, card)
+                if card_id:
+                    self._voice_cards[fid] = card_id
+                    # 起进度条 updater: 周期 patch 卡片 note 显示已播/总长
+                    asyncio.create_task(
+                        self._voice_progress_updater(fid, card_id, open_id, chat_id)
+                    )
+            except Exception:
+                log.exception("发送语音控制卡片失败")
 
         # ── 2. LiveKit broadcast (浏览器收音机, 开着 /broadcast page 才推) ──
         # 串行: 把最终回复推到 broadcast 并等播完 (drain opener + tool hints + 这条)。
         # AgentSession 是 FIFO 队列, await 最后一句的 wait_for_playout 就意味着前面
         # 排队的 hint 都已播完。没开 broadcast 时 say_to_user 立刻 return False。
         if self._voice_io is not None and text and text.strip():
-            open_id = next(
-                (oid for oid, cid in self._user_chats.items() if cid == chat_id), None
-            )
             if open_id and self._voice_io.has_active_session(open_id):
                 await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
 
@@ -4904,6 +4975,121 @@ class FeishuChannel(Channel):
             },
             "elements": elements,
         }
+
+    def _build_voice_control_card(
+        self,
+        open_id: Optional[str],
+        chat_id: str,
+        fid: str = "",
+        progress_note: str = "",
+    ) -> dict:
+        """构建 Discord 推流控制卡片 (暂停 / 继续 / 重播)。
+
+        按钮控制的是服务器侧给 Discord 语音频道推帧的代码 (vc.pause/resume/replay),
+        不是飞书客户端的音频播放器。点暂停 → 停止推帧 (生成线程仍写 buffer, 不丢音);
+        点继续 → 从断点续推; 点重播 → 从落盘 buffer 整段回放。envelope 锁定发起人 +
+        会话, 防他人误操作。fid 标识这次播报的 buffer 文件, 重播按钮带它定位回放。
+        progress_note 非空时在底部显示进度条文本 (updater 周期 patch 进来)。
+        """
+        def _btn(action_name: str, label: str, style: str,
+                 metadata: Optional[dict] = None) -> dict:
+            return {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label},
+                "type": style,
+                "value": _create_feishu_card_envelope(
+                    action_name,
+                    kind="meta",
+                    metadata=metadata or {},
+                    expected_user_open_id=open_id,
+                    expected_chat_id=chat_id,
+                    # 语音控制卡片不过期: 核心用例就是往上翻历史还能点重播。
+                    # 安全靠 user+chat claim 锁定发起人, 不靠时效。
+                    expires_in_ms=None,
+                ),
+            }
+
+        elements = [
+            {
+                "tag": "action",
+                "actions": [
+                    _btn("voice_pause", "⏸ 暂停", "default"),
+                    _btn("voice_resume", "▶️ 继续", "primary"),
+                    _btn("voice_rewind", "⏪ 倒退10%", "default",
+                         metadata={"fid": fid}),
+                    _btn("voice_forward", "⏩ 前进10%", "default",
+                         metadata={"fid": fid}),
+                    _btn("voice_replay", "🔁 重播", "default",
+                         metadata={"fid": fid}),
+                ],
+            },
+        ]
+        if progress_note:
+            elements.append({
+                "tag": "note",
+                "elements": [{"tag": "plain_text", "content": progress_note}],
+            })
+
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "🎧 Discord 推流控制"},
+                "template": "blue",
+            },
+            "elements": elements,
+        }
+
+    @staticmethod
+    def _fmt_progress_note(played: float, total: float, active: bool) -> str:
+        """把 (已播秒, 总秒, 是否在播) 渲染成进度条文本。"""
+        if total <= 0:
+            return "⏳ 生成中…"
+        ratio = max(0.0, min(1.0, played / total))
+        filled = int(ratio * 20)
+        bar = "█" * filled + "░" * (20 - filled)
+        state = "▶️ 播放中" if active else "⏹ 已结束"
+        return f"{state}  {bar}  {played:.0f}/{total:.0f}s"
+
+    async def _voice_progress_updater(
+        self, fid: str, card_id: str, open_id: Optional[str], chat_id: str,
+    ) -> None:
+        """周期读 sidecar 进度, patch 控制卡片底部 note 显示进度条。
+
+        ~1.5s 一次, 直到播放结束 (active=False 且 played≈total) 或超时 (~5min)。
+        重播会重置 active=True, updater 已退出则不会复活 — 由 voice_replay 分支
+        重新拉起一个 updater。读不到进度 (sidecar 没连/无文件) 直接退出。
+        """
+        try:
+            from ..voice.discord_voice_sidecar import get_playback_progress
+        except Exception:
+            return
+        last_note = ""
+        idle = 0
+        for _ in range(200):  # 200 * 1.5s = 5min 上限
+            await asyncio.sleep(1.5)
+            try:
+                prog = get_playback_progress()
+            except Exception:
+                prog = None
+            # prog: (played_s, total_s, active, cur_fid)
+            if not prog or prog[3] != fid:
+                idle += 1
+                if idle >= 4:  # ~6s 拿不到本 fid 进度 → 认为没在播, 退出
+                    break
+                continue
+            idle = 0
+            played, total, active, _ = prog
+            note = self._fmt_progress_note(played, total, active)
+            if note != last_note:
+                last_note = note
+                card = self._build_voice_control_card(
+                    open_id, chat_id, fid=fid, progress_note=note)
+                try:
+                    await self._async_update_card(card_id, card)
+                except Exception:
+                    pass
+            if not active and total > 0 and played >= total - 0.05:
+                break
 
     def _build_ask_question_card(
         self,

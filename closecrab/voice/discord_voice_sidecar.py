@@ -36,9 +36,60 @@ import asyncio
 import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采样)
 import logging
 import os
+import re
 import threading
+import time
 
 log = logging.getLogger("closecrab.discord_voice_sidecar")
+
+# ─── 语音 buffer 落盘 + 重播 ──────────────────────────────────────────────
+# Chris 2026-06-01: 好不容易生成的音频别播完就丢, 整段存成一个文件; 点重播就把
+# 这个文件重新 streaming 到同一个 Discord 语音入口 (暂停/继续复用 vc.pause/resume)。
+# 文件 = 实际推给 Discord 的 48kHz/stereo/s16 raw PCM (跟 _StreamPCMSource 一致),
+# 重播直接 _FilePCMSource 顺读, 不重新调 Gemini, 也不丢音。fid 编码进飞书重播按钮。
+_BUF_DIR = "/tmp/jarvis-tts-buf"
+_FID_RE = re.compile(r"^[0-9a-zA-Z_-]{1,64}$")  # 防路径穿越: 只许字母数字下划线连字符
+_PCM_BYTES_PER_SEC = 48000 * 2 * 2  # 48kHz * stereo * s16
+
+# 当前播放进度 (供飞书进度条 patch 卡片读)。played/total 单位 = 字节(48k/stereo/s16)。
+# total<=0 表示还在生成(直播首播时总长未知); active=False 表示已播完/没在播。
+_progress_lock = threading.Lock()
+_progress = {"fid": "", "played": 0, "total": 0, "active": False}
+
+
+def _set_progress(fid=None, *, played=None, total=None, active=None):
+    with _progress_lock:
+        if fid is not None:
+            _progress["fid"] = fid
+        if played is not None:
+            _progress["played"] = played
+        if total is not None:
+            _progress["total"] = total
+        if active is not None:
+            _progress["active"] = active
+
+
+def get_playback_progress():
+    """返回 (elapsed_s, total_s, active, fid) 或 None。
+
+    total_s<=0 表示总长未知(直播首播还在生成)。供飞书 _voice_progress_updater 读。
+    """
+    with _progress_lock:
+        if not _progress["fid"]:
+            return None
+        return (
+            _progress["played"] / _PCM_BYTES_PER_SEC,
+            _progress["total"] / _PCM_BYTES_PER_SEC,
+            _progress["active"],
+            _progress["fid"],
+        )
+
+
+def _buf_path(fid: str) -> str:
+    """fid → buffer 文件绝对路径。fid 不合法返回空串 (防路径穿越)。"""
+    if not fid or not _FID_RE.match(fid):
+        return ""
+    return os.path.join(_BUF_DIR, f"{fid}.pcm")
 
 # 模块级状态：给飞书线程跨线程调用 speak_text() 用。sidecar 未启动时全为 None/0，
 # speak_text() 据此静默跳过。
@@ -234,11 +285,62 @@ def is_voice_connected() -> bool:
     return bool(vc is not None and vc.is_connected())
 
 
+# —— 分批合成参数 (借鉴 livekit_io._batching_tts_loop, 因 jarvis 这台无
+#    livekit/blingfire 依赖, 故移植算法而非字面 import) ——
+#  实测 (probe): Gemini 流式 TTS 不是真 token 级流式, 它先啃完整段输入才出第一个
+#  音, 首字时间 ∝ 输入长度: 9c→2.6s · 39c→3.8s · 77c→6s · ≥150c→7.8s(封顶)。
+#  所以唯一压首字的杠杆 = 第一批只放少量字。又: 单次 ~500c 会吞结尾(568c 实测截断,
+#  458c OK), 且单流偶发 server gRPC drop 会丢整段。分批同时解决三件事:
+#    1) 第一批小 → 首字 ~3-4s (砍半);
+#    2) 后续批 ≤ _MAX_BATCH_CHARS → 不触发吞尾;
+#    3) 偶发 drop 只丢一批(≤200c≈36s)且断在句子边界 → 可廉价重合成(留后续)。
+#  连续性: 生成速率 ~2.7x 实时, 第一批后 cushion 滚雪球, 批间 firstbyte 接缝被
+#  前一批累积的 buffer 盖住; 欠载时 _StreamPCMSource 给静音帧不会断流。
+_SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?；;…])\s*|\n+")  # 句末标点切句(标点留句尾), 不切逗号保 prosody
+_SOLO_UNTIL_CHARS = 30    # 开头逐句单播, 累计播够这么多字之前每句独立成批(首字最快)
+_RAMP_BATCH_CHARS = 90    # 单播后第一包上限: 首字 ~6s 能被前面 cushion 盖住, 不留空档
+_MAX_BATCH_CHARS = 200    # 之后批上限: 此时已有大段 buffer, 放大减接缝; 远低于 ~500c 吞尾阈值
+
+
+def _plan_tts_batches(cleaned: str):
+    """切句 → 三段渐进打包。
+      阶段1 单播: 累计 <30c 时每句独立成批(首字最快, 接缝最小);
+      阶段2 第一包: 凑够 30c 后剩余句子先打包成 ≤90c 一包(首字 ~6s 被 cushion 盖住);
+      阶段3 大包: 此后每批 ≤200c(已有大 buffer, 放大减接缝 + 防吞尾)。
+
+    动机(Chris 2026-06-01): 旧版第一批小但第二批吞掉后面全部 → 187c 批首字 7.8s
+    出现 ~6s 空档。改成开头一句一句播建 cushion, 再用渐进上限让后续每批首字都
+    被已播 buffer 盖住, 实测接缝从 6s → <0.6s。"""
+    sents = [s for s in _SENT_SPLIT_RE.split(cleaned) if s and s.strip()]
+    if not sents:
+        return [cleaned] if cleaned.strip() else []
+    batches = []
+    acc, i = 0, 0
+    # 阶段1: 逐句单播, 直到累计字数够 cushion
+    while i < len(sents) and acc < _SOLO_UNTIL_CHARS:
+        batches.append(sents[i])
+        acc += len(sents[i])
+        i += 1
+    # 阶段2/3: 剩余句子渐进打包, 第一包用小 cap, 之后放大
+    cur, cur_n, cap = [], 0, _RAMP_BATCH_CHARS
+    for s in sents[i:]:
+        if cur and cur_n + len(s) > cap:
+            batches.append("".join(cur))
+            cur, cur_n, cap = [s], len(s), _MAX_BATCH_CHARS
+        else:
+            cur.append(s)
+            cur_n += len(s)
+    if cur:
+        batches.append("".join(cur))
+    return batches
+
+
 async def _gemini_tts_stream(text: str):
-    """流式调 Gemini TTS, 逐 chunk yield 24kHz mono s16 PCM bytes。
+    """分批流式调 Gemini TTS, 逐 chunk yield 24kHz mono s16 PCM bytes。
 
     复用 gemini_tts 的 client 构造 + 文本清洗 + config, 保证与飞书 ogg 同
-    model/voice (orus→"Orus")。
+    model/voice (orus→"Orus")。整段先切句打包成多批, 逐批 generate_content_stream,
+    PCM 连续 yield (消费方 _gen_worker 无感知分批, ratecv state 跨批连续)。
     """
     from google.genai import types as gt
     from .gemini_tts import _build_genai_client, _clean_text_for_tts
@@ -257,19 +359,32 @@ async def _gemini_tts_stream(text: str):
             )
         ),
     )
-    stream = await client.aio.models.generate_content_stream(
-        model=model, contents=cleaned, config=config
-    )
-    async for chunk in stream:
-        for cand in getattr(chunk, "candidates", None) or []:
-            content = getattr(cand, "content", None)
-            for part in getattr(content, "parts", None) or []:
-                inline = getattr(part, "inline_data", None)
-                if inline and inline.data:
-                    yield bytes(inline.data)
+    batches = _plan_tts_batches(cleaned)
+    log.info("TTS 分批: %dc → %d 批 (首批 %dc)", len(cleaned), len(batches),
+             len(batches[0]) if batches else 0)
+    for idx, batch in enumerate(batches, 1):
+        last_finish = None
+        got = 0
+        stream = await client.aio.models.generate_content_stream(
+            model=model, contents=batch, config=config
+        )
+        async for chunk in stream:
+            for cand in getattr(chunk, "candidates", None) or []:
+                fr = getattr(cand, "finish_reason", None)
+                if fr is not None:
+                    last_finish = fr
+                content = getattr(cand, "content", None)
+                for part in getattr(content, "parts", None) or []:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and inline.data:
+                        got += len(inline.data)
+                        yield bytes(inline.data)
+        log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
+                 idx, len(batches), len(batch), got / 2 / 24000, last_finish)
 
 
 _SOURCE_CLASS = None
+_FILE_SOURCE_CLASS = None
 
 
 def _get_source_class():
@@ -291,13 +406,14 @@ def _get_source_class():
 
         FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
 
-        def __init__(self):
+        def __init__(self, fid: str = ""):
             self._buf = bytearray()
             self._lock = threading.Lock()
             self._finished = False
-            self._written = 0   # 累计写入字节 (诊断)
-            self._real = 0      # 派发真音频帧数 (诊断)
+            self._written = 0   # 累计写入字节 (诊断 + 进度总长)
+            self._real = 0      # 派发真音频帧数 (诊断 + 进度已播)
             self._silence = 0   # 派发欠载静音帧数 (诊断)
+            self._fid = fid     # 进度条用: 标识这次播放对应哪个 buffer 文件
 
         def write(self, pcm: bytes):
             with self._lock:
@@ -311,6 +427,9 @@ def _get_source_class():
         def finish(self):
             with self._lock:
                 self._finished = True
+                # 生成完, 总长已确定; 让进度条拿到分母 (直播首播此前 total=0 未知)
+                if self._fid:
+                    _set_progress(self._fid, total=self._written)
 
         def read(self) -> bytes:
             with self._lock:
@@ -318,6 +437,9 @@ def _get_source_class():
                     out = bytes(self._buf[: self.FRAME])
                     del self._buf[: self.FRAME]
                     self._real += 1
+                    if self._fid:
+                        _set_progress(self._fid, played=self._real * self.FRAME,
+                                      active=True)
                     return out
                 if self._finished:
                     if self._buf:
@@ -329,6 +451,9 @@ def _get_source_class():
                         "Discord 播放结束: 写入 %d 字节(%.1fs), 真音频帧 %d(%.1fs), "
                         "欠载静音帧 %d", self._written, self._written / 4 / 48000,
                         self._real, self._real * 0.02, self._silence)
+                    if self._fid:
+                        _set_progress(self._fid, played=self._written,
+                                      total=self._written, active=False)
                     return b""
                 self._silence += 1
                 return b"\x00" * self.FRAME  # 欠载未结束: 静音帧保持流活着
@@ -340,10 +465,11 @@ def _get_source_class():
     return _SOURCE_CLASS
 
 
-async def _stream_speak(text: str):
+async def _stream_speak(text: str, fid: str = ""):
     """sidecar loop 内: 用现有常驻连接流式直生 → resample → 推 Discord。
 
     不主动建连 (没连由调用方 is_voice_connected 拦掉)。排队等上一句念完避免叠音。
+    fid 非空时, 把生成的 48k/stereo/s16 PCM 同步落盘到 _buf_path(fid), 供重播。
     """
     bot = _sidecar_bot
     if bot is None or not bot.guilds:
@@ -356,7 +482,7 @@ async def _stream_speak(text: str):
             break
         await asyncio.sleep(0.05)
 
-    source = _get_source_class()()
+    source = _get_source_class()(fid)
     # 预充阈值: 攒够 ~0.8s 的 48k/stereo/s16 再开播, 抗 jitter。
     PREBUFFER = int(48000 * 2 * 2 * 0.8)
 
@@ -365,11 +491,24 @@ async def _stream_speak(text: str):
     # keepalive + LiveKit Voice IO, 太忙 → chunk 消费被挤占变慢 → Vertex gRPC
     # 流被服务端按 idle 提前关 → async for 正常结束但只拿到一半音频 (截断元凶)。
     def _gen_worker():
+        buf_f = None
+        bpath = _buf_path(fid)
+        if bpath:
+            try:
+                os.makedirs(_BUF_DIR, exist_ok=True)
+                buf_f = open(bpath, "wb")
+            except Exception:
+                log.exception("打开 buffer 落盘文件失败: %s", bpath)
+                buf_f = None
+
         async def _run():
             state = None  # ratecv 跨块状态, 跨 chunk 传递保证边界无爆音
             async for pcm24 in _gemini_tts_stream(text):
                 pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
-                source.write(audioop.tostereo(pcm48, 2, 1, 1))  # mono → stereo
+                stereo = audioop.tostereo(pcm48, 2, 1, 1)  # mono → stereo
+                source.write(stereo)
+                if buf_f is not None:
+                    buf_f.write(stereo)  # tee: 直播的同时落盘整段, 供重播
             log.info("Discord 流式念(生成完): %s", text[:40])
         try:
             asyncio.run(_run())
@@ -377,6 +516,11 @@ async def _stream_speak(text: str):
             log.exception("流式 TTS 生成失败")
         finally:
             source.finish()  # 让 read() 放完残余后返回 b'' 结束播放
+            if buf_f is not None:
+                try:
+                    buf_f.close()
+                except Exception:
+                    pass
 
     gen_thread = threading.Thread(
         target=_gen_worker, daemon=True, name="discord-tts-gen")
@@ -397,11 +541,12 @@ async def _stream_speak(text: str):
         source.finish()  # 啥都没生成出来
 
 
-def stream_speak_text(text: str) -> bool:
+def stream_speak_text(text: str, fid: str = "") -> bool:
     """【飞书线程调用】流式直生 TTS 推 Discord 常驻语音频道念。线程安全。
 
     未连语音频道 / sidecar 未启动 → 静默返回 False (不主动建连, 不费劲)。
     fire-and-forget: 立即返回, 不阻塞飞书后续 (飞书 ogg) 的生成。
+    fid 非空时把整段音频落盘到 _buf_path(fid), 供后续 replay_file(fid) 重播。
     """
     if not text or not text.strip():
         return False
@@ -411,10 +556,238 @@ def stream_speak_text(text: str) -> bool:
     if not is_voice_connected():
         return False
     try:
-        asyncio.run_coroutine_threadsafe(_stream_speak(text), loop)
+        asyncio.run_coroutine_threadsafe(_stream_speak(text, fid), loop)
         return True
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
+        return False
+
+
+async def _set_pause(paused: bool) -> bool:
+    """sidecar loop 内: 暂停/恢复当前 Discord 推流 (vc.pause/resume 同步原生 API)。
+
+    暂停期间 _gen_worker 仍往 buffer 写, 不丢音; resume 后从断点继续念。
+    返回是否真的对一个正在播放的流执行了操作。
+    """
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return False
+    vc = bot.guilds[0].voice_client
+    if vc is None or not vc.is_connected():
+        return False
+    if paused:
+        if vc.is_playing():
+            vc.pause()
+            return True
+        return False
+    if vc.is_paused():
+        vc.resume()
+        return True
+    return False
+
+
+def pause_stream() -> bool:
+    """【飞书线程调用】暂停 Discord 推流。线程安全。无播放中流 → False。"""
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_set_pause(True), loop)
+        return bool(fut.result(timeout=3))
+    except Exception:
+        log.exception("pause_stream 跨线程调度失败")
+        return False
+
+
+def resume_stream() -> bool:
+    """【飞书线程调用】恢复 Discord 推流。线程安全。无暂停中流 → False。"""
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_set_pause(False), loop)
+        return bool(fut.result(timeout=3))
+    except Exception:
+        log.exception("resume_stream 跨线程调度失败")
+        return False
+
+
+# ─── 重播 (从落盘 buffer 文件回放整段) ──────────────────────────────────────
+
+
+def _get_file_source_class():
+    """惰性定义重播用 AudioSource (从 .pcm 文件按帧读, 同步更新进度)。"""
+    global _FILE_SOURCE_CLASS
+    if _FILE_SOURCE_CLASS is not None:
+        return _FILE_SOURCE_CLASS
+    import discord
+
+    class _FilePCMSource(discord.AudioSource):
+        """从落盘的 48k/stereo/s16 .pcm 文件按 20ms 帧读回放, 边读边更进度。
+
+        文件已是 Discord 原生 PCM 格式 (生成时即落盘), 无需再 resample。
+        read() 在播放线程被调, 必须快; 文件顺序读已足够快, 不另开缓冲线程。
+        """
+
+        FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
+
+        def __init__(self, fid: str, path: str, total: int, start_byte: int = 0):
+            self._fid = fid
+            self._f = open(path, "rb")
+            self._total = total
+            if start_byte > 0:
+                try:
+                    self._f.seek(min(start_byte, total))
+                except Exception:
+                    start_byte = 0
+                    self._f.seek(0)
+            self._played = start_byte
+            _set_progress(fid, played=start_byte, total=total, active=True)
+
+        def read(self) -> bytes:
+            chunk = self._f.read(self.FRAME)
+            if not chunk:
+                _set_progress(self._fid, played=self._total,
+                              total=self._total, active=False)
+                return b""
+            self._played += len(chunk)
+            _set_progress(self._fid, played=self._played, active=True)
+            if len(chunk) < self.FRAME:  # 末帧补齐静音
+                chunk = chunk + b"\x00" * (self.FRAME - len(chunk))
+            return chunk
+
+        def is_opus(self) -> bool:
+            return False
+
+        def cleanup(self):
+            try:
+                self._f.close()
+            except Exception:
+                pass
+
+    _FILE_SOURCE_CLASS = _FilePCMSource
+    return _FILE_SOURCE_CLASS
+
+
+async def _replay(fid: str) -> bool:
+    """sidecar loop 内: 停掉当前播放, 从 _buf_path(fid) 整段回放。"""
+    path = _buf_path(fid)
+    if not path or not os.path.exists(path):
+        log.warning("重播失败: buffer 文件不存在 fid=%s", fid)
+        return False
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return False
+    vc = bot.guilds[0].voice_client
+    if vc is None or not vc.is_connected():
+        return False
+    if vc.is_playing() or vc.is_paused():
+        vc.stop()  # 打断当前 (直播或上一次重播)
+        for _ in range(40):  # 最多 ~2s 等 stop 落定
+            if not vc.is_playing() and not vc.is_paused():
+                break
+            await asyncio.sleep(0.05)
+    try:
+        total = os.path.getsize(path)
+    except OSError:
+        return False
+    try:
+        source = _get_file_source_class()(fid, path, total)
+        vc.play(source)
+        log.info("重播开始 fid=%s (%.1fs)", fid, total / _PCM_BYTES_PER_SEC)
+        return True
+    except Exception:
+        log.exception("重播 vc.play 失败 fid=%s", fid)
+        return False
+
+
+def replay_file(fid: str) -> bool:
+    """【飞书线程调用】重播指定 fid 的整段音频。线程安全。"""
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    if not is_voice_connected():
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_replay(fid), loop)
+        return bool(fut.result(timeout=5))
+    except Exception:
+        log.exception("replay_file 跨线程调度失败 fid=%s", fid)
+        return False
+
+
+async def _seek(fid: str, delta_frac: float) -> bool:
+    """sidecar loop 内: 从当前播放位置按 delta_frac*总长 跳转 (正=前进, 负=倒退)。
+
+    实现 = 打断当前播放 + 用 _FilePCMSource(start_byte=...) 从目标点重开。
+    当前位置取自 _progress (须 fid 匹配, 直播/重播都更新它); 取不到则从头。
+    目标点 clamp 到 [0, total] 并对齐 20ms 帧边界 (FRAME=3840) 防左右声道错位。
+    """
+    path = _buf_path(fid)
+    if not path or not os.path.exists(path):
+        log.warning("seek 失败: buffer 文件不存在 fid=%s", fid)
+        return False
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return False
+    vc = bot.guilds[0].voice_client
+    if vc is None or not vc.is_connected():
+        return False
+    try:
+        total = os.path.getsize(path)
+    except OSError:
+        return False
+    if total <= 0:
+        return False
+    with _progress_lock:
+        played = _progress["played"] if _progress["fid"] == fid else 0
+    step = int(total * delta_frac)
+    start = max(0, min(total, played + step))
+    start -= start % 3840  # 对齐帧边界
+    if vc.is_playing() or vc.is_paused():
+        vc.stop()  # 打断当前 (直播或上一次重播)
+        for _ in range(40):  # 最多 ~2s 等 stop 落定
+            if not vc.is_playing() and not vc.is_paused():
+                break
+            await asyncio.sleep(0.05)
+    try:
+        source = _get_file_source_class()(fid, path, total, start_byte=start)
+        vc.play(source)
+        log.info("seek fid=%s delta=%+.0f%% → %.1fs/%.1fs", fid, delta_frac * 100,
+                 start / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
+        return True
+    except Exception:
+        log.exception("seek vc.play 失败 fid=%s", fid)
+        return False
+
+
+def rewind_file(fid: str, frac: float = 0.1) -> bool:
+    """【飞书线程调用】把指定 fid 的播放位置往回跳 frac*总长。线程安全。"""
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    if not is_voice_connected():
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_seek(fid, -abs(frac)), loop)
+        return bool(fut.result(timeout=5))
+    except Exception:
+        log.exception("rewind_file 跨线程调度失败 fid=%s", fid)
+        return False
+
+
+def forward_file(fid: str, frac: float = 0.1) -> bool:
+    """【飞书线程调用】把指定 fid 的播放位置往前跳 frac*总长。线程安全。"""
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+    if not is_voice_connected():
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_seek(fid, abs(frac)), loop)
+        return bool(fut.result(timeout=5))
+    except Exception:
+        log.exception("forward_file 跨线程调度失败 fid=%s", fid)
         return False
 
 
