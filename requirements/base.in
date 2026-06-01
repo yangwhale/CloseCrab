@@ -18,6 +18,8 @@ python-dotenv
 
 # ---- Channels ----
 py-cord            # Discord
+PyNaCl             # Discord 语音 RTP 传输层加密 (py-cord[voice] extra, 缺了语音连不上)
+davey              # Discord 语音 DAVE E2EE 原生实现 (py-cord[voice] extra, 缺了被 4017 拒)
 lark-oapi          # 飞书 / Lark
 dingtalk-stream    # 钉钉
 
