@@ -38,6 +38,7 @@ log = logging.getLogger("closecrab.discord_voice_sidecar")
 _sidecar_loop: "asyncio.AbstractEventLoop | None" = None
 _sidecar_bot = None
 _target_voice_channel_id: int = 0
+_heartbeat_task = None  # 后台 voice 健康检查 task，防重复启动
 
 
 def _load_sidecar_config(bot_name: str) -> dict | None:
@@ -134,6 +135,36 @@ async def _ensure_connected():
             break
         await asyncio.sleep(0.2)
     return vc if vc.is_connected() else None
+
+
+async def _voice_heartbeat(interval: float = 30.0):
+    """后台心跳：周期性检查 voice 连接，掉线则自动爬回常驻频道。
+
+    根因：Discord gateway 与 voice 是两条独立连接。半夜 websocket 1006 断线后
+    gateway 会 RESUME，但 voice 连接不会自动重建 → 飞书 voice-summary 检测到
+    is_voice_connected=False 就回退飞书 ogg，Discord 静音。这个心跳就是兜底。
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if not _target_voice_channel_id:
+                continue
+            bot = _sidecar_bot
+            if bot is None or not bot.guilds:
+                continue
+            vc = bot.guilds[0].voice_client
+            if vc is not None and vc.is_connected():
+                continue  # 健康，跳过
+            log.warning("检测到 voice 掉线，尝试自动 rejoin 常驻频道…")
+            vc = await _ensure_connected()
+            if vc is not None:
+                log.info("voice 自动 rejoin 成功")
+            else:
+                log.warning("voice 自动 rejoin 失败，下个周期再试")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("voice 心跳异常，继续下个周期")
 
 
 async def _speak(text: str):
@@ -407,6 +438,11 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         vc = await _ensure_connected()
         if vc is not None:
             log.info("已常驻语音频道: %s (id=%s)", ch.name, ch.id)
+        # 启动后台 voice 健康检查（防重复：on_ready 在 RESUME 后可能再次触发）
+        global _heartbeat_task
+        if _heartbeat_task is None or _heartbeat_task.done():
+            _heartbeat_task = asyncio.create_task(_voice_heartbeat())
+            log.info("voice 心跳已启动（30s 周期，断线自动 rejoin）")
 
     @bot.event
     async def on_application_command_error(ctx, error):
