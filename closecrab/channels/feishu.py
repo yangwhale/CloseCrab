@@ -3488,15 +3488,29 @@ class FeishuChannel(Channel):
                     log.error(f"Team msg from {sender_open_id} but no known users, dropping")
                     return
 
-            # voice mode + broadcast 在听: tool_use 触发 progressive hint, 跨 loop 推 TTS
-            # dedup 复刻 voice call (livekit_io.py:447): 同 tool 连发 ≥2 次跳过
+            # voice mode 中间过程播报: opener + tool hint 同时推两条 TTS 通道 ——
+            #   路径 A: Discord 常驻语音频道 (sidecar, 内部判 connected, 无 fid 不落盘不重播)
+            #   路径 B: LiveKit broadcast (实时会话, 需 _voice_io + has_active_session)
+            # 之前只推 B, 导致 Chris 用 Discord 常驻频道听时听不到中间过程, 只有最终 ogg。
+            # dedup 复刻 voice call (livekit_io.py:447): 同 tool 连发 ≥2 次跳过, 两路共用。
             _last_tool_hint = [None]
             _tool_hint_repeat = [0]
 
-            async def on_tool_use(tool_name: str, _tool_input: dict):
-                if not in_voice_mode or self._voice_io is None:
+            def _broadcast_intermediate(text: str, *, is_opener: bool):
+                if not text or not text.strip():
                     return
-                if not self._voice_io.has_active_session(user_key):
+                # 路径 A: Discord sidecar (无 fid → 不进 buffer 不可重播, 中间过程不需要)
+                try:
+                    from ..voice.discord_voice_sidecar import stream_speak_text
+                    stream_speak_text(text)
+                except Exception:
+                    pass
+                # 路径 B: LiveKit broadcast
+                if self._voice_io is not None and self._voice_io.has_active_session(user_key):
+                    asyncio.create_task(self._voice_io.say_to_user(user_key, text))
+
+            async def on_tool_use(tool_name: str, _tool_input: dict):
+                if not in_voice_mode:
                     return
                 if tool_name == _last_tool_hint[0]:
                     _tool_hint_repeat[0] += 1
@@ -3511,19 +3525,19 @@ class FeishuChannel(Channel):
                 except Exception as e:
                     log.debug(f"pick_tool_voice_phrase failed: {e}")
                     return
+                if not phrase:
+                    return
                 log.info(f"text-voice broadcast hint: tool={tool_name} → {phrase!r}")
-                asyncio.create_task(self._voice_io.say_to_user(user_key, phrase))
+                _broadcast_intermediate(phrase, is_opener=False)
 
-            # voice mode + broadcast: Claude 在调工具前那段 "[thinking] 我去看..." 也推到 broadcast,
-            # 否则只有 tool hints 和最终 ogg, 用户听不见思考过程。最终 ogg 走 _send_voice_summary,
+            # Claude 在调工具前那段 "[thinking] 我去看..." 也推到两路, 否则只有 tool
+            # hints 和最终 ogg, 用户听不见思考过程。最终 ogg 走 _send_voice_summary,
             # 那个是工具链跑完后的最后一段, 不含 opener — 必须在这里独立推一次。
             async def on_voice_opening_text(text: str):
-                if not in_voice_mode or self._voice_io is None:
-                    return
-                if not self._voice_io.has_active_session(user_key):
+                if not in_voice_mode:
                     return
                 log.info(f"text-voice broadcast opening: {text[:60]!r}")
-                asyncio.create_task(self._voice_io.say_to_user(user_key, text))
+                _broadcast_intermediate(text, is_opener=True)
 
             # 构造 UnifiedMessage
             metadata = {
@@ -5013,13 +5027,13 @@ class FeishuChannel(Channel):
             {
                 "tag": "action",
                 "actions": [
-                    _btn("voice_pause", "⏸ 暂停", "default"),
-                    _btn("voice_resume", "▶️ 继续", "primary"),
-                    _btn("voice_rewind", "⏪ 倒退10%", "default",
+                    _btn("voice_pause", "⏸", "default"),
+                    _btn("voice_resume", "▶️", "primary"),
+                    _btn("voice_rewind", "⏪", "default",
                          metadata={"fid": fid}),
-                    _btn("voice_forward", "⏩ 前进10%", "default",
+                    _btn("voice_forward", "⏩", "default",
                          metadata={"fid": fid}),
-                    _btn("voice_replay", "🔁 重播", "default",
+                    _btn("voice_replay", "🔁", "default",
                          metadata={"fid": fid}),
                 ],
             },
@@ -5030,12 +5044,9 @@ class FeishuChannel(Channel):
                 "elements": [{"tag": "plain_text", "content": progress_note}],
             })
 
+        # 轻量贴近: 不带彩色 header, 就是一条贴在内容下方的图标按钮条。
         return {
             "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "🎧 Discord 推流控制"},
-                "template": "blue",
-            },
             "elements": elements,
         }
 
