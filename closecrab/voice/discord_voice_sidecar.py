@@ -7,6 +7,13 @@
 它**故意不注册** ``on_message`` / 任何消息处理 handler，所以「接收消息那条
 路」天然堵死。它不依赖 BotCore，完全自包含，跑在独立后台 daemon 线程里。
 
+⚠️ 只做 TTS「播报 (发送)」，不做语音「接收 (STT)」。
+   Discord 已对所有非 Stage 通话强制 DAVE 端到端加密 (E2EE)，bot 端接收语音
+   在整个生态 (py-cord / discord.js / davey) 实测全部拿不到音频包 —— 上游死锁，
+   2026 年无 workaround (发送不受影响)。完整 STT 接收实现已封存到同目录
+   ``discord_stt_receive.py.disabled``，等上游修好 DAVE 接收后再复活。
+   详见 memory: discord-dave-voice-receive-blocked。
+
 启用方式 (Firestore ``bots/{name}``)::
 
     channels:
@@ -387,7 +394,7 @@ async def _stream_speak(text: str):
 
 
 def stream_speak_text(text: str) -> bool:
-    """【飞书线程调用】流式直生 TTS 推 Discord 常驻语音频道。线程安全。
+    """【飞书线程调用】流式直生 TTS 推 Discord 常驻语音频道念。线程安全。
 
     未连语音频道 / sidecar 未启动 → 静默返回 False (不主动建连, 不费劲)。
     fire-and-forget: 立即返回, 不阻塞飞书后续 (飞书 ogg) 的生成。
@@ -405,6 +412,14 @@ def stream_speak_text(text: str) -> bool:
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
         return False
+
+
+# ─── 语音「接收」(STT) 已封存 ────────────────────────────────────────────────
+# Discord 强制 DAVE E2EE 后, bot 端接收语音在整个生态实测拿不到音频包 (上游死锁,
+# 2026 无 workaround)。完整 V2 接收实现 (连续 PCM 流 + silero VAD + AgentSession
+# STT-only + ssrc 自动推断 + 诊断探针 + /listen /stoplisten 命令) 已封存到同目录
+# discord_stt_receive.py.disabled, 等上游修好 DAVE 接收后复活。本文件只保留发送
+# (TTS 播报)。详见 memory: discord-dave-voice-receive-blocked。
 
 
 def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
@@ -485,6 +500,18 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
 
     def _run():
         global _sidecar_loop, _sidecar_bot
+        import discord
+        # TTS 流式播放路径用 _StreamPCMSource(is_opus=False), py-cord 要把 PCM
+        # 编码成 opus 才能发, 故必须先手动加载 libopus (默认不自动加载)。
+        try:
+            if not discord.opus.is_loaded():
+                discord.opus.load_opus("libopus.so.0")
+                log.info("opus 已加载 (TTS 流式播放编码需要)")
+        except Exception:
+            log.exception("opus 加载失败，TTS 流式播放可能无法编码")
+        # 注: 不能禁用 DAVE (DAVE_PROTOCOL_VERSION=0) —— Discord 已强制 E2EE，
+        # 声明 0 会被 voice gateway 以 close code 4017 拒绝，连放音都连不上。
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _sidecar_loop = loop
