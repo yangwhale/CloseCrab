@@ -3520,7 +3520,7 @@ class FeishuChannel(Channel):
                     _last_tool_hint[0] = tool_name
                     _tool_hint_repeat[0] = 0
                 try:
-                    from ..voice.livekit_io import pick_tool_voice_phrase
+                    from ..voice.tool_voice_phrases import pick_tool_voice_phrase
                     phrase = pick_tool_voice_phrase(tool_name)
                 except Exception as e:
                     log.debug(f"pick_tool_voice_phrase failed: {e}")
