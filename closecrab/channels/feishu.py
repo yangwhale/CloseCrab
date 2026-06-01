@@ -93,6 +93,11 @@ _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停
 # 文本指令
 _TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff"}
 
+# 语音情绪标签: Gemini TTS 用的 [casually] / [thinking] 这种，全小写、不跟 "(".
+# 用全小写排除标题里的 [External]；用 (?!\() 排除 markdown 链接 [title](url)。
+# voice mode 下「带标签的段落才念」，不带标签的（链接/列表/表格/纯展示文本）只给眼睛看。
+_RE_VOICE_EMOTION_TAG = re.compile(r"\[[a-z][a-z _-]*\](?!\()")
+
 # Model 简写 map (chris 的约定: O/S/H + 版本数字)
 # 用于 /model 命令: `/model O46` 等价于 `/model claude-opus-4-6`
 # self-restart 冷却锁（秒）：boot 后这段时间内拒绝模型自重启，防无限循环。
@@ -4309,6 +4314,22 @@ class FeishuChannel(Channel):
                 except OSError:
                     pass
 
+    @staticmethod
+    def _keep_tagged_paragraphs_for_tts(text: str) -> str:
+        """voice mode 过滤: 只保留含情绪标签的段落给 TTS 念。
+
+        按空行切段, 段里有 [casually] 这种小写情绪标签才留, 否则丢。
+        这样链接/列表/表格/纯展示正文 (没标签) 不会被念出来, 只在飞书显示。
+        全都没标签时回落原文 (避免意外哑掉 —— voice mode 正常每段都带标签)。
+        """
+        if not text or not text.strip():
+            return text
+        paras = re.split(r"\n\s*\n", text)
+        kept = [p for p in paras if _RE_VOICE_EMOTION_TAG.search(p)]
+        if not kept:
+            return text
+        return "\n\n".join(p.strip() for p in kept).strip()
+
     async def _send_voice_summary(self, chat_id: str, text: str):
         """生成 TTS 语音并作为飞书语音消息发送（单段，不切分）。
 
@@ -4318,7 +4339,13 @@ class FeishuChannel(Channel):
 
         反查 open_id: 从 chat_id 反查 _user_chats (单用户单 chat 场景小, O(n) 可忽略),
         反查不到就只走飞书 ogg。
+
+        入口先做情绪标签过滤: 不带标签的段落 (链接/列表/表格) 不念, 只给眼睛看。
+        三条 TTS 通路 (Discord 流式 / LiveKit / 飞书 ogg) 共用过滤后的 text。
         """
+        text = self._keep_tagged_paragraphs_for_tts(text)
+        if not text or not text.strip():
+            return
         # ── 1. (最优先, 不阻塞) Discord 常驻语音频道: 流式直生 TTS 边生成边推 ──
         # 流式直接调 Gemini TTS (不落盘 ogg / 不走 ffmpeg), 首帧 ~0.9s 出声。
         # 内部判 connected, 没连则静默跳过、不主动建连。fire-and-forget 让 Discord
