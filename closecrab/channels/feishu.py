@@ -651,7 +651,7 @@ class FeishuChannel(Channel):
         # (a) 注入 voice-mode-rules 让模型用口语+情绪标签作答
         # (b) 整段 reply 文本走 TTS 合成一条 ogg 语音消息发飞书
         # 跟 /voice livekit 通话是两套独立流程, 这套不需要 webrtc / 浏览器.
-        self._text_voice_mode_users: set[str] = set()
+        self._text_voice_mode_users: set[str] = self._load_voice_mode_users()
         # user_key -> asyncio.Future（交互式工具回复等待）
         self._pending_input: dict[str, asyncio.Future] = {}
         # 缓存最近的审批/问题卡片（按钮点击后用于保留内容）
@@ -783,6 +783,56 @@ class FeishuChannel(Channel):
                 tmp.replace(self._user_chats_file)
             except Exception as e:
                 log.warning(f"Failed to save user_chats: {e}")
+
+    def _load_voice_mode_users(self) -> set[str]:
+        """开机恢复：从 Firestore 读回 voice mode 开启状态。
+
+        镜像 discord on/off 的持久化模式（channels.feishu.voice_mode_users）。
+        读失败只警告，返回空集合（等同关闭），不阻断启动。
+        """
+        try:
+            from google.cloud import firestore
+            from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+
+            db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+            snap = db.collection("bots").document(self._bot_name).get()
+            if snap.exists:
+                users = (
+                    (snap.to_dict() or {})
+                    .get("channels", {})
+                    .get("feishu", {})
+                    .get("voice_mode_users", [])
+                )
+                if users:
+                    log.info(
+                        "voice_mode_users 恢复 %d 个 (bot=%s)",
+                        len(users), self._bot_name,
+                    )
+                    return set(users)
+        except Exception as e:
+            log.warning("读取 voice_mode_users 失败 (non-fatal): %s", e)
+        return set()
+
+    def _persist_voice_mode_users(self) -> None:
+        """把 voice mode 开关写回 Firestore，跨重启保持状态。
+
+        每次开/关后调用。镜像 discord 的 _persist_sidecar_enabled。
+        持久化失败只警告，不阻断对话。
+        """
+        try:
+            from google.cloud import firestore
+            from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+
+            db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+            db.collection("bots").document(self._bot_name).update(
+                {"channels.feishu.voice_mode_users": sorted(self._text_voice_mode_users)}
+            )
+            log.info(
+                "voice_mode_users 持久化 %d 个 (bot=%s)",
+                len(self._text_voice_mode_users), self._bot_name,
+            )
+        except Exception as e:
+            log.warning("持久化 voice_mode_users 失败 (non-fatal): %s", e)
 
     def _build_ws_client(self):
         """构建 WebSocket 客户端和事件处理器。"""
@@ -3329,7 +3379,7 @@ class FeishuChannel(Channel):
                 await self._async_send_text(chat_id, result or "Session ended.")
                 return
 
-            # 文字 voice mode 开关 (per-user 状态, bot 重启清空, 不持久化)
+            # 文字 voice mode 开关 (per-user 状态, 持久化到 Firestore, 跨重启保持)
             # 去尾标点 (中英文句号/感叹号/问号/逗号), 用户语音转写常带终标点
             normalized = raw_content.strip().lower().rstrip("。.!！?？,，")
             # typo 容错: "语音" 常被打成 "语言"
@@ -3338,6 +3388,7 @@ class FeishuChannel(Channel):
                 "/voice-mode-on", "/voice-on",
             ):
                 self._text_voice_mode_users.add(user_key)
+                self._persist_voice_mode_users()
                 await self._async_send_text(
                     chat_id,
                     "🎤 已开启语音模式。后续回复用口语风格 + 情绪标签, "
@@ -3349,17 +3400,20 @@ class FeishuChannel(Channel):
                 "/voice-mode-off", "/voice-off",
             ):
                 self._text_voice_mode_users.discard(user_key)
+                self._persist_voice_mode_users()
                 await self._async_send_text(chat_id, "✅ 已关闭语音模式, 恢复正常回复。")
                 return
             # 单说"语音模式" / "语言模式" 当 toggle: 当前关→开, 当前开→关
             if normalized in ("语音模式", "语言模式", "/voice-mode", "/voice"):
                 if user_key in self._text_voice_mode_users:
                     self._text_voice_mode_users.discard(user_key)
+                    self._persist_voice_mode_users()
                     await self._async_send_text(
                         chat_id, "✅ 已关闭语音模式, 恢复正常回复。",
                     )
                 else:
                     self._text_voice_mode_users.add(user_key)
+                    self._persist_voice_mode_users()
                     await self._async_send_text(
                         chat_id,
                         "🎤 已开启语音模式。后续回复用口语风格 + 情绪标签, "
@@ -5023,24 +5077,24 @@ class FeishuChannel(Channel):
                 ),
             }
 
-        # 进度跟按钮放同一行 (Chris 要求): 飞书 v1 不允许按钮进 column (200410),
-        # 所以把进度做成 action 行里最后一个 disabled 按钮 (灰色、不可点), 视觉上贴在
-        # 🔁 后边同一行。disabled 按钮无 value/不触发回调, 纯展示。
         actions = [
             _btn("voice_pause", "⏸", "default"),
-            _btn("voice_resume", "▶️", "primary"),
+            _btn("voice_resume", "▶️", "default"),
             _btn("voice_rewind", "⏪", "default", metadata={"fid": fid}),
             _btn("voice_forward", "⏩", "default", metadata={"fid": fid}),
             _btn("voice_replay", "🔁", "default", metadata={"fid": fid}),
         ]
+        # layout=flow: 按钮横向流式排列, 到边界才折行。不加这个手机飞书会把每个
+        # 按钮各占一整行 (PC 端正常, 移动端竖堆), 占满竖向空间。Chris 2026-06-01 要求。
+        elements = [{"tag": "action", "layout": "flow", "actions": actions}]
+        # 进度 (如 5/5s) 单独做成按钮下方一条 note 小灰字。早先把它做成 action 行里的
+        # disabled 按钮, 但加 layout=flow 后流式布局会丢掉不可点的 disabled 按钮 →
+        # 进度消失 (Chris 2026-06-01 发现)。note 元素必渲染且占地极小, 最稳。
         if progress_note:
-            actions.append({
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": progress_note},
-                "type": "default",
-                "disabled": True,
+            elements.append({
+                "tag": "note",
+                "elements": [{"tag": "plain_text", "content": progress_note}],
             })
-        elements = [{"tag": "action", "actions": actions}]
 
         # 轻量贴近: 不带彩色 header, 就是一条贴在内容下方的图标按钮条。
         return {
@@ -5074,6 +5128,7 @@ class FeishuChannel(Channel):
             return
         last_note = ""
         idle = 0
+        log.info(f"[voice-progress] updater 启动 fid={fid} card_id={card_id}")
         for _ in range(200):  # 200 * 1.5s = 5min 上限
             await asyncio.sleep(1.5)
             try:
@@ -5083,7 +5138,9 @@ class FeishuChannel(Channel):
             # prog: (played_s, total_s, active, cur_fid)
             if not prog or prog[3] != fid:
                 idle += 1
+                log.info(f"[voice-progress] idle={idle} prog={prog} (待 fid={fid})")
                 if idle >= 4:  # ~6s 拿不到本 fid 进度 → 认为没在播, 退出
+                    log.info(f"[voice-progress] idle 退出 fid={fid}")
                     break
                 continue
             idle = 0
@@ -5094,10 +5151,12 @@ class FeishuChannel(Channel):
                 card = self._build_voice_control_card(
                     open_id, chat_id, fid=fid, progress_note=note)
                 try:
-                    await self._async_update_card(card_id, card)
-                except Exception:
-                    pass
+                    ok = await self._async_update_card(card_id, card)
+                    log.info(f"[voice-progress] patch note='{note}' ok={ok}")
+                except Exception as e:
+                    log.warning(f"[voice-progress] patch 异常: {type(e).__name__}: {e}")
             if not active and total > 0 and played >= total - 0.05:
+                log.info(f"[voice-progress] 播放结束退出 fid={fid} {played}/{total}")
                 break
 
     def _build_ask_question_card(
