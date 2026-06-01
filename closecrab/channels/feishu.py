@@ -5023,26 +5023,24 @@ class FeishuChannel(Channel):
                 ),
             }
 
-        elements = [
-            {
-                "tag": "action",
-                "actions": [
-                    _btn("voice_pause", "⏸", "default"),
-                    _btn("voice_resume", "▶️", "primary"),
-                    _btn("voice_rewind", "⏪", "default",
-                         metadata={"fid": fid}),
-                    _btn("voice_forward", "⏩", "default",
-                         metadata={"fid": fid}),
-                    _btn("voice_replay", "🔁", "default",
-                         metadata={"fid": fid}),
-                ],
-            },
+        # 进度跟按钮放同一行 (Chris 要求): 飞书 v1 不允许按钮进 column (200410),
+        # 所以把进度做成 action 行里最后一个 disabled 按钮 (灰色、不可点), 视觉上贴在
+        # 🔁 后边同一行。disabled 按钮无 value/不触发回调, 纯展示。
+        actions = [
+            _btn("voice_pause", "⏸", "default"),
+            _btn("voice_resume", "▶️", "primary"),
+            _btn("voice_rewind", "⏪", "default", metadata={"fid": fid}),
+            _btn("voice_forward", "⏩", "default", metadata={"fid": fid}),
+            _btn("voice_replay", "🔁", "default", metadata={"fid": fid}),
         ]
         if progress_note:
-            elements.append({
-                "tag": "note",
-                "elements": [{"tag": "plain_text", "content": progress_note}],
+            actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": progress_note},
+                "type": "default",
+                "disabled": True,
             })
+        elements = [{"tag": "action", "actions": actions}]
 
         # 轻量贴近: 不带彩色 header, 就是一条贴在内容下方的图标按钮条。
         return {
@@ -5052,14 +5050,14 @@ class FeishuChannel(Channel):
 
     @staticmethod
     def _fmt_progress_note(played: float, total: float, active: bool) -> str:
-        """把 (已播秒, 总秒, 是否在播) 渲染成进度条文本。"""
+        """渲染进度文本: 极简单行, 只显示 已播放/总时长 (如 11/11s)。
+
+        去掉了 20 格长条和播放状态 —— 长条在手机飞书上会折成两行, 而 Chris 只
+        要一眼看出进度, 已播/总秒数就够。total 未知 (还在生成) 显示占位。
+        """
         if total <= 0:
-            return "⏳ 生成中…"
-        ratio = max(0.0, min(1.0, played / total))
-        filled = int(ratio * 20)
-        bar = "█" * filled + "░" * (20 - filled)
-        state = "▶️ 播放中" if active else "⏹ 已结束"
-        return f"{state}  {bar}  {played:.0f}/{total:.0f}s"
+            return "⏳ …"
+        return f"{played:.0f}/{total:.0f}s"
 
     async def _voice_progress_updater(
         self, fid: str, card_id: str, open_id: Optional[str], chat_id: str,
