@@ -979,9 +979,24 @@ def _get_stt_sink_class():
                 self._hits += 1
                 self._pcm.extend(mono)
                 self._last_name = name
-                cap = _MONO_FRAME_BYTES * 100  # 限 backlog ~2s, 超出丢最旧
+                cap = _MONO_FRAME_BYTES * 100
                 if len(self._pcm) > cap:
                     del self._pcm[: len(self._pcm) - cap]
+            # 直通: Discord 解密 PCM 以 RTP 原生节奏直达 LiveKit 输入。
+            ai = _audio_input
+            if ai is not None and len(mono) >= _MONO_FRAME_BYTES:
+                from livekit import rtc
+                frame = rtc.AudioFrame(
+                    data=mono[:_MONO_FRAME_BYTES], sample_rate=48000,
+                    num_channels=1, samples_per_channel=_MONO_FRAME_SAMPLES,
+                )
+                loop = _sidecar_loop
+                if loop is not None:
+                    def _feed_and_mark(f=frame, a=ai):
+                        global _got_real_frame
+                        _got_real_frame = True
+                        a.feed_frame(f)
+                    loop.call_soon_threadsafe(_feed_and_mark)
 
         def pop_frame(self):
             """取一帧 20ms mono PCM bytes, 不足一帧返回 None。"""
@@ -1028,6 +1043,8 @@ def _get_audio_input_class():
     from livekit.agents.voice.io import AudioInput
 
     class _DiscordAudioInput(AudioInput):
+        _MAX_Q = 25  # jitter buffer 上限 (~0.5s), 超限丢最旧防积压 burst 打乱 VAD
+
         def __init__(self):
             super().__init__(label="discord")
             self._q: asyncio.Queue = asyncio.Queue()
@@ -1036,7 +1053,13 @@ def _get_audio_input_class():
             return await self._q.get()
 
         def feed_frame(self, frame):
-            self._q.put_nowait(frame)  # pump 在 sidecar loop 内调, 直接入队
+            q = self._q
+            if q.qsize() >= self._MAX_Q:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            q.put_nowait(frame)
 
     _AUDIO_INPUT_CLASS = _DiscordAudioInput
     return _AUDIO_INPUT_CLASS
@@ -1155,18 +1178,22 @@ def _get_audio_output_class():
     return _AUDIO_OUTPUT_CLASS
 
 
+_got_real_frame = False  # sink.write 直通喂真帧后置 True, 间隙填充器据此跳过
+
 async def _audio_pump_loop():
-    """连续推帧: 每 20ms 向 AudioInput 喂一帧。有真帧推真帧(并补 backlog), 无真帧推
-    静音帧。把"Discord 发不发包"翻译成"人声帧 vs 静音帧", 让 silero VAD 纯靠能量断句。
+    """间隙填充: Discord 不说话时不发帧, 但 LiveKit VAD 需要连续流才能量静音断句。
+    每 20ms 检查: sink.write 刚喂过真帧 → 跳过; 没有 → 补一帧静音。
+    真帧由 sink.write 经 call_soon_threadsafe 直通 LiveKit 输入, 本循环只管补静音。
+    配合起来 = WebRTC 的连续音频轨道 (有声时真帧、无声时静音, 全由 RTP 节奏驱动)。
     """
     from livekit import rtc
 
     silence = b"\x00" * _MONO_FRAME_BYTES
-    log.info("音频 pump 已启动 (20ms 节奏 + 静音填充)")
+    log.info("间隙填充已启动 (仅静音补帧, 真帧由 sink.write 直通)")
 
-    def _mk(pcm: bytes):
+    def _mk_silence():
         return rtc.AudioFrame(
-            data=pcm, sample_rate=48000, num_channels=1,
+            data=silence, sample_rate=48000, num_channels=1,
             samples_per_channel=_MONO_FRAME_SAMPLES,
         )
 
@@ -1176,16 +1203,11 @@ async def _audio_pump_loop():
             ai = _audio_input
             if ai is None:
                 continue
-            sink = _stt_sink
-            pushed = 0
-            while sink is not None and pushed < 5:  # 一次最多补 5 帧追实时
-                pcm = sink.pop_frame()
-                if pcm is None:
-                    break
-                ai.feed_frame(_mk(pcm))
-                pushed += 1
-            if pushed == 0:
-                ai.feed_frame(_mk(silence))  # 无真帧: 静音帧保持流连续
+            global _got_real_frame
+            if _got_real_frame:
+                _got_real_frame = False  # 真帧已由 sink.write 直通, 本 tick 不补
+            else:
+                ai.feed_frame(_mk_silence())  # 无真帧: 补静音让 VAD 量出静音断句
     except asyncio.CancelledError:
         log.info("音频 pump 已取消")
         raise
@@ -1210,8 +1232,12 @@ async def _start_agent_session(channel_id: int):
 
     full_duplex = _feishu_ref is not None and _feishu_loop is not None and bool(_feishu_open_id)
     # 全双工(STT→CloseCrabLLM→TTS)默认关闭, 回退到可工作的纯 STT-only 回显模式
-    # (收 Discord 语音 → STT → 发文字区让 Chris 核对转写)。全双工需显式 opt-in。
-    if os.environ.get("DISCORD_VOICE_FULLDUPLEX", "0") != "1":
+    # (收 Discord 语音 → STT → 发文字区让 Chris 核对转写)。全双工需显式 opt-in:
+    # 环境变量 DISCORD_VOICE_FULLDUPLEX=1 或标志文件 ~/.closecrab/discord-fullduplex。
+    _fd_on = os.environ.get("DISCORD_VOICE_FULLDUPLEX", "0") == "1" or os.path.exists(
+        os.path.expanduser("~/.closecrab/discord-fullduplex")
+    )
+    if not _fd_on:
         full_duplex = False
     llm = tts = None
     if full_duplex:
@@ -1262,7 +1288,7 @@ async def _start_agent_session(channel_id: int):
     _audio_output = ao
     _agent_session = session
     _audio_pump_task = asyncio.create_task(_audio_pump_loop())
-    log.info("AgentSession 已启动 (channel=%s, %s)", channel_id,
+    log.info("AgentSession 已启动 (channel=%s, %s, 直通+间隙填充)", channel_id,
              "全双工 STT→CloseCrabLLM→TTS" if full_duplex else "STT-only 发文字")
 
 
