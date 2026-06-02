@@ -281,6 +281,8 @@ def _shorten_model_name(raw: str) -> str:
         return ""
     name = raw.rsplit("/", 1)[-1] if "/" in raw else raw
     name = name.split("@")[0]
+    # 剥掉 [1m] 长上下文标记 (CC 内部后门, 不该出现在 user-facing 显示)
+    name = name.replace("[1m]", "")
     _MAP = {
         # Claude
         "claude-opus-4-6": "Opus 4.6",
@@ -5398,6 +5400,18 @@ class FeishuChannel(Channel):
         # 通知 Core
         loop.run_until_complete(self._core.on_channel_ready(self))
         self._ready = True
+
+        # 注册飞书大脑桥 → Discord 语音 sidecar 可全双工复用 CloseCrabLLM
+        # (Discord 麦克风进 → STT → CloseCrabLLM 飞书 worker → GeminiTTS → Discord 喇叭)
+        try:
+            from ..voice.discord_voice_sidecar import set_feishu_bridge
+            # open_id 优先 allowed_open_ids; 为空时回落最近活跃的 user_chats (持久化加载)
+            _voice_open_id = next(iter(self._allowed_open_ids), "")
+            if not _voice_open_id and self._user_chats:
+                _voice_open_id = list(self._user_chats.keys())[-1]
+            set_feishu_bridge(self, loop, _voice_open_id)
+        except Exception as e:
+            log.debug(f"注册 Discord 语音大脑桥失败 (不影响飞书/Discord TTS): {e}")
 
         # 上线通知
         if self._log_chat_id:

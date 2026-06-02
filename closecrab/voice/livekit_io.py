@@ -64,7 +64,12 @@ from livekit.plugins import silero
 # 放 _build_stt 里 lazy import 会因 voice worker thread 触发
 # "RuntimeError: Plugins must be registered on the main thread". 这里 top-level
 # import 保证主线程注册, 即使 STT_PROVIDER 不选 chirp3_stream 也只多一次 import 开销。
-from livekit.plugins import google as _lk_google
+# 设为可选: 只装了 silero 的机器 (如 Discord-only 复用 CloseCrabLLM 的 bot) 缺 google
+# plugin 时仍能 import 本模块; 仅 STT_PROVIDER=chirp3_stream 时才在 _build_stt 报错。
+try:
+    from livekit.plugins import google as _lk_google
+except ImportError:
+    _lk_google = None
 
 from .chirp_stt import ChirpSTT, _DEFAULT_PHRASE_BOOST
 from .chirp_phrases import default_phrases as _default_chirp_phrases

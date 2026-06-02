@@ -7,12 +7,12 @@
 它**故意不注册** ``on_message`` / 任何消息处理 handler，所以「接收消息那条
 路」天然堵死。它不依赖 BotCore，完全自包含，跑在独立后台 daemon 线程里。
 
-⚠️ 只做 TTS「播报 (发送)」，不做语音「接收 (STT)」。
-   Discord 已对所有非 Stage 通话强制 DAVE 端到端加密 (E2EE)，bot 端接收语音
-   在整个生态 (py-cord / discord.js / davey) 实测全部拿不到音频包 —— 上游死锁，
-   2026 年无 workaround (发送不受影响)。完整 STT 接收实现已封存到同目录
-   ``discord_stt_receive.py.disabled``，等上游修好 DAVE 接收后再复活。
-   详见 memory: discord-dave-voice-receive-blocked。
+发送 (TTS 播报) 与接收 (STT 转写) 都做：
+- **发送**：``speak_text`` / 流式播放，把飞书口语回复念到常驻语音频道。
+- **接收**：``/listen`` 起 ``vc.start_recording``，复用发送那条 VoiceClient
+  (在共享 UDP socket 上加监听，不新建连接)。py-cord 2.8.0 + davey 原生做完
+  DAVE/MLS 握手 + 逐人解密，解密后的 PCM 进 sink → 连续流 → silero VAD 断句
+  → Gemini STT → 把转写文字发回频道文字区。``/stoplisten`` 停。
 
 启用方式 (Firestore ``bots/{name}``)::
 
@@ -98,12 +98,78 @@ _sidecar_bot = None
 _sidecar_thread = None  # 运行时启停用：保存 sidecar 线程引用以便 stop 时 join
 _target_voice_channel_id: int = 0
 _heartbeat_task = None  # 后台 voice 健康检查 task，防重复启动
+_commands_synced = False  # slash 命令只注册一次 (on_ready 在 RESUME 后可能重复触发)
 # _stream_speak 串行锁: opener/hint/最终答 多条并发时, 保证 wait+play 临界区 FIFO,
 # 不会都通过 vc.is_playing() 等待后同时 vc.play 互相冲掉。懒创建 (绑 sidecar loop)。
 _speak_lock: "asyncio.Lock | None" = None
 
 # 没配 voice_channel_id 的 bot 默认连这个频道 (Discord General)。多 bot 共用。
 _DEFAULT_VOICE_CHANNEL_ID = "1471064068851761165"
+
+# ─── 语音「接收」(STT) 模块级状态 ────────────────────────────────────────────
+# py-cord 2.8.0 + davey 0.1.5 原生做完 DAVE/MLS 握手 + 逐人解密, 解密后的 PCM 直接
+# 到 sink.write。接收复用发送那条 VoiceClient (vc.start_recording 在共享 UDP socket
+# 上加监听, 不新建连接), 故不会动到发送(TTS 播放)路径。
+_stt_engine = None          # GeminiSTT 单例
+_stt_sink = None            # 当前 _STTSink 实例
+_STT_SINK_CLASS = None      # 惰性定义的 Sink 子类
+_AUDIO_INPUT_CLASS = None   # 惰性定义的 AudioInput 子类
+_audio_input = None         # 当前 _DiscordAudioInput 实例
+_agent_session = None       # 当前 AgentSession 实例
+_audio_pump_task = None     # 连续推帧 task (20ms 节奏 + 静音填充)
+_ssrc_task = None           # ssrc 自动推断 + 录音守护 task
+_listen_active = False      # 用户是否要求持续收音 (corrupted 崩溃后自动重启用)
+_listen_vc = None           # 当前收音的 voice client
+
+# ─── 全双工「大脑」桥 (复用飞书 CloseCrabLLM, Discord 只当麦克风+喇叭) ───────────
+# 飞书 channel 启动时调 set_feishu_bridge() 把自己 + loop + Chris open_id 注册进来。
+# 有这三样 → _start_agent_session 拼完整三阶段 (STT→CloseCrabLLM→GeminiTTS),
+# Discord 麦克风进、喇叭出, 大脑还是飞书 worker; 没有 → 回落 STT-only (只发文字)。
+_feishu_ref = None          # FeishuChannel 实例
+_feishu_loop = None         # 飞书 event loop (CloseCrabLLM 跨 loop 调 worker 用)
+_feishu_open_id = ""        # Chris 的飞书 open_id
+_audio_output = None        # 当前 _DiscordAudioOutput 实例 (出口音频桥)
+
+
+def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str) -> None:
+    """【飞书线程调用】注册飞书大脑入口, 供 Discord 语音全双工复用 CloseCrabLLM。
+
+    幂等: 飞书 start() / on_ready 后调一次即可。open_id 为空时不覆盖已有值。
+    """
+    global _feishu_ref, _feishu_loop, _feishu_open_id
+    _feishu_ref = feishu_channel
+    _feishu_loop = feishu_loop
+    if open_id:
+        _feishu_open_id = open_id
+    log.info("飞书大脑桥已注册 (open_id=%s…) → Discord 语音可全双工", open_id[:8] if open_id else "?")
+_listen_restart_n = 0       # 录音自动重启计数 (上限保护)
+_LISTEN_AUTOSTART = True     # 连上常驻频道后由心跳自动起一次录音 (重启后接收不再静默丢)
+_autostart_done = False      # 本进程内自动收音只起一次 (尊重之后的 /stoplisten)
+_receive_probe_installed = False  # decrypt_rtp ssrc 探针只挂一次
+_dave_backend_installed = False    # dave-py 后端替换只装一次
+
+# ── DAVE 后端总开关 (rollback 用) ──────────────────────────────────────────
+# True = 把 py-cord 的 DAVE 后端从 davey 换成 dave-py (接收路径能解出真文本)。
+# 为什么换: davey 不暴露逐 MLS-epoch 的 key-ratchet API, 接收端无法按 epoch 正确驱动
+# DAVE 解密 → 拿不到明文 Opus → STT 永远静音。endcord 因同缺口也弃 davey 改 dave-py。
+# dave-py 把 API 拆成 Session(MLS) + 逐 ssrc Decryptor(带 transition_to_key_ratchet)
+# + Encryptor, 正好补上 ratchet API。
+# ⚠️ 这条线**同时碰发送加密** (client.py:_get_voice_packet 调 session.encrypt_opus),
+# 故换错会哑掉 TTS。万一发送坏了: 把这个置 False + 重启即回滚到纯 davey 稳定版。
+_DAVE_PY_BACKEND_ENABLED = True  # 2026-06-02: dave-py 后端, 接收→STT 全链路已验证可用
+
+_LISTEN_RESTART_MAX = 8      # 录音崩溃后最多自动重启次数
+
+# 单声道 20ms 帧 @ 48kHz/16-bit: 喂给 AudioInput 的基本单位。
+_MONO_FRAME_MS = 20
+_MONO_FRAME_SAMPLES = 48000 * _MONO_FRAME_MS // 1000   # 960
+_MONO_FRAME_BYTES = _MONO_FRAME_SAMPLES * 2            # 1920
+
+# decrypt_rtp 探针记录的「传输层实收 ssrc」(每个 RTP 包都过 decrypt_rtp, 在 DAVE
+# 解密门之前)。这是 ssrc 自动推断的可靠来源 —— py-cord 2.8.0 下未映射 ssrc 的包
+# 在 reader 里被丢弃前不会建 decoder, 所以旧的 decoders.keys() 推断已失效。
+_seen_ssrcs_lock = threading.Lock()
+_seen_ssrcs: set = set()
 
 
 def _load_sidecar_config(bot_name: str) -> dict | None:
@@ -202,6 +268,37 @@ async def _ensure_connected():
     return vc if vc.is_connected() else None
 
 
+async def _activate_listen(vc) -> tuple:
+    """起录音 + AgentSession + ssrc 推断循环。/listen 和心跳自动起共用。
+    不依赖 slash ctx, 可被后台 task 调。返回 (是否成功, 说明)。"""
+    global _stt_sink, _ssrc_task, _listen_active, _listen_vc, _listen_restart_n
+    if vc is None or not vc.is_connected():
+        return False, "未连接语音频道"
+    if vc.is_recording():
+        return True, "已经在收音"
+    sink = _get_stt_sink_class()()
+    sink.vc = vc  # 解码路径解析说话人要用 sink.vc, 手动补
+    _stt_sink = sink
+    _listen_vc = vc
+    _listen_restart_n = 0
+    try:
+        # 复用发送那条 VoiceClient: start_recording 在共享 UDP socket 上加监听,
+        # 不新建连接, 不影响 vc.play() 的 TTS 播放。
+        vc.start_recording(sink, _on_recording_done)
+    except Exception as e:
+        log.exception("start_recording 失败")
+        return False, f"start_recording 失败: {e}"
+    _listen_active = True  # 录音被冲垮由守护循环自动重启
+    try:
+        await _start_agent_session(_target_voice_channel_id)
+    except Exception as e:
+        log.exception("AgentSession 启动失败")
+        return False, f"AgentSession 启动失败: {e}"
+    if _ssrc_task is None or _ssrc_task.done():
+        _ssrc_task = asyncio.create_task(_ssrc_infer_loop())
+    return True, "ok"
+
+
 async def _voice_heartbeat(interval: float = 30.0):
     """后台心跳：周期性检查 voice 连接，掉线则自动爬回常驻频道。
 
@@ -209,6 +306,7 @@ async def _voice_heartbeat(interval: float = 30.0):
     gateway 会 RESUME，但 voice 连接不会自动重建 → 飞书 voice-summary 检测到
     is_voice_connected=False 就回退飞书 ogg，Discord 静音。这个心跳就是兜底。
     """
+    global _autostart_done
     while True:
         try:
             await asyncio.sleep(interval)
@@ -218,14 +316,19 @@ async def _voice_heartbeat(interval: float = 30.0):
             if bot is None or not bot.guilds:
                 continue
             vc = bot.guilds[0].voice_client
-            if vc is not None and vc.is_connected():
-                continue  # 健康，跳过
-            log.warning("检测到 voice 掉线，尝试自动 rejoin 常驻频道…")
-            vc = await _ensure_connected()
-            if vc is not None:
-                log.info("voice 自动 rejoin 成功")
-            else:
-                log.warning("voice 自动 rejoin 失败，下个周期再试")
+            if vc is None or not vc.is_connected():
+                log.warning("检测到 voice 掉线，尝试自动 rejoin 常驻频道…")
+                vc = await _ensure_connected()
+                if vc is not None:
+                    log.info("voice 自动 rejoin 成功")
+                else:
+                    log.warning("voice 自动 rejoin 失败，下个周期再试")
+                    continue
+            # 连接健康 → 本进程内自动起一次录音 (重启/重连后接收自愈, 尊重之后的 /stoplisten)
+            if _LISTEN_AUTOSTART and not _autostart_done and not _listen_active and not vc.is_recording():
+                ok, msg = await _activate_listen(vc)
+                _autostart_done = True
+                log.info("[DAVE埋点] 自动收音启动: %s", "ok" if ok else msg)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -426,6 +529,11 @@ def _get_source_class():
         def buffered(self) -> int:
             with self._lock:
                 return len(self._buf)
+
+        def clear(self):
+            """barge-in: 立刻丢掉未播缓冲 (下一帧 read 回落静音), 不结束流。"""
+            with self._lock:
+                self._buf.clear()
 
         def finish(self):
             with self._lock:
@@ -801,12 +909,964 @@ def forward_file(fid: str, frac: float = 0.1) -> bool:
         return False
 
 
-# ─── 语音「接收」(STT) 已封存 ────────────────────────────────────────────────
-# Discord 强制 DAVE E2EE 后, bot 端接收语音在整个生态实测拿不到音频包 (上游死锁,
-# 2026 无 workaround)。完整 V2 接收实现 (连续 PCM 流 + silero VAD + AgentSession
-# STT-only + ssrc 自动推断 + 诊断探针 + /listen /stoplisten 命令) 已封存到同目录
-# discord_stt_receive.py.disabled, 等上游修好 DAVE 接收后复活。本文件只保留发送
-# (TTS 播报)。详见 memory: discord-dave-voice-receive-blocked。
+# ─── 语音「接收」(STT): vc.start_recording → 连续 PCM → silero VAD → Gemini STT ──
+# py-cord 2.8.0 + davey 已原生做完 DAVE/MLS 握手 + 逐人解密, 解密后 PCM 到 sink.write。
+# 链路: vc.start_recording(_STTSink) → sink.write(每个语音包) → stereo 降 mono 入缓冲
+# → _audio_pump_loop 每 20ms 取一帧(有真帧推真帧, 无则推静音帧)喂 _DiscordAudioInput
+# → AgentSession(stt=GeminiSTT, vad=silero, 无 llm/tts) 内部 VAD 断句 + STT
+# → user_input_transcribed(is_final) → 发频道文字区。
+#
+# 关键前提(py-cord 2.8.0): decrypt_rtp 只在 dave.ready 且 ssrc→uid 已映射时才写
+# decrypted_data, 否则包在 reader 里被丢弃(连 decoder 都不建)。ssrc→uid 映射的正路
+# 是 gateway speaking op → _add_ssrc; 兜底是下面的 decrypt_rtp 探针抓传输层实收 ssrc
+# + 频道唯一真人时自动 _add_ssrc。
+
+
+def _get_stt():
+    """惰性构造 GeminiSTT 单例 (复用 voice 模式同款 Vertex 凭据)。"""
+    global _stt_engine
+    if _stt_engine is None:
+        from .gemini_stt import GeminiSTT
+        _stt_engine = GeminiSTT()
+    return _stt_engine
+
+
+def _get_stt_sink_class():
+    """惰性定义 discord.sinks.Sink 子类 (延迟 import discord)。
+
+    py-cord 2.8.0 路径: PacketRouter 调 ``sink.write(data, source)``。``data.pcm``
+    是解码后的 48kHz/16-bit/stereo PCM bytes; ``user`` 是 User/Member。覆写 write
+    直取 data.pcm, 不走基类落盘逻辑(我们要实时流)。
+
+    基类没定义 ``__sink_listeners__`` / ``walk_children`` / ``is_opus`` (半成品),
+    SinkEventRouter / PacketDecoder 初始化会用到, 补空实现让其注册空集不崩;
+    送 PCM 的 PacketRouter 是另一条独立路径, 照常进来。只动子类, 不 patch py-cord。
+    """
+    global _STT_SINK_CLASS
+    if _STT_SINK_CLASS is not None:
+        return _STT_SINK_CLASS
+    import discord
+
+    class _STTSink(discord.sinks.Sink):
+        """按 user 累积 PCM。write 跑在 py-cord 解码线程, 故用 Lock 护缓冲。"""
+
+        __sink_listeners__: list = []  # noqa: 让 SinkEventRouter 注册空集不崩
+
+        def walk_children(self):
+            return []
+
+        def is_opus(self) -> bool:
+            return False  # False = 要 PacketDecoder 把 opus 解成 PCM
+
+        def __init__(self):
+            super().__init__()
+            self._lock = threading.Lock()
+            self._pcm = bytearray()  # 所有说话人 mono PCM 混入同一条流(本步单人)
+            self._last_name = "?"
+            self._hits = 0  # write 被调次数 (诊断: 验证 receive 真有包进来)
+
+        def write(self, data, user):
+            pcm = getattr(data, "pcm", None)
+            if not pcm:
+                return
+            name = getattr(user, "display_name", None) or getattr(
+                user, "name", None) or str(getattr(user, "id", "?"))
+            try:
+                mono = audioop.tomono(pcm, 2, 0.5, 0.5)  # 48kHz stereo → mono
+            except Exception:
+                return
+            with self._lock:
+                self._hits += 1
+                self._pcm.extend(mono)
+                self._last_name = name
+                cap = _MONO_FRAME_BYTES * 100  # 限 backlog ~2s, 超出丢最旧
+                if len(self._pcm) > cap:
+                    del self._pcm[: len(self._pcm) - cap]
+
+        def pop_frame(self):
+            """取一帧 20ms mono PCM bytes, 不足一帧返回 None。"""
+            with self._lock:
+                if len(self._pcm) >= _MONO_FRAME_BYTES:
+                    out = bytes(self._pcm[:_MONO_FRAME_BYTES])
+                    del self._pcm[:_MONO_FRAME_BYTES]
+                    return out
+                return None
+
+        def last_name(self) -> str:
+            with self._lock:
+                return self._last_name
+
+        def hits(self) -> int:
+            with self._lock:
+                return self._hits
+
+        def cleanup(self):
+            self.finished = True  # 不往 audio_data 写, 覆写成空操作
+
+    _STT_SINK_CLASS = _STTSink
+    return _STT_SINK_CLASS
+
+
+def _on_recording_done(exc):
+    """start_recording 的结束回调 (录音停止/出错时被调)。出错时 _listen_active 仍开
+    则由守护循环自动重启录音 (重启后 ssrc 通常已映射好)。"""
+    if exc is not None:
+        log.warning("voice 录音结束并带异常 (将由守护循环自动重启): %s", exc)
+    else:
+        log.info("voice 录音已停止")
+
+
+def _get_audio_input_class():
+    """惰性定义 livekit AudioInput 子类 (延迟 import livekit.agents)。
+
+    AgentSession 通过 ``async for frame in audio_input`` 拉帧。覆写 ``__anext__``
+    从队列取帧; source=None 时基类 on_attached/on_detached 已是 no-op。
+    """
+    global _AUDIO_INPUT_CLASS
+    if _AUDIO_INPUT_CLASS is not None:
+        return _AUDIO_INPUT_CLASS
+    from livekit.agents.voice.io import AudioInput
+
+    class _DiscordAudioInput(AudioInput):
+        def __init__(self):
+            super().__init__(label="discord")
+            self._q: asyncio.Queue = asyncio.Queue()
+
+        async def __anext__(self):
+            return await self._q.get()
+
+        def feed_frame(self, frame):
+            self._q.put_nowait(frame)  # pump 在 sidecar loop 内调, 直接入队
+
+    _AUDIO_INPUT_CLASS = _DiscordAudioInput
+    return _AUDIO_INPUT_CLASS
+
+
+_AUDIO_OUTPUT_CLASS = None
+
+
+def _get_audio_output_class():
+    """惰性定义 livekit AudioOutput 子类 (出口音频桥, 延迟 import)。
+
+    AgentSession 的 TTS 帧通过 ``capture_frame`` 喂进来。我们声明 sample_rate=48000,
+    livekit 会在喂之前自动把 GeminiTTS 的 24kHz 重采样成 48kHz, 这里只需 mono→stereo
+    再写进一个常驻 _StreamPCMSource (vc.play 一次, 空档自动放静音帧不断流)。
+
+      capture_frame: TTS 帧 → 48k stereo → source.write (首帧时起 vc.play)
+      flush:         一段话说完 → 等 buffer 放空 → on_playback_finished(未打断)
+      clear_buffer:  barge-in (用户插话) → source.clear + vc.stop → on_playback_finished(打断)
+    """
+    global _AUDIO_OUTPUT_CLASS
+    if _AUDIO_OUTPUT_CLASS is not None:
+        return _AUDIO_OUTPUT_CLASS
+    from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities
+
+    class _DiscordAudioOutput(AudioOutput):
+        def __init__(self):
+            super().__init__(
+                label="discord",
+                capabilities=AudioOutputCapabilities(pause=False),
+                sample_rate=48000,  # 要 48k → livekit 替我把 TTS 24k 重采样好再喂
+            )
+            self._source = None          # 常驻 _StreamPCMSource
+            self._playing = False        # vc.play 是否已起
+            self._seg_frames = 0         # 当前 segment 已写帧数 (算 playback_position)
+            self._flush_task = None
+
+        def _ensure_source_playing(self):
+            if self._source is not None and self._playing:
+                return
+            bot = _sidecar_bot
+            if bot is None or not bot.guilds:
+                return
+            vc = bot.guilds[0].voice_client
+            if vc is None or not vc.is_connected():
+                return
+            if vc.is_playing():
+                # 飞书借喇叭 (stream_speak_text) 正占着 → 先让它, 本帧丢弃
+                return
+            self._source = _get_source_class()()  # 无 fid: 不落盘不进度
+            try:
+                vc.play(self._source)
+                self._playing = True
+                log.info("Discord 语音 agent 出口流已开播")
+            except Exception:
+                log.exception("出口流 vc.play 失败")
+                self._source = None
+
+        async def capture_frame(self, frame) -> None:
+            await super().capture_frame(frame)  # 基类记 segment 计数
+            self._ensure_source_playing()
+            if self._source is None:
+                return
+            pcm = bytes(frame.data)
+            ch = getattr(frame, "num_channels", 1)
+            if ch == 1:
+                pcm = audioop.tostereo(pcm, 2, 1, 1)  # mono → stereo
+            self._source.write(pcm)
+            self._seg_frames += 1
+
+        def flush(self) -> None:
+            super().flush()
+            src = self._source
+            if src is None:
+                # 没真播出去 → 立即报完成, 否则 AgentSession 会一直等
+                self.on_playback_finished(playback_position=0.0, interrupted=False)
+                return
+            played = self._seg_frames * 0.02
+            self._seg_frames = 0
+            # 等 buffer 抽干 (真播完) 再报完成; 在 sidecar loop 起一个轻量轮询 task。
+            if self._flush_task is not None and not self._flush_task.done():
+                self._flush_task.cancel()
+            self._flush_task = asyncio.create_task(self._wait_drain_then_finish(src, played))
+
+        async def _wait_drain_then_finish(self, src, played: float):
+            try:
+                for _ in range(3000):  # 最多 ~60s
+                    if src.buffered() <= 0:
+                        break
+                    await asyncio.sleep(0.02)
+            except asyncio.CancelledError:
+                return
+            self.on_playback_finished(playback_position=played, interrupted=False)
+
+        def clear_buffer(self) -> None:
+            # barge-in: 立刻掐声
+            if self._flush_task is not None and not self._flush_task.done():
+                self._flush_task.cancel()
+            src = self._source
+            if src is not None:
+                src.clear()
+            bot = _sidecar_bot
+            try:
+                if bot is not None and bot.guilds:
+                    vc = bot.guilds[0].voice_client
+                    if vc is not None and vc.is_playing():
+                        vc.stop()
+            except Exception:
+                log.exception("barge-in vc.stop 失败")
+            self._source = None
+            self._playing = False
+            played = self._seg_frames * 0.02
+            self._seg_frames = 0
+            self.on_playback_finished(playback_position=played, interrupted=True)
+
+    _AUDIO_OUTPUT_CLASS = _DiscordAudioOutput
+    return _AUDIO_OUTPUT_CLASS
+
+
+async def _audio_pump_loop():
+    """连续推帧: 每 20ms 向 AudioInput 喂一帧。有真帧推真帧(并补 backlog), 无真帧推
+    静音帧。把"Discord 发不发包"翻译成"人声帧 vs 静音帧", 让 silero VAD 纯靠能量断句。
+    """
+    from livekit import rtc
+
+    silence = b"\x00" * _MONO_FRAME_BYTES
+    log.info("音频 pump 已启动 (20ms 节奏 + 静音填充)")
+
+    def _mk(pcm: bytes):
+        return rtc.AudioFrame(
+            data=pcm, sample_rate=48000, num_channels=1,
+            samples_per_channel=_MONO_FRAME_SAMPLES,
+        )
+
+    try:
+        while True:
+            await asyncio.sleep(_MONO_FRAME_MS / 1000)
+            ai = _audio_input
+            if ai is None:
+                continue
+            sink = _stt_sink
+            pushed = 0
+            while sink is not None and pushed < 5:  # 一次最多补 5 帧追实时
+                pcm = sink.pop_frame()
+                if pcm is None:
+                    break
+                ai.feed_frame(_mk(pcm))
+                pushed += 1
+            if pushed == 0:
+                ai.feed_frame(_mk(silence))  # 无真帧: 静音帧保持流连续
+    except asyncio.CancelledError:
+        log.info("音频 pump 已取消")
+        raise
+
+
+async def _start_agent_session(channel_id: int):
+    """装配并启动 AgentSession, 接 Discord 连续音频流。
+
+    有飞书大脑桥 (set_feishu_bridge 注册过) → 全双工三阶段:
+        Discord 麦克风 → STT → CloseCrabLLM(飞书 worker) → GeminiTTS → Discord 喇叭。
+        barge-in / 断句由 AgentSession 原生处理。
+    没有桥 → 回落 STT-only: 转写发频道文字区 (老行为, 不哑火)。"""
+    from livekit.agents import Agent, AgentSession
+    from livekit.plugins import silero
+
+    global _audio_input, _agent_session, _audio_pump_task, _audio_output
+
+    bot = _sidecar_bot
+    stt = _get_stt()
+    vad = silero.VAD.load(min_silence_duration=0.6)
+    log.info("silero VAD 已加载")
+
+    full_duplex = _feishu_ref is not None and _feishu_loop is not None and bool(_feishu_open_id)
+    # 全双工(STT→CloseCrabLLM→TTS)默认关闭, 回退到可工作的纯 STT-only 回显模式
+    # (收 Discord 语音 → STT → 发文字区让 Chris 核对转写)。全双工需显式 opt-in。
+    if os.environ.get("DISCORD_VOICE_FULLDUPLEX", "0") != "1":
+        full_duplex = False
+    llm = tts = None
+    if full_duplex:
+        try:
+            from .livekit_io import CloseCrabLLM
+            from .gemini_tts import GeminiTTS
+            voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
+            model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
+            llm = CloseCrabLLM(_feishu_ref, _feishu_loop, _feishu_open_id)
+            tts = GeminiTTS(model=model, voice=voice)
+        except Exception:
+            log.exception("装配 CloseCrabLLM/GeminiTTS 失败 → 回落 STT-only")
+            full_duplex = False
+            llm = tts = None
+
+    if full_duplex:
+        session = AgentSession(stt=stt, vad=vad, llm=llm, tts=tts, turn_detection="vad")
+    else:
+        session = AgentSession(stt=stt, vad=vad, turn_detection="vad")  # STT-only
+
+    ai = _get_audio_input_class()()
+    session.input.audio = ai  # 预设 input → start() 不创建 RoomIO
+    ao = None
+    if full_duplex:
+        ao = _get_audio_output_class()()
+        session.output.audio = ao  # 出口怼回 Discord 喇叭
+
+    def _on_transcribed(ev):
+        # STT 转写始终旁路发 Discord 文字区, 让 Chris 看见自己说的话转得对不对。
+        # 全双工模式下转写同时也走 CloseCrabLLM(喂大脑), 这条只是额外的可视回显。
+        try:
+            if not getattr(ev, "is_final", False):
+                return
+            text = (getattr(ev, "transcript", "") or "").strip()
+            if not text:
+                return
+            name = _stt_sink.last_name() if _stt_sink is not None else "?"
+            log.info("STT 转写 [%s]: %s", name, text[:80])
+            ch = bot.get_channel(channel_id) if bot else None
+            if ch is not None:
+                asyncio.create_task(ch.send(f"🎤 {name}: {text}"))
+        except Exception:
+            log.exception("处理 user_input_transcribed 失败")
+
+    session.on("user_input_transcribed", _on_transcribed)
+    await session.start(Agent(instructions=" "))  # 无 room; 人格在 worker system prompt
+    _audio_input = ai
+    _audio_output = ao
+    _agent_session = session
+    _audio_pump_task = asyncio.create_task(_audio_pump_loop())
+    log.info("AgentSession 已启动 (channel=%s, %s)", channel_id,
+             "全双工 STT→CloseCrabLLM→TTS" if full_duplex else "STT-only 发文字")
+
+
+class _CommitWelcome:
+    """替身 davey.CommitWelcome —— gateway 用 isinstance(result, davey.CommitWelcome)
+    判断 process_proposals 的返回。dave-py 的 process_proposals 直接返回单个 blob
+    (commit+welcome 已拼好), 故 commit=整块 blob, welcome=b'' —— gateway 见 welcome
+    为空只发 result.commit (即整块), 正好。"""
+
+    __slots__ = ("commit", "welcome")
+
+    def __init__(self, commit: bytes, welcome: bytes = b""):
+        self.commit = commit
+        self.welcome = welcome
+
+
+class DaveSessionAdapter:
+    """把 py-cord 期望的 davey.DaveSession 接口, 适配到 dave-py 的
+    Session + Encryptor + 逐用户 Decryptor 三件套。
+
+    py-cord 对 session 的全部调用 (grep 实测的契约):
+      构造  DaveSession(version, user_id, channel_id)            (state.py:921)
+      .reinit(version, user_id, channel_id)                       (state.py:917)
+      .reset()                                                    (state.py:932)
+      .set_passthrough_mode(True, 10)                             (state.py:933/974, gw:230)
+      .get_serialized_key_package() -> bytes                      (state.py:929)
+      .set_external_sender(bytes)                                 (gw:270)
+      .get_user_ids()                          (debug log only)   (gw:273)
+      .process_proposals(op_type, bytes) -> CommitWelcome|None    (gw:277)
+      .process_commit(bytes)   抛异常→recover                     (gw:301)
+      .process_welcome(bytes)  抛异常→recover                     (gw:322)
+      .decrypt(user_id, MediaType.audio, bytes) -> bytes          (reader:280/300/341)
+      .encrypt_opus(bytes) -> bytes            (发送路径!!)        (client.py:421)
+      .ready  (property bool)                  (发送+接收门)       (client.py:421, reader)
+      .voice_privacy_code (property)                              (client.py:370)
+
+    ⚠️ encrypt_opus 在发送 (TTS 播放) 路径上, 任何异常都回落明文, 绝不让 TTS 崩。
+    """
+
+    def __init__(self, version, user_id, channel_id):
+        import dave  # 懒导入: dave-py 未装的 bot import sidecar 不应崩
+        self._dave = dave
+        self._MT_AUDIO = dave.MediaType.audio
+        self._version = version
+        self._user_id = user_id
+        self._channel_id = channel_id
+        self._self_key = str(user_id)
+        self._state = None                 # 由 _install 的 reinit patch 注入 (拿 ssrc + 成员名单)
+        self._decryptors: dict = {}        # user_id(str) -> dave.Decryptor
+        self._dec_fail: dict = {}          # user_id(str) -> 连续解密失败计数 (重拉 ratchet 用)
+        self._dec_ok: dict = {}            # user_id(str) -> 累计解密成功计数 (区分哪个 sender 通)
+        self._dec_has_ratchet: set = set() # user_id(str) -> 已成功 transition 过 ratchet (防逐帧重拉)
+        self._enc_frames = 0               # 埋点: 发送帧计数 (查断流用)
+        self._rekeys = 0                   # 埋点: ratchet 刷新次数 (中途换钥匙=可能断流)
+        self._roster: set = set()          # commit/welcome 返回的权威群名单 (str user_id), 入 recognized_set
+        self._sess = dave.Session()
+        self._sess.init(version, int(channel_id), str(user_id))
+        self._enc = dave.Encryptor()
+        log.info("DaveSessionAdapter 已建 (version=%s group=%s self=%s)",
+                 version, channel_id, user_id)
+
+    # ── 成员名单 (MLS recognized set): dave-py process_* 要传 ──
+    def _recognized_set(self) -> set:
+        ids = {self._self_key}
+        # 权威源 1: commit/welcome 返回的群名单 (一旦进树就常驻, 不受缓存/时序影响)
+        ids |= self._roster
+        st = self._state
+        try:
+            if st is not None:
+                ch = None
+                try:
+                    ch = st.guild.get_channel(int(self._channel_id)) if st.guild else None
+                except Exception:
+                    ch = None
+                if ch is not None:
+                    # 权威源 2: voice_states (VOICE_STATE_UPDATE 维护, 不需 members 特权 intent)。
+                    # 关键修复 (2026-06-02): 原来只用 ch.members, 但 bot 跑 Intents.default() 不含
+                    # members 特权 intent → ch.members 空/陈旧 → 新进频道的人 (如 Chris) 在 proposals
+                    # 到达时不在 recognized_set → 其 add 被 dave-py 拒 → 永不进 MLS 树 → 解密全失败。
+                    # voice_states 是语音频道真实在场名单, 才是对的源。members 保留做并集兜底。
+                    for uid in (getattr(ch, "voice_states", None) or {}).keys():
+                        ids.add(str(uid))
+                    for m in getattr(ch, "members", []) or []:
+                        ids.add(str(m.id))
+                for uid in (getattr(st, "ssrc_user_map", {}) or {}).values():
+                    ids.add(str(uid))
+        except Exception:
+            log.exception("_recognized_set 计算失败 (回落仅自己)")
+        return ids
+
+    # ── ratchet 刷新: 群密钥每次 epoch 变更后重新拉 (commit/welcome/transition 后) ──
+    def _refresh_ratchets(self):
+        recognized = self._recognized_set()
+        self._rekeys += 1
+        log.info("[DAVE埋点] _refresh_ratchets #%d: 成员=%d 名单=%s 已发帧=%d (中途换钥匙可能断流)",
+                 self._rekeys, len(recognized), sorted(recognized), self._enc_frames)
+        for uid in recognized:
+            try:
+                r = self._sess.get_key_ratchet(uid)
+            except Exception:
+                log.exception("get_key_ratchet(%s) 失败", uid)
+                continue
+            log.info("[DAVE埋点] get_key_ratchet(%s) → %s%s",
+                     uid, "None(不在MLS树)" if r is None else "有ratchet",
+                     " [自己→encryptor]" if uid == self._self_key else " [他人→decryptor]")
+            if r is None:
+                continue
+            if uid == self._self_key:
+                try:
+                    self._enc.set_key_ratchet(r)
+                except Exception:
+                    log.exception("set 自己 encryptor ratchet 失败")
+            else:
+                dec = self._decryptors.get(uid)
+                if dec is None:
+                    dec = self._dave.Decryptor()
+                    self._decryptors[uid] = dec
+                try:
+                    dec.transition_to_key_ratchet(r, transition_expiry=10.0)
+                    # epoch 真变更时这是合法的重 transition; 标记后 decrypt() 不再逐帧重拉
+                    self._dec_has_ratchet.add(uid)
+                except Exception:
+                    log.exception("transition decryptor(%s) ratchet 失败", uid)
+
+    # ── MLS 生命周期 ──
+    def reinit(self, version, user_id, channel_id):
+        self._version = version
+        self._user_id = user_id
+        self._channel_id = channel_id
+        self._self_key = str(user_id)
+        try:
+            self._sess.reset()
+        except Exception:
+            log.exception("reinit: session.reset 失败 (继续 init)")
+        self._sess.init(version, int(channel_id), str(user_id))
+        self._decryptors.clear()
+        self._dec_fail.clear()
+        self._dec_has_ratchet.clear()
+        self._enc = self._dave.Encryptor()
+        self._enc_frames = 0
+        self._rekeys = 0
+        log.info("DaveSessionAdapter.reinit (version=%s group=%s self=%s)",
+                 version, channel_id, user_id)
+
+    def reset(self):
+        try:
+            self._sess.reset()
+        except Exception:
+            log.exception("reset 失败")
+        self._decryptors.clear()
+        self._dec_fail.clear()
+        self._dec_has_ratchet.clear()
+        try:
+            self._enc = self._dave.Encryptor()
+        except Exception:
+            pass
+
+    def set_passthrough_mode(self, passthrough, expiry=10):
+        try:
+            self._enc.set_passthrough_mode(bool(passthrough))
+        except Exception:
+            log.exception("encryptor.set_passthrough_mode 失败")
+        for dec in list(self._decryptors.values()):
+            try:
+                dec.transition_to_passthrough_mode(bool(passthrough), float(expiry))
+            except Exception:
+                pass
+
+    def get_serialized_key_package(self) -> bytes:
+        return self._sess.get_marshalled_key_package()
+
+    def set_external_sender(self, data):
+        self._sess.set_external_sender(bytes(data))
+
+    def get_user_ids(self):
+        return list(self._recognized_set())
+
+    def process_proposals(self, op_type, proposals):
+        # 关键修复 (2026-06-02): dave-py 的 process_proposals 期望 proposals 字节**带前导 optype
+        # 字节** (daveprotocol 线格式 opcode27 = [optype:1B][MLS proposals...])。py-cord 的 davey
+        # 后端把 optype 拆成单独枚举、只把 msg[4:] 当 proposals 传进来; 换 dave-py 后端必须把这个
+        # 字节补回去, 否则 dave-py 把首个 MLS 字节当 boolean 解析 → "Malformed boolean" → 成员
+        # 永远进不了 MLS 树 → 全程解密失败。只动接收, 与 TTS 发送无关。
+        try:
+            ot = op_type if isinstance(op_type, int) else int(getattr(op_type, "value", 0))
+        except Exception:
+            ot = 0
+        ot = 0 if ot == 0 else 1
+        rec = self._recognized_set()
+        raw = bytes(proposals)
+        # 主路径: 带前导 optype 字节; 若失败 (异常/None) 回退到无前导 (老行为), 记录哪种生效。
+        for tag, payload in (("带前导", bytes([ot]) + raw), ("无前导", raw)):
+            try:
+                blob = self._sess.process_proposals(payload, rec)
+            except Exception as e:
+                log.warning("[DAVE埋点] process_proposals(%s optype=%d in=%dB) 抛错: %s",
+                            tag, ot, len(payload), e)
+                continue
+            log.info("[DAVE埋点] process_proposals(%s optype=%d in=%dB 成员=%d) → blob=%s",
+                     tag, ot, len(payload), len(rec),
+                     ("%dB" % len(bytes(blob))) if blob is not None else "None")
+            if blob is not None:
+                return _CommitWelcome(bytes(blob), b"")
+        return None
+
+    def process_commit(self, commit):
+        # dave-py 不抛异常: RejectType=失败。抛出去让 py-cord 走 recover_dave_from_invalid_commit
+        # (发 invalid_commit_welcome + 重发 key package), 与 davey 的 except 流程一致。
+        result = self._sess.process_commit(bytes(commit))
+        if isinstance(result, self._dave.RejectType):
+            log.warning("[DAVE埋点] process_commit REJECTED: %s (in=%dB)", result, len(bytes(commit)))
+            raise RuntimeError(f"MLS commit rejected: {result}")
+        self._capture_roster(result, "commit")
+        log.info("[DAVE埋点] process_commit OK (in=%dB roster=%s) → 刷新 ratchet, 已发帧=%d",
+                 len(bytes(commit)), sorted(self._roster), self._enc_frames)
+        self._refresh_ratchets()
+        return result
+
+    def process_welcome(self, welcome):
+        result = self._sess.process_welcome(bytes(welcome), self._recognized_set())
+        if result is None:
+            log.warning("[DAVE埋点] process_welcome REJECTED (in=%dB)", len(bytes(welcome)))
+            raise RuntimeError("MLS welcome rejected")
+        self._capture_roster(result, "welcome")
+        log.info("[DAVE埋点] process_welcome OK (in=%dB roster=%s) → 刷新 ratchet, 已发帧=%d",
+                 len(bytes(welcome)), sorted(self._roster), self._enc_frames)
+        self._refresh_ratchets()
+        return result
+
+    def _capture_roster(self, result, src):
+        # dave-py process_commit/welcome 返回 dict[int,list[int]] = epoch 后群名单
+        # (user_id → leaf/sender-key indices)。keys 即权威 recognized set, 常驻进 self._roster。
+        try:
+            if isinstance(result, dict):
+                for k in result.keys():
+                    self._roster.add(str(k))
+        except Exception:
+            log.exception("_capture_roster(%s) 失败", src)
+
+    # ── 给某 Decryptor 拉群密钥 ratchet (拉到才算成功) ──
+    def _try_set_decryptor_ratchet(self, key, dec) -> bool:
+        try:
+            r = self._sess.get_key_ratchet(key)
+        except Exception:
+            return False
+        if r is None:
+            return False
+        try:
+            dec.transition_to_key_ratchet(r, transition_expiry=10.0)
+            return True
+        except Exception:
+            return False
+
+    # ── 收 (接收路径): py-cord 传 user_id, 路由到该用户的 Decryptor ──
+    # 关键修复 (2026-06-02 v2): dave-py Decryptor 每 epoch 只需 transition 一次 ratchet,
+    # 之后内部沿 HKDF 链**自增 generation** 解每帧。旧版在每帧解密失败时重拉 ratchet,
+    # 把 generation 基线打回原点 → 真语音解到 ~25 帧后持续 GCM 认证失败、永远续不上
+    # ("没续上语言流")。这里改成: 每个 sender 只在首次 (或 epoch 刷新) transition 一次,
+    # 逐帧失败只计数+深诊, 绝不重拉。epoch 真变更由 _refresh_ratchets 统一重 transition。
+    # 只动接收, 与 TTS 发送无关。
+    def decrypt(self, user_id, media_type, data):
+        key = str(user_id)
+        dec = self._decryptors.get(key)
+        if dec is None:
+            dec = self._dave.Decryptor()
+            self._decryptors[key] = dec
+        # 一次性拉 ratchet (修首包早于 welcome 的竞态): 仅当本 sender 还没成功 transition 过。
+        # 拉到才标记, 拉不到 (还没进 MLS 树) 留待下帧或 _refresh_ratchets 补。绝不逐帧重拉。
+        if key not in self._dec_has_ratchet:
+            if self._try_set_decryptor_ratchet(key, dec):
+                self._dec_has_ratchet.add(key)
+        try:
+            out = dec.decrypt(self._MT_AUDIO, bytes(data))
+            if out is not None:
+                self._dec_fail.pop(key, None)
+                ns = self._dec_ok.get(key, 0) + 1
+                self._dec_ok[key] = ns
+                if ns <= 3 or ns % 500 == 0:
+                    log.info("[DAVE埋点] decrypt(%s) 成功#%d: in=%dB out=%dB 头=%s (真Opus)",
+                             key, ns, len(bytes(data)), len(bytes(out)), bytes(out)[:4].hex())
+                return bytes(out)
+        except Exception:
+            pass
+        n = self._dec_fail.get(key, 0) + 1
+        self._dec_fail[key] = n
+        # 深诊 (前 5 次失败 + 之后每 200): 用 DecryptorStats 区分故障类别 ——
+        # miss_key>0 = ratchet/leaf 不对 (MLS 同步问题); bad_nonce>0 = 帧格式/nonce 不对;
+        # 仅 fail 增长 = GCM 认证失败 (钥匙错/epoch 错)。帧头尾用于核对 DAVE trailer。
+        if n <= 5 or n % 200 == 0:
+            try:
+                st = dec.get_stats(self._MT_AUDIO)
+                d = bytes(data)
+                log.warning(
+                    "[DAVE深诊] decrypt(%s) 失败#%d 群建立=%s 有ratchet=%s | 帧 in=%dB 头=%s 尾=%s | "
+                    "stats success=%d fail=%d miss_key=%d bad_nonce=%d attempts=%d",
+                    key, n, self._sess.has_established_group(), key in self._dec_has_ratchet,
+                    len(d), d[:8].hex(), d[-8:].hex(),
+                    st.decrypt_success_count, st.decrypt_failure_count,
+                    st.decrypt_missing_key_count, st.decrypt_invalid_nonce_count,
+                    st.decrypt_attempts)
+            except Exception:
+                log.exception("[DAVE深诊] 取 stats 失败")
+        return b""
+
+    # ── 发 (发送路径!!): 任何异常回落明文, 绝不崩 TTS ──
+    def encrypt_opus(self, data):
+        self._enc_frames += 1
+        try:
+            ssrc = int(getattr(self._state, "ssrc", 0) or 0) if self._state else 0
+            out = self._enc.encrypt(self._MT_AUDIO, ssrc, bytes(data))
+            if out is not None:
+                if self._enc_frames % 50 == 1:
+                    log.info("[DAVE埋点] encrypt_opus 帧#%d: ssrc=%s in=%dB out=%dB 密文OK ready=%s",
+                             self._enc_frames, ssrc, len(bytes(data)), len(bytes(out)), self.ready)
+                return bytes(out)
+            # encrypt 返回 None: 没 ratchet / passthrough → 回落明文
+            if self._enc_frames % 50 == 1:
+                log.warning("[DAVE埋点] encrypt_opus 帧#%d: ssrc=%s encrypt()返回None→回落明文 ready=%s "
+                            "has_ratchet=%s", self._enc_frames, ssrc, self.ready,
+                            self._safe_has_ratchet())
+        except Exception:
+            log.exception("[DAVE埋点] encrypt_opus 帧#%d 异常, 回落明文 (TTS 可能受影响)",
+                          self._enc_frames)
+        return data
+
+    def _safe_has_ratchet(self):
+        try:
+            return bool(self._enc.has_key_ratchet())
+        except Exception:
+            return "?"
+
+    @property
+    def ready(self) -> bool:
+        try:
+            return bool(self._sess.has_established_group()) and bool(self._enc.has_key_ratchet())
+        except Exception:
+            return False
+
+    def can_passthrough(self, user_id) -> bool:
+        # py-cord opus.py:729 在 opus decode 后调此判断是否要在 PCM 上再 DAVE 解密一遍
+        # (davey 的多余分支)。我们的 DAVE 解密已在 _probed/decrypt_rtp 阶段完成,
+        # decrypted_data 已是明文 Opus, opus.py:711 解出的 PCM 就是最终结果。
+        # 返回 False 跳过那个多余分支, 避免 AttributeError 把好 PCM 丢成 silence。
+        return False
+
+    @property
+    def voice_privacy_code(self):
+        return None
+
+
+def _install_dave_py_backend():
+    """把 py-cord 的 DAVE 后端从 davey 换成 dave-py (只装一次, 进程级)。
+
+    手法: monkeypatch ``davey`` 模块的 ``DaveSession`` / ``CommitWelcome`` 属性 ——
+    py-cord 在 state.py/gateway.py 用 ``davey.DaveSession(...)`` / isinstance(.,
+    ``davey.CommitWelcome``) 在**调用时**做属性查找, 故换模块属性即拦截全部调用,
+    零改 py-cord 源码。再 patch VoiceConnectionState 两个 async 方法 (additive,
+    先调原版再加料): reinit 注入 state 引用 (adapter 需 state.ssrc + 频道成员名单);
+    execute_dave_transition 在 epoch 切换后刷新 ratchet (py-cord 原版不刷, endcord
+    opcode 22 会刷)。
+
+    ⚠️ 这条线同时改发送加密 (encrypt_opus)。换错会哑 TTS —— 故 adapter.encrypt_opus
+    任何异常回落明文, 且 _DAVE_PY_BACKEND_ENABLED=False 可一键回滚到纯 davey。
+    """
+    global _dave_backend_installed
+    if _dave_backend_installed:
+        return
+    if not _DAVE_PY_BACKEND_ENABLED:
+        log.info("dave-py 后端开关关闭 (_DAVE_PY_BACKEND_ENABLED=False), 保持 davey")
+        return
+    try:
+        import dave  # noqa: F401  确认已装, 未装则跳过 (保持 davey, 发送不受影响)
+        import davey
+        from discord.voice.state import VoiceConnectionState
+
+        davey.DaveSession = DaveSessionAdapter
+        davey.CommitWelcome = _CommitWelcome
+
+        if not getattr(VoiceConnectionState, "_cc_dave_py_patched", False):
+            _orig_reinit = VoiceConnectionState.reinit_dave_session
+
+            async def _reinit_with_state(self):
+                await _orig_reinit(self)
+                if self.dave_session is not None:
+                    try:
+                        self.dave_session._state = self
+                    except Exception:
+                        pass
+
+            VoiceConnectionState.reinit_dave_session = _reinit_with_state
+
+            _orig_exec = VoiceConnectionState.execute_dave_transition
+
+            async def _exec_then_refresh(self, transition):
+                await _orig_exec(self, transition)
+                sess = self.dave_session
+                if sess is not None and hasattr(sess, "_refresh_ratchets"):
+                    try:
+                        sess._refresh_ratchets()
+                    except Exception:
+                        log.exception("execute_dave_transition 后刷新 ratchet 失败")
+
+            VoiceConnectionState.execute_dave_transition = _exec_then_refresh
+            VoiceConnectionState._cc_dave_py_patched = True
+
+        _dave_backend_installed = True
+        log.info("DAVE 后端已替换为 dave-py (Session + Encryptor + 逐用户 Decryptor); "
+                 "发送回落明文兜底已就位")
+    except Exception:
+        log.exception("dave-py 后端替换失败 —— 保持 davey (发送不受影响, 接收仍乱码)")
+
+
+def _install_receive_probe():
+    """挂 decrypt_rtp ssrc 探针 (只挂一次, 进程级)。
+
+    每个 RTP 包都过 ``PacketDecryptor.decrypt_rtp`` (DAVE 解密门之前), 这里记下
+    ``packet.ssrc`` 到 ``_seen_ssrcs`` —— py-cord 2.8.0 下未映射 ssrc 的包在 reader
+    被丢弃前不建 decoder, 所以 decoders.keys() 推断已失效, 这是唯一可靠的传输层实收
+    ssrc 来源。PacketDecryptor 只被接收路径(AudioReader)用, 不碰发送(TTS 播放), 安全。
+    """
+    global _receive_probe_installed
+    if _receive_probe_installed:
+        return
+    try:
+        from discord.voice.receive.reader import PacketDecryptor
+        try:
+            from discord.voice.packets.core import OPUS_SILENCE
+        except Exception:
+            OPUS_SILENCE = b"\xf8\xff\xfe"
+        _orig = PacketDecryptor.decrypt_rtp
+
+        def _probed(self, packet):
+            try:
+                with _seen_ssrcs_lock:
+                    _seen_ssrcs.add(packet.ssrc)
+            except Exception:
+                pass
+
+            # ── 接收路径专用: 用 endcord 验证过的正确顺序自己做 DAVE 解密 ──
+            # py-cord 2.8.0 reader.decrypt_rtp 有两个 bug:
+            #  ① DAVE 解密**后**又调 update_extended_header + decrypted_data[offset:]
+            #     (reader.py:306-308), 把已是合法 Opus(头=78) 的明文当扩展头再切一刀
+            #     → opus "corrupted stream"。endcord 在 DAVE 解密**前**剥扩展、解密后
+            #     直接喂 opus、绝不后切 (voice.py:895-930)。rtpsize AEAD 传输层已把扩展
+            #     头并入 AAD, _decryptor_rtp 返回的就是干净密文, 所以解密后无需也不能再切。
+            #  ② dave.ready 但 ssrc 未映射(uid 缺)时既不解密也不兜底, 留 MLS 密文 → 崩。
+            # 这里完全接管 DAVE 分支, 不调 py-cord 原 _orig (含错误后切); 非 DAVE / 未就绪
+            # 才回落 _orig。PacketDecryptor 只被 AudioReader 用, 不碰 TTS 发送, 安全。
+            handled = False
+            try:
+                state = self.client._connection
+                dave = getattr(state, "dave_session", None)
+                if dave is not None and getattr(dave, "ready", False):
+                    # 传输层 SRTP 解密 (rtpsize: 扩展头已并入 AAD, 返回干净密文)
+                    raw_payload = self._decryptor_rtp(packet)
+                    uid = state.ssrc_user_map.get(packet.ssrc)
+                    if uid:
+                        try:
+                            plain = dave.decrypt(uid, None, raw_payload)
+                        except Exception:
+                            plain = None
+                        # DAVE 明文(头=78 真 Opus)直接喂 opus, 不再后切扩展头
+                        packet.decrypted_data = plain if plain else OPUS_SILENCE
+                    else:
+                        # 未映射 ssrc: 兜底有效静音帧, 让 router 存活等 ssrc 推断补映射
+                        packet.decrypted_data = OPUS_SILENCE
+                    result = packet.decrypted_data
+                    handled = True
+            except Exception:
+                log.exception("[DAVE接管] decrypt_rtp 自管失败, 回落 py-cord 原实现")
+            if not handled:
+                result = _orig(self, packet)
+            return result
+
+        PacketDecryptor.decrypt_rtp = _probed
+        _receive_probe_installed = True
+        log.info("decrypt_rtp ssrc 探针已挂载 (接收路径专用, 不影响发送)")
+    except Exception:
+        log.exception("decrypt_rtp ssrc 探针挂载失败 (ssrc 自动推断将退化)")
+
+    # ── opus decode 崩溃兜底 (接收路径专用, 不碰 TTS 发送) ──
+    # graceful degradation: 个别帧 decode 失败 (偶发 ssrc 未映射 / 钥匙刚切换的边界帧)
+    # 时回落一帧静音 PCM, 让 PacketRouter.run() 永不因单帧异常退出 —— 退出会触发
+    # stop_recording → 守护循环疯狂重启录音 → voice 连接抖动。正常语音帧 (DAVE 解密的
+    # 明文 Opus, 头=0x78) 照常解码。
+    try:
+        from discord.opus import PacketDecoder, Decoder
+        if not getattr(PacketDecoder, "_cc_decode_guarded", False):
+            _orig_decode = PacketDecoder._decode_packet
+            try:
+                _silence_pcm = b"\x00" * (Decoder.SAMPLES_PER_FRAME * Decoder.SAMPLE_SIZE)
+            except Exception:
+                _silence_pcm = b"\x00" * 3840
+            _decode_fail_n = [0]
+
+            def _decode_guarded(self, packet):
+                try:
+                    return _orig_decode(self, packet)
+                except Exception:
+                    _decode_fail_n[0] += 1
+                    if _decode_fail_n[0] % 500 == 1:
+                        log.warning("[opus兜底] decode 失败累计 %d 帧 → 回落静音 (单帧偶发, 不影响整体)",
+                                    _decode_fail_n[0])
+                    return packet, _silence_pcm
+
+            PacketDecoder._decode_packet = _decode_guarded
+            PacketDecoder._cc_decode_guarded = True
+            log.info("opus _decode_packet 崩溃兜底已挂载")
+    except Exception:
+        log.exception("opus _decode_packet 崩溃兜底挂载失败")
+
+
+async def _ssrc_infer_loop(period: float = 0.3):
+    """后台守护: ① 录音被 corrupted stream 冲垮时自动重启; ② ssrc 自动推断兜底
+    (频道唯一真人时, 把传输层实收的未映射 ssrc 直接 _add_ssrc, 不靠 speaking 事件)。
+    含诊断日志 (dave ready/epoch + ssrc_map + hits + 实收 ssrc), 便于现场定位。"""
+    global _stt_sink, _listen_restart_n
+    log.info("ssrc 推断 + 录音守护循环已启动")
+    diag_n = 0
+    _diag_last: tuple = ()
+    try:
+        while True:
+            await asyncio.sleep(period)
+            # 录音被冲垮后自动重启 (新 sink), 等 ssrc 映射好就能正常收
+            if _listen_active and _listen_vc is not None and not _listen_vc.is_recording():
+                if _listen_restart_n < _LISTEN_RESTART_MAX:
+                    _listen_restart_n += 1
+                    try:
+                        new_sink = _get_stt_sink_class()()
+                        new_sink.vc = _listen_vc
+                        _stt_sink = new_sink
+                        _listen_vc.start_recording(new_sink, _on_recording_done)
+                        log.info("录音已自动重启 (第 %d 次)", _listen_restart_n)
+                    except Exception:
+                        log.exception("录音自动重启失败")
+                continue
+            sink = _stt_sink
+            if sink is None:
+                continue
+            vc = getattr(sink, "vc", None)
+            st = getattr(vc, "_connection", None) if vc else None
+            dave = getattr(st, "dave_session", None)
+            # ssrc_user_map: ssrc→uid (state.py 属性, 是 _id_to_ssrc 的逆)。
+            smap = getattr(st, "ssrc_user_map", None)
+            cur_map = dict(smap) if smap else {}
+            with _seen_ssrcs_lock:
+                seen = set(_seen_ssrcs)
+            cur_hits = sink.hits()
+            # 诊断: 每 10 轮(~3s)打一次, hits / map / 实收 ssrc 一变化立即打
+            cur_diag = (cur_hits, tuple(sorted(cur_map.items())), tuple(sorted(seen)))
+            changed = cur_diag != _diag_last
+            diag_n += 1
+            if changed or diag_n % 10 == 0:
+                log.info(
+                    "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 实收ssrc=%s%s",
+                    diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
+                    cur_map, cur_hits, sorted(seen), "  <<变化" if changed else "",
+                )
+                _diag_last = cur_diag
+            # ssrc 自动推断兜底: 频道唯一真人时, 传输层实收但未映射的 ssrc 必是那个真人
+            try:
+                if vc is not None and dave is not None and getattr(dave, "ready", False):
+                    known = set(cur_map.keys())
+                    unknown = seen - known
+                    bot_id = None
+                    try:
+                        bot_id = vc.guild.me.id
+                    except Exception:
+                        pass
+                    human_ids = set()
+                    ch = getattr(vc, "channel", None)
+                    if ch is not None:
+                        for m in (getattr(ch, "members", None) or []):
+                            if not getattr(m, "bot", False) and m.id != bot_id:
+                                human_ids.add(m.id)
+                        for uid in (getattr(ch, "voice_states", None) or {}).keys():
+                            if uid == bot_id:
+                                continue
+                            # voice_states 里会混入其它队友 bot (如 tianmaojingling),
+                            # py-cord 还可能 "Skipping member" 解析不出它们。无法解析的
+                            # 成员或 .bot=True 一律不算真人 —— 否则会被算进"未映射真人",
+                            # 让 len(unmapped_humans)>1, 唯一真人的 ssrc 永远绑不上 →
+                            # decrypt_rtp 兜底每帧塞 OPUS_SILENCE → RMS=0 → VAD 永不断句。
+                            try:
+                                m = ch.guild.get_member(uid)
+                            except Exception:
+                                m = None
+                            if m is None or getattr(m, "bot", False):
+                                continue
+                            human_ids.add(uid)
+                    # 唯一未映射的真人 → 唯一未映射的 ssrc。比「频道全局唯一真人」更
+                    # 鲁棒: 房里有 2 人但一人已映射时, 剩下的实收 ssrc 必属另一人。
+                    mapped_uids = set(cur_map.values())
+                    unmapped_humans = human_ids - mapped_uids
+                    if unknown and len(unmapped_humans) == 1:
+                        hid = next(iter(unmapped_humans))
+                        for s in unknown:
+                            vc._add_ssrc(hid, s)
+                            log.info("🔧 自动推断 ssrc: user=%s ssrc=%s (唯一未映射真人)", hid, s)
+            except Exception:
+                log.exception("ssrc 自动推断失败")
+    except asyncio.CancelledError:
+        log.info("ssrc 推断循环已取消")
+        raise
 
 
 def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
@@ -817,13 +1877,11 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
     import discord
 
     intents = discord.Intents.default()  # 含 voice_states；不开 message_content
-    debug_guilds = None
-    if guild_id:
-        try:
-            debug_guilds = [int(guild_id)]
-        except (ValueError, TypeError):
-            debug_guilds = None
-    bot = discord.Bot(intents=intents, debug_guilds=debug_guilds)
+    # auto_sync_commands=False: sidecar 与主 DiscordChannel 共用同一 token = 同一
+    # application。py-cord 的 sync_commands() global 分支无条件 bulk-overwrite,
+    # 会把主频道注册的 global 命令 (/status 等) 全冲掉。这里关掉自动同步, 改在
+    # on_ready 里用 register_commands(guild_id=...) 只往 guild 注册, 绝不碰 global。
+    bot = discord.Bot(intents=intents, auto_sync_commands=False)
 
     @bot.event
     async def on_ready():
@@ -845,6 +1903,23 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         if _heartbeat_task is None or _heartbeat_task.done():
             _heartbeat_task = asyncio.create_task(_voice_heartbeat())
             log.info("voice 心跳已启动（30s 周期，断线自动 rejoin）")
+        # 显式把 slash 命令只注册到 guild (不碰 global, 保护主频道命令)。
+        # on_ready 时 application_id + guilds 已就绪, 避开 on_connect 过早 sync 的坑。
+        global _commands_synced
+        if guild_id and not _commands_synced:
+            try:
+                gid = int(guild_id)
+                regd = await bot.register_commands(
+                    bot.pending_application_commands,
+                    guild_id=gid, method="bulk", force=True,
+                )
+                _commands_synced = True
+                log.info(
+                    "slash 命令已注册到 guild %s: %s",
+                    gid, [c.get("name") for c in regd],
+                )
+            except Exception:
+                log.exception("slash 命令注册失败 (guild=%s)", guild_id)
 
     @bot.event
     async def on_application_command_error(ctx, error):
@@ -862,6 +1937,50 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             await ctx.respond("👋 已离开语音频道。")
         else:
             await ctx.respond("我不在任何语音频道里。")
+
+    @bot.slash_command(description="开始把语音频道里的说话转成文字发到这里")
+    async def listen(ctx):
+        vc = ctx.guild.voice_client
+        if vc is None or not vc.is_connected():
+            await ctx.respond("我还没在语音频道里，稍等心跳重连或重启后再试。", ephemeral=True)
+            return
+        if vc.is_recording():
+            await ctx.respond("已经在收音了。", ephemeral=True)
+            return
+        await ctx.defer(ephemeral=True)  # silero VAD 加载 + session 启动可能耗时
+        ok, msg = await _activate_listen(vc)
+        if not ok:
+            await ctx.respond(f"❌ {msg}", ephemeral=True)
+            return
+        await ctx.respond("🎤 开始收音，说几句中文试试（silero VAD 自动断句）。", ephemeral=True)
+
+    @bot.slash_command(description="停止语音转文字")
+    async def stoplisten(ctx):
+        global _ssrc_task, _audio_pump_task, _agent_session, _audio_input, _audio_output, _listen_active
+        _listen_active = False  # 先关, 防守护循环在停录后又自动重启
+        vc = ctx.guild.voice_client
+        if vc and vc.is_recording():
+            vc.stop_recording()
+        if _audio_pump_task is not None:
+            _audio_pump_task.cancel()
+            _audio_pump_task = None
+        if _ssrc_task is not None:
+            _ssrc_task.cancel()
+            _ssrc_task = None
+        if _agent_session is not None:
+            try:
+                await _agent_session.aclose()
+            except Exception:
+                log.exception("AgentSession 关闭异常")
+            _agent_session = None
+        _audio_input = None
+        _audio_output = None
+        hits = _stt_sink.hits() if _stt_sink is not None else 0
+        await ctx.respond(
+            f"🛑 已停止收音。本次 voice 包命中 {hits} 次"
+            + ("（>0 说明接收链路通）。" if hits else "（=0 说明还没收到解密音频）。"),
+            ephemeral=True,
+        )
 
     return bot
 
@@ -908,6 +2027,17 @@ def _spawn_sidecar_thread(
         log.warning("未安装 py-cord，Discord 语音 sidecar 跳过")
         return None
 
+    # livekit silero 插件在 import 时调 register_plugin(), 而 livekit 强制插件只能
+    # 在主线程注册 (agents/plugin.py 检查 current_thread == main_thread)。sidecar 跑在
+    # daemon 线程, 故这里先在主线程 import 一次进 sys.modules; 线程内再 import 即命中
+    # 缓存、不重跑模块体, register_plugin 不会二次触发。失败不致命 (STT 接收路径不可用,
+    # 但 TTS 发送路径无关)。
+    try:
+        from livekit.plugins import silero  # noqa: F401
+        from livekit.agents import Agent, AgentSession  # noqa: F401
+    except Exception:
+        log.exception("livekit 预导入失败 (STT 接收路径将不可用，不影响 TTS 发送)")
+
     def _run():
         global _sidecar_loop, _sidecar_bot, _sidecar_thread
         import discord
@@ -921,6 +2051,11 @@ def _spawn_sidecar_thread(
             log.exception("opus 加载失败，TTS 流式播放可能无法编码")
         # 注: 不能禁用 DAVE (DAVE_PROTOCOL_VERSION=0) —— Discord 已强制 E2EE，
         # 声明 0 会被 voice gateway 以 close code 4017 拒绝，连放音都连不上。
+        # 挂接收路径专用的 decrypt_rtp ssrc 探针 (只挂一次, 不碰发送路径)。
+        _install_receive_probe()
+        # 把 DAVE 后端从 davey 换成 dave-py (解密能出真 PCM)。这条线同时碰发送加密,
+        # encrypt_opus 已做明文回落兜底; 一键回滚 = _DAVE_PY_BACKEND_ENABLED=False。
+        _install_dave_py_backend()
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
