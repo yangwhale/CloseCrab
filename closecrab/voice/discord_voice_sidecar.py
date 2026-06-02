@@ -923,9 +923,11 @@ def forward_file(fid: str, frac: float = 0.1) -> bool:
 
 
 def _get_stt():
-    """复用 livekit_io 的 _build_stt(), 统一 STT 实例 (Chirp 3 / GeminiSTT 由 STT_PROVIDER env 决定)。"""
+    """复用 livekit_io 的 _build_stt(), 统一 STT (默认 Chirp 3 + 词汇增强)。"""
     global _stt_engine
     if _stt_engine is None:
+        os.environ.setdefault("STT_PROVIDER", "chirp3_stream")
+        os.environ.setdefault("STT_PHRASE_BOOST", "1")
         from .livekit_io import _build_stt
         _stt_engine = _build_stt()
     return _stt_engine
