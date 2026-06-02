@@ -923,11 +923,11 @@ def forward_file(fid: str, frac: float = 0.1) -> bool:
 
 
 def _get_stt():
-    """惰性构造 GeminiSTT 单例 (复用 voice 模式同款 Vertex 凭据)。"""
+    """复用 livekit_io 的 _build_stt(), 统一 STT 实例 (Chirp 3 / GeminiSTT 由 STT_PROVIDER env 决定)。"""
     global _stt_engine
     if _stt_engine is None:
-        from .gemini_stt import GeminiSTT
-        _stt_engine = GeminiSTT()
+        from .livekit_io import _build_stt
+        _stt_engine = _build_stt()
     return _stt_engine
 
 
