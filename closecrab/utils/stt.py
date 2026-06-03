@@ -220,9 +220,12 @@ class STTEngine:
         from funasr import AutoModel
         global _funasr_model
         if _funasr_model is None:
-            log.info("Loading FunASR SenseVoiceSmall model (first time)...")
+            local_path = "/tmp/SenseVoiceSmall"
+            import os
+            model_id = local_path if os.path.exists(local_path) else "iic/SenseVoiceSmall"
+            log.info("Loading FunASR SenseVoiceSmall model from %s...", model_id)
             _funasr_model = AutoModel(
-                model="iic/SenseVoiceSmall",
+                model=model_id,
                 device="cpu",
             )
             log.info("FunASR model loaded.")
