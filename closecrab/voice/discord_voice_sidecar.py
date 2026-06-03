@@ -1989,10 +1989,19 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         log.info("Discord 文字 → BotCore: [%s] %s", message.author.display_name, text[:80])
         dc_channel = message.channel
         sidecar_loop = _sidecar_loop
-        # 用飞书 open_id 路由, 这样 Discord 文字消息走到跟飞书同一个 worker/session
         open_id = _feishu_open_id
         if not open_id:
             return
+
+        # 转发到飞书聊天窗口, 让 Chris 看见 Discord 来的消息 + 处理过程
+        async def _forward_to_feishu():
+            try:
+                chat_id = getattr(ch_ref, '_user_chats', {}).get(open_id, "")
+                if chat_id:
+                    ch_ref._send_text(chat_id, f"📱 [Discord] {message.author.display_name}: {text}")
+            except Exception:
+                log.exception("转发 Discord 文字到飞书失败")
+        asyncio.run_coroutine_threadsafe(_forward_to_feishu(), feishu_loop)
 
         async def _route():
             from closecrab.core.types import UnifiedMessage
