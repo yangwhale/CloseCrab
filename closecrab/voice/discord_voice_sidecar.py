@@ -669,6 +669,11 @@ async def _stream_speak(text: str, fid: str = ""):
                 break
             await asyncio.sleep(0.05)
         if source.buffered() > 0 or gen_thread.is_alive():
+            # 等上一段播完再播 (顺序播放, 不争抢)
+            for _ in range(600):  # 最多 ~30s
+                if not vc.is_playing():
+                    break
+                await asyncio.sleep(0.05)
             try:
                 vc.play(source)
             except Exception:
