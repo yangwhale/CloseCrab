@@ -1911,7 +1911,8 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
     """
     import discord
 
-    intents = discord.Intents.default()  # 含 voice_states；不开 message_content
+    intents = discord.Intents.default()  # 含 voice_states
+    intents.message_content = True       # 接收文字消息内容 (Discord Developer Portal 需开 privileged intent)
     # auto_sync_commands=False: sidecar 与主 DiscordChannel 共用同一 token = 同一
     # application。py-cord 的 sync_commands() global 分支无条件 bulk-overwrite,
     # 会把主频道注册的 global 命令 (/status 等) 全冲掉。这里关掉自动同步, 改在
