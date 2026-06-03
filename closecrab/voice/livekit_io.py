@@ -409,6 +409,20 @@ class _CloseCrabStream(llm.LLMStream):
                 except Exception as e:
                     log.warning(f"Push voice result to feishu failed: {e}")
 
+            # 同时发干净文字到 Discord 语音房文字频道 (先于 TTS 念出来)
+            try:
+                from .discord_voice_sidecar import _sidecar_bot, _sidecar_loop, _target_voice_channel_id
+                if _sidecar_bot and _sidecar_loop and _target_voice_channel_id:
+                    clean = re.sub(r'\[[a-z]+\]\s*', '', text_for_feishu).strip()
+                    if clean:
+                        def _dc_send():
+                            ch = _sidecar_bot.get_channel(_target_voice_channel_id)
+                            if ch:
+                                asyncio.ensure_future(ch.send(f"💬 {clean[:1900]}"))
+                        _sidecar_loop.call_soon_threadsafe(_dc_send)
+            except Exception:
+                pass  # Discord 不可用不影响主流程
+
             return text_for_feishu
 
         try:
