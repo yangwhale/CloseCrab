@@ -34,6 +34,7 @@
 
 import asyncio
 import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采样)
+from dataclasses import dataclass
 import logging
 import os
 import re
@@ -106,9 +107,16 @@ _sidecar_thread = None  # 运行时启停用：保存 sidecar 线程引用以便
 _target_voice_channel_id: int = 0
 _heartbeat_task = None  # 后台 voice 健康检查 task，防重复启动
 _commands_synced = False  # slash 命令只注册一次 (on_ready 在 RESUME 后可能重复触发)
-# _stream_speak 串行锁: opener/hint/最终答 多条并发时, 保证 wait+play 临界区 FIFO,
-# 不会都通过 vc.is_playing() 等待后同时 vc.play 互相冲掉。懒创建 (绑 sidecar loop)。
-_speak_lock: "asyncio.Lock | None" = None
+# TTS 播报队列: hint/opener/最终回复 统一入队, 单 consumer 串行播放。
+# reply 入队时清洗队列中所有 pending hint (结论到了中间过程不用再念)。
+@dataclass
+class _SpeakItem:
+    text: str
+    fid: str = ""
+    is_reply: bool = False  # True = 最终回复 (fid 非空), False = hint/opener
+
+_speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
+_speak_consumer_task: "asyncio.Task | None" = None
 
 # 没配 voice_channel_id 的 bot 默认连这个频道 (Discord General)。多 bot 共用。
 _DEFAULT_VOICE_CHANNEL_ID = "1471064068851761165"
@@ -583,12 +591,34 @@ def _get_source_class():
     return _SOURCE_CLASS
 
 
-async def _stream_speak(text: str, fid: str = ""):
-    """sidecar loop 内: 用现有常驻连接流式直生 → resample → 推 Discord。
+def _flush_hints_from_queue():
+    """从 _speak_queue 中移除所有 pending hint，保留 reply。
 
-    不主动建连 (没连由调用方 is_voice_connected 拦掉)。排队等上一句念完避免叠音。
-    fid 非空时, 把生成的 48k/stereo/s16 PCM 同步落盘到 _buf_path(fid), 供重播。
+    reply 入队时调用：结论已到，中间过程不用再念。
     """
+    if _speak_queue is None:
+        return 0
+    kept: list[_SpeakItem] = []
+    flushed = 0
+    while not _speak_queue.empty():
+        try:
+            item = _speak_queue.get_nowait()
+            if item.is_reply:
+                kept.append(item)
+            else:
+                flushed += 1
+        except asyncio.QueueEmpty:
+            break
+    for item in kept:
+        _speak_queue.put_nowait(item)
+    if flushed:
+        log.info("TTS 队列清洗: 丢弃 %d 条过期 hint", flushed)
+    return flushed
+
+
+async def _do_speak(text: str, fid: str = ""):
+    """单条 TTS 生成+播放。由 _speak_consumer 串行调用，不需要锁。"""
+    import discord
     bot = _sidecar_bot
     if bot is None or not bot.guilds:
         return
@@ -596,89 +626,99 @@ async def _stream_speak(text: str, fid: str = ""):
     if vc is None or not vc.is_connected():
         return
 
-    # 飞书来的消息不需要回显到 Discord 文字频道 (Chris 在飞书已能看到)
-    # Discord 输入的回复由 CloseCrabLLM 路径 (livekit_io.py) 单独处理 💬 回显
+    for _ in range(1200):  # 最多 ~60s 等上一句播完
+        if not vc.is_playing():
+            break
+        await asyncio.sleep(0.05)
 
-    global _speak_lock
-    if _speak_lock is None:
-        _speak_lock = asyncio.Lock()
-    # 临界区: 等上一句念完 + 起播。整段持锁 (vc.play 立即返回, 实际播放在后台,
-    # 不占锁), 让 opener→hint→hint→最终答 严格 FIFO, 不叠音不互相冲掉。
-    async with _speak_lock:
-        for _ in range(1200):  # 最多 ~60s 等上一句念完
-            if not vc.is_playing():
-                break
-            await asyncio.sleep(0.05)
+    source = _get_source_class()(fid)
+    PREBUFFER = int(48000 * 2 * 2 * 0.8)
 
-        source = _get_source_class()(fid)
-        # 预充阈值: 攒够 ~0.8s 的 48k/stereo/s16 再开播, 抗 jitter。
-        PREBUFFER = int(48000 * 2 * 2 * 0.8)
-
-        # Gemini 生成挪到独立线程, 自带干净 event loop, 全速迭代。
-        # 原因: 之前在 sidecar loop 里跑, 那个 loop 还扛着 Discord 心跳 + voice
-        # keepalive + LiveKit Voice IO, 太忙 → chunk 消费被挤占变慢 → Vertex gRPC
-        # 流被服务端按 idle 提前关 → async for 正常结束但只拿到一半音频 (截断元凶)。
-        def _gen_worker():
-            buf_f = None
-            bpath = _buf_path(fid)
-            if bpath:
-                try:
-                    os.makedirs(_BUF_DIR, exist_ok=True)
-                    buf_f = open(bpath, "wb")
-                except Exception:
-                    log.exception("打开 buffer 落盘文件失败: %s", bpath)
-                    buf_f = None
-
-            async def _run():
-                state = None  # ratecv 跨块状态, 跨 chunk 传递保证边界无爆音
-                async for pcm24 in _gemini_tts_stream(text):
-                    pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
-                    stereo = audioop.tostereo(pcm48, 2, 1, 1)  # mono → stereo
-                    source.write(stereo)
-                    if buf_f is not None:
-                        buf_f.write(stereo)  # tee: 直播的同时落盘整段, 供重播
-                log.info("Discord 流式念(生成完): %s", text[:40])
+    def _gen_worker():
+        buf_f = None
+        bpath = _buf_path(fid)
+        if bpath:
             try:
-                asyncio.run(_run())
+                os.makedirs(_BUF_DIR, exist_ok=True)
+                buf_f = open(bpath, "wb")
             except Exception:
-                log.exception("流式 TTS 生成失败")
-            finally:
-                source.finish()  # 让 read() 放完残余后返回 b'' 结束播放
+                log.exception("打开 buffer 落盘文件失败: %s", bpath)
+                buf_f = None
+
+        async def _run():
+            state = None
+            async for pcm24 in _gemini_tts_stream(text):
+                pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
+                stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                source.write(stereo)
                 if buf_f is not None:
-                    try:
-                        buf_f.close()
-                    except Exception:
-                        pass
-
-        gen_thread = threading.Thread(
-            target=_gen_worker, daemon=True, name="discord-tts-gen")
-        gen_thread.start()
-
-        # sidecar loop 只做轻量轮询: 等预充够 (或生成已结束) 再开播。
-        for _ in range(2400):  # 最多 ~120s
-            if source.buffered() >= PREBUFFER or not gen_thread.is_alive():
-                break
-            await asyncio.sleep(0.05)
-        if source.buffered() > 0 or gen_thread.is_alive():
-            # 顺序播放: 等上一段播完 + 撞车重试
-            played = False
-            for attempt in range(120):  # 最多 ~60s
-                if vc.is_playing():
-                    await asyncio.sleep(0.5)
-                    continue
+                    buf_f.write(stereo)
+            log.info("Discord 流式念(生成完): %s", text[:40])
+        try:
+            asyncio.run(_run())
+        except Exception:
+            log.exception("流式 TTS 生成失败")
+        finally:
+            source.finish()
+            if buf_f is not None:
                 try:
-                    vc.play(source)
-                    played = True
-                    break
-                except discord.ClientException:
-                    await asyncio.sleep(0.5)  # Already playing, 等一下重试
+                    buf_f.close()
                 except Exception:
-                    log.exception("Discord vc.play(stream source) 失败")
-                    break
-            if not played:
-                source.finish()
-        else:
-            source.finish()  # 啥都没生成出来
+                    pass
+
+    gen_thread = threading.Thread(
+        target=_gen_worker, daemon=True, name="discord-tts-gen")
+    gen_thread.start()
+
+    for _ in range(2400):  # 最多 ~120s 等预充
+        if source.buffered() >= PREBUFFER or not gen_thread.is_alive():
+            break
+        await asyncio.sleep(0.05)
+    if source.buffered() > 0 or gen_thread.is_alive():
+        played = False
+        for attempt in range(120):
+            if vc.is_playing():
+                await asyncio.sleep(0.5)
+                continue
+            try:
+                vc.play(source)
+                played = True
+                break
+            except discord.ClientException:
+                await asyncio.sleep(0.5)
+            except Exception:
+                log.exception("Discord vc.play(stream source) 失败")
+                break
+        if not played:
+            source.finish()
+    else:
+        source.finish()
+
+
+async def _speak_consumer():
+    """单 consumer loop: 从队列取 item，串行生成+播放。
+
+    reply 入队时已清洗过期 hint (生产者侧)，consumer 这边再做一次兜底：
+    取到 reply 时把队列里剩余 hint 也清掉（防 put 和 flush 之间的竞态窗口）。
+    """
+    while True:
+        item = await _speak_queue.get()
+        if item.is_reply:
+            _flush_hints_from_queue()
+        try:
+            await _do_speak(item.text, item.fid)
+        except Exception:
+            log.exception("_speak_consumer: _do_speak 异常")
+
+
+async def _enqueue_speak(text: str, fid: str = ""):
+    """sidecar loop 内: 把 TTS 请求入队。reply 入队前先清洗过期 hint。"""
+    is_reply = bool(fid)
+    if is_reply:
+        _flush_hints_from_queue()
+    _speak_queue.put_nowait(_SpeakItem(text=text, fid=fid, is_reply=is_reply))
+    tag = "reply" if is_reply else "hint"
+    log.debug("TTS 入队 (%s, qsize=%d): %s", tag, _speak_queue.qsize(), text[:30])
 
 
 def stream_speak_text(text: str, fid: str = "") -> bool:
@@ -695,8 +735,10 @@ def stream_speak_text(text: str, fid: str = "") -> bool:
         return False
     if not is_voice_connected():
         return False
+    if _speak_queue is None:
+        return False
     try:
-        asyncio.run_coroutine_threadsafe(_stream_speak(text, fid), loop)
+        asyncio.run_coroutine_threadsafe(_enqueue_speak(text, fid), loop)
         return True
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
@@ -1949,6 +1991,13 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         vc = await _ensure_connected()
         if vc is not None:
             log.info("已常驻语音频道: %s (id=%s)", ch.name, ch.id)
+        # 启动 TTS 播报队列 consumer（防重复：on_ready 在 RESUME 后可能再次触发）
+        global _speak_queue, _speak_consumer_task
+        if _speak_queue is None:
+            _speak_queue = asyncio.Queue()
+        if _speak_consumer_task is None or _speak_consumer_task.done():
+            _speak_consumer_task = asyncio.create_task(_speak_consumer())
+            log.info("TTS 播报队列 consumer 已启动")
         # 启动后台 voice 健康检查（防重复：on_ready 在 RESUME 后可能再次触发）
         global _heartbeat_task
         if _heartbeat_task is None or _heartbeat_task.done():
