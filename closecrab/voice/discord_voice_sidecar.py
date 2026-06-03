@@ -669,15 +669,22 @@ async def _stream_speak(text: str, fid: str = ""):
                 break
             await asyncio.sleep(0.05)
         if source.buffered() > 0 or gen_thread.is_alive():
-            # 等上一段播完再播 (顺序播放, 不争抢)
-            for _ in range(600):  # 最多 ~30s
-                if not vc.is_playing():
+            # 顺序播放: 等上一段播完 + 撞车重试
+            played = False
+            for attempt in range(120):  # 最多 ~60s
+                if vc.is_playing():
+                    await asyncio.sleep(0.5)
+                    continue
+                try:
+                    vc.play(source)
+                    played = True
                     break
-                await asyncio.sleep(0.05)
-            try:
-                vc.play(source)
-            except Exception:
-                log.exception("Discord vc.play(stream source) 失败")
+                except discord.ClientException:
+                    await asyncio.sleep(0.5)  # Already playing, 等一下重试
+                except Exception:
+                    log.exception("Discord vc.play(stream source) 失败")
+                    break
+            if not played:
                 source.finish()
         else:
             source.finish()  # 啥都没生成出来
