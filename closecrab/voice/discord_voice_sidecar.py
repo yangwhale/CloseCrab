@@ -2005,8 +2005,10 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
 
         async def _route():
             from closecrab.core.types import UnifiedMessage
+            chat_id = getattr(ch_ref, '_user_chats', {}).get(open_id, "")
 
             async def reply_cb(response_text):
+                # 回复也发到 Discord
                 def _send():
                     async def _do_send():
                         try:
@@ -2018,12 +2020,13 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
                 if sidecar_loop is not None:
                     sidecar_loop.call_soon_threadsafe(_send)
 
+            # channel_type="feishu" + chat_id → 飞书频道正常出卡片/语音/进度
             msg = UnifiedMessage(
-                channel_type="discord",
+                channel_type="feishu",
                 user_id=open_id,
                 content=text,
                 reply=reply_cb,
-                metadata={"discord_channel_id": str(dc_channel.id)},
+                metadata={"chat_id": chat_id, "source": "discord_text"},
             )
             await core.process_message(msg)
 
