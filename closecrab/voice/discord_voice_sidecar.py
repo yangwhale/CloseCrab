@@ -626,10 +626,17 @@ async def _do_speak(text: str, fid: str = ""):
     if vc is None or not vc.is_connected():
         return
 
-    for _ in range(1200):  # 最多 ~60s 等上一句播完
+    # LiveKit 的 _DiscordAudioOutput 可能持续占着 vc.play (常驻 source 放静音帧)。
+    # 如果等 3s 还在播，直接 vc.stop() 抢过来。LiveKit 侧 _ensure_source_playing
+    # 会在下次 capture_frame 时自动重建 source，不会永久挂掉。
+    for i in range(60):  # 最多 ~3s
         if not vc.is_playing():
             break
         await asyncio.sleep(0.05)
+    if vc.is_playing():
+        log.info("TTS 队列: vc 仍在播放 (可能是 LiveKit), 强制 stop 让出")
+        vc.stop()
+        await asyncio.sleep(0.1)
 
     source = _get_source_class()(fid)
     PREBUFFER = int(48000 * 2 * 2 * 0.8)
@@ -676,10 +683,10 @@ async def _do_speak(text: str, fid: str = ""):
         await asyncio.sleep(0.05)
     if source.buffered() > 0 or gen_thread.is_alive():
         played = False
-        for attempt in range(120):
-            if vc.is_playing():
-                await asyncio.sleep(0.5)
-                continue
+        if vc.is_playing():
+            vc.stop()
+            await asyncio.sleep(0.1)
+        for attempt in range(30):  # 最多 ~15s
             try:
                 vc.play(source)
                 played = True
