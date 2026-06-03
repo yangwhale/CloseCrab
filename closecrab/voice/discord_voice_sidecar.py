@@ -2018,17 +2018,8 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             except Exception:
                 log.exception("Discord 文字 → _run_voice_message_with_card 失败")
                 return
-            # 回复也发到 Discord
-            if result and sidecar_loop is not None:
-                def _send():
-                    async def _do_send():
-                        try:
-                            clean = result[:2000]
-                            await dc_channel.send(clean)
-                        except Exception:
-                            log.exception("Discord 文字回复失败")
-                    asyncio.ensure_future(_do_send())
-                sidecar_loop.call_soon_threadsafe(_send)
+            # 回复已经通过飞书卡片+语音显示, 不再发到 Discord 文字窗口
+            # (带感情标签的原始文字不适合文字显示, TTS 会念到 Discord 喇叭)
 
         asyncio.run_coroutine_threadsafe(_route(), feishu_loop)
 
