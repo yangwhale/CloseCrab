@@ -486,7 +486,8 @@ class _CloseCrabStream(llm.LLMStream):
             speech_text = ""
 
         if speech_text:
-            log.info(f"CloseCrabLLM: TTS will speak {len(speech_text)} chars (final)")
+            import time as _time
+            log.info(f"CloseCrabLLM: TTS will speak {len(speech_text)} chars (final) t={_time.monotonic():.3f}")
             try:
                 self._event_ch.send_nowait(
                     llm.ChatChunk(
@@ -633,6 +634,7 @@ async def _voice_tts_node(
             yield frame
         return
 
+    import time as _time
     wrapped_tts = activity.tts
     conn_options = activity.session.conn_options.tts_conn_options
     async with wrapped_tts.stream(conn_options=conn_options) as stream:
@@ -642,11 +644,21 @@ async def _voice_tts_node(
             stream.end_input()
 
         forward_task = asyncio.create_task(_forward_input())
+        t0 = _time.monotonic()
+        first_frame = True
+        frame_count = 0
         try:
             async for ev in stream:
+                if first_frame:
+                    log.info(f"🎤 TTS stream TTFB={_time.monotonic() - t0:.2f}s")
+                    first_frame = False
+                frame_count += 1
                 yield ev.frame
         finally:
             await agents_utils.aio.cancel_and_wait(forward_task)
+            elapsed = _time.monotonic() - t0
+            log.info(f"🎤 TTS stream done: frames={frame_count} "
+                     f"synth={elapsed:.2f}s audio≈{frame_count * 0.01:.1f}s")
 
 
 _MAX_BATCH_CHARS = 500  # Gemini TTS 单次音频上限. 实测 568c 末尾被截断 (09:16 红烧排骨),
@@ -732,14 +744,32 @@ async def _batching_tts_loop(
         f"{len(batches)} batch(es)"
     )
 
+    import time as _time
+    total_t0 = _time.monotonic()
+    total_audio_s = 0.0
     for idx, batch_text in enumerate(batches, 1):
-        log.info(f"TTS batch #{idx}: {len(batch_text)} chars")
+        t0 = _time.monotonic()
+        first_frame = True
+        frame_count = 0
         chunked = tts.synthesize(batch_text, conn_options=conn_options)
         try:
             async for sa in chunked:
+                if first_frame:
+                    ttfb = _time.monotonic() - t0
+                    log.info(f"🎤 TTS batch #{idx}/{len(batches)}: {len(batch_text)}c TTFB={ttfb:.2f}s")
+                    first_frame = False
+                frame_count += 1
                 yield sa.frame
         finally:
             await chunked.aclose()
+        elapsed = _time.monotonic() - t0
+        audio_dur = frame_count * 0.01  # 10ms per frame (typical)
+        total_audio_s += audio_dur
+        log.info(f"🎤 TTS batch #{idx}/{len(batches)}: {len(batch_text)}c done "
+                 f"synth={elapsed:.2f}s audio≈{audio_dur:.1f}s frames={frame_count}")
+    total_elapsed = _time.monotonic() - total_t0
+    log.info(f"🎤 TTS total: {len(full_text)}c {len(batches)} batch(es) "
+             f"synth={total_elapsed:.2f}s audio≈{total_audio_s:.1f}s")
 
 
 # 全局单例引用,供 entrypoint() 拿 feishu_channel + feishu_loop
