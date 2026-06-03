@@ -1964,6 +1964,57 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         except Exception:
             pass
 
+    @bot.event
+    async def on_message(message):
+        """Discord 语音房文字聊天 → BotCore → 回复发回 Discord。"""
+        if message.author.bot:
+            return
+        text = (message.content or "").strip()
+        if not text:
+            return
+        if bot.user:
+            text = re.sub(rf'<@!?{bot.user.id}>', '', text).strip()
+        if not text:
+            return
+
+        ch_ref = _feishu_ref
+        feishu_loop = _feishu_loop
+        if ch_ref is None or feishu_loop is None:
+            return
+        core = getattr(ch_ref, '_core', None)
+        if core is None:
+            return
+
+        log.info("Discord 文字 → BotCore: [%s] %s", message.author.display_name, text[:80])
+        dc_channel = message.channel
+        sidecar_loop = _sidecar_loop
+
+        async def _route():
+            from closecrab.core.types import UnifiedMessage
+
+            async def reply_cb(response_text):
+                def _send():
+                    async def _do_send():
+                        try:
+                            for i in range(0, len(response_text), 2000):
+                                await dc_channel.send(response_text[i:i+2000])
+                        except Exception:
+                            log.exception("Discord 文字回复失败")
+                    asyncio.ensure_future(_do_send())
+                if sidecar_loop is not None:
+                    sidecar_loop.call_soon_threadsafe(_send)
+
+            msg = UnifiedMessage(
+                channel_type="discord",
+                user_id=str(message.author.id),
+                content=text,
+                reply=reply_cb,
+                metadata={"discord_channel_id": str(dc_channel.id)},
+            )
+            await core.process_message(msg)
+
+        asyncio.run_coroutine_threadsafe(_route(), feishu_loop)
+
     @bot.slash_command(description="让机器人离开语音频道")
     async def leave(ctx):
         vc = ctx.guild.voice_client
