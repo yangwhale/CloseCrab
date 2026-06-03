@@ -1989,6 +1989,10 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         log.info("Discord 文字 → BotCore: [%s] %s", message.author.display_name, text[:80])
         dc_channel = message.channel
         sidecar_loop = _sidecar_loop
+        # 用飞书 open_id 路由, 这样 Discord 文字消息走到跟飞书同一个 worker/session
+        open_id = _feishu_open_id
+        if not open_id:
+            return
 
         async def _route():
             from closecrab.core.types import UnifiedMessage
@@ -2007,8 +2011,8 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
 
             msg = UnifiedMessage(
                 channel_type="discord",
-                user_id=str(message.author.id),
-                content=text,
+                user_id=open_id,
+                content=f"[channel: text]\n[from: Discord文字]\n{text}",
                 reply=reply_cb,
                 metadata={"discord_channel_id": str(dc_channel.id)},
             )
