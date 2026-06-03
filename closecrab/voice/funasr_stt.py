@@ -21,9 +21,8 @@ import os
 import re
 import wave
 
-from livekit.agents import stt, utils
+from livekit.agents import APIConnectOptions, stt, utils
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
-from livekit.plugins.openai.stt import APIConnectOptions
 from livekit import rtc
 
 log = logging.getLogger("closecrab.voice.funasr_stt")
