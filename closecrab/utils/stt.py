@@ -23,8 +23,9 @@ from pathlib import Path
 
 log = logging.getLogger("closecrab.utils.stt")
 
-# Lazy-loaded whisper model singleton
+# Lazy-loaded model singletons
 _whisper_model = None
+_funasr_model = None
 
 
 class STTEngine:
@@ -212,4 +213,24 @@ class STTEngine:
 
         text = response.text.strip()
         log.info(f"Gemini transcribed: {text[:100]}...")
+        return text
+
+    def _transcribe_funasr(self, file_path: str) -> str:
+        """用 FunASR SenseVoiceSmall 转写音频文件（中文优化，CPU 可跑）。"""
+        from funasr import AutoModel
+        global _funasr_model
+        if _funasr_model is None:
+            log.info("Loading FunASR SenseVoiceSmall model (first time)...")
+            _funasr_model = AutoModel(
+                model="iic/SenseVoiceSmall",
+                device="cpu",
+            )
+            log.info("FunASR model loaded.")
+
+        result = _funasr_model.generate(input=file_path)
+        if result and len(result) > 0 and "text" in result[0]:
+            text = result[0]["text"].strip()
+        else:
+            text = ""
+        log.info(f"FunASR transcribed: {text[:100]}...")
         return text
