@@ -599,8 +599,10 @@ async def _stream_speak(text: str, fid: str = ""):
     # 原则: 凡是要在 Discord 念的, 先把干净文字发到语音房文字频道
     try:
         clean = re.sub(r'\[[a-z]+\]\s*', '', text).strip()
+        log.info("💬 回显: clean=%d chars, vc_ch=%s", len(clean), _target_voice_channel_id)
         if clean and _target_voice_channel_id:
             ch = bot.get_channel(_target_voice_channel_id)
+            log.info("💬 回显: get_channel → %s", type(ch).__name__ if ch else "None")
             if ch:
                 asyncio.create_task(ch.send(f"💬 {clean[:1900]}"))
     except Exception:
