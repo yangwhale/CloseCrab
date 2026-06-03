@@ -848,6 +848,12 @@ def _build_stt():
             location=os.environ.get("STT_LOCATION", "asia-southeast1"),
             phrases=phrases,
         )
+    if provider == "funasr":
+        from .funasr_stt import FunASRSTT
+        phrases = _default_chirp_phrases()
+        hotword_str = " ".join(p for p, _ in phrases) if phrases else ""
+        return FunASRSTT(hotword=hotword_str)
+
     return GeminiSTT(model=os.environ.get("STT_MODEL", "gemini-3-flash-preview"))
 
 
