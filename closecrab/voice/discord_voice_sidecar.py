@@ -596,6 +596,16 @@ async def _stream_speak(text: str, fid: str = ""):
     if vc is None or not vc.is_connected():
         return
 
+    # 原则: 凡是要在 Discord 念的, 先把干净文字发到语音房文字频道
+    try:
+        clean = re.sub(r'\[[a-z]+\]\s*', '', text).strip()
+        if clean and _target_voice_channel_id:
+            ch = bot.get_channel(_target_voice_channel_id)
+            if ch:
+                asyncio.create_task(ch.send(f"💬 {clean[:1900]}"))
+    except Exception:
+        pass  # 文字回显失败不影响 TTS
+
     global _speak_lock
     if _speak_lock is None:
         _speak_lock = asyncio.Lock()
