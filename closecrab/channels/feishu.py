@@ -3586,9 +3586,6 @@ class FeishuChannel(Channel):
                 log.info(f"text-voice broadcast hint: tool={tool_name} → {phrase!r}")
                 _broadcast_intermediate(phrase, is_opener=False)
 
-            # Claude 在调工具前那段 "[thinking] 我去看..." 也推到两路, 否则只有 tool
-            # hints 和最终 ogg, 用户听不见思考过程。最终 ogg 走 _send_voice_summary,
-            # 那个是工具链跑完后的最后一段, 不含 opener — 必须在这里独立推一次。
             async def on_voice_opening_text(text: str):
                 if not in_voice_mode:
                     return
@@ -4643,30 +4640,6 @@ class FeishuChannel(Channel):
 
             # STT 转写
             text = await loop.run_in_executor(None, self._stt.transcribe, tmp_path)
-
-            # A/B 旁路：同一音频喂 FunASR 对比（不影响主流程）
-            async def _funasr_sidecar(path: str, gemini_text: str):
-                try:
-                    import time as _t
-                    t0 = _t.monotonic()
-                    funasr_text = await loop.run_in_executor(
-                        None, self._stt._transcribe_funasr, path
-                    )
-                    dur = _t.monotonic() - t0
-                    log.info(
-                        "STT 对比 — Gemini: %s | FunASR(%.1fs): %s",
-                        gemini_text[:80], dur, funasr_text[:80],
-                    )
-                except Exception as e:
-                    log.warning("FunASR 旁路失败: %s", e)
-                finally:
-                    if os.path.exists(path):
-                        os.unlink(path)
-            # 复制音频文件供旁路使用（主流程会在 finally 删原文件）
-            import shutil
-            sidecar_path = tmp_path + ".funasr.ogg"
-            shutil.copy2(tmp_path, sidecar_path)
-            asyncio.create_task(_funasr_sidecar(sidecar_path, text))
 
             return text
 

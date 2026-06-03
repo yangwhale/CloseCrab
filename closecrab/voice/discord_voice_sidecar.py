@@ -696,7 +696,14 @@ async def _do_speak(text: str, fid: str = ""):
             except Exception:
                 log.exception("Discord vc.play(stream source) 失败")
                 break
-        if not played:
+        if played:
+            # 等 TTS 生成线程结束 + 播放完成再返回，consumer 串行取下一条。
+            # 不能用 gen_thread.join() — 那是阻塞调用，会卡死 event loop。
+            while gen_thread.is_alive():
+                await asyncio.sleep(0.1)
+            while vc.is_playing():
+                await asyncio.sleep(0.1)
+        else:
             source.finish()
     else:
         source.finish()
