@@ -1993,35 +1993,14 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         if not open_id:
             return
 
-        # 转发到飞书聊天窗口, 让 Chris 看见 Discord 来的消息 + 处理过程
-        async def _forward_to_feishu():
-            try:
-                chat_id = getattr(ch_ref, '_user_chats', {}).get(open_id, "")
-                if chat_id:
-                    ch_ref._send_text(chat_id, f"📱 [Discord] {message.author.display_name}: {text}")
-            except Exception:
-                log.exception("转发 Discord 文字到飞书失败")
-        asyncio.run_coroutine_threadsafe(_forward_to_feishu(), feishu_loop)
-
-        async def _route():
-            chat_id = getattr(ch_ref, '_user_chats', {}).get(open_id, "")
-            if not chat_id:
-                return
-            # 跟语音 STT 走同一条路: _run_voice_message_with_card
-            # (卡片生命周期 + worker + 进度更新 + 语音回复, 跟 CloseCrabLLM 一模一样)
-            try:
-                result = await ch_ref._run_voice_message_with_card(
-                    chat_id=chat_id,
-                    user_key=open_id,
-                    content=f"[channel: text]\n[from: Discord文字]\n{text}",
-                )
-            except Exception:
-                log.exception("Discord 文字 → _run_voice_message_with_card 失败")
-                return
-            # 回复已经通过飞书卡片+语音显示, 不再发到 Discord 文字窗口
-            # (带感情标签的原始文字不适合文字显示, TTS 会念到 Discord 喇叭)
-
-        asyncio.run_coroutine_threadsafe(_route(), feishu_loop)
+        # 注入 AgentSession: 跟语音 STT 出文字后走完全一样的管线
+        # (generate_reply → CloseCrabLLM → feishu worker → TTS → Discord 喇叭)
+        session = _agent_session
+        if session is None:
+            log.warning("Discord 文字: AgentSession 未就绪, 跳过")
+            return
+        session.generate_reply(user_input=text)
+        log.info("Discord 文字 → AgentSession.generate_reply: %s", text[:80])
 
     @bot.slash_command(description="让机器人离开语音频道")
     async def leave(ctx):
