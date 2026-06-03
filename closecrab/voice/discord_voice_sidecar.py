@@ -1236,7 +1236,7 @@ async def _start_agent_session(channel_id: int):
 
     bot = _sidecar_bot
     stt = _get_stt()
-    vad = silero.VAD.load(min_silence_duration=0.6)
+    vad = silero.VAD.load(min_silence_duration=1.2)  # 0.6→1.2: 更宽容的停顿, 不会句中喘口气就切
     log.info("silero VAD 已加载")
 
     full_duplex = _feishu_ref is not None and _feishu_loop is not None and bool(_feishu_open_id)
