@@ -6,16 +6,16 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""FunASR SenseVoiceSmall STT for LiveKit AgentSession.
+"""FunASR STT for LiveKit AgentSession — WebSocket streaming via Docker service.
 
-Batch-mode STT (like GeminiSTT): receives complete audio buffer from
-VAD, transcribes in one shot, returns SpeechEvent. Runs on CPU, no GPU
-needed. Hotwords from chirp_phrases.py are passed to FunASR's hotword
-parameter for improved technical term recognition.
+Batch-mode interface (VAD断句 → 整段音频 → WebSocket → online 结果),
+but internally streams chunks to FunASR Docker service for lowest latency.
+Uses online-only mode (no 2pass offline correction) for speed.
 """
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -28,6 +28,10 @@ from livekit import rtc
 log = logging.getLogger("closecrab.voice.funasr_stt")
 
 _TAG_RE = re.compile(r"<\|[^|]*\|>")
+_WS_URL = os.environ.get("FUNASR_WS_URL", "ws://127.0.0.1:10095")
+_CHUNK_MS = 600
+_SAMPLE_RATE = 16000
+_CHUNK_BYTES = int(_SAMPLE_RATE * _CHUNK_MS / 1000) * 2
 
 
 def _pcm_to_wav(pcm: bytes, *, sample_rate: int, num_channels: int) -> bytes:
@@ -40,53 +44,39 @@ def _pcm_to_wav(pcm: bytes, *, sample_rate: int, num_channels: int) -> bytes:
     return buf.getvalue()
 
 
+def _resample_to_16k(pcm: bytes, src_rate: int, num_channels: int) -> bytes:
+    if src_rate == _SAMPLE_RATE and num_channels == 1:
+        return pcm
+    import audioop
+    if num_channels > 1:
+        pcm = audioop.tomono(pcm, 2, 1, 1)
+    if src_rate != _SAMPLE_RATE:
+        pcm, _ = audioop.ratecv(pcm, 2, 1, src_rate, _SAMPLE_RATE, None)
+    return pcm
+
+
 class FunASRSTT(stt.STT):
     def __init__(
         self,
         *,
-        model_path: str = "/tmp/SenseVoiceSmall",
         hotword: str = "",
         language: str = "cmn-Hans-CN",
+        ws_url: str = "",
     ) -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(streaming=False, interim_results=False),
         )
         self._language = language
         self._hotword = hotword
-        self._model = None
-        self._model_path = model_path
-
-    def _ensure_model(self):
-        if self._model is not None:
-            return
-        from funasr import AutoModel
-        path = self._model_path if os.path.exists(self._model_path) else "iic/SenseVoiceSmall"
-        log.info("Loading FunASR SenseVoiceSmall from %s...", path)
-        self._model = AutoModel(model=path, device="cpu", disable_update=True)
-        log.info("FunASR model loaded.")
+        self._ws_url = ws_url or _WS_URL
 
     @property
     def model(self) -> str:
-        return "SenseVoiceSmall"
+        return "FunASR-online"
 
     @property
     def provider(self) -> str:
         return "funasr"
-
-    def _sync_recognize(self, wav_bytes: bytes) -> str:
-        import tempfile
-        self._ensure_model()
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(wav_bytes)
-            tmp_path = f.name
-        try:
-            result = self._model.generate(input=tmp_path, hotword=self._hotword)
-            if result and len(result) > 0 and "text" in result[0]:
-                raw = result[0]["text"].strip()
-                return _TAG_RE.sub("", raw).strip()
-            return ""
-        finally:
-            os.unlink(tmp_path)
 
     async def _recognize_impl(
         self,
@@ -96,16 +86,60 @@ class FunASRSTT(stt.STT):
         conn_options: APIConnectOptions,
     ) -> stt.SpeechEvent:
         frame = rtc.combine_audio_frames(buffer)
-        wav_bytes = _pcm_to_wav(
+        pcm_16k = _resample_to_16k(
             frame.data.tobytes(),
-            sample_rate=frame.sample_rate,
+            src_rate=frame.sample_rate,
             num_channels=frame.num_channels,
         )
 
-        text = await asyncio.to_thread(self._sync_recognize, wav_bytes)
+        text = await self._ws_recognize(pcm_16k)
         lang_tag = language if language else self._language
 
         return stt.SpeechEvent(
             type=stt.SpeechEventType.FINAL_TRANSCRIPT,
             alternatives=[stt.SpeechData(language=lang_tag, text=text)],
         )
+
+    async def _ws_recognize(self, pcm_16k: bytes) -> str:
+        import websockets
+
+        final_text = ""
+        try:
+            async with websockets.connect(
+                self._ws_url, subprotocols=["binary"], close_timeout=5,
+            ) as ws:
+                cfg = {
+                    "mode": "online",
+                    "chunk_size": [5, 10, 5],
+                    "wav_name": "lk",
+                    "is_speaking": True,
+                    "chunk_interval": 10,
+                    "itn": True,
+                }
+                if self._hotword:
+                    cfg["hotwords"] = self._hotword
+                await ws.send(json.dumps(cfg))
+
+                offset = 0
+                while offset < len(pcm_16k):
+                    chunk = pcm_16k[offset:offset + _CHUNK_BYTES]
+                    await ws.send(chunk)
+                    offset += _CHUNK_BYTES
+
+                await ws.send(json.dumps({"is_speaking": False}))
+
+                try:
+                    while True:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=8)
+                        d = json.loads(msg)
+                        if d.get("text"):
+                            final_text = d["text"]
+                        if d.get("is_final") or d.get("mode") in ("offline", "2pass-offline"):
+                            break
+                except asyncio.TimeoutError:
+                    pass
+        except Exception:
+            log.exception("FunASR WebSocket recognize failed")
+            return ""
+
+        return final_text
