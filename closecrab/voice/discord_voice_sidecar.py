@@ -2004,31 +2004,31 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         asyncio.run_coroutine_threadsafe(_forward_to_feishu(), feishu_loop)
 
         async def _route():
-            from closecrab.core.types import UnifiedMessage
             chat_id = getattr(ch_ref, '_user_chats', {}).get(open_id, "")
-
-            async def reply_cb(response_text):
-                # 回复也发到 Discord
+            if not chat_id:
+                return
+            # 跟语音 STT 走同一条路: _run_voice_message_with_card
+            # (卡片生命周期 + worker + 进度更新 + 语音回复, 跟 CloseCrabLLM 一模一样)
+            try:
+                result = await ch_ref._run_voice_message_with_card(
+                    chat_id=chat_id,
+                    user_key=open_id,
+                    content=f"[channel: text]\n[from: Discord文字]\n{text}",
+                )
+            except Exception:
+                log.exception("Discord 文字 → _run_voice_message_with_card 失败")
+                return
+            # 回复也发到 Discord
+            if result and sidecar_loop is not None:
                 def _send():
                     async def _do_send():
                         try:
-                            for i in range(0, len(response_text), 2000):
-                                await dc_channel.send(response_text[i:i+2000])
+                            clean = result[:2000]
+                            await dc_channel.send(clean)
                         except Exception:
                             log.exception("Discord 文字回复失败")
                     asyncio.ensure_future(_do_send())
-                if sidecar_loop is not None:
-                    sidecar_loop.call_soon_threadsafe(_send)
-
-            # channel_type="feishu" + chat_id → 飞书频道正常出卡片/语音/进度
-            msg = UnifiedMessage(
-                channel_type="feishu",
-                user_id=open_id,
-                content=text,
-                reply=reply_cb,
-                metadata={"chat_id": chat_id, "source": "discord_text"},
-            )
-            await core.process_message(msg)
+                sidecar_loop.call_soon_threadsafe(_send)
 
         asyncio.run_coroutine_threadsafe(_route(), feishu_loop)
 
