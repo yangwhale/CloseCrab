@@ -40,6 +40,13 @@ import re
 import threading
 import time
 
+# LiveKit plugin 必须在主线程 import (注册 plugin registry), 否则
+# AgentSession 从 sidecar 线程启动时报 "Plugins must be registered on the main thread"。
+try:
+    from livekit.plugins import google as _lk_google  # noqa: F401
+except ImportError:
+    pass
+
 log = logging.getLogger("closecrab.discord_voice_sidecar")
 
 # ─── 语音 buffer 落盘 + 重播 ──────────────────────────────────────────────
