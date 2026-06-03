@@ -2021,7 +2021,7 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             msg = UnifiedMessage(
                 channel_type="discord",
                 user_id=open_id,
-                content=f"[channel: text]\n[from: Discord文字]\n{text}",
+                content=text,
                 reply=reply_cb,
                 metadata={"discord_channel_id": str(dc_channel.id)},
             )
