@@ -994,11 +994,27 @@ def forward_file(fid: str, frac: float = 0.1) -> bool:
 
 
 def _get_stt():
-    """复用 livekit_io 的 _build_stt(), 统一 STT (默认 Chirp 3 + 词汇增强)。"""
+    """复用 livekit_io 的 _build_stt(), 统一 STT。
+
+    读 Firestore livekit.stt_provider 配置 (跟 LiveKitVoiceIO.start 同源),
+    而不是硬编码 chirp3_stream。这样 sidecar 和 LiveKit 用同一个 STT。
+    """
     global _stt_engine
     if _stt_engine is None:
-        os.environ.setdefault("STT_PROVIDER", "chirp3_stream")
+        provider = os.environ.get("STT_PROVIDER", "")
+        if not provider:
+            try:
+                from google.cloud import firestore as _fs
+                from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+                _db = _fs.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+                bot_name = os.environ.get("BOT_NAME", "jarvis")
+                doc = _db.collection("bots").document(bot_name).get()
+                provider = (doc.to_dict() or {}).get("livekit", {}).get("stt_provider", "chirp3_stream")
+            except Exception:
+                provider = "chirp3_stream"
+            os.environ["STT_PROVIDER"] = provider
         os.environ.setdefault("STT_PHRASE_BOOST", "1")
+        log.info("sidecar STT provider: %s", provider)
         from .livekit_io import _build_stt
         _stt_engine = _build_stt()
     return _stt_engine
