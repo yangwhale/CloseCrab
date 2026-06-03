@@ -604,7 +604,7 @@ async def _stream_speak(text: str, fid: str = ""):
             if ch:
                 asyncio.create_task(ch.send(f"💬 {clean[:1900]}"))
     except Exception:
-        pass  # 文字回显失败不影响 TTS
+        log.exception("💬 Discord 文字回显失败")
 
     global _speak_lock
     if _speak_lock is None:
