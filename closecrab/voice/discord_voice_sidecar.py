@@ -1558,16 +1558,6 @@ def _stt_ab_save_utterance(chirp3_text: str, chirp3_t: float):
     }
     _stt_ab_results.append(record)
 
-    # 给 FunASR 发句末信号：is_speaking=false 触发 offline 识别，然后重开 is_speaking=true
-    if _funasr_ws is not None:
-        try:
-            import json as _json
-            _funasr_ws.send(_json.dumps({"is_speaking": False}))
-            _funasr_ws.send(_json.dumps({"is_speaking": True}))
-            log.info("[STT-AB] FunASR 句末信号已发 (is_speaking false→true)")
-        except Exception:
-            pass
-
     # 异步触发 Gemini STT（批量模式，发完整 WAV）
     import threading
     def _gemini_stt():
@@ -1601,6 +1591,7 @@ _funasr_ab_enabled = True  # 开关
 _funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
 _funasr_last_pcm_time = 0.0  # 最近一次 PCM 帧时间 (monotonic)
 _funasr_watchdog_started = False
+_funasr_speaking = False  # PTT 说话状态：True=正在说话(喂音频)，False=静默(不喂)
 
 def _funasr_ab_init():
     """初始化 FunASR WebSocket 连接（后台线程安全）。"""
@@ -1653,7 +1644,9 @@ def _funasr_ab_init():
                                     llm_inst._skip_next_debounce = True
                                 loop = _sidecar_loop
                                 if loop is not None:
-                                    loop.call_soon_threadsafe(session.generate_reply, text)
+                                    def _do_gen(s=session, t=text):
+                                        s.generate_reply(user_input=t)
+                                    loop.call_soon_threadsafe(_do_gen)
                                     log.info("[FunASR→LLM] offline → generate_reply: %s", text[:80])
                                     ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
                                     if ch is not None:
@@ -1673,41 +1666,42 @@ def _funasr_ab_init():
 
 
 def _funasr_send_end_of_speech():
-    """发 is_speaking=False 触发 FunASR offline 识别，然后重开。"""
-    global _funasr_ws
-    if _funasr_ws is None:
+    """PTT 抬手：发 is_speaking=False 触发 FunASR offline 识别。不重开——等下次 PTT 按下。"""
+    global _funasr_ws, _funasr_speaking
+    if _funasr_ws is None or not _funasr_speaking:
         return
     try:
         import json as _json
         _funasr_ws.send(_json.dumps({"is_speaking": False}))
-        _funasr_ws.send(_json.dumps({"is_speaking": True}))
-        log.info("[FunASR] PTT 抬手 → is_speaking false→true")
+        _funasr_speaking = False
+        log.info("[FunASR] PTT 抬手 → is_speaking=false (等 offline 结果)")
     except Exception:
         _funasr_ws = None
+        _funasr_speaking = False
 
 
-def _funasr_silence_watchdog():
-    """后台线程：检测 PTT 抬手（300ms 无新 PCM）→ 触发 FunASR 断句。"""
-    import time as _time
-    global _funasr_last_pcm_time
-    while True:
-        _time.sleep(0.1)
-        t = _funasr_last_pcm_time
-        if t > 0 and _time.monotonic() - t > 0.3:
-            _funasr_send_end_of_speech()
-            _funasr_last_pcm_time = 0.0
-            _stt_ab_save_utterance("", 0)  # 触发录音落盘（text 后面由 FunASR 填）
-
-
-def _ensure_funasr_watchdog():
-    """确保 silence watchdog 线程只启动一次。"""
-    global _funasr_watchdog_started
-    if _funasr_watchdog_started:
+def _funasr_send_start_of_speech():
+    """PTT 按下：发 is_speaking=True 开始接收音频。"""
+    global _funasr_speaking
+    if _funasr_speaking:
         return
-    _funasr_watchdog_started = True
-    t = threading.Thread(target=_funasr_silence_watchdog, daemon=True, name="funasr-ptt-watchdog")
-    t.start()
-    log.info("[FunASR] PTT silence watchdog 已启动 (300ms 阈值)")
+    ws = _funasr_ab_init()
+    if ws is None:
+        return
+    try:
+        import json as _json
+        ws.send(_json.dumps({"is_speaking": True}))
+        _funasr_speaking = True
+        log.info("[FunASR] PTT 按下 → is_speaking=true (开始收音)")
+    except Exception:
+        pass
+
+
+def _on_discord_speaking_stop():
+    """Discord member_speaking_stop 事件触发：用户松手/停止说话。"""
+    _funasr_send_end_of_speech()
+    _stt_ab_save_utterance("", 0)
+    log.info("[FunASR] Discord speaking_stop → 触发断句")
 
 
 def _funasr_ab_feed(mono_48k: bytes):
@@ -1717,7 +1711,7 @@ def _funasr_ab_feed(mono_48k: bytes):
         return
     import time as _time
     _funasr_last_pcm_time = _time.monotonic()
-    _ensure_funasr_watchdog()
+    _funasr_send_start_of_speech()
     ws = _funasr_ab_init()
     if ws is None:
         return
@@ -2523,6 +2517,21 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             await ctx.respond(f"❌ 命令出错：{error}", ephemeral=True)
         except Exception:
             pass
+
+    @bot.event
+    async def on_member_speaking_stop(member):
+        """Discord speaking_stop 事件：用户停止说话 (PTT 抬手 / VAD 检测静音)。"""
+        if member.bot:
+            return
+        log.info("[Discord] speaking_stop: %s", member.display_name)
+        _on_discord_speaking_stop()
+
+    @bot.event
+    async def on_member_speaking_start(member):
+        """Discord speaking_start 事件：用户开始说话。"""
+        if member.bot:
+            return
+        log.info("[Discord] speaking_start: %s", member.display_name)
 
     @bot.event
     async def on_message(message):
