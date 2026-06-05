@@ -1572,13 +1572,14 @@ def stt_ab_get_dir():
 # ─── FunASR 离线 batch STT (PTT 驱动) ─────────────────────────────────
 _funasr_model = None       # Paraformer 离线模型 (懒加载)
 _funasr_punc_model = None  # 标点模型
+_funasr_itn = None         # ITN 逆文本标准化 (数字/日期/百分比)
 _funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
 _funasr_speaking = False   # PTT 说话状态
 _funasr_pcm_buf = bytearray()  # PTT 期间攒 16kHz mono s16 PCM
 
 def _funasr_ensure_model():
-    """懒加载 Paraformer 离线模型 + 标点模型。首次调用约 5s。"""
-    global _funasr_model, _funasr_punc_model
+    """懒加载 Paraformer 离线模型 + 标点模型 + ITN。首次调用约 15s。"""
+    global _funasr_model, _funasr_punc_model, _funasr_itn
     if _funasr_model is not None:
         return _funasr_model
     try:
@@ -1598,7 +1599,13 @@ def _funasr_ensure_model():
             model="iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727",
             device="cpu", disable_pbar=True, disable_log=True, disable_update=True,
         )
-        log.info("[FunASR] 离线模型已加载 (Paraformer + Punc), 热词 %d 个", len(hotwords_lines))
+        try:
+            from itn.chinese.inverse_normalizer import InverseNormalizer
+            _funasr_itn = InverseNormalizer()
+            log.info("[FunASR] ITN 已加载")
+        except Exception:
+            log.warning("[FunASR] ITN 加载失败 (数字/日期不转换)")
+        log.info("[FunASR] 离线模型已加载 (Paraformer + Punc + ITN), 热词 %d 个", len(hotwords_lines))
         _funasr_model._hotwords = hotwords_str
         return _funasr_model
     except Exception:
@@ -1629,6 +1636,11 @@ def _funasr_recognize(pcm_16k: bytes) -> str:
         punc_result = _funasr_punc_model.generate(input=text)
         if punc_result and len(punc_result) > 0:
             text = punc_result[0].get("text", text).strip()
+    if text and _funasr_itn is not None:
+        try:
+            text = _funasr_itn.normalize(text)
+        except Exception:
+            pass
     dt = (_time.monotonic() - t0) * 1000
     log.info("[FunASR] 离线识别: %.0fms, %.1fs音频 → %s", dt, len(audio)/16000, text[:80])
     return text
