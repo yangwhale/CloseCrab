@@ -283,24 +283,7 @@ async def _ensure_connected():
         if vc.is_connected():
             break
         await asyncio.sleep(0.2)
-    if vc and vc.is_connected():
-        _patch_recv_hook_debug(vc)
     return vc if vc.is_connected() else None
-
-
-def _patch_recv_hook_debug(vc):
-    """Monkeypatch VoiceClient._recv_hook 加 Opcode 5 调试日志。"""
-    from discord.voice.enums import OpCodes
-    orig = vc._recv_hook
-    async def _debug_hook(ws, msg):
-        op = msg.get("op")
-        if op == int(OpCodes.speaking):
-            d = msg.get("d", {})
-            log.info("[DEBUG] Voice WS Opcode 5 Speaking: user_id=%s speaking=%s ssrc=%s",
-                     d.get("user_id"), d.get("speaking"), d.get("ssrc"))
-        return await orig(ws, msg)
-    vc._recv_hook = _debug_hook
-    log.info("[DEBUG] VoiceClient._recv_hook 已 patch (追踪 Opcode 5)")
 
 
 async def _activate_listen(vc) -> tuple:
@@ -1305,9 +1288,7 @@ def _get_stt_sink_class():
     class _STTSink(discord.sinks.Sink):
         """按 user 累积 PCM。write 跑在 py-cord 解码线程, 故用 Lock 护缓冲。"""
 
-        __sink_listeners__ = [
-            ("on_member_speaking_stop", "_on_speaking_stop"),
-        ]
+        __sink_listeners__: list = []
 
         def walk_children(self):
             return []
@@ -1361,14 +1342,6 @@ def _get_stt_sink_class():
 
         def cleanup(self):
             self.finished = True  # 不往 audio_data 写, 覆写成空操作
-
-        def _on_speaking_stop(self, member):
-            """SpeakingTimer: 200ms 无 RTP 包 → PTT 松手。直接触发识别。"""
-            if member is not None and member.bot:
-                return
-            name = getattr(member, "display_name", "?") if member else "?"
-            log.info("[SpeakingTimer] speaking_stop: %s → 触发 FunASR 识别", name)
-            _on_discord_speaking_stop()
 
     _STT_SINK_CLASS = _STTSink
     return _STT_SINK_CLASS
@@ -1596,24 +1569,19 @@ def stt_ab_get_dir():
     return _stt_ab_dir
 
 
-# ─── FunASR 离线 batch STT (PTT 驱动) ─────────────────────────────────
-_funasr_model = None       # Paraformer 离线模型 (懒加载)
-_funasr_punc_model = None  # 标点模型
-_funasr_itn = None         # ITN 逆文本标准化 (数字/日期/百分比)
-_funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
-_funasr_speaking = False   # PTT 说话状态
-_funasr_pcm_buf = bytearray()  # PTT 期间攒 16kHz mono s16 PCM
-_funasr_last_write = 0.0  # monotonic 时间戳
-_funasr_watchdog_started = False
-_funasr_cooldown_until = 0.0  # 识别完后 1s 冷却，防止残留 RTP 包触发新一轮
+# ─── FunASR WebSocket 流式 STT (标准全套: VAD + 2pass + Punc + ITN) ──
+_funasr_ws = None
+_funasr_is_primary = True
 
-def _funasr_ensure_model():
-    """懒加载 Paraformer 离线模型 + 标点模型 + ITN。首次调用约 15s。"""
-    global _funasr_model, _funasr_punc_model, _funasr_itn
-    if _funasr_model is not None:
-        return _funasr_model
+def _funasr_init():
+    """初始化 FunASR WebSocket 连接 (C++ 服务端)。断线自动重连。"""
+    global _funasr_ws
+    if _funasr_ws is not None:
+        return _funasr_ws
     try:
-        from funasr import AutoModel
+        import websockets.sync.client as ws_sync
+        _funasr_ws = ws_sync.connect("ws://localhost:10095", open_timeout=3)
+        import json
         from .chirp_phrases import default_phrases
         hotwords_lines = []
         for phrase, boost in default_phrases():
@@ -1621,141 +1589,69 @@ def _funasr_ensure_model():
             if len(phrase) <= 20:
                 hotwords_lines.append(f"{phrase} {w}")
         hotwords_str = "\n".join(hotwords_lines)
-        _funasr_model = AutoModel(
-            model="iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            device="cpu", disable_pbar=True, disable_log=True, disable_update=True,
-        )
-        _funasr_punc_model = AutoModel(
-            model="iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727",
-            device="cpu", disable_pbar=True, disable_log=True, disable_update=True,
-        )
-        try:
-            from itn.chinese.inverse_normalizer import InverseNormalizer
-            _funasr_itn = InverseNormalizer()
-            log.info("[FunASR] ITN 已加载")
-        except Exception:
-            log.warning("[FunASR] ITN 加载失败 (数字/日期不转换)")
-        log.info("[FunASR] 离线模型已加载 (Paraformer + Punc + ITN), 热词 %d 个", len(hotwords_lines))
-        _funasr_model._hotwords = hotwords_str
-        return _funasr_model
-    except Exception:
-        log.exception("[FunASR] 模型加载失败")
+        log.info("[FunASR] 热词: %d 个", len(hotwords_lines))
+        _funasr_ws.send(json.dumps({
+            "mode": "2pass", "chunk_size": [5, 10, 5],
+            "wav_name": "discord", "is_speaking": True,
+            "hotwords": hotwords_str, "itn": True
+        }))
+        log.info("[FunASR] WebSocket 已连接 (2pass 全套: VAD+online+offline+Punc+ITN)")
+        import threading
+        def _reader():
+            global _funasr_ws
+            import time as _time
+            try:
+                while True:
+                    msg = _funasr_ws.recv(timeout=300)
+                    data = json.loads(msg)
+                    text = data.get("text", "").strip()
+                    mode = data.get("mode", "")
+                    if not text:
+                        continue
+                    t_now = _time.monotonic()
+                    log.info("[FunASR] %s: %s", mode, text[:80])
+                    if "offline" in mode and _funasr_is_primary:
+                        log.info("[FunASR→LLM] offline → %s", text[:80])
+                        session = _agent_session
+                        if session is not None:
+                            from .livekit_io import _closecrab_llm_instance
+                            llm_inst = _closecrab_llm_instance()
+                            if llm_inst is not None:
+                                llm_inst._skip_next_debounce = True
+                            loop = _sidecar_loop
+                            if loop is not None:
+                                def _do(s=session, t=text):
+                                    s.generate_reply(user_input=t)
+                                loop.call_soon_threadsafe(_do)
+                                ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
+                                if ch is not None:
+                                    import asyncio
+                                    loop.call_soon_threadsafe(
+                                        lambda c=ch, t=text: asyncio.ensure_future(c.send(f"🎤 {t[:1900]}"))
+                                    )
+            except Exception as e:
+                log.warning("[FunASR] reader 退出: %s (下次 feed 自动重连)", e)
+                _funasr_ws = None
+        threading.Thread(target=_reader, daemon=True, name="funasr-reader").start()
+        return _funasr_ws
+    except Exception as e:
+        log.warning("[FunASR] 连接失败: %s", e)
         return None
 
 
-def _funasr_recognize(pcm_16k: bytes) -> str:
-    """在工作线程里跑 Paraformer 离线识别。输入 16kHz mono s16 PCM，返回文字。"""
-    import numpy as np
-    model = _funasr_ensure_model()
-    if model is None:
-        return ""
-    audio = np.frombuffer(pcm_16k, dtype=np.int16).astype(np.float32) / 32768.0
-    if len(audio) < 1600:  # <100ms 太短
-        return ""
-    import time as _time
-    t0 = _time.monotonic()
-    kwargs = {}
-    hw = getattr(model, "_hotwords", "")
-    if hw:
-        kwargs["hotword"] = hw
-    result = model.generate(input=audio, batch_size_s=300, **kwargs)
-    text = ""
-    if result and len(result) > 0:
-        text = result[0].get("text", "").strip()
-    if text and _funasr_punc_model is not None:
-        punc_result = _funasr_punc_model.generate(input=text)
-        if punc_result and len(punc_result) > 0:
-            text = punc_result[0].get("text", text).strip()
-    if text and _funasr_itn is not None:
-        try:
-            text = _funasr_itn.normalize(text)
-        except Exception:
-            pass
-    dt = (_time.monotonic() - t0) * 1000
-    log.info("[FunASR] 离线识别: %.0fms, %.1fs音频 → %s", dt, len(audio)/16000, text[:80])
-    return text
-
-
-def _on_discord_speaking_stop():
-    """PTT 松手 (RTP 停止 200ms)：攒好的 PCM 一次性跑离线识别 → 送 LLM。"""
-    global _funasr_pcm_buf, _funasr_speaking, _funasr_cooldown_until
-    _funasr_speaking = False
-    import time as _time
-    _funasr_cooldown_until = _time.monotonic() + 1.0  # 1s 冷却防残留 RTP 循环
-    _stt_ab_save_utterance("", 0)
-
-    pcm = bytes(_funasr_pcm_buf)
-    _funasr_pcm_buf = bytearray()
-    if len(pcm) < 32000:  # <1s (16kHz * 2bytes * 1s = 32000)
-        log.info("[FunASR] PTT 松手但音频太短 (%.1fs), 忽略", len(pcm) / 2 / 16000)
-        return
-    log.info("[FunASR] PTT 松手 → 离线识别 %.1fs 音频", len(pcm) / 2 / 16000)
-
-    def _recognize_and_send():
-        text = _funasr_recognize(pcm)
-        if not text:
-            return
-        log.info("[FunASR→LLM] → %s", text[:120])
-        session = _agent_session
-        if session is None or not _funasr_is_primary:
-            return
-        from .livekit_io import _closecrab_llm_instance
-        llm_inst = _closecrab_llm_instance()
-        if llm_inst is not None:
-            llm_inst._skip_next_debounce = True
-        loop = _sidecar_loop
-        if loop is not None:
-            def _do_gen(s=session, t=text):
-                s.generate_reply(user_input=t)
-            loop.call_soon_threadsafe(_do_gen)
-            ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
-            if ch is not None:
-                import asyncio
-                loop.call_soon_threadsafe(
-                    lambda c=ch, t=text: asyncio.ensure_future(c.send(f"🎤 FunASR: {t[:1900]}"))
-                )
-
-    import threading
-    threading.Thread(target=_recognize_and_send, daemon=True, name="funasr-recognize").start()
-
-
 def _funasr_ab_feed(mono_48k: bytes):
-    """把 48kHz mono PCM 降采样到 16kHz 攒入 buffer。500ms RTP 超时触发识别。"""
-    global _funasr_speaking, _funasr_last_write, _funasr_watchdog_started
+    """把 48kHz mono PCM 降采样到 16kHz 流式喂 FunASR。"""
+    global _funasr_ws
     if not _funasr_is_primary:
         return
-    import time as _time
-    now = _time.monotonic()
-    _funasr_last_write = now
-    if not _funasr_speaking:
-        if now < _funasr_cooldown_until:
-            return  # 冷却期内忽略残留 RTP 包
-        _funasr_speaking = True
-        _funasr_pcm_buf.clear()
-        log.info("[FunASR] PTT 按下 → 开始攒音频")
-    if not _funasr_watchdog_started:
-        _funasr_watchdog_started = True
-        import threading
-        threading.Thread(target=_funasr_rtp_watchdog, daemon=True, name="funasr-watchdog").start()
-        log.info("[FunASR] RTP watchdog 启动 (200ms 超时)")
+    ws = _funasr_init()
+    if ws is None:
+        return
     try:
         mono_16k, _ = audioop.ratecv(mono_48k, 2, 1, 48000, 16000, None)
-        _funasr_pcm_buf.extend(mono_16k)
+        ws.send(mono_16k)
     except Exception:
-        pass
-
-
-def _funasr_rtp_watchdog():
-    """后台线程：500ms 无新 RTP 帧 = PTT 松手 → 触发识别。"""
-    import time as _time
-    while True:
-        _time.sleep(0.1)
-        if not _funasr_speaking:
-            continue
-        last = _funasr_last_write
-        if last > 0 and _time.monotonic() - last > 0.8:
-            log.info("[FunASR] RTP 停止 800ms → PTT 松手")
-            _on_discord_speaking_stop()
+        _funasr_ws = None
 
 async def _audio_pump_loop():
     """间隙填充: Discord 不说话时不发帧, 但 LiveKit VAD 需要连续流才能量静音断句。
@@ -2518,22 +2414,6 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             await ctx.respond(f"❌ 命令出错：{error}", ephemeral=True)
         except Exception:
             pass
-
-    @bot.event
-    async def on_member_speaking_state_update(member, ssrc, state):
-        """Voice Gateway Opcode 5: 用户 speaking 状态变化 (PTT 按下/松手)。
-
-        state: discord.SpeakingState — none(0)=松手, voice(1)=按下
-        这是真正的 Discord PTT 信号，不是 RTP 超时推断。
-        """
-        if member is None or member.bot:
-            return
-        from discord.enums import SpeakingState
-        if state == SpeakingState.none:
-            log.info("[Discord] PTT 松手 (Opcode 5 speaking=0): %s", member.display_name)
-            _on_discord_speaking_stop()
-        else:
-            log.info("[Discord] PTT 按下 (Opcode 5 speaking=%s): %s", int(state), member.display_name)
 
     @bot.event
     async def on_message(message):
