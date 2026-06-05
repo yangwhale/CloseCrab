@@ -1558,6 +1558,16 @@ def _stt_ab_save_utterance(chirp3_text: str, chirp3_t: float):
     }
     _stt_ab_results.append(record)
 
+    # 给 FunASR 发句末信号：is_speaking=false 触发 offline 识别，然后重开 is_speaking=true
+    if _funasr_ws is not None:
+        try:
+            import json as _json
+            _funasr_ws.send(_json.dumps({"is_speaking": False}))
+            _funasr_ws.send(_json.dumps({"is_speaking": True}))
+            log.info("[STT-AB] FunASR 句末信号已发 (is_speaking false→true)")
+        except Exception:
+            pass
+
     # 异步触发 Gemini STT（批量模式，发完整 WAV）
     import threading
     def _gemini_stt():
@@ -1588,6 +1598,9 @@ def stt_ab_get_dir():
 # ─── FunASR A/B 测试旁路 ─────────────────────────────────────────────
 _funasr_ws = None  # WebSocket 连接 (threading 模式，sink.write 在解码线程调)
 _funasr_ab_enabled = True  # 开关
+_funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
+_funasr_last_pcm_time = 0.0  # 最近一次 PCM 帧时间 (monotonic)
+_funasr_watchdog_started = False
 
 def _funasr_ab_init():
     """初始化 FunASR WebSocket 连接（后台线程安全）。"""
@@ -1598,10 +1611,18 @@ def _funasr_ab_init():
         import websockets.sync.client as ws_sync
         _funasr_ws = ws_sync.connect("ws://localhost:10095", open_timeout=3)
         import json
+        from .chirp_phrases import default_phrases
+        hotwords_lines = []
+        for phrase, boost in default_phrases():
+            w = int(boost) if boost else 10
+            if len(phrase) <= 20:
+                hotwords_lines.append(f"{phrase} {w}")
+        hotwords_str = "\n".join(hotwords_lines)
+        log.info("[STT-AB] FunASR 热词: %d 个 (从 chirp_phrases 同步)", len(hotwords_lines))
         _funasr_ws.send(json.dumps({
             "mode": "offline", "chunk_size": [5, 10, 5],
             "wav_name": "ab_test", "is_speaking": True,
-            "hotwords": "TPU 20\nGPU 20\nClaude Code 20\n香港 15\n天气预报 15\n打印机 10\n水浒传 15\n骆驼祥子 15\n办公室 10\n会议室 10\nLiveKit 15\nDiscord 15\nFirestore 15\nQwen 15\nGemini 15\nKubernetes 10\nvLLM 15\nMaxText 10",
+            "hotwords": hotwords_str,
             "itn": True
         }))
         log.info("[STT-AB] FunASR WebSocket 已连接")
@@ -1623,6 +1644,23 @@ def _funasr_ab_init():
                             r = _stt_ab_results[-1]
                             key = "funasr_offline" if "offline" in mode else "funasr_online"
                             r[key] = {"text": text, "t": t_now}
+                        if "offline" in mode and _funasr_is_primary:
+                            session = _agent_session
+                            if session is not None:
+                                from .livekit_io import _closecrab_llm_instance
+                                llm_inst = _closecrab_llm_instance()
+                                if llm_inst is not None:
+                                    llm_inst._skip_next_debounce = True
+                                loop = _sidecar_loop
+                                if loop is not None:
+                                    loop.call_soon_threadsafe(session.generate_reply, text)
+                                    log.info("[FunASR→LLM] offline → generate_reply: %s", text[:80])
+                                    ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
+                                    if ch is not None:
+                                        import asyncio
+                                        loop.call_soon_threadsafe(
+                                            lambda c=ch, t=text: asyncio.ensure_future(c.send(f"🎤 FunASR: {t[:1900]}"))
+                                        )
             except Exception as e:
                 log.warning("[STT-AB] FunASR reader 退出: %s (下次 feed 自动重连)", e)
                 _funasr_ws = None
@@ -1634,11 +1672,52 @@ def _funasr_ab_init():
         return None
 
 
+def _funasr_send_end_of_speech():
+    """发 is_speaking=False 触发 FunASR offline 识别，然后重开。"""
+    global _funasr_ws
+    if _funasr_ws is None:
+        return
+    try:
+        import json as _json
+        _funasr_ws.send(_json.dumps({"is_speaking": False}))
+        _funasr_ws.send(_json.dumps({"is_speaking": True}))
+        log.info("[FunASR] PTT 抬手 → is_speaking false→true")
+    except Exception:
+        _funasr_ws = None
+
+
+def _funasr_silence_watchdog():
+    """后台线程：检测 PTT 抬手（300ms 无新 PCM）→ 触发 FunASR 断句。"""
+    import time as _time
+    global _funasr_last_pcm_time
+    while True:
+        _time.sleep(0.1)
+        t = _funasr_last_pcm_time
+        if t > 0 and _time.monotonic() - t > 0.3:
+            _funasr_send_end_of_speech()
+            _funasr_last_pcm_time = 0.0
+            _stt_ab_save_utterance("", 0)  # 触发录音落盘（text 后面由 FunASR 填）
+
+
+def _ensure_funasr_watchdog():
+    """确保 silence watchdog 线程只启动一次。"""
+    global _funasr_watchdog_started
+    if _funasr_watchdog_started:
+        return
+    _funasr_watchdog_started = True
+    t = threading.Thread(target=_funasr_silence_watchdog, daemon=True, name="funasr-ptt-watchdog")
+    t.start()
+    log.info("[FunASR] PTT silence watchdog 已启动 (300ms 阈值)")
+
+
 def _funasr_ab_feed(mono_48k: bytes):
     """把 48kHz mono PCM 降采样到 16kHz 喂 FunASR。sink.write 线程调用。"""
-    global _funasr_ws
+    global _funasr_ws, _funasr_last_pcm_time
     if not _funasr_ab_enabled:
         return
+    import time as _time
+    _funasr_last_pcm_time = _time.monotonic()
+    _ensure_funasr_watchdog()
     ws = _funasr_ab_init()
     if ws is None:
         return

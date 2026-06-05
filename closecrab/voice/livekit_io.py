@@ -368,7 +368,14 @@ class _CloseCrabStream(llm.LLMStream):
             self._yield_empty()
             return
 
-        # ── Step 4: 我是 leader, 抽干 buffer 合并提交 ─────────────────────
+        # ── Step 4: 检查 FunASR 主力模式 ──────────────────────────────────
+        from .discord_voice_sidecar import _funasr_is_primary
+        if _funasr_is_primary:
+            log.info(f"CloseCrabLLM: FunASR 是主力 STT，Chirp3 路径跳过 (seq={my_seq})")
+            self._yield_empty()
+            return
+
+        # ── Step 4b: 我是 leader, 抽干 buffer 合并提交 ────────────────────
         if not llm_instance._batch_buffer:
             log.warning(f"CloseCrabLLM: leader seq={my_seq} found empty buffer; skipping flush")
             self._yield_empty()
