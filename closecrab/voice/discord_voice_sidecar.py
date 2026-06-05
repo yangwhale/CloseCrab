@@ -1574,6 +1574,7 @@ _funasr_ws = None  # WebSocket 连接 (threading 模式，sink.write 在解码�
 _funasr_ab_enabled = True  # 开关
 _funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
 _funasr_speaking = False  # PTT 说话状态：True=正在说话(喂音频)，False=静默(不喂)
+_funasr_text_buffer = []  # FunASR offline 结果 buffer, PTT 松手时拼接送 LLM
 
 def _funasr_ab_init():
     """初始化 FunASR WebSocket 连接（后台线程安全）。"""
@@ -1593,11 +1594,10 @@ def _funasr_ab_init():
         hotwords_str = "\n".join(hotwords_lines)
         log.info("[STT-AB] FunASR 热词: %d 个 (从 chirp_phrases 同步)", len(hotwords_lines))
         _funasr_ws.send(json.dumps({
-            "mode": "offline", "chunk_size": [10, 15, 10],
+            "mode": "offline", "chunk_size": [5, 10, 5],
             "wav_name": "ab_test", "is_speaking": True,
             "hotwords": hotwords_str,
-            "itn": True,
-            "vad_needed": False
+            "itn": True
         }))
         log.info("[STT-AB] FunASR WebSocket 已连接")
         import threading
@@ -1619,24 +1619,9 @@ def _funasr_ab_init():
                             key = "funasr_offline" if "offline" in mode else "funasr_online"
                             r[key] = {"text": text, "t": t_now}
                         if "offline" in mode and _funasr_is_primary:
-                            log.info("[FunASR→LLM] offline → generate_reply: %s", text[:80])
-                            session = _agent_session
-                            if session is not None:
-                                from .livekit_io import _closecrab_llm_instance
-                                llm_inst = _closecrab_llm_instance()
-                                if llm_inst is not None:
-                                    llm_inst._skip_next_debounce = True
-                                loop = _sidecar_loop
-                                if loop is not None:
-                                    def _do_gen(s=session, t=text):
-                                        s.generate_reply(user_input=t)
-                                    loop.call_soon_threadsafe(_do_gen)
-                                    ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
-                                    if ch is not None:
-                                        import asyncio
-                                        loop.call_soon_threadsafe(
-                                            lambda c=ch, t=text: asyncio.ensure_future(c.send(f"🎤 FunASR: {t[:1900]}"))
-                                        )
+                            _funasr_text_buffer.append(text)
+                            log.info("[FunASR] offline 结果入 buffer (#%d): %s",
+                                     len(_funasr_text_buffer), text[:80])
             except Exception as e:
                 log.warning("[STT-AB] FunASR reader 退出: %s (下次 feed 自动重连)", e)
                 _funasr_ws = None
@@ -1665,9 +1650,10 @@ def _funasr_send_end_of_speech():
 
 def _funasr_send_start_of_speech():
     """PTT 按下：发 is_speaking=True 开始接收音频。"""
-    global _funasr_speaking
+    global _funasr_speaking, _funasr_text_buffer
     if _funasr_speaking:
         return
+    _funasr_text_buffer = []
     ws = _funasr_ab_init()
     if ws is None:
         return
@@ -1681,11 +1667,46 @@ def _funasr_send_start_of_speech():
 
 
 def _on_discord_speaking_stop():
-    """PTT 松手 (Opcode 5 speaking=0)：发 is_speaking=False 触发 FunASR 整段 offline 识别。
-    FunASR 服务端 VAD 已关闭，只靠这个信号出完整结果 → reader 线程收到后送 LLM。"""
+    """PTT 松手 (Opcode 5 speaking=0)：flush buffer 中已攒的 offline 结果 → 送 LLM。
+    同时发 is_speaking=False 触发 FunASR flush 残留音频。
+    残留结果会在 reader 线程入 buffer，但本轮 PTT 的主体已在这里发出。"""
+    global _funasr_text_buffer
     _funasr_send_end_of_speech()
     _stt_ab_save_utterance("", 0)
-    log.info("[FunASR] PTT 松手 → is_speaking=false → 等完整 offline 结果")
+
+    # 等短暂时间让 FunASR flush 最后一段 (is_speaking=False 触发的 offline 结果)
+    import time as _time
+    _time.sleep(0.3)
+
+    buf = _funasr_text_buffer
+    _funasr_text_buffer = []
+    if not buf:
+        log.info("[FunASR] PTT 松手但 buffer 空")
+        return
+
+    combined = "".join(buf).strip()
+    if not combined:
+        return
+    log.info("[FunASR→LLM] PTT 松手 → flush %d 段: %s", len(buf), combined[:120])
+
+    session = _agent_session
+    if session is None or not _funasr_is_primary:
+        return
+    from .livekit_io import _closecrab_llm_instance
+    llm_inst = _closecrab_llm_instance()
+    if llm_inst is not None:
+        llm_inst._skip_next_debounce = True
+    loop = _sidecar_loop
+    if loop is not None:
+        def _do_gen(s=session, t=combined):
+            s.generate_reply(user_input=t)
+        loop.call_soon_threadsafe(_do_gen)
+        ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
+        if ch is not None:
+            import asyncio
+            loop.call_soon_threadsafe(
+                lambda c=ch, t=combined: asyncio.ensure_future(c.send(f"🎤 FunASR: {t[:1900]}"))
+            )
 
 
 def _funasr_ab_feed(mono_48k: bytes):
