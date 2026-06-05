@@ -283,7 +283,24 @@ async def _ensure_connected():
         if vc.is_connected():
             break
         await asyncio.sleep(0.2)
+    if vc and vc.is_connected():
+        _patch_recv_hook_debug(vc)
     return vc if vc.is_connected() else None
+
+
+def _patch_recv_hook_debug(vc):
+    """Monkeypatch VoiceClient._recv_hook 加 Opcode 5 调试日志。"""
+    from discord.voice.enums import OpCodes
+    orig = vc._recv_hook
+    async def _debug_hook(ws, msg):
+        op = msg.get("op")
+        if op == int(OpCodes.speaking):
+            d = msg.get("d", {})
+            log.info("[DEBUG] Voice WS Opcode 5 Speaking: user_id=%s speaking=%s ssrc=%s",
+                     d.get("user_id"), d.get("speaking"), d.get("ssrc"))
+        return await orig(ws, msg)
+    vc._recv_hook = _debug_hook
+    log.info("[DEBUG] VoiceClient._recv_hook 已 patch (追踪 Opcode 5)")
 
 
 async def _activate_listen(vc) -> tuple:
