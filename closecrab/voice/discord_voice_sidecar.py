@@ -1611,24 +1611,14 @@ def _funasr_init():
                     t_now = _time.monotonic()
                     log.info("[FunASR] %s: %s", mode, text[:80])
                     if "offline" in mode and _funasr_is_primary:
-                        log.info("[FunASR→LLM] offline → %s", text[:80])
-                        session = _agent_session
-                        if session is not None:
-                            from .livekit_io import _closecrab_llm_instance
-                            llm_inst = _closecrab_llm_instance()
-                            if llm_inst is not None:
-                                llm_inst._skip_next_debounce = True
-                            loop = _sidecar_loop
-                            if loop is not None:
-                                def _do(s=session, t=text):
-                                    s.generate_reply(user_input=t)
-                                loop.call_soon_threadsafe(_do)
-                                ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
-                                if ch is not None:
-                                    import asyncio
-                                    loop.call_soon_threadsafe(
-                                        lambda c=ch, t=text: asyncio.ensure_future(c.send(f"🎤 {t[:1900]}"))
-                                    )
+                        log.info("[FunASR] offline → %s", text[:80])
+                        loop = _sidecar_loop
+                        ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
+                        if loop is not None and ch is not None:
+                            import asyncio
+                            loop.call_soon_threadsafe(
+                                lambda c=ch, t=text: asyncio.ensure_future(c.send(f"🎤 {t[:1900]}"))
+                            )
             except Exception as e:
                 log.warning("[FunASR] reader 退出: %s (下次 feed 自动重连)", e)
                 _funasr_ws = None
