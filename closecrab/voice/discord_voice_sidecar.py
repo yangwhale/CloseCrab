@@ -1589,8 +1589,6 @@ def stt_ab_get_dir():
 _funasr_ws = None  # WebSocket 连接 (threading 模式，sink.write 在解码线程调)
 _funasr_ab_enabled = True  # 开关
 _funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
-_funasr_last_pcm_time = 0.0  # 最近一次 PCM 帧时间 (monotonic)
-_funasr_watchdog_started = False
 _funasr_speaking = False  # PTT 说话状态：True=正在说话(喂音频)，False=静默(不喂)
 
 def _funasr_ab_init():
@@ -1706,11 +1704,9 @@ def _on_discord_speaking_stop():
 
 def _funasr_ab_feed(mono_48k: bytes):
     """把 48kHz mono PCM 降采样到 16kHz 喂 FunASR。sink.write 线程调用。"""
-    global _funasr_ws, _funasr_last_pcm_time
+    global _funasr_ws
     if not _funasr_ab_enabled:
         return
-    import time as _time
-    _funasr_last_pcm_time = _time.monotonic()
     _funasr_send_start_of_speech()
     ws = _funasr_ab_init()
     if ws is None:
@@ -2519,19 +2515,20 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             pass
 
     @bot.event
-    async def on_member_speaking_stop(member):
-        """Discord speaking_stop 事件：用户停止说话 (PTT 抬手 / VAD 检测静音)。"""
-        if member.bot:
-            return
-        log.info("[Discord] speaking_stop: %s", member.display_name)
-        _on_discord_speaking_stop()
+    async def on_member_speaking_state_update(member, ssrc, state):
+        """Voice Gateway Opcode 5: 用户 speaking 状态变化 (PTT 按下/松手)。
 
-    @bot.event
-    async def on_member_speaking_start(member):
-        """Discord speaking_start 事件：用户开始说话。"""
-        if member.bot:
+        state: discord.SpeakingState — none(0)=松手, voice(1)=按下
+        这是真正的 Discord PTT 信号，不是 RTP 超时推断。
+        """
+        if member is None or member.bot:
             return
-        log.info("[Discord] speaking_start: %s", member.display_name)
+        from discord.enums import SpeakingState
+        if state == SpeakingState.none:
+            log.info("[Discord] PTT 松手 (Opcode 5 speaking=0): %s", member.display_name)
+            _on_discord_speaking_stop()
+        else:
+            log.info("[Discord] PTT 按下 (Opcode 5 speaking=%s): %s", int(state), member.display_name)
 
     @bot.event
     async def on_message(message):
