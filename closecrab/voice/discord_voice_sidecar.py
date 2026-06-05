@@ -1614,8 +1614,17 @@ def _funasr_init():
                     t_now = _time.monotonic()
                     log.info("[FunASR] %s: %s", mode, text[:80])
                     if "offline" in mode and _funasr_is_primary:
-                        log.info("[FunASR] offline → %s", text[:80])
+                        log.info("[FunASR→LLM] offline → %s", text[:80])
+                        session = _agent_session
                         loop = _sidecar_loop
+                        if session is not None and loop is not None:
+                            from .livekit_io import _closecrab_llm_instance
+                            llm_inst = _closecrab_llm_instance()
+                            if llm_inst is not None:
+                                llm_inst._skip_next_debounce = True
+                            def _do(s=session, t=text):
+                                s.generate_reply(user_input=t)
+                            loop.call_soon_threadsafe(_do)
                         ch = _sidecar_bot.get_channel(_target_voice_channel_id) if _sidecar_bot else None
                         if loop is not None and ch is not None:
                             import asyncio
