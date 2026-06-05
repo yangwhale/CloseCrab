@@ -1572,6 +1572,9 @@ def stt_ab_get_dir():
 # ─── FunASR WebSocket 流式 STT (标准全套: VAD + 2pass + Punc + ITN) ──
 _funasr_ws = None
 _funasr_is_primary = True
+_funasr_last_feed = 0.0
+_funasr_feeding = False
+_funasr_flush_started = False
 
 def _funasr_init():
     """初始化 FunASR WebSocket 连接 (C++ 服务端)。断线自动重连。"""
@@ -1631,9 +1634,17 @@ def _funasr_init():
 
 def _funasr_ab_feed(mono_48k: bytes):
     """把 48kHz mono PCM 降采样到 16kHz 流式喂 FunASR。"""
-    global _funasr_ws
+    global _funasr_ws, _funasr_last_feed, _funasr_feeding, _funasr_flush_started
     if not _funasr_is_primary:
         return
+    import time as _time
+    _funasr_last_feed = _time.monotonic()
+    if not _funasr_feeding:
+        _funasr_feeding = True
+        if not _funasr_flush_started:
+            _funasr_flush_started = True
+            import threading
+            threading.Thread(target=_funasr_flush_thread, daemon=True, name="funasr-flush").start()
     ws = _funasr_init()
     if ws is None:
         return
@@ -1642,6 +1653,31 @@ def _funasr_ab_feed(mono_48k: bytes):
         ws.send(mono_16k)
     except Exception:
         _funasr_ws = None
+
+
+def _funasr_flush_thread():
+    """PTT 松手 (RTP 停 800ms) → 发 is_speaking=False 让 FunASR flush 最后一段。
+    之后发 is_speaking=True 重新开始接收下一轮。"""
+    import time as _time
+    while True:
+        _time.sleep(0.1)
+        if not _funasr_feeding:
+            continue
+        last = _funasr_last_feed
+        if last > 0 and _time.monotonic() - last > 0.8:
+            global _funasr_ws, _funasr_feeding
+            _funasr_feeding = False
+            ws = _funasr_ws
+            if ws is not None:
+                try:
+                    import json as _json
+                    ws.send(_json.dumps({"is_speaking": False}))
+                    log.info("[FunASR] RTP 停 800ms → is_speaking=false (flush)")
+                    _time.sleep(0.5)
+                    ws.send(_json.dumps({"is_speaking": True}))
+                    log.info("[FunASR] is_speaking=true (重新接收)")
+                except Exception:
+                    _funasr_ws = None
 
 async def _audio_pump_loop():
     """间隙填充: Discord 不说话时不发帧, 但 LiveKit VAD 需要连续流才能量静音断句。
