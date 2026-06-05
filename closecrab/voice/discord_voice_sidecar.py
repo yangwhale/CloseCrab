@@ -1658,6 +1658,7 @@ def _funasr_ab_feed(mono_48k: bytes):
 def _funasr_flush_thread():
     """PTT 松手 (RTP 停 800ms) → 发 is_speaking=False 让 FunASR flush 最后一段。
     之后发 is_speaking=True 重新开始接收下一轮。"""
+    global _funasr_ws, _funasr_feeding
     import time as _time
     while True:
         _time.sleep(0.1)
@@ -1665,7 +1666,6 @@ def _funasr_flush_thread():
             continue
         last = _funasr_last_feed
         if last > 0 and _time.monotonic() - last > 0.8:
-            global _funasr_ws, _funasr_feeding
             _funasr_feeding = False
             ws = _funasr_ws
             if ws is not None:
