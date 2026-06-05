@@ -1731,7 +1731,7 @@ def _funasr_ab_feed(mono_48k: bytes):
         _funasr_watchdog_started = True
         import threading
         threading.Thread(target=_funasr_rtp_watchdog, daemon=True, name="funasr-watchdog").start()
-        log.info("[FunASR] RTP watchdog 启动 (500ms 超时)")
+        log.info("[FunASR] RTP watchdog 启动 (200ms 超时)")
     try:
         mono_16k, _ = audioop.ratecv(mono_48k, 2, 1, 48000, 16000, None)
         _funasr_pcm_buf.extend(mono_16k)
@@ -1747,8 +1747,8 @@ def _funasr_rtp_watchdog():
         if not _funasr_speaking:
             continue
         last = _funasr_last_write
-        if last > 0 and _time.monotonic() - last > 0.5:
-            log.info("[FunASR] RTP 停止 500ms → PTT 松手")
+        if last > 0 and _time.monotonic() - last > 0.2:
+            log.info("[FunASR] RTP 停止 200ms → PTT 松手")
             _on_discord_speaking_stop()
 
 async def _audio_pump_loop():
