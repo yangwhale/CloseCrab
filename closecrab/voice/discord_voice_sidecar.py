@@ -1305,7 +1305,9 @@ def _get_stt_sink_class():
     class _STTSink(discord.sinks.Sink):
         """按 user 累积 PCM。write 跑在 py-cord 解码线程, 故用 Lock 护缓冲。"""
 
-        __sink_listeners__: list = []  # noqa: 让 SinkEventRouter 注册空集不崩
+        __sink_listeners__ = [
+            ("member_speaking_stop", "_on_speaking_stop"),
+        ]
 
         def walk_children(self):
             return []
@@ -1359,6 +1361,14 @@ def _get_stt_sink_class():
 
         def cleanup(self):
             self.finished = True  # 不往 audio_data 写, 覆写成空操作
+
+        def _on_speaking_stop(self, member):
+            """SpeakingTimer: 200ms 无 RTP 包 → PTT 松手。直接触发识别。"""
+            if member is not None and member.bot:
+                return
+            name = getattr(member, "display_name", "?") if member else "?"
+            log.info("[SpeakingTimer] speaking_stop: %s → 触发 FunASR 识别", name)
+            _on_discord_speaking_stop()
 
     _STT_SINK_CLASS = _STTSink
     return _STT_SINK_CLASS
@@ -1593,8 +1603,6 @@ _funasr_itn = None         # ITN 逆文本标准化 (数字/日期/百分比)
 _funasr_is_primary = True  # FunASR 作为主力 STT 驱动 LLM
 _funasr_speaking = False   # PTT 说话状态
 _funasr_pcm_buf = bytearray()  # PTT 期间攒 16kHz mono s16 PCM
-_funasr_last_write = 0.0  # 最近一次 sink.write 时间 (monotonic)
-_funasr_watchdog_started = False  # 超时检测线程是否已启动
 
 def _funasr_ensure_model():
     """懒加载 Paraformer 离线模型 + 标点模型 + ITN。首次调用约 15s。"""
@@ -1707,38 +1715,19 @@ def _on_discord_speaking_stop():
 
 
 def _funasr_ab_feed(mono_48k: bytes):
-    """把 48kHz mono PCM 降采样到 16kHz 攒入 buffer。RTP 停止 500ms 后触发识别。"""
-    global _funasr_speaking, _funasr_last_write, _funasr_watchdog_started
+    """把 48kHz mono PCM 降采样到 16kHz 攒入 buffer。SpeakingTimer 200ms 超时触发识别。"""
+    global _funasr_speaking
     if not _funasr_is_primary:
         return
-    import time as _time
-    _funasr_last_write = _time.monotonic()
     if not _funasr_speaking:
         _funasr_speaking = True
         _funasr_pcm_buf.clear()
         log.info("[FunASR] PTT 按下 → 开始攒音频")
-    if not _funasr_watchdog_started:
-        _funasr_watchdog_started = True
-        import threading
-        threading.Thread(target=_funasr_rtp_watchdog, daemon=True, name="funasr-watchdog").start()
     try:
         mono_16k, _ = audioop.ratecv(mono_48k, 2, 1, 48000, 16000, None)
         _funasr_pcm_buf.extend(mono_16k)
     except Exception:
         pass
-
-
-def _funasr_rtp_watchdog():
-    """后台线程：检测 RTP 包停止 (PTT 松手)。500ms 无新帧 → 触发识别。"""
-    import time as _time
-    while True:
-        _time.sleep(0.1)
-        if not _funasr_speaking:
-            continue
-        last = _funasr_last_write
-        if last > 0 and _time.monotonic() - last > 0.5:
-            log.info("[FunASR] RTP 停止 500ms → PTT 松手 → 触发识别")
-            _on_discord_speaking_stop()
 
 async def _audio_pump_loop():
     """间隙填充: Discord 不说话时不发帧, 但 LiveKit VAD 需要连续流才能量静音断句。
