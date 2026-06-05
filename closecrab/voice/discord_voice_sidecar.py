@@ -1605,6 +1605,7 @@ _funasr_speaking = False   # PTT 说话状态
 _funasr_pcm_buf = bytearray()  # PTT 期间攒 16kHz mono s16 PCM
 _funasr_last_write = 0.0  # monotonic 时间戳
 _funasr_watchdog_started = False
+_funasr_cooldown_until = 0.0  # 识别完后 1s 冷却，防止残留 RTP 包触发新一轮
 
 def _funasr_ensure_model():
     """懒加载 Paraformer 离线模型 + 标点模型 + ITN。首次调用约 15s。"""
@@ -1676,9 +1677,11 @@ def _funasr_recognize(pcm_16k: bytes) -> str:
 
 
 def _on_discord_speaking_stop():
-    """PTT 松手 (RTP 停止 500ms)：攒好的 PCM 一次性跑离线识别 → 送 LLM。"""
-    global _funasr_pcm_buf, _funasr_speaking
+    """PTT 松手 (RTP 停止 200ms)：攒好的 PCM 一次性跑离线识别 → 送 LLM。"""
+    global _funasr_pcm_buf, _funasr_speaking, _funasr_cooldown_until
     _funasr_speaking = False
+    import time as _time
+    _funasr_cooldown_until = _time.monotonic() + 1.0  # 1s 冷却防残留 RTP 循环
     _stt_ab_save_utterance("", 0)
 
     pcm = bytes(_funasr_pcm_buf)
@@ -1722,8 +1725,11 @@ def _funasr_ab_feed(mono_48k: bytes):
     if not _funasr_is_primary:
         return
     import time as _time
-    _funasr_last_write = _time.monotonic()
+    now = _time.monotonic()
+    _funasr_last_write = now
     if not _funasr_speaking:
+        if now < _funasr_cooldown_until:
+            return  # 冷却期内忽略残留 RTP 包
         _funasr_speaking = True
         _funasr_pcm_buf.clear()
         log.info("[FunASR] PTT 按下 → 开始攒音频")
