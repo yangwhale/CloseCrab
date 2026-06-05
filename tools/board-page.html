@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis Whiteboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Google+Sans+Mono&display=swap" rel="stylesheet">
+<style>
+  :root { --blue: #1a73e8; --text: #202124; --dim: #5f6368; --border: #dadce0; --surface: #f8f9fa; --white: #fff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Google Sans', 'Roboto', system-ui, sans-serif; background: #e8eaed; color: var(--text); overflow: hidden; height: 100vh; }
+  .frame { display: flex; flex-direction: column; height: 100vh; }
+
+  /* Top bar - GCP style */
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 1.5rem; height: 48px;
+            background: var(--white); border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 10;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  .topbar .left { display: flex; align-items: center; gap: 12px; }
+  .topbar .logo { width: 24px; height: 24px; background: var(--blue); border-radius: 4px; display: flex; align-items: center; justify-content: center; }
+  .topbar .logo svg { width: 16px; height: 16px; fill: #fff; }
+  .topbar h1 { font-size: 14px; font-weight: 500; color: var(--text); }
+  .topbar .sep { color: var(--border); margin: 0 4px; }
+  .topbar .sub { font-size: 13px; color: var(--dim); }
+  .topbar .right { display: flex; align-items: center; gap: 12px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 10px; border-radius: 12px; font-size: 11px;
+          background: #e8f0fe; color: var(--blue); }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .chip .dot.on { background: #34a853; }
+  .chip .dot.off { background: #ea4335; }
+
+  /* Whiteboard area */
+  .board-wrapper { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1.5rem; }
+  .whiteboard { width: 100%; max-width: 960px; height: 100%; background: var(--white); border-radius: 12px;
+                border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+                position: relative; overflow: hidden; }
+  /* Subtle whiteboard texture */
+  .whiteboard::before { content: ''; position: absolute; inset: 0; opacity: 0.02;
+    background-image: repeating-linear-gradient(0deg, #000 0px, transparent 1px, transparent 40px),
+                      repeating-linear-gradient(90deg, #000 0px, transparent 1px, transparent 40px); }
+
+  .slide-area { width: 100%; height: 100%; position: relative; }
+  .slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+           padding: 3rem 4rem; transition: transform 0.45s cubic-bezier(0.4,0,0.2,1), opacity 0.4s ease; }
+  .slide.current { transform: translateX(0); opacity: 1; }
+  .slide.left { transform: translateX(-100%); opacity: 0; }
+  .slide.right { transform: translateX(100%); opacity: 0; }
+
+  .slide-content { max-width: 820px; width: 100%; position: relative; z-index: 1; }
+  .slide-content h2 { font-size: 1.4rem; font-weight: 500; margin-bottom: 1rem; color: var(--text);
+                       border-bottom: 2px solid var(--blue); padding-bottom: 0.5rem; display: inline-block; }
+  .slide-content p { line-height: 1.9; font-size: 1rem; color: var(--dim); }
+  .slide-content strong { color: var(--text); }
+  .slide-content pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem;
+                       font-family: 'Google Sans Mono', monospace; font-size: 0.82rem; overflow-x: auto; line-height: 1.7; margin: 1rem 0; }
+  .slide-content .formula { text-align: center; font-size: 1.4rem; color: var(--blue); margin: 1.5rem 0; font-weight: 600; }
+  .slide-content .note { background: #e8f0fe; border-left: 3px solid var(--blue); padding: 0.8rem 1rem;
+                         border-radius: 0 8px 8px 0; font-size: 0.9rem; color: var(--dim); margin-top: 1rem; }
+  .slide-content .hl { background: #fef7e0; padding: 2px 6px; border-radius: 3px; color: #b06000; font-weight: 500; }
+  .slide-content svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  .empty-slide { text-align: center; color: #bbb; font-size: 1rem; }
+
+  /* Bottom nav - Material buttons */
+  .nav { display: flex; align-items: center; justify-content: center; gap: 1rem; padding: 0.6rem 1rem;
+         background: var(--white); border-top: 1px solid var(--border); flex-shrink: 0; }
+  .nav-btn { background: transparent; border: 1px solid var(--border); color: var(--blue); padding: 6px 16px;
+             border-radius: 20px; cursor: pointer; font-size: 13px; font-family: 'Google Sans'; font-weight: 500;
+             transition: all 0.2s; }
+  .nav-btn:hover { background: #e8f0fe; }
+  .nav-btn:disabled { opacity: 0.3; cursor: default; }
+  .nav-btn:disabled:hover { background: transparent; }
+  .page-num { font-size: 13px; color: var(--dim); min-width: 60px; text-align: center; }
+  .dots { display: flex; gap: 6px; }
+  .dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--border); transition: all 0.3s; cursor: pointer; }
+  .dots span.active { background: var(--blue); transform: scale(1.3); }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="topbar">
+    <div class="left">
+      <div class="logo"><svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg></div>
+      <h1 id="title">Jarvis Whiteboard</h1>
+      <span class="sep">/</span>
+      <span class="sub" id="subtitle"></span>
+    </div>
+    <div class="right">
+      <div class="chip"><div class="dot off" id="conn-dot"></div><span id="conn-text">连接中</span></div>
+    </div>
+  </div>
+  <div class="board-wrapper">
+    <div class="whiteboard">
+      <div class="slide-area" id="slide-area">
+        <div class="slide current"><div class="slide-content empty-slide">等待 Jarvis 开始书写...</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="nav">
+    <button class="nav-btn" id="btn-prev" onclick="goSlide(curSlide-1)">&#8592; 上一页</button>
+    <div class="dots" id="dots"></div>
+    <span class="page-num" id="page-num">0 / 0</span>
+    <button class="nav-btn" id="btn-next" onclick="goSlide(curSlide+1)">下一页 &#8594;</button>
+  </div>
+</div>
+<script>
+const area = document.getElementById('slide-area');
+const dotsEl = document.getElementById('dots');
+const pageNum = document.getElementById('page-num');
+const titleEl = document.getElementById('title');
+const subEl = document.getElementById('subtitle');
+const dotEl = document.getElementById('conn-dot');
+const connText = document.getElementById('conn-text');
+let slides = [], curSlide = 0;
+let ws, wsOk = false, pollTimer = null, lastTs = 0;
+const basePath = location.pathname.replace(/\/$/, '') || '';
+
+function renderSlides() {
+  area.innerHTML = '';
+  if (slides.length === 0) {
+    area.innerHTML = '<div class="slide current"><div class="slide-content empty-slide">等待 Jarvis 开始书写...</div></div>';
+    pageNum.textContent = '0 / 0'; dotsEl.innerHTML = ''; return;
+  }
+  slides.forEach((html, i) => {
+    const d = document.createElement('div');
+    d.className = 'slide ' + (i === curSlide ? 'current' : (i < curSlide ? 'left' : 'right'));
+    d.innerHTML = '<div class="slide-content">' + html + '</div>';
+    area.appendChild(d);
+  });
+  dotsEl.innerHTML = slides.map((_, i) => '<span class="' + (i === curSlide ? 'active' : '') + '" onclick="goSlide(' + i + ')"></span>').join('');
+  pageNum.textContent = (curSlide + 1) + ' / ' + slides.length;
+  document.getElementById('btn-prev').disabled = curSlide <= 0;
+  document.getElementById('btn-next').disabled = curSlide >= slides.length - 1;
+}
+function goSlide(n) { if (n < 0 || n >= slides.length) return; curSlide = n; renderSlides(); }
+function applyState(msg) {
+  titleEl.textContent = msg.title || 'Jarvis Whiteboard';
+  subEl.textContent = msg.subtitle || '';
+  slides = msg.steps || [];
+  if (msg.highlight >= 0 && msg.highlight < slides.length) curSlide = msg.highlight;
+  else if (curSlide >= slides.length) curSlide = Math.max(0, slides.length - 1);
+  renderSlides();
+}
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + basePath + '/ws');
+  ws.onopen = () => { wsOk = true; dotEl.className = 'dot on'; connText.textContent = '实时'; stopPolling(); };
+  ws.onclose = () => { wsOk = false; dotEl.className = 'dot off'; connText.textContent = '轮询'; startPolling(); setTimeout(connect, 5000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'full_state') applyState(msg);
+    else if (msg.type === 'add_step') { slides.push(msg.html); if (msg.highlight === slides.length - 1) curSlide = slides.length - 1; renderSlides(); }
+    else if (msg.type === 'update_step' && msg.index >= 0 && msg.index < slides.length) { slides[msg.index] = msg.html; renderSlides(); }
+    else if (msg.type === 'highlight' && msg.step >= 0 && msg.step < slides.length) { curSlide = msg.step; renderSlides(); }
+    else if (msg.type === 'clear') { slides = []; curSlide = 0; renderSlides(); }
+    else if (msg.type === 'title') { titleEl.textContent = msg.title; subEl.textContent = msg.subtitle || ''; }
+  };
+}
+async function poll() {
+  try { const r = await fetch(basePath + '/api/state?_=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) return; const s = await r.json();
+    if (s.ts !== lastTs) { lastTs = s.ts; applyState(s); }
+  } catch(e) {}
+}
+function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, 2000); } }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') goSlide(curSlide - 1);
+  else if (e.key === 'ArrowRight') goSlide(curSlide + 1);
+});
+connect(); startPolling();
+</script>
+</body>
+</html>

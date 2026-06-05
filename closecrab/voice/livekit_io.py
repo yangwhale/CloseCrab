@@ -74,7 +74,7 @@ except ImportError:
 from .chirp_stt import ChirpSTT, _DEFAULT_PHRASE_BOOST
 from .chirp_phrases import default_phrases as _default_chirp_phrases
 from .gemini_stt import GeminiSTT
-from .gemini_tts import GeminiTTS
+from .gemini_tts import GeminiTTS, CloudStreamingTTS
 
 if TYPE_CHECKING:
     from ..channels.feishu import FeishuChannel
@@ -174,6 +174,66 @@ _BROADCAST_OPENERS = [
 ]
 
 
+# ─── 即时应答 (instant ack) 语料库 ─────────────────────────────────────
+# 用户说话后 200ms 内推一句短回复到 TTS，不阻塞 LLM 主路径。
+# 规则: 用确认/过渡语，不用正式回答，避免跟 Claude 回复语义重复。
+_INSTANT_ACK_GREETINGS = [
+    "嗨！你好你好！", "哟！来了来了！等着你呢！", "嘿嘿，在呢在呢，说吧！",
+    "诶！又见面啦！", "嗯哼！我在我在！",
+    "来了来了，恭候多时！", "哟呵，今天精神不错啊！",
+    "嘿！来了来了，你的贴心 AI 已上线！",
+]
+_INSTANT_ACK_GENERIC = [
+    "好嘞，收到收到，让我想想啊！", "这就给你整，稍等稍等！",
+    "包在我身上，马上安排！", "让我想想啊，嗯，容我三秒！",
+    "好问题好问题，有点东西啊！", "有意思有意思，等我查查看！",
+    "这个我知道，等我组织一下语言！", "属于是问对人了，来活了！",
+    "收到收到，这题我会，搁这等着！", "马上出活，整起来整起来！",
+    "好嘞好嘞，冲了冲了！", "嗯，这个嘛，让我捋一捋！",
+    "安排安排，少年再等等就出来了！", "嗯嗯嗯，烧脑中，稍等！",
+    "收到，灯等灯等灯，马上就好！", "好的好的，脑子已经开始转了！",
+    "嗯，这个有点意思，等我想想啊！", "了解了解，大脑正在加载中！",
+    "绝了绝了，这问题有水平！等我想想！", "破防了破防了，这题太上头了，稍等！",
+    "不是哥们，这个问题有点东西啊！让我整整！",
+    "硬控我三秒，容我缓缓再回你！", "触爆了触爆了，好问题！等等我！",
+    "收到收到，已购买大脑爱用，马上出活！",
+    "嗯嗯，懂的都懂，让我给你好好捋捋！",
+    "这个含金量很高啊，等我翻翻资料！",
+    "芭比Q了，太烧脑了，给我两秒！",
+    "歪歪滴S，你这问题太顶了，稍等！",
+]
+_INSTANT_ACK_JOKE = [
+    "又来找我啦，我的快乐回来了！", "说吧说吧，你说你的我听着呢！",
+    "好的老板，遵命遵命！", "来了来了，你的贴心小助手上线了！",
+    "诶嘿，被你逮到了，说吧！", "到到到，随叫随到！",
+    "你可算来了，我都想你了！", "来活了来活了，兴奋到模糊！",
+    "我就快，但这题我真会！等着！",
+    "不嘻嘻不嘻嘻，认真给你整！",
+]
+_INSTANT_ACK_LONG = [
+    "嗯，这个得好好想想，你等我一下下啊！",
+    "好问题好问题，让我翻翻资料，容我组织一下！",
+    "这个有点复杂，我捋一捋啊，稍等！",
+    "嗯嗯嗯，这个烧脑，让我仔细想想再回你！",
+    "收到收到，内容有点多，我整理一下再说！",
+    "不是哥们，这个问题含金量太高了，让我好好想想！",
+    "这题硬控我了，太上头了，等我缓缓再给你讲！",
+    "绝了，这个问题很有水平，让我翻翻 wiki 再回你！",
+]
+
+def _pick_instant_ack(user_text: str) -> str:
+    """根据用户输入选一句即时应答。短问候匹配专用池，其他随机通用池。"""
+    t = user_text.strip().lower()
+    if not t:
+        return ""
+    if t in ("嗨", "hi", "hey", "嘿", "你好", "早", "早上好", "晚上好",
+             "嗨嗨", "嗨嗨嗨", "hello", "哈喽"):
+        return random.choice(_INSTANT_ACK_GREETINGS)
+    if len(t) > 30:
+        return random.choice(_INSTANT_ACK_LONG)
+    return random.choice(_INSTANT_ACK_GENERIC + _INSTANT_ACK_JOKE)
+
+
 def add_voice_emotion_icon(text: str, icon: str = "🗣️") -> str:
     """在每个情绪标签前插入图标, 让 voice 回复在飞书显示时有视觉标识。
 
@@ -226,7 +286,9 @@ class _CloseCrabStream(llm.LLMStream):
             pass
 
     async def _run(self) -> None:
-        # 提取最新一条 user message
+        import time as _time
+        t0 = _time.monotonic()
+
         transcript = ""
         for item in reversed(self._chat_ctx.items):
             if isinstance(item, llm.ChatMessage) and item.role == "user":
@@ -245,15 +307,15 @@ class _CloseCrabStream(llm.LLMStream):
         open_id = llm_instance._open_id
         chat_id = feishu._user_chats.get(open_id, "")
 
-        # ── Step 1: 立即 echo 这一段 transcript 到飞书 (实时 STT 视图) ─────
-        # 用户希望每一段 STT 都能在飞书看到, 但 LLM 调用要攒批。
+        # ── Step 1: echo 到飞书 (fire-and-forget, 不阻塞 LLM 管线) ─────
         if chat_id:
             try:
-                await self._cross_loop(
-                    feishu_loop, feishu._send_long(chat_id, f"🎤 {transcript}")
+                feishu_loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        feishu._send_long(chat_id, f"🎤 {transcript}"),
+                        loop=feishu_loop,
+                    )
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as e:
                 log.warning(f"Echo transcript failed: {e}")
 
@@ -317,10 +379,33 @@ class _CloseCrabStream(llm.LLMStream):
         llm_instance._batch_buffer = []
         llm_instance._batch_timer = None
 
+        t_flush = _time.monotonic()
         log.info(
             f"CloseCrabLLM: leader seq={my_seq} flushing {segments} segments "
-            f"({len(combined)} chars): {combined[:120]!r}"
+            f"({len(combined)} chars) t_echo→flush={int((t_flush-t0)*1000)}ms: "
+            f"{combined[:120]!r}"
         )
+
+        # ── Barge-in: 新消息到达时中断旧 TTS ─────────────────────────
+        # 绕过 LiveKit TTS 后，中断机制需要手动触发：
+        # 设 _tts_interrupted 停止当前 _do_speak + 清空队列 + 清 buffer
+        from .discord_voice_sidecar import stream_speak_text
+        from . import discord_voice_sidecar as _sidecar_mod
+        _sidecar_mod._tts_interrupted = True
+        if _sidecar_mod._speak_queue is not None:
+            _sidecar_mod._flush_hints_from_queue()
+        src = _sidecar_mod._get_persistent_source()
+        if src is not None:
+            src.clear()
+        log.info("barge-in: interrupted old TTS + cleared buffer for new message")
+
+        # ── 即时应答 (instant ack): 并行推一句俏皮短回复到 TTS ──────────
+        # 不阻塞主 LLM 路径。用户说话后 200ms 内就能听到确认，正式回复几秒后跟上。
+        # 规则：用确认/过渡语，不用正式回答，避免跟 Claude 回复语义重复。
+        _instant_ack_phrases = _pick_instant_ack(combined)
+        if _instant_ack_phrases:
+            stream_speak_text(_instant_ack_phrases, backend="qwen3")
+            log.info(f"instant ack: {_instant_ack_phrases!r}")
 
         # on_input_needed 直接复用 feishu 的卡片机制: Claude 触发
         # ExitPlanMode/AskUserQuestion 时, 卡片发到飞书, 用户在飞书审批。
@@ -370,16 +455,10 @@ class _CloseCrabStream(llm.LLMStream):
                 log.debug(f"push_voice_chunk failed (voice down?): {e}")
 
         async def on_tool_use_voice(tool_name: str, tool_input: dict) -> None:
-            if tool_name == last_tool[0]:
-                repeat_count[0] += 1
-                if repeat_count[0] >= 2:
-                    return
-            else:
-                last_tool[0] = tool_name
-                repeat_count[0] = 0
-            phrase = pick_tool_voice_phrase(tool_name)
-            log.info(f"voice progressive: tool={tool_name} → {phrase!r}")
-            _push_voice_chunk(phrase)
+            # LiveKit TTS 管线已绕过，tool hint 走 LiveKit 旧管线会跟 sidecar TTS 冲突。
+            # 飞书 broadcast hint 仍正常工作（走 Gemini TTS），这里只跳过 Discord 播出。
+            log.debug(f"voice progressive: tool={tool_name} (skipped, bypass mode)")
+            return
 
         # opening text: Claude 拿到任务后输出的第一段文本 (tool_use 之前)
         # 立即跨 loop 推 TTS, 这样用户先听到"好我去查 xxx"再听到 tool hint。
@@ -434,6 +513,7 @@ class _CloseCrabStream(llm.LLMStream):
 
             return text_for_feishu
 
+        t_llm_start = _time.monotonic()
         try:
             feishu_text = await self._cross_loop(feishu_loop, _do_feishu_side())
         except asyncio.CancelledError:
@@ -445,6 +525,10 @@ class _CloseCrabStream(llm.LLMStream):
             log.error(f"_do_feishu_side cross-loop failed: {e}", exc_info=True)
             feishu_text = "嗯抱歉,我这边出了点问题。"
 
+        t_llm_done = _time.monotonic()
+        log.info(f"CloseCrabLLM: 延迟拆解 t0→flush={int((t_flush-t0)*1000)}ms "
+                 f"flush→LLM={int((t_llm_done-t_flush)*1000)}ms "
+                 f"total={int((t_llm_done-t0)*1000)}ms")
         # ── Step 5: 喂 TTS (剥过 voice tag 的 speech) ─────────────────────
         speech_text = extract_speech_text(feishu_text)
 
@@ -497,11 +581,16 @@ class _CloseCrabStream(llm.LLMStream):
         if speech_text:
             import time as _time
             log.info(f"CloseCrabLLM: TTS will speak {len(speech_text)} chars (final) t={_time.monotonic():.3f}")
+            # 跳过 LiveKit TTS 管线（SentenceTokenizer + StreamAdapter 有 1.5s 开销）
+            # 直接走 sidecar 的 TTS 路径（Qwen3 200ms / Gemini 2s / Cloud TTS 200ms）
+            from .discord_voice_sidecar import stream_speak_text
+            stream_speak_text(speech_text, backend="qwen3")
+            # 推空 chunk 给 LiveKit 做 turn 管理（不触发 TTS）
             try:
                 self._event_ch.send_nowait(
                     llm.ChatChunk(
                         id=agents_utils.shortuuid(),
-                        delta=llm.ChoiceDelta(role="assistant", content=speech_text),
+                        delta=llm.ChoiceDelta(role="assistant", content=""),
                     )
                 )
             except Exception as e:
@@ -941,9 +1030,8 @@ async def _voice_entrypoint(ctx: JobContext):
         turn_handling=_turn_handling,
         stt=_build_stt(),
         llm=closecrab_llm,
-        tts=GeminiTTS(
-            model=os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview"),
-            voice=os.environ.get("TTS_VOICE", "Charon"),
+        tts=CloudStreamingTTS(
+            voice=os.environ.get("CLOUD_TTS_VOICE", "cmn-CN-Chirp3-HD-Orus"),
         ),
     )
 

@@ -25,6 +25,13 @@ _highlight_step: int = -1
 _clients: set[web.WebSocketResponse] = set()
 _title = "Jarvis Whiteboard"
 _subtitle = ""
+_state_ts: int = 0
+
+
+def _bump_ts():
+    global _state_ts
+    import time
+    _state_ts = int(time.time() * 1000)
 
 
 def _build_state() -> dict:
@@ -34,6 +41,7 @@ def _build_state() -> dict:
         "subtitle": _subtitle,
         "steps": _steps,
         "highlight": _highlight_step,
+        "ts": _state_ts,
     }
 
 
@@ -70,14 +78,19 @@ async def ws_handler(request):
 # --- HTTP API ---
 
 async def api_add(request):
-    """添加一个步骤。POST body: {"html": "<p>内容</p>"}"""
+    """添加一个步骤。POST body: {"html": "...", "show": true/false}
+    show=true (默认 false): 立刻翻到新页。不传或 false 则静默添加，需手动 highlight 翻页。
+    """
     global _highlight_step
     body = await request.json()
     html = body.get("html", "")
     if not html:
         return web.json_response({"error": "missing html"}, status=400)
     _steps.append(html)
-    _highlight_step = len(_steps) - 1
+    show = body.get("show", False)
+    if show:
+        _highlight_step = len(_steps) - 1
+    _bump_ts()
     await _broadcast({
         "type": "add_step",
         "index": len(_steps) - 1,
@@ -96,6 +109,7 @@ async def api_update(request):
     if idx < 0 or idx >= len(_steps):
         return web.json_response({"error": "invalid step"}, status=400)
     _steps[idx] = html
+    _bump_ts()
     await _broadcast({"type": "update_step", "index": idx, "html": html})
     return web.json_response({"ok": True})
 
@@ -105,6 +119,7 @@ async def api_highlight(request):
     global _highlight_step
     body = await request.json()
     _highlight_step = body.get("step", -1)
+    _bump_ts()
     await _broadcast({"type": "highlight", "step": _highlight_step})
     return web.json_response({"ok": True})
 
@@ -114,6 +129,7 @@ async def api_clear(request):
     global _highlight_step
     _steps.clear()
     _highlight_step = -1
+    _bump_ts()
     await _broadcast({"type": "clear"})
     return web.json_response({"ok": True})
 
@@ -124,6 +140,7 @@ async def api_title(request):
     body = await request.json()
     _title = body.get("title", _title)
     _subtitle = body.get("subtitle", _subtitle)
+    _bump_ts()
     await _broadcast({"type": "title", "title": _title, "subtitle": _subtitle})
     return web.json_response({"ok": True})
 
@@ -138,9 +155,16 @@ async def api_status(request):
     })
 
 
+async def api_state(request):
+    """返回完整状态（供 HTTP 轮询 fallback）。"""
+    return web.json_response(_build_state())
+
+
 # --- 前端页面 ---
 
-PAGE_HTML = r"""<!DOCTYPE html>
+import pathlib as _pathlib
+PAGE_HTML = (_pathlib.Path(__file__).parent / "board-page.html").read_text()
+_OLD_PAGE_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -207,32 +231,36 @@ const dotEl = document.getElementById('conn-dot');
 const connText = document.getElementById('conn-text');
 const titleEl = document.getElementById('title');
 const subEl = document.getElementById('subtitle');
-let ws;
+let ws, wsOk = false, pollTimer = null, lastTs = 0;
+const basePath = location.pathname.replace(/\/$/, '') || '';
+
+function applyState(msg) {
+  titleEl.textContent = msg.title || 'Jarvis Whiteboard';
+  subEl.textContent = msg.subtitle || '';
+  stepsEl.innerHTML = '';
+  if (!msg.steps || msg.steps.length === 0) {
+    stepsEl.innerHTML = '<div class="empty">等待 Jarvis 开始书写...</div>';
+  } else {
+    msg.steps.forEach((html, i) => addStepDOM(i, html, i === msg.highlight));
+    if (msg.highlight >= 0) {
+      const el = document.getElementById('step-' + msg.highlight);
+      if (el) el.scrollIntoView({behavior:'smooth', block:'center'});
+    }
+  }
+}
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const basePath = location.pathname.replace(/\/$/, '') || '';
   ws = new WebSocket(proto + '//' + location.host + basePath + '/ws');
-  ws.onopen = () => { dotEl.className = 'conn-dot on'; connText.textContent = '已连接'; };
-  ws.onclose = () => { dotEl.className = 'conn-dot off'; connText.textContent = '断线重连...'; setTimeout(connect, 2000); };
+  ws.onopen = () => { wsOk = true; dotEl.className = 'conn-dot on'; connText.textContent = '实时连接'; stopPolling(); };
+  ws.onclose = () => { wsOk = false; dotEl.className = 'conn-dot off'; connText.textContent = '轮询模式'; startPolling(); setTimeout(connect, 5000); };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === 'full_state') {
-      titleEl.textContent = msg.title || 'Jarvis Whiteboard';
-      subEl.textContent = msg.subtitle || '';
-      stepsEl.innerHTML = '';
-      if (msg.steps.length === 0) {
-        stepsEl.innerHTML = '<div class="empty" id="empty-hint">等待 Jarvis 开始书写...</div>';
-      } else {
-        msg.steps.forEach((html, i) => addStepDOM(i, html, i === msg.highlight));
-      }
-    } else if (msg.type === 'add_step') {
-      const emp = document.getElementById('empty-hint');
-      if (emp) emp.remove();
-      clearHighlights();
-      addStepDOM(msg.index, msg.html, true);
-      scrollToBottom();
+    if (msg.type === 'full_state') { applyState(msg); }
+    else if (msg.type === 'add_step') {
+      const emp = stepsEl.querySelector('.empty'); if (emp) emp.remove();
+      clearHighlights(); addStepDOM(msg.index, msg.html, true); scrollToBottom();
     } else if (msg.type === 'update_step') {
       const el = document.getElementById('step-' + msg.index);
       if (el) el.querySelector('.step-body').innerHTML = msg.html;
@@ -240,14 +268,21 @@ function connect() {
       clearHighlights();
       const el = document.getElementById('step-' + msg.step);
       if (el) { el.classList.add('active'); el.scrollIntoView({behavior:'smooth', block:'center'}); }
-    } else if (msg.type === 'clear') {
-      stepsEl.innerHTML = '<div class="empty" id="empty-hint">等待 Jarvis 开始书写...</div>';
-    } else if (msg.type === 'title') {
-      titleEl.textContent = msg.title;
-      subEl.textContent = msg.subtitle || '';
-    }
+    } else if (msg.type === 'clear') { stepsEl.innerHTML = '<div class="empty">等待 Jarvis 开始书写...</div>'; }
+    else if (msg.type === 'title') { titleEl.textContent = msg.title; subEl.textContent = msg.subtitle || ''; }
   };
 }
+
+async function poll() {
+  try {
+    const r = await fetch(basePath + '/api/state?_=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) return;
+    const s = await r.json();
+    if (s.ts !== lastTs) { lastTs = s.ts; applyState(s); }
+  } catch(e) {}
+}
+function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, 2000); } }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
 function addStepDOM(idx, html, active) {
   const div = document.createElement('div');
@@ -264,6 +299,7 @@ connect();
 </body>
 </html>
 """
+del _OLD_PAGE_HTML
 
 
 async def page_handler(request):
@@ -283,6 +319,7 @@ def create_app():
     app.router.add_post("/board/api/clear", api_clear)
     app.router.add_post("/board/api/title", api_title)
     app.router.add_get("/board/api/status", api_status)
+    app.router.add_get("/board/api/state", api_state)
     # 兼容不带 /board 前缀的本地访问
     app.router.add_get("/", page_handler)
     app.router.add_get("/ws", ws_handler)
@@ -292,6 +329,7 @@ def create_app():
     app.router.add_post("/api/clear", api_clear)
     app.router.add_post("/api/title", api_title)
     app.router.add_get("/api/status", api_status)
+    app.router.add_get("/api/state", api_state)
     return app
 
 

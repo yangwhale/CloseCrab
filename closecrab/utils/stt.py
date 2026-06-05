@@ -230,9 +230,18 @@ class STTEngine:
             )
             log.info("FunASR model loaded.")
 
-        result = _funasr_model.generate(input=file_path)
+        _hotwords = (
+            "Claude Code Gemini TPU GPU B200 H100 A100 vLLM SGLang "
+            "GCP GKE Discord VS Code Whisper Chirp FunASR "
+            "MaxText Qwen MoE HBM MFU Firestore LiveKit "
+            "Docker Kubernetes PyTorch JAX TensorFlow "
+            "Anthropic OpenAI DeepSeek 通义千问 飞书 蚂蚁"
+        )
+        result = _funasr_model.generate(input=file_path, hotword=_hotwords)
         if result and len(result) > 0 and "text" in result[0]:
-            text = result[0]["text"].strip()
+            raw = result[0]["text"].strip()
+            import re
+            text = re.sub(r"<\|[^|]*\|>", "", raw).strip()
         else:
             text = ""
         log.info(f"FunASR transcribed: {text[:100]}...")

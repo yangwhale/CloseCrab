@@ -160,6 +160,11 @@ class ClaudeCodeWorker(Worker):
         env.pop("CLAUDECODE", None)
         env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)  # 让 Claude CLI 用 VM 默认 SA 调 Vertex AI
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "0"
+        if self._model and "haiku" in self._model.lower():
+            env.pop("ANTHROPIC_BETAS", None)
+            log.info("Stripped ANTHROPIC_BETAS for Haiku (1M context unsupported)")
+        else:
+            env.setdefault("ANTHROPIC_BETAS", "context-1m-2025-08-07")
         if self._model:
             prev = env.get("ANTHROPIC_MODEL", "")
             env["ANTHROPIC_MODEL"] = self._model

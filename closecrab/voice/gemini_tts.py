@@ -245,3 +245,100 @@ class _GeminiChunkedStream(tts.ChunkedStream):
             output_emitter.push(bytes(silent_frame_samples * 2 * GEMINI_TTS_NUM_CHANNELS))
 
         output_emitter.flush()
+
+
+# ── Cloud TTS streaming (Chirp3-HD) ─────────────────────────────────────
+
+_cloud_tts_client_singleton = None
+
+class CloudStreamingTTS(tts.TTS):
+    """LiveKit TTS plugin using Cloud TTS streaming_synthesize (Chirp3-HD).
+    TTFB ~120-200ms vs Gemini API ~2s. No emotion tag support."""
+
+    def __init__(self, *, voice: str = "cmn-CN-Chirp3-HD-Orus") -> None:
+        if not _HAS_LIVEKIT:
+            raise RuntimeError("CloudStreamingTTS requires livekit-agents.")
+        super().__init__(
+            capabilities=tts.TTSCapabilities(streaming=False),
+            sample_rate=24000, num_channels=1,
+        )
+        self._voice_name = voice
+
+    @property
+    def model(self) -> str:
+        return "chirp3-hd"
+
+    @property
+    def provider(self) -> str:
+        return "cloud-tts"
+
+    def synthesize(self, text: str, *,
+                   conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+                   ) -> tts.ChunkedStream:
+        cleaned = _clean_text_for_tts(text)
+        return _CloudChunkedStream(tts=self, input_text=cleaned,
+                                   conn_options=conn_options, voice_name=self._voice_name)
+
+
+class _CloudChunkedStream(tts.ChunkedStream):
+    def __init__(self, *, tts: CloudStreamingTTS, input_text: str,
+                 conn_options: APIConnectOptions, voice_name: str) -> None:
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
+        self._voice_name = voice_name
+
+    async def _run(self, output_emitter: tts.AudioEmitter) -> None:
+        global _cloud_tts_client_singleton
+        import asyncio
+        from google.cloud import texttospeech
+
+        output_emitter.initialize(request_id=utils.shortuuid(),
+                                  sample_rate=24000, num_channels=1, mime_type="audio/pcm")
+
+        if not self._input_text.strip():
+            output_emitter.push(bytes(2400))
+            output_emitter.flush()
+            return
+
+        if _cloud_tts_client_singleton is None:
+            _cloud_tts_client_singleton = texttospeech.TextToSpeechClient()
+
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="cmn-CN", name=self._voice_name)
+
+        import queue, threading
+        pcm_q: queue.Queue = queue.Queue(maxsize=200)
+        _sentinel = object()
+
+        def _producer():
+            try:
+                def gen():
+                    yield texttospeech.StreamingSynthesizeRequest(
+                        streaming_config=texttospeech.StreamingSynthesizeConfig(voice=voice))
+                    yield texttospeech.StreamingSynthesizeRequest(
+                        input=texttospeech.StreamingSynthesisInput(text=self._input_text))
+                for resp in _cloud_tts_client_singleton.streaming_synthesize(gen()):
+                    if resp.audio_content:
+                        pcm_q.put(bytes(resp.audio_content))
+            except Exception as e:
+                log.error("Cloud TTS streaming failed: %s", e)
+            finally:
+                pcm_q.put(_sentinel)
+
+        t = threading.Thread(target=_producer, daemon=True, name="cloud-tts-lk")
+        t.start()
+
+        total = 0
+        while True:
+            try:
+                item = pcm_q.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.005)
+                continue
+            if item is _sentinel:
+                break
+            output_emitter.push(item)
+            total += len(item)
+
+        if total == 0:
+            output_emitter.push(bytes(2400))
+        output_emitter.flush()

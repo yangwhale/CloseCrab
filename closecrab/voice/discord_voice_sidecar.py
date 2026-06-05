@@ -115,6 +115,7 @@ class _SpeakItem:
     fid: str = ""
     is_reply: bool = False  # True = 最终回复 (fid 非空), False = hint/opener
     enqueue_time: float = 0.0  # monotonic 入队时间，测排队延迟
+    backend: str = ""  # 指定 TTS 后端 (qwen3/gemini/cloud_tts)，空=用默认
 
 _speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
 _speak_consumer_task: "asyncio.Task | None" = None
@@ -132,6 +133,7 @@ _STT_SINK_CLASS = None      # 惰性定义的 Sink 子类
 _AUDIO_INPUT_CLASS = None   # 惰性定义的 AudioInput 子类
 _audio_input = None         # 当前 _DiscordAudioInput 实例
 _agent_session = None       # 当前 AgentSession 实例
+_pending_discord_text = []  # AgentSession 未就绪时缓存的 Discord 文字消息
 _audio_pump_task = None     # 连续推帧 task (20ms 节奏 + 静音填充)
 _ssrc_task = None           # ssrc 自动推断 + 录音守护 task
 _listen_active = False      # 用户是否要求持续收音 (corrupted 崩溃后自动重启用)
@@ -529,10 +531,55 @@ _EMOTION_TAG_RE = re.compile(r'\[(?:casually|friendly|warmly|amused|cheerfully|p
                              r'excitement|happy|seriously|suggestion|whispers|'
                              r'focus|neutral)\]\s*', re.IGNORECASE)
 
+_EMOTION_INSTRUCT_MAP = {
+    "thinking": "音高: 女性中高音区，语调富于变化. 语速: 语速快，像连珠炮一样边想边说. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 脑子飞速运转，急切地分析. 语调: 快速起伏，像在飞速自言自语. 性格: 聪明敏捷，停不下来.",
+    "realization": "音高: 女性中高音区，声音明亮上扬. 语速: 语速快，干脆利落. 音量: 正常偏大，笑声响亮. 清晰度: 吐字清晰. 情绪: 恍然大悟，兴奋脱口而出. 语调: 猛地上扬有力，转折明显. 性格: 反应极快，自信爽朗.",
+    "curiosity": "音高: 女性中高音区，句末明显上扬. 语速: 语速快，急切. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 充满好奇，迫不及待想知道. 语调: 疑问式上扬，期待感强烈. 性格: 好学求知，热情.",
+    "casually": "音高: 女性中高音区，语调自然活泼. 语速: 语速明快，干脆利落. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 轻松随意，开心自在. 语调: 随性自然，偶有上扬. 性格: 随和爽朗，外向开朗.",
+    "excitement": "音高: 女性高音区，语调大幅上扬. 语速: 语速飞快，节奏紧凑. 音量: 较大，近乎喊叫. 清晰度: 吐字清晰有力. 情绪: 极度兴奋，控制不住的狂喜. 语调: 高亢爆发，充满感染力. 性格: 外向热烈，激情四射.",
+    "seriously": "音高: 女性中高音区，语调稳定有力. 语速: 语速明快，节奏紧凑不拖沓. 音量: 正常偏大. 清晰度: 字字清晰有力. 情绪: 严肃认真，干练果断. 语调: 有力简洁，掷地有声. 性格: 专业干练，不啰嗦.",
+    "whispers": "音高: 女性中音区，压低但明亮. 语速: 语速快，紧凑不拖. 音量: 较小，悄悄话. 清晰度: 吐字清晰. 情绪: 神秘兴奋，分享劲爆秘密. 语调: 压低但有张力和节奏. 性格: 机灵俏皮.",
+    "playful": "音高: 女性中高音区，语调跳跃灵动. 语速: 语速快，节奏明快. 音量: 正常交谈音量，偶有笑声. 清晰度: 吐字清晰. 情绪: 俏皮调侃，带着得意的笑. 语调: 上下跳跃，活泼灵动. 性格: 幽默风趣，爱逗人.",
+    "happy": "音高: 女性中高音区，语调上扬明亮. 语速: 语速快，欢快. 音量: 正常偏大，笑声爽朗. 清晰度: 吐字清晰. 情绪: 纯粹的快乐，笑意满溢. 语调: 明朗上扬，充满阳光. 性格: 乐观开朗，感染力强.",
+    "warmly": "音高: 女性中高音区，语调柔和但明亮. 语速: 语速快，温暖但不拖沓. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 温暖关怀，真诚亲切. 语调: 柔和上扬，带笑意. 性格: 体贴热情，干脆利落.",
+    "contemplative": "音高: 女性中高音区，语调有层次起伏. 语速: 语速快，紧凑有节奏. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 若有所悟，恍然感慨. 语调: 快速起伏有致，像突然想明白了. 性格: 有深度且反应快.",
+    "friendly": "音高: 女性中高音区，语调温和上扬. 语速: 语速明快，热情. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 热情友好，亲和力强. 语调: 亲切上扬，疑问时更明显. 性格: 热心开朗，爱交朋友.",
+    "amused": "音高: 女性中高音区，语调带笑. 语速: 语速明快，忍不住加速. 音量: 正常交谈音量，笑声响亮. 清晰度: 吐字清晰. 情绪: 忍俊不禁，被逗乐了. 语调: 带笑意颤动，有感染力. 性格: 幽默爽朗.",
+    "cheerfully": "音高: 女性中高音区，语调明快跳跃. 语速: 语速快，充满活力. 音量: 正常偏大. 清晰度: 吐字清晰. 情绪: 精力充沛，元气满满. 语调: 明亮跳跃，节奏感强. 性格: 活力四射，热情洋溢.",
+    "suggestion": "音高: 女性中高音区，语调平稳但有力. 语速: 语速明快，简洁. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 诚恳自信，有主意. 语调: 稳中有升，有说服力. 性格: 可靠干练，出谋划策.",
+    "focus": "音高: 女性中高音区，语调精准有力. 语速: 语速明快，节奏紧凑. 音量: 正常交谈音量. 清晰度: 字字清晰. 情绪: 全神贯注，高效专注. 语调: 精确有条理，不废话. 性格: 专注严谨，利落.",
+    "confusion": "音高: 女性中高音区，语调带疑问上扬. 语速: 语速明快，急切求解. 音量: 正常交谈音量. 清晰度: 吐字清晰. 情绪: 困惑但积极，想搞明白. 语调: 疑问上扬，不确定但不消极. 性格: 好奇求真，不服输.",
+    "neutral": "音高: 女性中高音区，语调自然. 语速: 语速明快. 音量: 正常交谈音量. 清晰度: 吐字清晰，发音标准. 流畅度: 表达流畅自如. 口音: 普通话. 情绪: 平和自然. 语调: 语调上扬活泼. 性格: 外向开朗.",
+}
+
+_EMOTION_SPLIT_RE = re.compile(
+    r'\[(casually|friendly|warmly|amused|cheerfully|playful|'
+    r'thinking|realization|curiosity|confusion|contemplative|'
+    r'excitement|happy|seriously|suggestion|whispers|'
+    r'focus|neutral)\]\s*', re.IGNORECASE)
+
+
+def _split_by_emotion(text: str) -> list:
+    """按情感标签切分文本，返回 [(instructions, text_segment), ...]。
+    pipeline 调用：每段用不同 instructions 调 Qwen3 TTS API。"""
+    parts = _EMOTION_SPLIT_RE.split(text)
+    segments = []
+    if parts[0].strip():
+        segments.append(("", parts[0].strip()))
+    for i in range(1, len(parts), 2):
+        tag = parts[i].lower()
+        txt = parts[i + 1].strip() if i + 1 < len(parts) else ""
+        if txt:
+            instruct = _EMOTION_INSTRUCT_MAP.get(tag, "")
+            segments.append((instruct, txt))
+    return segments if segments else [("", text)]
+
+
 _qwen3_session = None  # requests.Session for HTTP keep-alive
 
-async def _qwen3_tts_stream(text: str):
-    """流式调 Qwen3-TTS (vLLM-Omni), 逐 chunk yield 24kHz mono s16 PCM bytes。"""
+async def _qwen3_tts_stream(text: str, instructions: str = ""):
+    """流式调 Qwen3-TTS (vLLM-Omni), 逐 chunk yield 24kHz mono s16 PCM bytes。
+    instructions: Qwen3 TTS instruct 参数，控制情感/语速/音高等。"""
     global _qwen3_session
     import json as _json
 
@@ -544,10 +591,11 @@ async def _qwen3_tts_stream(text: str):
 
     qwen3_host = os.environ.get("QWEN3_TTS_HOST", "10.101.0.3")
     qwen3_port = os.environ.get("QWEN3_TTS_PORT", "8091")
-    qwen3_voice = os.environ.get("QWEN3_TTS_VOICE", "dylan")
+    qwen3_voice = os.environ.get("QWEN3_TTS_VOICE", "vivian")
     url = f"http://{qwen3_host}:{qwen3_port}/v1/audio/speech"
 
-    log.info("Qwen3 TTS: %dc → %s voice=%s", len(cleaned), url, qwen3_voice)
+    log.info("Qwen3 TTS: %dc → %s voice=%s instruct=%s",
+             len(cleaned), url, qwen3_voice, instructions[:40] if instructions else "none")
 
     if _qwen3_session is None:
         import requests as _requests
@@ -555,9 +603,11 @@ async def _qwen3_tts_stream(text: str):
 
     def _blocking_stream():
         """同步流式读取, 复用 HTTP keep-alive session。"""
-        resp = _qwen3_session.post(url,
-            json={"model": "/model", "input": cleaned, "voice": qwen3_voice,
-                  "response_format": "pcm", "stream": True},
+        body = {"model": "/model", "input": cleaned, "voice": qwen3_voice,
+                "response_format": "pcm", "stream": True}
+        if instructions:
+            body["instructions"] = instructions
+        resp = _qwen3_session.post(url, json=body,
             stream=True, timeout=120)
         resp.raise_for_status()
         for chunk in resp.iter_content(chunk_size=4800):
@@ -802,7 +852,7 @@ def _flush_hints_from_queue():
     return flushed
 
 
-async def _do_speak(text: str, fid: str = ""):
+async def _do_speak(text: str, fid: str = "", backend: str = ""):
     """单条 TTS 生成+播放。直接写入持久 source，无需新建/抢占/预缓冲。"""
     import time as _time
     global _tts_interrupted
@@ -813,13 +863,7 @@ async def _do_speak(text: str, fid: str = ""):
 
     _tts_interrupted = False  # 新一轮生成，重置中断标志
 
-    tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")  # "gemini", "qwen3", or "cloud_tts"
-    if tts_backend == "qwen3":
-        tts_stream = _qwen3_tts_stream(text)
-    elif tts_backend == "cloud_tts":
-        tts_stream = _cloud_tts_stream(text)
-    else:
-        tts_stream = _gemini_tts_stream(text)
+    tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "gemini")
 
     buf_f = None
     bpath = _buf_path(fid)
@@ -835,20 +879,47 @@ async def _do_speak(text: str, fid: str = ""):
         state = None
         wrote = 0
         t_first_pcm = None
-        async for pcm24 in tts_stream:
-            if _tts_interrupted:
-                log.info("TTS 被打断(barge-in), 停止生成: %dc已写, %s", wrote, text[:30])
-                break
-            if t_first_pcm is None:
-                t_first_pcm = _time.monotonic()
-                log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
-                         (t_first_pcm - t_start) * 1000, len(text), text[:30])
-            pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
-            stereo = audioop.tostereo(pcm48, 2, 1, 1)
-            source.write(stereo)
-            wrote += len(stereo)
-            if buf_f is not None:
-                buf_f.write(stereo)
+
+        if tts_backend == "qwen3":
+            segments = _split_by_emotion(text)
+            log.info("Qwen3 TTS 分段: %d 段, %s", len(segments), text[:40])
+            for seg_idx, (instruct, seg_text) in enumerate(segments):
+                if _tts_interrupted:
+                    log.info("TTS 被打断(barge-in), 停止生成: %dc已写, seg %d/%d",
+                             wrote, seg_idx, len(segments))
+                    break
+                async for pcm24 in _qwen3_tts_stream(seg_text, instructions=instruct):
+                    if _tts_interrupted:
+                        break
+                    if t_first_pcm is None:
+                        t_first_pcm = _time.monotonic()
+                        log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
+                                 (t_first_pcm - t_start) * 1000, len(text), text[:30])
+                    pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
+                    stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                    source.write(stereo)
+                    wrote += len(stereo)
+                    if buf_f is not None:
+                        buf_f.write(stereo)
+        else:
+            if tts_backend == "cloud_tts":
+                tts_stream = _cloud_tts_stream(text)
+            else:
+                tts_stream = _gemini_tts_stream(text)
+            async for pcm24 in tts_stream:
+                if _tts_interrupted:
+                    log.info("TTS 被打断(barge-in), 停止生成: %dc已写, %s", wrote, text[:30])
+                    break
+                if t_first_pcm is None:
+                    t_first_pcm = _time.monotonic()
+                    log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
+                             (t_first_pcm - t_start) * 1000, len(text), text[:30])
+                pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
+                stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                source.write(stereo)
+                wrote += len(stereo)
+                if buf_f is not None:
+                    buf_f.write(stereo)
         t_done = _time.monotonic()
         log.info("TTS 延迟: total=%.0fms, audio=%.1fs, %dc, %s",
                  (t_done - t_start) * 1000, wrote / 4 / 48000,
@@ -888,28 +959,29 @@ async def _speak_consumer():
         if queue_wait > 50:
             log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
         try:
-            await _do_speak(item.text, item.fid)
+            await _do_speak(item.text, item.fid, backend=item.backend)
         except Exception:
             log.exception("_speak_consumer: _do_speak 异常")
 
 
-async def _enqueue_speak(text: str, fid: str = ""):
+async def _enqueue_speak(text: str, fid: str = "", backend: str = ""):
     """sidecar loop 内: 把 TTS 请求入队。reply 入队前先清洗过期 hint。"""
     is_reply = bool(fid)
     if is_reply:
         _flush_hints_from_queue()
     import time as _time
     _speak_queue.put_nowait(_SpeakItem(text=text, fid=fid, is_reply=is_reply,
-                                       enqueue_time=_time.monotonic()))
+                                       enqueue_time=_time.monotonic(), backend=backend))
     tag = "reply" if is_reply else "hint"
     log.debug("TTS 入队 (%s, qsize=%d): %s", tag, _speak_queue.qsize(), text[:30])
 
 
-def stream_speak_text(text: str, fid: str = "") -> bool:
-    """【飞书线程调用】流式直生 TTS 推 Discord 常驻语音频道念。线程安全。
+def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
+    """【飞书/LiveKit 线程调用】流式直生 TTS 推 Discord 常驻语音频道念。线程安全。
 
     未连语音频道 / sidecar 未启动 → 静默返回 False (不主动建连, 不费劲)。
-    fire-and-forget: 立即返回, 不阻塞飞书后续 (飞书 ogg) 的生成。
+    fire-and-forget: 立即返回, 不阻塞调用方。
+    backend: 指定 TTS 后端 (qwen3/gemini/cloud_tts)，空=用默认。
     fid 非空时把整段音频落盘到 _buf_path(fid), 供后续 replay_file(fid) 重播。
     """
     if not text or not text.strip():
@@ -922,7 +994,7 @@ def stream_speak_text(text: str, fid: str = "") -> bool:
     if _speak_queue is None:
         return False
     try:
-        asyncio.run_coroutine_threadsafe(_enqueue_speak(text, fid), loop)
+        asyncio.run_coroutine_threadsafe(_enqueue_speak(text, fid, backend=backend), loop)
         return True
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
@@ -1248,6 +1320,8 @@ def _get_stt_sink_class():
                 cap = _MONO_FRAME_BYTES * 100
                 if len(self._pcm) > cap:
                     del self._pcm[: len(self._pcm) - cap]
+            # FunASR A/B 旁路: 同一帧 PCM 同时喂 FunASR
+            _funasr_ab_feed(mono)
             # 直通: Discord 解密 PCM 以 RTP 原生节奏直达 LiveKit 输入。
             ai = _audio_input
             if ai is not None and len(mono) >= _MONO_FRAME_BYTES:
@@ -1422,6 +1496,61 @@ def _get_audio_output_class():
 
 _got_real_frame = False  # sink.write 直通喂真帧后置 True, 间隙填充器据此跳过
 
+# ─── FunASR A/B 测试旁路 ─────────────────────────────────────────────
+_funasr_ws = None  # WebSocket 连接 (threading 模式，sink.write 在解码线程调)
+_funasr_ab_enabled = True  # 开关
+
+def _funasr_ab_init():
+    """初始化 FunASR WebSocket 连接（后台线程安全）。"""
+    global _funasr_ws
+    if _funasr_ws is not None:
+        return _funasr_ws
+    try:
+        import websockets.sync.client as ws_sync
+        _funasr_ws = ws_sync.connect("ws://localhost:10095", open_timeout=3)
+        import json
+        _funasr_ws.send(json.dumps({
+            "mode": "2pass", "chunk_size": [5, 10, 5],
+            "wav_name": "ab_test", "is_speaking": True,
+            "hotwords": "", "itn": True
+        }))
+        log.info("[STT-AB] FunASR WebSocket 已连接")
+        import threading
+        def _funasr_reader():
+            import time as _time
+            try:
+                while True:
+                    msg = _funasr_ws.recv(timeout=60)
+                    data = json.loads(msg)
+                    text = data.get("text", "").strip()
+                    mode = data.get("mode", "")
+                    if text:
+                        log.info("[STT-AB] FunASR %s: t=%.3f text=%r",
+                                 mode, _time.monotonic(), text[:80])
+            except Exception as e:
+                log.warning("[STT-AB] FunASR reader 退出: %s", e)
+        t = threading.Thread(target=_funasr_reader, daemon=True, name="funasr-ab-reader")
+        t.start()
+        return _funasr_ws
+    except Exception as e:
+        log.warning("[STT-AB] FunASR 连接失败 (A/B 测试禁用): %s", e)
+        return None
+
+
+def _funasr_ab_feed(mono_48k: bytes):
+    """把 48kHz mono PCM 降采样到 16kHz 喂 FunASR。sink.write 线程调用。"""
+    global _funasr_ws
+    if not _funasr_ab_enabled:
+        return
+    ws = _funasr_ab_init()
+    if ws is None:
+        return
+    try:
+        mono_16k, _ = audioop.ratecv(mono_48k, 2, 1, 48000, 16000, None)
+        ws.send(mono_16k)
+    except Exception:
+        _funasr_ws = None
+
 async def _audio_pump_loop():
     """间隙填充: Discord 不说话时不发帧, 但 LiveKit VAD 需要连续流才能量静音断句。
     每 20ms 检查: sink.write 刚喂过真帧 → 跳过; 没有 → 补一帧静音。
@@ -1508,16 +1637,16 @@ async def _start_agent_session(channel_id: int):
         session.output.audio = ao  # 出口怼回 Discord 喇叭
 
     def _on_transcribed(ev):
-        # STT 转写始终旁路发 Discord 文字区, 让 Chris 看见自己说的话转得对不对。
-        # 全双工模式下转写同时也走 CloseCrabLLM(喂大脑), 这条只是额外的可视回显。
         try:
             if not getattr(ev, "is_final", False):
                 return
             text = (getattr(ev, "transcript", "") or "").strip()
             if not text:
                 return
+            import time as _time
             name = _stt_sink.last_name() if _stt_sink is not None else "?"
             log.info("STT 转写 [%s]: %s", name, text[:80])
+            log.info("[STT-AB] Chirp3 final: t=%.3f text=%r", _time.monotonic(), text[:80])
             ch = bot.get_channel(channel_id) if bot else None
             if ch is not None:
                 asyncio.create_task(ch.send(f"🎤 {name}: {text}"))
@@ -1530,8 +1659,19 @@ async def _start_agent_session(channel_id: int):
     _audio_output = ao
     _agent_session = session
     _audio_pump_task = asyncio.create_task(_audio_pump_loop())
-    log.info("AgentSession 已启动 (channel=%s, %s, 直通+间隙填充)", channel_id,
+    log.info("AgentSession 已启动 (channel=%s, %s, 直通+间隔填充)", channel_id,
              "全双工 STT→CloseCrabLLM→TTS" if full_duplex else "STT-only 发文字")
+
+    if _pending_discord_text:
+        log.info("回放 %d 条缓存的 Discord 文字消息", len(_pending_discord_text))
+        for buffered in _pending_discord_text:
+            from .livekit_io import _closecrab_llm_instance
+            llm = _closecrab_llm_instance()
+            if llm is not None:
+                llm._skip_next_debounce = True
+            session.generate_reply(user_input=buffered)
+            log.info("Discord 文字回放 → AgentSession.generate_reply: %s", buffered[:80])
+        _pending_discord_text.clear()
 
 
 class _CommitWelcome:
@@ -2238,7 +2378,9 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         # (generate_reply → CloseCrabLLM → feishu worker → TTS → Discord 喇叭)
         session = _agent_session
         if session is None:
-            log.warning("Discord 文字: AgentSession 未就绪, 跳过")
+            _pending_discord_text.append(text)
+            log.info("Discord 文字: AgentSession 未就绪, 缓存待回放 (%d条): %s",
+                      len(_pending_discord_text), text[:80])
             return
         from .livekit_io import _closecrab_llm_instance
         llm = _closecrab_llm_instance()
