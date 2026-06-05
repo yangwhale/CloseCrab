@@ -81,6 +81,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("closecrab.voice.livekit_io")
 
+_active_llm = None  # CloseCrabLLM instance, set during agent session start
+
+def _closecrab_llm_instance():
+    return _active_llm
+
 # Worker 注册名前缀 — 实际 agent_name = f"{AGENT_NAME_PREFIX}-{bot_name}"。
 # 同一台机器上多个 bot 各自起 voice worker, 用 bot_name 后缀区分,
 # explicit dispatch 才能精确派给"用户在 /voice 的那个 bot"对应的 worker。
@@ -262,7 +267,11 @@ class _CloseCrabStream(llm.LLMStream):
         if old_timer is not None and not old_timer.done():
             old_timer.cancel()
 
-        timer = asyncio.create_task(asyncio.sleep(llm_instance._batch_debounce))
+        debounce = 0 if llm_instance._skip_next_debounce else llm_instance._batch_debounce
+        if llm_instance._skip_next_debounce:
+            llm_instance._skip_next_debounce = False
+            log.info("CloseCrabLLM: 文字消息跳过 debounce, 立即处理")
+        timer = asyncio.create_task(asyncio.sleep(debounce))
         llm_instance._batch_timer = timer
 
         log.info(
@@ -524,7 +533,7 @@ class CloseCrabLLM(llm.LLM):
         feishu_channel: "FeishuChannel",
         feishu_loop: asyncio.AbstractEventLoop,
         open_id: str,
-        batch_debounce: float = 1.5,
+        batch_debounce: float = 0.0,
     ):
         super().__init__()
         self._feishu = feishu_channel
@@ -553,6 +562,7 @@ class CloseCrabLLM(llm.LLM):
         self._batch_seq: int = 0
         # 当前 pending 的 sleep task; 新 chat() 来时 cancel 它再启新的。
         self._batch_timer: asyncio.Task[None] | None = None
+        self._skip_next_debounce: bool = False
 
     @property
     def model(self) -> str:
@@ -920,9 +930,11 @@ async def _voice_entrypoint(ctx: JobContext):
         f"interrupt={_turn_handling['interruption']['mode']}"
     )
 
+    global _active_llm
     closecrab_llm = CloseCrabLLM(
         feishu_channel=feishu, feishu_loop=feishu_loop, open_id=open_id
     )
+    _active_llm = closecrab_llm
 
     session = AgentSession(
         vad=vad,

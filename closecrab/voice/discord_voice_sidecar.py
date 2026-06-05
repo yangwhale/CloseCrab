@@ -114,6 +114,7 @@ class _SpeakItem:
     text: str
     fid: str = ""
     is_reply: bool = False  # True = 最终回复 (fid 非空), False = hint/opener
+    enqueue_time: float = 0.0  # monotonic 入队时间，测排队延迟
 
 _speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
 _speak_consumer_task: "asyncio.Task | None" = None
@@ -420,7 +421,7 @@ def is_voice_connected() -> bool:
 _SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?；;…])\s*|\n+")  # 句末标点切句(标点留句尾), 不切逗号保 prosody
 _SOLO_UNTIL_CHARS = 30    # 开头逐句单播, 累计播够这么多字之前每句独立成批(首字最快)
 _RAMP_BATCH_CHARS = 90    # 单播后第一包上限: 首字 ~6s 能被前面 cushion 盖住, 不留空档
-_MAX_BATCH_CHARS = 200    # 之后批上限: 此时已有大段 buffer, 放大减接缝; 远低于 ~500c 吞尾阈值
+_MAX_BATCH_CHARS = 300    # 之后批上限: 300c 减少总批数避免 API 限流; 远低于 ~500c 吞尾阈值
 
 
 def _plan_tts_batches(cleaned: str):
@@ -456,6 +457,8 @@ def _plan_tts_batches(cleaned: str):
     return batches
 
 
+_tts_client_cache = None  # module-level singleton for HTTP keep-alive
+
 async def _gemini_tts_stream(text: str):
     """分批流式调 Gemini TTS, 逐 chunk yield 24kHz mono s16 PCM bytes。
 
@@ -463,13 +466,16 @@ async def _gemini_tts_stream(text: str):
     model/voice (orus→"Orus")。整段先切句打包成多批, 逐批 generate_content_stream,
     PCM 连续 yield (消费方 _gen_worker 无感知分批, ratecv state 跨批连续)。
     """
+    global _tts_client_cache
     from google.genai import types as gt
     from .gemini_tts import _build_genai_client, _clean_text_for_tts
 
     cleaned = _clean_text_for_tts(text)
     if not cleaned.strip():
         return
-    client = _build_genai_client(None)
+    if _tts_client_cache is None:
+        _tts_client_cache = _build_genai_client(None)
+    client = _tts_client_cache
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
     voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")  # 对齐飞书 --voice orus
     config = gt.GenerateContentConfig(
@@ -484,24 +490,170 @@ async def _gemini_tts_stream(text: str):
     log.info("TTS 分批: %dc → %d 批 (首批 %dc)", len(cleaned), len(batches),
              len(batches[0]) if batches else 0)
     for idx, batch in enumerate(batches, 1):
+        if idx > 1:
+            await asyncio.sleep(2)  # 批间延迟防 API 限流
         last_finish = None
         got = 0
-        stream = await client.aio.models.generate_content_stream(
-            model=model, contents=batch, config=config
-        )
-        async for chunk in stream:
-            for cand in getattr(chunk, "candidates", None) or []:
-                fr = getattr(cand, "finish_reason", None)
-                if fr is not None:
-                    last_finish = fr
-                content = getattr(cand, "content", None)
-                for part in getattr(content, "parts", None) or []:
-                    inline = getattr(part, "inline_data", None)
-                    if inline and inline.data:
-                        got += len(inline.data)
-                        yield bytes(inline.data)
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                stream = await client.aio.models.generate_content_stream(
+                    model=model, contents=batch, config=config
+                )
+                async for chunk in stream:
+                    for cand in getattr(chunk, "candidates", None) or []:
+                        fr = getattr(cand, "finish_reason", None)
+                        if fr is not None:
+                            last_finish = fr
+                        content = getattr(cand, "content", None)
+                        for part in getattr(content, "parts", None) or []:
+                            inline = getattr(part, "inline_data", None)
+                            if inline and inline.data:
+                                got += len(inline.data)
+                                yield bytes(inline.data)
+                break  # success
+            except Exception as exc:
+                if attempt < max_retries:
+                    log.warning("TTS 批 #%d/%d 失败(retry %d/%d): %s",
+                                idx, len(batches), attempt + 1, max_retries, exc)
+                    await asyncio.sleep(1 + attempt)
+                else:
+                    log.error("TTS 批 #%d/%d 最终失败，跳过(%dc): %s",
+                              idx, len(batches), len(batch), exc)
         log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
                  idx, len(batches), len(batch), got / 2 / 24000, last_finish)
+
+
+_EMOTION_TAG_RE = re.compile(r'\[(?:casually|friendly|warmly|amused|cheerfully|playful|'
+                             r'thinking|realization|curiosity|confusion|contemplative|'
+                             r'excitement|happy|seriously|suggestion|whispers|'
+                             r'focus|neutral)\]\s*', re.IGNORECASE)
+
+_qwen3_session = None  # requests.Session for HTTP keep-alive
+
+async def _qwen3_tts_stream(text: str):
+    """流式调 Qwen3-TTS (vLLM-Omni), 逐 chunk yield 24kHz mono s16 PCM bytes。"""
+    global _qwen3_session
+    import json as _json
+
+    from .gemini_tts import _clean_text_for_tts
+    cleaned = _clean_text_for_tts(text)
+    cleaned = _EMOTION_TAG_RE.sub('', cleaned).strip()
+    if not cleaned:
+        return
+
+    qwen3_host = os.environ.get("QWEN3_TTS_HOST", "10.101.0.3")
+    qwen3_port = os.environ.get("QWEN3_TTS_PORT", "8091")
+    qwen3_voice = os.environ.get("QWEN3_TTS_VOICE", "dylan")
+    url = f"http://{qwen3_host}:{qwen3_port}/v1/audio/speech"
+
+    log.info("Qwen3 TTS: %dc → %s voice=%s", len(cleaned), url, qwen3_voice)
+
+    if _qwen3_session is None:
+        import requests as _requests
+        _qwen3_session = _requests.Session()
+
+    def _blocking_stream():
+        """同步流式读取, 复用 HTTP keep-alive session。"""
+        resp = _qwen3_session.post(url,
+            json={"model": "/model", "input": cleaned, "voice": qwen3_voice,
+                  "response_format": "pcm", "stream": True},
+            stream=True, timeout=120)
+        resp.raise_for_status()
+        for chunk in resp.iter_content(chunk_size=4800):
+            if chunk:
+                yield chunk
+        resp.close()
+
+    import queue
+    pcm_q: queue.Queue = queue.Queue(maxsize=100)
+    _sentinel = object()
+
+    def _producer():
+        try:
+            for chunk in _blocking_stream():
+                pcm_q.put(chunk)
+        except Exception as exc:
+            log.error("Qwen3 TTS 流失败: %s", exc)
+        finally:
+            pcm_q.put(_sentinel)
+
+    import threading
+    t = threading.Thread(target=_producer, daemon=True, name="qwen3-tts-stream")
+    t.start()
+
+    while True:
+        try:
+            item = pcm_q.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(0.01)
+            continue
+        if item is _sentinel:
+            break
+        yield item
+
+
+_cloud_tts_client = None  # Cloud TTS gRPC client singleton
+
+async def _cloud_tts_stream(text: str):
+    """gRPC 双向流调 Cloud TTS (Chirp3-HD-Orus), 逐 chunk yield 24kHz mono s16 PCM."""
+    global _cloud_tts_client
+    from .gemini_tts import _clean_text_for_tts
+
+    cleaned = _clean_text_for_tts(text)
+    cleaned = _EMOTION_TAG_RE.sub('', cleaned).strip()
+    if not cleaned:
+        return
+
+    if _cloud_tts_client is None:
+        from google.cloud import texttospeech
+        _cloud_tts_client = texttospeech.TextToSpeechClient()
+
+    from google.cloud import texttospeech
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="cmn-CN",
+        name=os.environ.get("CLOUD_TTS_VOICE", "cmn-CN-Chirp3-HD-Orus"),
+    )
+
+    log.info("Cloud TTS streaming: %dc voice=%s", len(cleaned), voice.name)
+
+    def _blocking_stream():
+        def gen():
+            yield texttospeech.StreamingSynthesizeRequest(
+                streaming_config=texttospeech.StreamingSynthesizeConfig(voice=voice)
+            )
+            yield texttospeech.StreamingSynthesizeRequest(
+                input=texttospeech.StreamingSynthesisInput(text=cleaned)
+            )
+        for resp in _cloud_tts_client.streaming_synthesize(gen()):
+            if resp.audio_content:
+                yield bytes(resp.audio_content)
+
+    import queue
+    pcm_q: queue.Queue = queue.Queue(maxsize=100)
+    _sentinel = object()
+
+    def _producer():
+        try:
+            for chunk in _blocking_stream():
+                pcm_q.put(chunk)
+        except Exception as exc:
+            log.error("Cloud TTS 流失败: %s", exc)
+        finally:
+            pcm_q.put(_sentinel)
+
+    t = threading.Thread(target=_producer, daemon=True, name="cloud-tts-stream")
+    t.start()
+
+    while True:
+        try:
+            item = pcm_q.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(0.01)
+            continue
+        if item is _sentinel:
+            break
+        yield item
 
 
 _SOURCE_CLASS = None
@@ -527,10 +679,11 @@ def _get_source_class():
 
         FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
 
-        def __init__(self, fid: str = ""):
+        def __init__(self, fid: str = "", persistent: bool = False):
             self._buf = bytearray()
             self._lock = threading.Lock()
             self._finished = False
+            self._persistent = persistent  # True: 永不停播，空 buffer 放静音帧
             self._written = 0   # 累计写入字节 (诊断 + 进度总长)
             self._real = 0      # 派发真音频帧数 (诊断 + 进度已播)
             self._silence = 0   # 派发欠载静音帧数 (诊断)
@@ -552,10 +705,15 @@ def _get_source_class():
 
         def finish(self):
             with self._lock:
-                self._finished = True
-                # 生成完, 总长已确定; 让进度条拿到分母 (直播首播此前 total=0 未知)
+                if not self._persistent:
+                    self._finished = True
                 if self._fid:
                     _set_progress(self._fid, total=self._written)
+                if self._persistent and self._written > 0:
+                    log.info(
+                        "持久 source 段结束: 写入 %d 字节(%.1fs), 真帧 %d, 静音帧 %d",
+                        self._written, self._written / 4 / 48000,
+                        self._real, self._silence)
 
         def read(self) -> bytes:
             with self._lock:
@@ -567,7 +725,7 @@ def _get_source_class():
                         _set_progress(self._fid, played=self._real * self.FRAME,
                                       active=True)
                     return out
-                if self._finished:
+                if self._finished and not self._persistent:
                     if self._buf:
                         out = bytes(self._buf) + b"\x00" * (self.FRAME - len(self._buf))
                         self._buf.clear()
@@ -582,13 +740,41 @@ def _get_source_class():
                                       total=self._written, active=False)
                     return b""
                 self._silence += 1
-                return b"\x00" * self.FRAME  # 欠载未结束: 静音帧保持流活着
+                return b"\x00" * self.FRAME
 
         def is_opus(self) -> bool:
             return False
 
     _SOURCE_CLASS = _StreamPCMSource
     return _SOURCE_CLASS
+
+
+_persistent_source = None
+_tts_interrupted = False  # barge-in: LiveKit 打断时设 True，_do_speak 检查后停止生成
+
+def _get_persistent_source():
+    """获取或创建持久 source。vc.play() 只调一次，之后永不 stop。"""
+    global _persistent_source
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return None
+    vc = bot.guilds[0].voice_client
+    if vc is None or not vc.is_connected():
+        _persistent_source = None
+        return None
+    if _persistent_source is not None:
+        if vc.is_playing():
+            return _persistent_source
+        log.warning("持久 source 存在但 vc 未在播放，重建")
+        _persistent_source = None
+    _persistent_source = _get_source_class()(persistent=True)
+    try:
+        vc.play(_persistent_source)
+        log.info("持久 source 已创建并开始播放")
+    except Exception:
+        log.exception("持久 source vc.play 失败")
+        _persistent_source = None
+    return _persistent_source
 
 
 def _flush_hints_from_queue():
@@ -617,96 +803,74 @@ def _flush_hints_from_queue():
 
 
 async def _do_speak(text: str, fid: str = ""):
-    """单条 TTS 生成+播放。由 _speak_consumer 串行调用，不需要锁。"""
-    import discord
-    bot = _sidecar_bot
-    if bot is None or not bot.guilds:
+    """单条 TTS 生成+播放。直接写入持久 source，无需新建/抢占/预缓冲。"""
+    import time as _time
+    global _tts_interrupted
+    t_start = _time.monotonic()
+    source = _get_persistent_source()
+    if source is None:
         return
-    vc = bot.guilds[0].voice_client
-    if vc is None or not vc.is_connected():
-        return
 
-    # LiveKit 的 _DiscordAudioOutput 可能持续占着 vc.play (常驻 source 放静音帧)。
-    # 如果等 3s 还在播，直接 vc.stop() 抢过来。LiveKit 侧 _ensure_source_playing
-    # 会在下次 capture_frame 时自动重建 source，不会永久挂掉。
-    for i in range(60):  # 最多 ~3s
-        if not vc.is_playing():
-            break
-        await asyncio.sleep(0.05)
-    if vc.is_playing():
-        log.info("TTS 队列: vc 仍在播放 (可能是 LiveKit), 强制 stop 让出")
-        vc.stop()
-        await asyncio.sleep(0.1)
+    _tts_interrupted = False  # 新一轮生成，重置中断标志
 
-    source = _get_source_class()(fid)
-    PREBUFFER = int(48000 * 2 * 2 * 0.8)
-
-    def _gen_worker():
-        buf_f = None
-        bpath = _buf_path(fid)
-        if bpath:
-            try:
-                os.makedirs(_BUF_DIR, exist_ok=True)
-                buf_f = open(bpath, "wb")
-            except Exception:
-                log.exception("打开 buffer 落盘文件失败: %s", bpath)
-                buf_f = None
-
-        async def _run():
-            state = None
-            async for pcm24 in _gemini_tts_stream(text):
-                pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
-                stereo = audioop.tostereo(pcm48, 2, 1, 1)
-                source.write(stereo)
-                if buf_f is not None:
-                    buf_f.write(stereo)
-            log.info("Discord 流式念(生成完): %s", text[:40])
-        try:
-            asyncio.run(_run())
-        except Exception:
-            log.exception("流式 TTS 生成失败")
-        finally:
-            source.finish()
-            if buf_f is not None:
-                try:
-                    buf_f.close()
-                except Exception:
-                    pass
-
-    gen_thread = threading.Thread(
-        target=_gen_worker, daemon=True, name="discord-tts-gen")
-    gen_thread.start()
-
-    for _ in range(2400):  # 最多 ~120s 等预充
-        if source.buffered() >= PREBUFFER or not gen_thread.is_alive():
-            break
-        await asyncio.sleep(0.05)
-    if source.buffered() > 0 or gen_thread.is_alive():
-        played = False
-        if vc.is_playing():
-            vc.stop()
-            await asyncio.sleep(0.1)
-        for attempt in range(30):  # 最多 ~15s
-            try:
-                vc.play(source)
-                played = True
-                break
-            except discord.ClientException:
-                await asyncio.sleep(0.5)
-            except Exception:
-                log.exception("Discord vc.play(stream source) 失败")
-                break
-        if played:
-            # 等 TTS 生成线程结束 + 播放完成再返回，consumer 串行取下一条。
-            # 不能用 gen_thread.join() — 那是阻塞调用，会卡死 event loop。
-            while gen_thread.is_alive():
-                await asyncio.sleep(0.1)
-            while vc.is_playing():
-                await asyncio.sleep(0.1)
-        else:
-            source.finish()
+    tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")  # "gemini", "qwen3", or "cloud_tts"
+    if tts_backend == "qwen3":
+        tts_stream = _qwen3_tts_stream(text)
+    elif tts_backend == "cloud_tts":
+        tts_stream = _cloud_tts_stream(text)
     else:
-        source.finish()
+        tts_stream = _gemini_tts_stream(text)
+
+    buf_f = None
+    bpath = _buf_path(fid)
+    if bpath:
+        try:
+            os.makedirs(_BUF_DIR, exist_ok=True)
+            buf_f = open(bpath, "wb")
+        except Exception:
+            log.exception("打开 buffer 落盘文件失败: %s", bpath)
+            buf_f = None
+
+    try:
+        state = None
+        wrote = 0
+        t_first_pcm = None
+        async for pcm24 in tts_stream:
+            if _tts_interrupted:
+                log.info("TTS 被打断(barge-in), 停止生成: %dc已写, %s", wrote, text[:30])
+                break
+            if t_first_pcm is None:
+                t_first_pcm = _time.monotonic()
+                log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
+                         (t_first_pcm - t_start) * 1000, len(text), text[:30])
+            pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
+            stereo = audioop.tostereo(pcm48, 2, 1, 1)
+            source.write(stereo)
+            wrote += len(stereo)
+            if buf_f is not None:
+                buf_f.write(stereo)
+        t_done = _time.monotonic()
+        log.info("TTS 延迟: total=%.0fms, audio=%.1fs, %dc, %s",
+                 (t_done - t_start) * 1000, wrote / 4 / 48000,
+                 len(text), text[:30])
+    except Exception:
+        log.exception("流式 TTS 生成失败")
+    finally:
+        if buf_f is not None:
+            try:
+                buf_f.close()
+            except Exception:
+                pass
+        if fid:
+            _set_progress(fid, total=source._written, active=False)
+
+    # 等本次写入的音频播完再返回（扣除生成期间已播放的时间）
+    if wrote > 0 and not _tts_interrupted:
+        play_dur = wrote / 4 / 48000
+        elapsed = _time.monotonic() - t_start
+        remain = play_dur - elapsed
+        if remain > 0:
+            await asyncio.sleep(remain)
 
 
 async def _speak_consumer():
@@ -715,10 +879,14 @@ async def _speak_consumer():
     reply 入队时已清洗过期 hint (生产者侧)，consumer 这边再做一次兜底：
     取到 reply 时把队列里剩余 hint 也清掉（防 put 和 flush 之间的竞态窗口）。
     """
+    import time as _time
     while True:
         item = await _speak_queue.get()
         if item.is_reply:
             _flush_hints_from_queue()
+        queue_wait = (_time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
+        if queue_wait > 50:
+            log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
         try:
             await _do_speak(item.text, item.fid)
         except Exception:
@@ -730,7 +898,9 @@ async def _enqueue_speak(text: str, fid: str = ""):
     is_reply = bool(fid)
     if is_reply:
         _flush_hints_from_queue()
-    _speak_queue.put_nowait(_SpeakItem(text=text, fid=fid, is_reply=is_reply))
+    import time as _time
+    _speak_queue.put_nowait(_SpeakItem(text=text, fid=fid, is_reply=is_reply,
+                                       enqueue_time=_time.monotonic()))
     tag = "reply" if is_reply else "hint"
     log.debug("TTS 入队 (%s, qsize=%d): %s", tag, _speak_queue.qsize(), text[:30])
 
@@ -1193,25 +1363,10 @@ def _get_audio_output_class():
             self._flush_task = None
 
         def _ensure_source_playing(self):
-            if self._source is not None and self._playing:
-                return
-            bot = _sidecar_bot
-            if bot is None or not bot.guilds:
-                return
-            vc = bot.guilds[0].voice_client
-            if vc is None or not vc.is_connected():
-                return
-            if vc.is_playing():
-                # 飞书借喇叭 (stream_speak_text) 正占着 → 先让它, 本帧丢弃
-                return
-            self._source = _get_source_class()()  # 无 fid: 不落盘不进度
-            try:
-                vc.play(self._source)
+            src = _get_persistent_source()
+            if src is not None:
+                self._source = src
                 self._playing = True
-                log.info("Discord 语音 agent 出口流已开播")
-            except Exception:
-                log.exception("出口流 vc.play 失败")
-                self._source = None
 
         async def capture_frame(self, frame) -> None:
             await super().capture_frame(frame)  # 基类记 segment 计数
@@ -1224,20 +1379,20 @@ def _get_audio_output_class():
                 pcm = audioop.tostereo(pcm, 2, 1, 1)  # mono → stereo
             self._source.write(pcm)
             self._seg_frames += 1
+            if self._seg_frames % 50 == 1:
+                log.info("LiveKit capture_frame #%d: %dB pcm, buf=%d, source=%s",
+                         self._seg_frames, len(pcm),
+                         self._source.buffered() if self._source else -1,
+                         id(self._source))
 
         def flush(self) -> None:
             super().flush()
-            src = self._source
-            if src is None:
-                # 没真播出去 → 立即报完成, 否则 AgentSession 会一直等
-                self.on_playback_finished(playback_position=0.0, interrupted=False)
-                return
             played = self._seg_frames * 0.02
             self._seg_frames = 0
-            # 等 buffer 抽干 (真播完) 再报完成; 在 sidecar loop 起一个轻量轮询 task。
-            if self._flush_task is not None and not self._flush_task.done():
-                self._flush_task.cancel()
-            self._flush_task = asyncio.create_task(self._wait_drain_then_finish(src, played))
+            # 持久 source 模式: 不等 buffer drain, 直接报完成。
+            # buffer 一直在被 Discord 播放线程读, 不会丢; 等 drain 会阻塞 LiveKit
+            # 的下一轮 TTS 生成 (AgentSession 等 on_playback_finished 才开始下一段)。
+            self.on_playback_finished(playback_position=played, interrupted=False)
 
         async def _wait_drain_then_finish(self, src, played: float):
             try:
@@ -1250,22 +1405,13 @@ def _get_audio_output_class():
             self.on_playback_finished(playback_position=played, interrupted=False)
 
         def clear_buffer(self) -> None:
-            # barge-in: 立刻掐声
+            global _tts_interrupted
             if self._flush_task is not None and not self._flush_task.done():
                 self._flush_task.cancel()
-            src = self._source
+            _tts_interrupted = True  # 通知 sidecar _do_speak 停止生成
+            src = _get_persistent_source()
             if src is not None:
                 src.clear()
-            bot = _sidecar_bot
-            try:
-                if bot is not None and bot.guilds:
-                    vc = bot.guilds[0].voice_client
-                    if vc is not None and vc.is_playing():
-                        vc.stop()
-            except Exception:
-                log.exception("barge-in vc.stop 失败")
-            self._source = None
-            self._playing = False
             played = self._seg_frames * 0.02
             self._seg_frames = 0
             self.on_playback_finished(playback_position=played, interrupted=True)
@@ -2021,6 +2167,7 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         vc = await _ensure_connected()
         if vc is not None:
             log.info("已常驻语音频道: %s (id=%s)", ch.name, ch.id)
+            _get_persistent_source()
         # 启动 TTS 播报队列 consumer（防重复：on_ready 在 RESUME 后可能再次触发）
         global _speak_queue, _speak_consumer_task
         if _speak_queue is None:
@@ -2093,6 +2240,10 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         if session is None:
             log.warning("Discord 文字: AgentSession 未就绪, 跳过")
             return
+        from .livekit_io import _closecrab_llm_instance
+        llm = _closecrab_llm_instance()
+        if llm is not None:
+            llm._skip_next_debounce = True
         session.generate_reply(user_input=text)
         log.info("Discord 文字 → AgentSession.generate_reply: %s", text[:80])
 
