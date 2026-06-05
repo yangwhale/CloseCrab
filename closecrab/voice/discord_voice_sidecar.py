@@ -1320,7 +1320,8 @@ def _get_stt_sink_class():
                 cap = _MONO_FRAME_BYTES * 100
                 if len(self._pcm) > cap:
                     del self._pcm[: len(self._pcm) - cap]
-            # FunASR A/B 旁路: 同一帧 PCM 同时喂 FunASR
+            # STT A/B: 录音 + FunASR 旁路
+            _stt_ab_record_pcm(mono)
             _funasr_ab_feed(mono)
             # 直通: Discord 解密 PCM 以 RTP 原生节奏直达 LiveKit 输入。
             ai = _audio_input
@@ -1496,6 +1497,94 @@ def _get_audio_output_class():
 
 _got_real_frame = False  # sink.write 直通喂真帧后置 True, 间隙填充器据此跳过
 
+# ─── STT A/B 测试：录音 + 结果收集 ──────────────────────────────────────
+_stt_ab_results = []
+_stt_ab_seq = 0
+_stt_ab_dir = ""
+_stt_ab_pcm_buf = bytearray()
+_stt_ab_pcm_lock = threading.Lock()
+_STT_AB_MAX_PCM = 48000 * 2 * 30  # 最多缓存 30 秒 (48kHz mono s16)
+
+
+def _stt_ab_record_pcm(mono_48k: bytes):
+    """累积 48kHz mono PCM 到 buffer，供落盘用。"""
+    with _stt_ab_pcm_lock:
+        _stt_ab_pcm_buf.extend(mono_48k)
+        if len(_stt_ab_pcm_buf) > _STT_AB_MAX_PCM:
+            del _stt_ab_pcm_buf[:len(_stt_ab_pcm_buf) - _STT_AB_MAX_PCM]
+
+
+def _stt_ab_save_utterance(chirp3_text: str, chirp3_t: float):
+    """Chirp3 出 final transcript 时，落盘 WAV + 创建记录 + 触发 Gemini STT。"""
+    global _stt_ab_seq, _stt_ab_dir
+    import time as _time, wave, struct
+
+    _stt_ab_seq += 1
+    seq = _stt_ab_seq
+
+    if not _stt_ab_dir:
+        _stt_ab_dir = f"/tmp/stt-ab/{int(_time.time())}"
+        os.makedirs(_stt_ab_dir, exist_ok=True)
+        log.info("[STT-AB] 录音目录: %s", _stt_ab_dir)
+
+    wav_path = os.path.join(_stt_ab_dir, f"{seq:03d}.wav")
+    with _stt_ab_pcm_lock:
+        pcm = bytes(_stt_ab_pcm_buf)
+        _stt_ab_pcm_buf.clear()
+
+    if len(pcm) < 4800:
+        log.warning("[STT-AB] PCM 太短 (%dB)，跳过 seq=%d", len(pcm), seq)
+        return
+
+    try:
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            wf.writeframes(pcm)
+        log.info("[STT-AB] 录音落盘: seq=%d %s (%.1fs)", seq, wav_path, len(pcm) / 96000)
+    except Exception:
+        log.exception("[STT-AB] WAV 写入失败")
+        return
+
+    record = {
+        "seq": seq,
+        "wav_path": wav_path,
+        "audio_dur": len(pcm) / 96000,
+        "chirp3": {"text": chirp3_text, "t": chirp3_t},
+        "funasr_online": {"text": "", "t": 0},
+        "funasr_offline": {"text": "", "t": 0},
+        "gemini": {"text": "", "t": 0},
+    }
+    _stt_ab_results.append(record)
+
+    # 异步触发 Gemini STT（批量模式，发完整 WAV）
+    import threading
+    def _gemini_stt():
+        try:
+            from closecrab.utils.stt import STTEngine
+            engine = STTEngine()
+            t0 = _time.monotonic()
+            text = engine._transcribe_gemini(wav_path)
+            t1 = _time.monotonic()
+            record["gemini"] = {"text": text, "t": t1}
+            log.info("[STT-AB] Gemini final: t=%.3f latency=%.0fms text=%r",
+                     t1, (t1 - t0) * 1000, text[:80])
+        except Exception as e:
+            log.warning("[STT-AB] Gemini STT 失败: %s", e)
+    threading.Thread(target=_gemini_stt, daemon=True, name=f"gemini-stt-{seq}").start()
+
+
+def stt_ab_get_results():
+    """外部调用：获取所有 A/B 测试结果。"""
+    return list(_stt_ab_results)
+
+
+def stt_ab_get_dir():
+    """外部调用：获取录音目录。"""
+    return _stt_ab_dir
+
+
 # ─── FunASR A/B 测试旁路 ─────────────────────────────────────────────
 _funasr_ws = None  # WebSocket 连接 (threading 模式，sink.write 在解码线程调)
 _funasr_ab_enabled = True  # 开关
@@ -1510,25 +1599,33 @@ def _funasr_ab_init():
         _funasr_ws = ws_sync.connect("ws://localhost:10095", open_timeout=3)
         import json
         _funasr_ws.send(json.dumps({
-            "mode": "2pass", "chunk_size": [5, 10, 5],
+            "mode": "offline", "chunk_size": [5, 10, 5],
             "wav_name": "ab_test", "is_speaking": True,
-            "hotwords": "", "itn": True
+            "hotwords": "TPU 20\nGPU 20\nClaude Code 20\n香港 15\n天气预报 15\n打印机 10\n水浒传 15\n骆驼祥子 15\n办公室 10\n会议室 10\nLiveKit 15\nDiscord 15\nFirestore 15\nQwen 15\nGemini 15\nKubernetes 10\nvLLM 15\nMaxText 10",
+            "itn": True
         }))
         log.info("[STT-AB] FunASR WebSocket 已连接")
         import threading
         def _funasr_reader():
+            global _funasr_ws
             import time as _time
             try:
                 while True:
-                    msg = _funasr_ws.recv(timeout=60)
+                    msg = _funasr_ws.recv(timeout=300)
                     data = json.loads(msg)
                     text = data.get("text", "").strip()
                     mode = data.get("mode", "")
                     if text:
+                        t_now = _time.monotonic()
                         log.info("[STT-AB] FunASR %s: t=%.3f text=%r",
-                                 mode, _time.monotonic(), text[:80])
+                                 mode, t_now, text[:80])
+                        if _stt_ab_results:
+                            r = _stt_ab_results[-1]
+                            key = "funasr_offline" if "offline" in mode else "funasr_online"
+                            r[key] = {"text": text, "t": t_now}
             except Exception as e:
-                log.warning("[STT-AB] FunASR reader 退出: %s", e)
+                log.warning("[STT-AB] FunASR reader 退出: %s (下次 feed 自动重连)", e)
+                _funasr_ws = None
         t = threading.Thread(target=_funasr_reader, daemon=True, name="funasr-ab-reader")
         t.start()
         return _funasr_ws
@@ -1645,8 +1742,10 @@ async def _start_agent_session(channel_id: int):
                 return
             import time as _time
             name = _stt_sink.last_name() if _stt_sink is not None else "?"
+            t_now = _time.monotonic()
             log.info("STT 转写 [%s]: %s", name, text[:80])
-            log.info("[STT-AB] Chirp3 final: t=%.3f text=%r", _time.monotonic(), text[:80])
+            log.info("[STT-AB] Chirp3 final: t=%.3f text=%r", t_now, text[:80])
+            _stt_ab_save_utterance(text, t_now)
             ch = bot.get_channel(channel_id) if bot else None
             if ch is not None:
                 asyncio.create_task(ch.send(f"🎤 {name}: {text}"))
