@@ -1686,8 +1686,8 @@ def _on_discord_speaking_stop():
 
     pcm = bytes(_funasr_pcm_buf)
     _funasr_pcm_buf = bytearray()
-    if len(pcm) < 3200:  # <100ms
-        log.info("[FunASR] PTT 松手但音频太短 (%d bytes)", len(pcm))
+    if len(pcm) < 32000:  # <1s (16kHz * 2bytes * 1s = 32000)
+        log.info("[FunASR] PTT 松手但音频太短 (%.1fs), 忽略", len(pcm) / 2 / 16000)
         return
     log.info("[FunASR] PTT 松手 → 离线识别 %.1fs 音频", len(pcm) / 2 / 16000)
 
@@ -1753,8 +1753,8 @@ def _funasr_rtp_watchdog():
         if not _funasr_speaking:
             continue
         last = _funasr_last_write
-        if last > 0 and _time.monotonic() - last > 0.2:
-            log.info("[FunASR] RTP 停止 200ms → PTT 松手")
+        if last > 0 and _time.monotonic() - last > 0.8:
+            log.info("[FunASR] RTP 停止 800ms → PTT 松手")
             _on_discord_speaking_stop()
 
 async def _audio_pump_loop():
