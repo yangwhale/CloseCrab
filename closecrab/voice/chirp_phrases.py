@@ -419,6 +419,29 @@ _PER_PHRASE_BOOST: dict[str, float] = {
     "ElevenLabs": 16.0,       # was getting "11 Labs"
     "Modal Labs": 15.0,
     "Bolt": 14.0,
+    # Hardware / ML terms often misrecognized by Paraformer
+    "TFLOPS": 20.0,
+    "FP8": 20.0,
+    "FP16": 18.0,
+    "BF16": 18.0,
+    "TPU v7": 20.0,
+    "TPU v6e": 18.0,
+    "HBM": 18.0,
+    "HBM3e": 18.0,
+    "HBM2e": 18.0,
+    "MFU": 18.0,
+    "FLOPS": 18.0,
+    "B200": 18.0,
+    "H100": 18.0,
+    "A100": 18.0,
+    "GKE": 16.0,
+    "MaxText": 18.0,
+    "vLLM": 18.0,
+    "SGLang": 18.0,
+    "sglang": 18.0,
+    "Paraformer": 16.0,
+    "FunASR": 18.0,
+    "Qwen": 18.0,
 }
 
 
