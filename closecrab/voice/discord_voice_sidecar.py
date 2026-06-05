@@ -1306,7 +1306,7 @@ def _get_stt_sink_class():
         """按 user 累积 PCM。write 跑在 py-cord 解码线程, 故用 Lock 护缓冲。"""
 
         __sink_listeners__ = [
-            ("member_speaking_stop", "_on_speaking_stop"),
+            ("on_member_speaking_stop", "_on_speaking_stop"),
         ]
 
         def walk_children(self):
