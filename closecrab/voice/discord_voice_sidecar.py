@@ -1320,24 +1320,8 @@ def _get_stt_sink_class():
                 cap = _MONO_FRAME_BYTES * 100
                 if len(self._pcm) > cap:
                     del self._pcm[: len(self._pcm) - cap]
-            # STT A/B: 录音 + FunASR 旁路
             _stt_ab_record_pcm(mono)
             _funasr_ab_feed(mono)
-            # 直通: Discord 解密 PCM 以 RTP 原生节奏直达 LiveKit 输入。
-            ai = _audio_input
-            if ai is not None and len(mono) >= _MONO_FRAME_BYTES:
-                from livekit import rtc
-                frame = rtc.AudioFrame(
-                    data=mono[:_MONO_FRAME_BYTES], sample_rate=48000,
-                    num_channels=1, samples_per_channel=_MONO_FRAME_SAMPLES,
-                )
-                loop = _sidecar_loop
-                if loop is not None:
-                    def _feed_and_mark(f=frame, a=ai):
-                        global _got_real_frame
-                        _got_real_frame = True
-                        a.feed_frame(f)
-                    loop.call_soon_threadsafe(_feed_and_mark)
 
         def pop_frame(self):
             """取一帧 20ms mono PCM bytes, 不足一帧返回 None。"""
@@ -1751,32 +1735,18 @@ async def _audio_pump_loop():
 
 
 async def _start_agent_session(channel_id: int):
-    """装配并启动 AgentSession, 接 Discord 连续音频流。
+    """装配 AgentSession (仅 LLM 路由, STT 由 FunASR 独立驱动)。
 
-    有飞书大脑桥 (set_feishu_bridge 注册过) → 全双工三阶段:
-        Discord 麦克风 → STT → CloseCrabLLM(飞书 worker) → GeminiTTS → Discord 喇叭。
-        barge-in / 断句由 AgentSession 原生处理。
-    没有桥 → 回落 STT-only: 转写发频道文字区 (老行为, 不哑火)。"""
+    FunASR offline 通过 PTT Opcode 5 断句, 结果调 session.generate_reply()
+    驱动 CloseCrabLLM → TTS → Discord 喇叭。Chirp 3 STT 已停用。"""
     from livekit.agents import Agent, AgentSession
-    from livekit.plugins import silero
 
     global _audio_input, _agent_session, _audio_pump_task, _audio_output
 
     bot = _sidecar_bot
-    stt = _get_stt()
-    vad = silero.VAD.load(min_silence_duration=0.9)  # 0.9s: 平衡断句灵敏度和停顿容忍
-    log.info("silero VAD 已加载")
 
-    full_duplex = _feishu_ref is not None and _feishu_loop is not None and bool(_feishu_open_id)
-    # 全双工(STT→CloseCrabLLM→TTS)默认关闭, 回退到可工作的纯 STT-only 回显模式
-    # (收 Discord 语音 → STT → 发文字区让 Chris 核对转写)。全双工需显式 opt-in:
-    # 环境变量 DISCORD_VOICE_FULLDUPLEX=1 或标志文件 ~/.closecrab/discord-fullduplex。
-    _fd_on = os.environ.get("DISCORD_VOICE_FULLDUPLEX", "0") == "1" or os.path.exists(
-        os.path.expanduser("~/.closecrab/discord-fullduplex")
-    )
-    if not _fd_on:
-        full_duplex = False
     llm = tts = None
+    full_duplex = _feishu_ref is not None and _feishu_loop is not None and bool(_feishu_open_id)
     if full_duplex:
         try:
             from .livekit_io import CloseCrabLLM
@@ -1786,49 +1756,28 @@ async def _start_agent_session(channel_id: int):
             llm = CloseCrabLLM(_feishu_ref, _feishu_loop, _feishu_open_id)
             tts = GeminiTTS(model=model, voice=voice)
         except Exception:
-            log.exception("装配 CloseCrabLLM/GeminiTTS 失败 → 回落 STT-only")
+            log.exception("装配 CloseCrabLLM/GeminiTTS 失败")
             full_duplex = False
             llm = tts = None
 
-    if full_duplex:
-        session = AgentSession(stt=stt, vad=vad, llm=llm, tts=tts, turn_detection="vad")
-    else:
-        session = AgentSession(stt=stt, vad=vad, turn_detection="vad")  # STT-only
+    # 无 STT/VAD — FunASR 独立处理语音识别, 通过 generate_reply() 驱动 LLM
+    session = AgentSession(llm=llm, tts=tts) if full_duplex else AgentSession()
 
+    # AudioInput 仍需创建 (AgentSession.start 要求), 但不再喂真实音频
     ai = _get_audio_input_class()()
-    session.input.audio = ai  # 预设 input → start() 不创建 RoomIO
+    session.input.audio = ai
     ao = None
     if full_duplex:
         ao = _get_audio_output_class()()
-        session.output.audio = ao  # 出口怼回 Discord 喇叭
+        session.output.audio = ao
 
-    def _on_transcribed(ev):
-        try:
-            if not getattr(ev, "is_final", False):
-                return
-            text = (getattr(ev, "transcript", "") or "").strip()
-            if not text:
-                return
-            import time as _time
-            name = _stt_sink.last_name() if _stt_sink is not None else "?"
-            t_now = _time.monotonic()
-            log.info("STT 转写 [%s]: %s", name, text[:80])
-            log.info("[STT-AB] Chirp3 final: t=%.3f text=%r", t_now, text[:80])
-            _stt_ab_save_utterance(text, t_now)
-            ch = bot.get_channel(channel_id) if bot else None
-            if ch is not None:
-                asyncio.create_task(ch.send(f"🎤 {name}: {text}"))
-        except Exception:
-            log.exception("处理 user_input_transcribed 失败")
-
-    session.on("user_input_transcribed", _on_transcribed)
-    await session.start(Agent(instructions=" "))  # 无 room; 人格在 worker system prompt
+    await session.start(Agent(instructions=" "))
     _audio_input = ai
     _audio_output = ao
     _agent_session = session
-    _audio_pump_task = asyncio.create_task(_audio_pump_loop())
-    log.info("AgentSession 已启动 (channel=%s, %s, 直通+间隔填充)", channel_id,
-             "全双工 STT→CloseCrabLLM→TTS" if full_duplex else "STT-only 发文字")
+    _audio_pump_task = None  # 不再需要静音填充 (Chirp 3 已停)
+    log.info("AgentSession 已启动 (channel=%s, FunASR 主力 STT, %s)",
+             channel_id, "LLM+TTS" if full_duplex else "仅路由")
 
     if _pending_discord_text:
         log.info("回放 %d 条缓存的 Discord 文字消息", len(_pending_discord_text))
