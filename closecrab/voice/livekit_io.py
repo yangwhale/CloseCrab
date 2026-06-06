@@ -584,7 +584,9 @@ class _CloseCrabStream(llm.LLMStream):
             # 跳过 LiveKit TTS 管线（SentenceTokenizer + StreamAdapter 有 1.5s 开销）
             # 直接走 sidecar 的 TTS 路径（Qwen3 200ms / Gemini 2s / Cloud TTS 200ms）
             from .discord_voice_sidecar import stream_speak_text
-            stream_speak_text(speech_text, backend="qwen3")
+            import time as _t
+            _fid = f"{int(_t.time() * 1000):x}"
+            stream_speak_text(speech_text, fid=_fid, backend="qwen3")
             # 推空 chunk 给 LiveKit 做 turn 管理（不触发 TTS）
             try:
                 self._event_ch.send_nowait(

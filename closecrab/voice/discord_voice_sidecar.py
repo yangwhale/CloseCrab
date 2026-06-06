@@ -1033,10 +1033,35 @@ def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
         return False
     try:
         asyncio.run_coroutine_threadsafe(_enqueue_speak(text, fid, backend=backend), loop)
+        if fid and _feishu_ref is not None and _feishu_loop is not None:
+            _notify_feishu_voice_card(fid)
         return True
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
         return False
+
+
+def _notify_feishu_voice_card(fid: str):
+    """通知飞书发语音控制卡片 (复用已有的 _build_voice_control_card)。"""
+    feishu = _feishu_ref
+    feishu_loop = _feishu_loop
+    open_id = _feishu_open_id
+    if not feishu or not feishu_loop or not open_id:
+        return
+    import asyncio
+    async def _send_card():
+        try:
+            chat_id = open_id
+            card = feishu._build_voice_control_card(open_id, chat_id, fid=fid)
+            card_id = await feishu._async_send_card_with_id(chat_id, card)
+            if card_id:
+                feishu._voice_cards[fid] = card_id
+                asyncio.create_task(
+                    feishu._voice_progress_updater(fid, card_id, open_id, chat_id)
+                )
+        except Exception:
+            log.exception("Discord→飞书 语音控制卡片发送失败")
+    feishu_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send_card()))
 
 
 async def _set_pause(paused: bool) -> bool:
