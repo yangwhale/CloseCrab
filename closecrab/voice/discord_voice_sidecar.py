@@ -2355,42 +2355,10 @@ def _install_receive_probe():
             except Exception:
                 pass
 
-            # ── 接收路径专用: 用 endcord 验证过的正确顺序自己做 DAVE 解密 ──
-            # py-cord 2.8.0 reader.decrypt_rtp 有两个 bug:
-            #  ① DAVE 解密**后**又调 update_extended_header + decrypted_data[offset:]
-            #     (reader.py:306-308), 把已是合法 Opus(头=78) 的明文当扩展头再切一刀
-            #     → opus "corrupted stream"。endcord 在 DAVE 解密**前**剥扩展、解密后
-            #     直接喂 opus、绝不后切 (voice.py:895-930)。rtpsize AEAD 传输层已把扩展
-            #     头并入 AAD, _decryptor_rtp 返回的就是干净密文, 所以解密后无需也不能再切。
-            #  ② dave.ready 但 ssrc 未映射(uid 缺)时既不解密也不兜底, 留 MLS 密文 → 崩。
-            # 这里完全接管 DAVE 分支, 不调 py-cord 原 _orig (含错误后切); 非 DAVE / 未就绪
-            # 才回落 _orig。PacketDecryptor 只被 AudioReader 用, 不碰 TTS 发送, 安全。
-            handled = False
-            try:
-                state = self.client._connection
-                dave = getattr(state, "dave_session", None)
-                if dave is not None and getattr(dave, "ready", False):
-                    # 传输层 SRTP 解密 (rtpsize: 扩展头已并入 AAD, 返回干净密文)
-                    raw_payload = self._decryptor_rtp(packet)
-                    uid = state.ssrc_user_map.get(packet.ssrc)
-                    if uid:
-                        try:
-                            import davey as _davey_mod
-                            plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
-                        except Exception:
-                            plain = None
-                        # DAVE 明文(头=78 真 Opus)直接喂 opus, 不再后切扩展头
-                        packet.decrypted_data = plain if plain else OPUS_SILENCE
-                    else:
-                        # 未映射 ssrc: 兜底有效静音帧, 让 router 存活等 ssrc 推断补映射
-                        packet.decrypted_data = OPUS_SILENCE
-                    result = packet.decrypted_data
-                    handled = True
-            except Exception:
-                log.exception("[DAVE接管] decrypt_rtp 自管失败, 回落 py-cord 原实现")
-            if not handled:
-                result = _orig(self, packet)
-            return result
+            # 不再接管 DAVE 解密——让 py-cord 2.8.0 原生 decrypt_rtp 处理。
+            # 之前接管是因为发现两个 bug，但接管代码本身也有 bug (MediaType=None 等)，
+            # 导致 17-31% 解密失败率。原生代码用 davey 0.1.5，失败自动 fallback OPUS_SILENCE。
+            return _orig(self, packet)
 
         PacketDecryptor.decrypt_rtp = _probed
         _receive_probe_installed = True
