@@ -2213,7 +2213,7 @@ class DaveSessionAdapter:
                     st.decrypt_attempts)
             except Exception:
                 log.exception("[DAVE深诊] 取 stats 失败")
-        return b""
+        return b"\xf8\xff\xfe"  # Opus 静音帧: 不被 py-cord 过滤，解码出静音替代丢帧空洞
 
     # ── 发 (发送路径!!): 任何异常回落明文, 绝不崩 TTS ──
     def encrypt_opus(self, data):
