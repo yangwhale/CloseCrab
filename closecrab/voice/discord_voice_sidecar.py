@@ -978,9 +978,10 @@ async def _speak_consumer():
         if item.is_reply:
             _flush_hints_from_queue()
         queue_wait = (_time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
-        # 丢弃过期 hint (入队超过 5 秒的 hint 已经没意义了)
-        if not item.is_reply and queue_wait > 5000:
-            log.info("TTS 丢弃过期 hint (%.0fms): %s", queue_wait, item.text[:30])
+        # 丢弃过期消息 (入队超过 8 秒的 hint 或 reply 都没意义了)
+        if queue_wait > 8000:
+            log.info("TTS 丢弃过期消息 (%.0fms, %s): %s",
+                     queue_wait, "reply" if item.is_reply else "hint", item.text[:30])
             continue
         if queue_wait > 50:
             log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
@@ -1503,10 +1504,17 @@ def _get_audio_output_class():
             if _current_speak_task is not None and not _current_speak_task.done():
                 _current_speak_task.cancel()
                 log.info("barge-in: cancelled _do_speak task")
-            # 清空 speak 队列中的旧 hint，避免 barge-in 后又播旧内容
-            flushed = _flush_hints_from_queue()
-            if flushed:
-                log.info("barge-in: 清除 %d 条旧 hint", flushed)
+            # 清空整个 speak 队列 (hint + 旧 reply 全丢)
+            if _speak_queue is not None:
+                flushed = 0
+                while not _speak_queue.empty():
+                    try:
+                        _speak_queue.get_nowait()
+                        flushed += 1
+                    except asyncio.QueueEmpty:
+                        break
+                if flushed:
+                    log.info("barge-in: 清空队列 %d 条 (hint+reply)", flushed)
             src = _get_persistent_source()
             if src is not None:
                 src.clear()
