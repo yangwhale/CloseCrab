@@ -1628,9 +1628,9 @@ _funasr_debug_pcm = bytearray()  # 48kHz mono s16
 _funasr_debug = True  # 开关
 
 def _funasr_debug_dump(text: str):
-    """Debug: 把攒的 PCM 转 OGG 发飞书，和转写文字一起发。"""
+    """Debug: PCM→OGG, 同时跑 Gemini STT 对比, 发飞书。"""
     global _funasr_debug_pcm
-    import time as _t, subprocess, tempfile
+    import time as _t, subprocess
     pcm = bytes(_funasr_debug_pcm)
     _funasr_debug_pcm.clear()
     dur = len(pcm) / 2 / 48000
@@ -1650,8 +1650,29 @@ def _funasr_debug_dump(text: str):
     except Exception:
         log.exception("[STT-debug] PCM→OGG 转换失败")
         return
-    log.info("[STT-debug] 录音 %.1fs → %s, 转写: %s", dur, ogg_path, text[:60])
-    # 发飞书: voice-file + 转写文字
+    # Gemini A/B: 对同一段 Discord 音频也跑 Gemini STT
+    gemini_text = ""
+    gemini_ms = 0
+    try:
+        from .stt_utils import _gemini_transcribe_file
+    except ImportError:
+        _gemini_transcribe_file = None
+    if _gemini_transcribe_file is None:
+        try:
+            from ..utils.stt import STTEngine
+            _gem_stt = STTEngine(engine="gemini")
+            t0 = _t.monotonic()
+            gemini_text = _gem_stt.transcribe(ogg_path)
+            gemini_ms = int((_t.monotonic() - t0) * 1000)
+        except Exception as e:
+            gemini_text = f"[Gemini 失败: {e}]"
+    else:
+        t0 = _t.monotonic()
+        gemini_text = _gemini_transcribe_file(ogg_path)
+        gemini_ms = int((_t.monotonic() - t0) * 1000)
+    log.info("[STT-AB Discord] %.1fs | FunASR: %s | Gemini(%dms): %s",
+             dur, text[:60], gemini_ms, gemini_text[:60])
+    # 发飞书
     loop = _sidecar_loop
     feishu_ref = _feishu_ref
     if loop is not None and feishu_ref is not None:
@@ -1663,7 +1684,10 @@ def _funasr_debug_dump(text: str):
                 if not open_id:
                     return
                 await feishu._send_voice_file(open_id, ogg_path)
-                await feishu.send_to_user(open_id, f"🔍 STT debug ({dur:.1f}s)\n转写: {text}")
+                msg = (f"🔬 Discord STT A/B ({dur:.1f}s)\n"
+                       f"FunASR: {text}\n"
+                       f"Gemini ({gemini_ms}ms): {gemini_text}")
+                await feishu.send_to_user(open_id, msg)
             except Exception:
                 log.exception("[STT-debug] 发飞书失败")
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send()))

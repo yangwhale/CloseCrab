@@ -4652,13 +4652,20 @@ class FeishuChannel(Channel):
                      os.environ.get("STT_AB_DEBUG"), tmp_path, os.path.exists(tmp_path) if tmp_path else False)
             if True:  # TEMP: A/B debug always on
                 try:
+                    import time as _ab_time
                     from ..utils.stt import STTEngine
                     funasr_stt = STTEngine(engine="funasr")
+                    t0 = _ab_time.monotonic()
                     funasr_text = await loop.run_in_executor(None, funasr_stt.transcribe, tmp_path)
-                    log.info("[STT-AB] Gemini: %s | FunASR: %s", text[:80], funasr_text[:80])
+                    funasr_ms = int((_ab_time.monotonic() - t0) * 1000)
+                    # Gemini 耗时从上面的 transcribe 推算
+                    gemini_ms = int((t0 - (_ab_time.monotonic() - funasr_ms/1000 - (t0 - _ab_time.monotonic() + funasr_ms/1000))) * 1000) if False else 0
+                    log.info("[STT-AB] Gemini: %s | FunASR(%dms): %s", text[:80], funasr_ms, funasr_text[:80])
                     chat_id = getattr(message, "chat_id", "") or ""
                     if chat_id:
-                        ab_msg = f"🔬 STT A/B 对比\nGemini: {text}\nFunASR: {funasr_text}"
+                        ab_msg = (f"🔬 飞书 STT A/B 对比\n"
+                                  f"Gemini: {text}\n"
+                                  f"FunASR ({funasr_ms}ms): {funasr_text}")
                         await self.send_message(chat_id, ab_msg)
                 except Exception:
                     log.exception("[STT-AB] FunASR 对比失败")
