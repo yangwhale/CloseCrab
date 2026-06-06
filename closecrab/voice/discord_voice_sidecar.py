@@ -2355,9 +2355,19 @@ def _install_receive_probe():
             except Exception:
                 pass
 
-            # 不再接管 DAVE 解密——让 py-cord 2.8.0 原生 decrypt_rtp 处理。
-            # 之前接管是因为发现两个 bug，但接管代码本身也有 bug (MediaType=None 等)，
-            # 导致 17-31% 解密失败率。原生代码用 davey 0.1.5，失败自动 fallback OPUS_SILENCE。
+            # 修 py-cord 扩展头 bug: DAVE 解密后不应再切 extended header。
+            # 方法: DAVE 激活时临时把 packet.extended 设 False，跑完再恢复。
+            try:
+                state = self.client._connection
+                dave = getattr(state, "dave_session", None)
+                if dave is not None and getattr(dave, "ready", False):
+                    orig_ext = packet.extended
+                    packet.extended = False  # 阻止 py-cord 在 DAVE 解密后错误切扩展头
+                    result = _orig(self, packet)
+                    packet.extended = orig_ext
+                    return result
+            except Exception:
+                pass
             return _orig(self, packet)
 
         PacketDecryptor.decrypt_rtp = _probed
