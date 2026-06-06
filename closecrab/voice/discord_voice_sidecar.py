@@ -1053,6 +1053,7 @@ def _notify_feishu_voice_card(fid: str):
     chat_id = _feishu_chat_id
     if not feishu or not feishu_loop or not chat_id:
         return
+    feishu._voice_cards[fid] = "pending"  # 占位防 _send_voice_summary 重复发
     import asyncio
     async def _send_card():
         try:
