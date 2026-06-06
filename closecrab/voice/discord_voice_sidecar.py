@@ -178,7 +178,7 @@ _dave_backend_installed = False    # dave-py 后端替换只装一次
 # + Encryptor, 正好补上 ratchet API。
 # ⚠️ 这条线**同时碰发送加密** (client.py:_get_voice_packet 调 session.encrypt_opus),
 # 故换错会哑掉 TTS。万一发送坏了: 把这个置 False + 重启即回滚到纯 davey 稳定版。
-_DAVE_PY_BACKEND_ENABLED = True  # 2026-06-02: dave-py 后端, 接收→STT 全链路已验证可用
+_DAVE_PY_BACKEND_ENABLED = False  # 2026-06-06: 测试 py-cord 原生 davey 0.1.5 解密质量
 
 _LISTEN_RESTART_MAX = 8      # 录音崩溃后最多自动重启次数
 
