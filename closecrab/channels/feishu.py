@@ -3429,7 +3429,10 @@ class FeishuChannel(Channel):
             # 时刻都有标签, 避免"有时有有时无"让模型困惑.
             in_voice_mode = user_key in self._text_voice_mode_users
             _channel_tag = "voice" if in_voice_mode else "text"
-            content = f"[channel: {_channel_tag}]\n" + content
+            from datetime import datetime, timezone, timedelta
+            _hkt = datetime.now(timezone(timedelta(hours=8)))
+            _hkt_str = _hkt.strftime("%Y-%m-%d %H:%M HKT")
+            content = f"[channel: {_channel_tag}]\n[当前时间: {_hkt_str}]\n" + content
 
             # 日志
             _log = self._log_buffer
