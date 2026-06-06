@@ -1033,8 +1033,6 @@ def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
         return False
     try:
         asyncio.run_coroutine_threadsafe(_enqueue_speak(text, fid, backend=backend), loop)
-        if fid and _feishu_ref is not None and _feishu_loop is not None:
-            _notify_feishu_voice_card(fid)
         return True
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
