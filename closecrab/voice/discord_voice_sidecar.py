@@ -1661,7 +1661,7 @@ _funasr_flush_started = False
 
 # Debug: 录制 Discord 收到的原始音频，offline 结果出来后转 OGG 发飞书
 _funasr_debug_pcm = bytearray()  # 48kHz mono s16
-_funasr_debug = True  # 开关
+_funasr_debug = False  # 关闭 debug 录音 + Gemini A/B 对比
 
 def _funasr_debug_dump(text: str):
     """Debug: PCM→OGG, 同时跑 Gemini STT 对比, 发飞书。"""
