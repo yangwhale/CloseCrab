@@ -729,14 +729,17 @@ def _get_source_class():
 
         FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
 
+        _IDLE_STOP_FRAMES = 100  # 2s of silence (100 × 20ms) → stop playback
+
         def __init__(self, fid: str = "", persistent: bool = False):
             self._buf = bytearray()
             self._lock = threading.Lock()
             self._finished = False
-            self._persistent = persistent  # True: 永不停播，空 buffer 放静音帧
+            self._persistent = persistent  # True: idle 后自动停播，新音频到时重新 play
             self._written = 0   # 累计写入字节 (诊断 + 进度总长)
             self._real = 0      # 派发真音频帧数 (诊断 + 进度已播)
             self._silence = 0   # 派发欠载静音帧数 (诊断)
+            self._consec_silence = 0  # 连续静音帧计数 (idle 检测)
             self._fid = fid     # 进度条用: 标识这次播放对应哪个 buffer 文件
 
         def write(self, pcm: bytes):
@@ -771,6 +774,7 @@ def _get_source_class():
                     out = bytes(self._buf[: self.FRAME])
                     del self._buf[: self.FRAME]
                     self._real += 1
+                    self._consec_silence = 0
                     if self._fid:
                         _set_progress(self._fid, played=self._real * self.FRAME,
                                       active=True)
@@ -790,6 +794,11 @@ def _get_source_class():
                                       total=self._written, active=False)
                     return b""
                 self._silence += 1
+                self._consec_silence += 1
+                if self._persistent and self._consec_silence >= self._IDLE_STOP_FRAMES:
+                    log.info("持久 source idle 2s, 停播释放 speaking 状态 "
+                             "(真帧 %d, 静音帧 %d)", self._real, self._silence)
+                    return b""
                 return b"\x00" * self.FRAME
 
         def is_opus(self) -> bool:
@@ -803,7 +812,7 @@ _persistent_source = None
 _tts_interrupted = False  # barge-in: LiveKit 打断时设 True，_do_speak 检查后停止生成
 
 def _get_persistent_source():
-    """获取或创建持久 source。vc.play() 只调一次，之后永不 stop。"""
+    """获取或创建持久 source。idle 2s 自动停播, 新音频到时重新 vc.play()。"""
     global _persistent_source
     bot = _sidecar_bot
     if bot is None or not bot.guilds:
@@ -815,8 +824,15 @@ def _get_persistent_source():
     if _persistent_source is not None:
         if vc.is_playing():
             return _persistent_source
-        log.warning("持久 source 存在但 vc 未在播放，重建")
-        _persistent_source = None
+        # idle 停播后重新 play 同一个 source (reset idle 计数器)
+        _persistent_source._consec_silence = 0
+        try:
+            vc.play(_persistent_source)
+            log.info("持久 source idle 后唤醒, 重新 vc.play()")
+            return _persistent_source
+        except Exception:
+            log.exception("持久 source 唤醒失败, 重建")
+            _persistent_source = None
     _persistent_source = _get_source_class()(persistent=True)
     try:
         vc.play(_persistent_source)
@@ -895,6 +911,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                         t_first_pcm = _time.monotonic()
                         log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                                  (t_first_pcm - t_start) * 1000, len(text), text[:30])
+                        source = _get_persistent_source() or source
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
                     source.write(stereo)
@@ -914,6 +931,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     t_first_pcm = _time.monotonic()
                     log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                              (t_first_pcm - t_start) * 1000, len(text), text[:30])
+                    source = _get_persistent_source() or source
                 pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                 stereo = audioop.tostereo(pcm48, 2, 1, 1)
                 source.write(stereo)
@@ -944,12 +962,16 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             await asyncio.sleep(remain)
 
 
+_current_speak_task: "asyncio.Task | None" = None
+
+
 async def _speak_consumer():
     """单 consumer loop: 从队列取 item，串行生成+播放。
 
     reply 入队时已清洗过期 hint (生产者侧)，consumer 这边再做一次兜底：
     取到 reply 时把队列里剩余 hint 也清掉（防 put 和 flush 之间的竞态窗口）。
     """
+    global _current_speak_task
     import time as _time
     while True:
         item = await _speak_queue.get()
@@ -959,9 +981,14 @@ async def _speak_consumer():
         if queue_wait > 50:
             log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
         try:
+            _current_speak_task = asyncio.current_task()
             await _do_speak(item.text, item.fid, backend=item.backend)
+        except asyncio.CancelledError:
+            log.info("TTS _do_speak 被 cancel (barge-in): %s", item.text[:30])
         except Exception:
             log.exception("_speak_consumer: _do_speak 异常")
+        finally:
+            _current_speak_task = None
 
 
 async def _enqueue_speak(text: str, fid: str = "", backend: str = ""):
@@ -1467,7 +1494,15 @@ def _get_audio_output_class():
             global _tts_interrupted
             if self._flush_task is not None and not self._flush_task.done():
                 self._flush_task.cancel()
-            _tts_interrupted = True  # 通知 sidecar _do_speak 停止生成
+            _tts_interrupted = True
+            # 直接 cancel _do_speak 协程，不等标志位轮询
+            if _current_speak_task is not None and not _current_speak_task.done():
+                _current_speak_task.cancel()
+                log.info("barge-in: cancelled _do_speak task")
+            # 清空 speak 队列中的旧 hint，避免 barge-in 后又播旧内容
+            flushed = _flush_hints_from_queue()
+            if flushed:
+                log.info("barge-in: 清除 %d 条旧 hint", flushed)
             src = _get_persistent_source()
             if src is not None:
                 src.clear()

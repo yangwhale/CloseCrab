@@ -164,6 +164,125 @@ async def api_state(request):
 
 import pathlib as _pathlib
 PAGE_HTML = (_pathlib.Path(__file__).parent / "board-page.html").read_text()
+CANVAS_HTML = (_pathlib.Path(__file__).parent / "board-canvas.html").read_text()
+
+
+# ===== Canvas mode (SVG whiteboard) =====
+
+_canvas_elements: list[dict] = []
+_canvas_clients: set[web.WebSocketResponse] = set()
+_canvas_title = "Jarvis Canvas"
+_canvas_subtitle = ""
+_canvas_ts: int = 0
+
+
+def _bump_canvas_ts():
+    global _canvas_ts
+    import time
+    _canvas_ts = int(time.time() * 1000)
+
+
+def _build_canvas_state() -> dict:
+    return {
+        "cmd": "full_state",
+        "title": _canvas_title,
+        "subtitle": _canvas_subtitle,
+        "elements": _canvas_elements,
+        "ts": _canvas_ts,
+    }
+
+
+async def _canvas_broadcast(msg: dict):
+    global _canvas_clients
+    data = json.dumps(msg, ensure_ascii=False)
+    dead = set()
+    for ws in _canvas_clients:
+        try:
+            await ws.send_str(data)
+        except Exception:
+            dead.add(ws)
+    _canvas_clients -= dead
+
+
+async def canvas_ws_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    _canvas_clients.add(ws)
+    log.info("Canvas client connected (%d total)", len(_canvas_clients))
+    await ws.send_str(json.dumps(_build_canvas_state(), ensure_ascii=False))
+    try:
+        async for msg in ws:
+            pass
+    finally:
+        _canvas_clients.discard(ws)
+        log.info("Canvas client disconnected (%d left)", len(_canvas_clients))
+    return ws
+
+
+async def canvas_draw(request):
+    """Draw an element. POST body: {"cmd":"rect","id":"r1","x":10,...}"""
+    body = await request.json()
+    cmd = body.get("cmd", "")
+    if not cmd:
+        return web.json_response({"error": "missing cmd"}, status=400)
+    if cmd == "clear":
+        _canvas_elements.clear()
+        _bump_canvas_ts()
+        await _canvas_broadcast({"cmd": "clear"})
+        return web.json_response({"ok": True})
+    if cmd == "remove":
+        eid = body.get("id", "")
+        _canvas_elements[:] = [e for e in _canvas_elements if e.get("id") != eid]
+        _bump_canvas_ts()
+        await _canvas_broadcast(body)
+        return web.json_response({"ok": True})
+    if cmd == "highlight":
+        _bump_canvas_ts()
+        await _canvas_broadcast(body)
+        return web.json_response({"ok": True})
+    if cmd == "title":
+        global _canvas_title, _canvas_subtitle
+        _canvas_title = body.get("title", _canvas_title)
+        _canvas_subtitle = body.get("subtitle", _canvas_subtitle)
+        _bump_canvas_ts()
+        await _canvas_broadcast(body)
+        return web.json_response({"ok": True})
+    _canvas_elements.append(body)
+    _bump_canvas_ts()
+    await _canvas_broadcast(body)
+    log.info("Canvas draw: %s id=%s", cmd, body.get("id", "?"))
+    return web.json_response({"ok": True, "elements": len(_canvas_elements)})
+
+
+async def canvas_batch(request):
+    """Draw multiple elements at once. POST body: {"commands":[{...},{...}]}"""
+    global _canvas_title, _canvas_subtitle
+    body = await request.json()
+    cmds = body.get("commands", [])
+    for cmd_body in cmds:
+        cmd = cmd_body.get("cmd", "")
+        if cmd == "clear":
+            _canvas_elements.clear()
+        elif cmd == "remove":
+            eid = cmd_body.get("id", "")
+            _canvas_elements[:] = [e for e in _canvas_elements if e.get("id") != eid]
+        elif cmd in ("highlight", "title"):
+            if cmd == "title":
+                _canvas_title = cmd_body.get("title", _canvas_title)
+                _canvas_subtitle = cmd_body.get("subtitle", _canvas_subtitle)
+        else:
+            _canvas_elements.append(cmd_body)
+        await _canvas_broadcast(cmd_body)
+    _bump_canvas_ts()
+    return web.json_response({"ok": True, "elements": len(_canvas_elements)})
+
+
+async def canvas_state(request):
+    return web.json_response(_build_canvas_state())
+
+
+async def canvas_page_handler(request):
+    return web.Response(text=CANVAS_HTML, content_type="text/html")
 _OLD_PAGE_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -310,6 +429,7 @@ async def page_handler(request):
 
 def create_app():
     app = web.Application()
+    # Slide mode (original)
     app.router.add_get("/board", page_handler)
     app.router.add_get("/board/", page_handler)
     app.router.add_get("/board/ws", ws_handler)
@@ -320,6 +440,19 @@ def create_app():
     app.router.add_post("/board/api/title", api_title)
     app.router.add_get("/board/api/status", api_status)
     app.router.add_get("/board/api/state", api_state)
+    # Canvas mode (SVG whiteboard)
+    app.router.add_get("/canvas", canvas_page_handler)
+    app.router.add_get("/canvas/", canvas_page_handler)
+    app.router.add_get("/canvas/ws", canvas_ws_handler)
+    app.router.add_post("/canvas/api/draw", canvas_draw)
+    app.router.add_post("/canvas/api/batch", canvas_batch)
+    app.router.add_get("/canvas/api/state", canvas_state)
+    app.router.add_get("/board/canvas", canvas_page_handler)
+    app.router.add_get("/board/canvas/", canvas_page_handler)
+    app.router.add_get("/board/canvas/ws", canvas_ws_handler)
+    app.router.add_post("/board/canvas/api/draw", canvas_draw)
+    app.router.add_post("/board/canvas/api/batch", canvas_batch)
+    app.router.add_get("/board/canvas/api/state", canvas_state)
     # 兼容不带 /board 前缀的本地访问
     app.router.add_get("/", page_handler)
     app.router.add_get("/ws", ws_handler)
@@ -330,6 +463,9 @@ def create_app():
     app.router.add_post("/api/title", api_title)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/state", api_state)
+    app.router.add_post("/api/draw", canvas_draw)
+    app.router.add_post("/api/batch", canvas_batch)
+    app.router.add_get("/api/canvas/state", canvas_state)
     return app
 
 

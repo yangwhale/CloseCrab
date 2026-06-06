@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jarvis Canvas</title>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600&family=Google+Sans+Mono&display=swap" rel="stylesheet">
+<style>
+  :root { --blue: #1a73e8; --text: #202124; --dim: #5f6368; --border: #dadce0; --surface: #f8f9fa; --white: #fff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Google Sans', system-ui, sans-serif; background: #e8eaed; color: var(--text); overflow: hidden; height: 100vh; }
+  .frame { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 1.5rem; height: 44px;
+            background: var(--white); border-bottom: 1px solid var(--border); flex-shrink: 0;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+  .topbar .left { display: flex; align-items: center; gap: 10px; }
+  .topbar .logo { width: 22px; height: 22px; background: var(--blue); border-radius: 4px; display: flex; align-items: center; justify-content: center; }
+  .topbar .logo svg { width: 14px; height: 14px; fill: #fff; }
+  .topbar h1 { font-size: 14px; font-weight: 500; }
+  .topbar .sep { color: var(--border); }
+  .topbar .sub { font-size: 13px; color: var(--dim); }
+  .topbar .right { display: flex; align-items: center; gap: 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 10px; border-radius: 12px; font-size: 11px;
+          background: #e8f0fe; color: var(--blue); }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .chip .dot.on { background: #34a853; }
+  .chip .dot.off { background: #ea4335; }
+  .canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .canvas-frame { width: 100%; max-width: 1200px; aspect-ratio: 16/9; background: var(--white); border-radius: 12px;
+                  border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+                  position: relative; overflow: hidden; }
+  .canvas-frame svg { width: 100%; height: 100%; }
+  .empty-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+               color: #bbb; font-size: 1rem; pointer-events: none; }
+
+  /* Animations for new elements */
+  @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .canvas-frame svg .anim-in { animation: fadeSlideIn 0.5s ease-out forwards; }
+  @keyframes pulseHighlight { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .canvas-frame svg .highlight { animation: pulseHighlight 1.2s ease-in-out 3; }
+
+  /* Bottom info bar */
+  .infobar { display: flex; align-items: center; justify-content: center; gap: 1.5rem; padding: 0.4rem;
+             background: var(--white); border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="topbar">
+    <div class="left">
+      <div class="logo"><svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></div>
+      <h1 id="title">Jarvis Canvas</h1>
+      <span class="sep">/</span>
+      <span class="sub" id="subtitle"></span>
+    </div>
+    <div class="right">
+      <div class="chip"><div class="dot off" id="conn-dot"></div><span id="conn-text">连接中</span></div>
+    </div>
+  </div>
+  <div class="canvas-wrap">
+    <div class="canvas-frame" id="canvas-frame">
+      <svg id="canvas" viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#5f6368"/>
+          </marker>
+          <marker id="arrowhead-blue" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#1a73e8"/>
+          </marker>
+          <marker id="arrowhead-red" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#d93025"/>
+          </marker>
+          <marker id="arrowhead-green" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#0d652d"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="empty-msg" id="empty-msg">等待 Jarvis 开始绘制...</div>
+    </div>
+  </div>
+  <div class="infobar">
+    <span id="elem-count">元素: 0</span>
+    <span>·</span>
+    <span>960 × 540</span>
+    <span>·</span>
+    <span>Jarvis Canvas · 实时同步</span>
+  </div>
+</div>
+<script>
+const svg = document.getElementById('canvas');
+const emptyMsg = document.getElementById('empty-msg');
+const titleEl = document.getElementById('title');
+const subEl = document.getElementById('subtitle');
+const dotEl = document.getElementById('conn-dot');
+const connText = document.getElementById('conn-text');
+const elemCount = document.getElementById('elem-count');
+let ws, wsOk = false, pollTimer = null, lastTs = 0;
+const basePath = location.pathname.replace(/\/$/, '') || '';
+
+function updateCount() {
+  const n = svg.querySelectorAll('[data-id]').length;
+  elemCount.textContent = '元素: ' + n;
+  emptyMsg.style.display = n > 0 ? 'none' : 'flex';
+}
+
+function addRect(d) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-id', d.id);
+  g.classList.add('anim-in');
+  const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  r.setAttribute('x', d.x); r.setAttribute('y', d.y);
+  r.setAttribute('width', d.w); r.setAttribute('height', d.h);
+  r.setAttribute('rx', d.rx || 6);
+  r.setAttribute('fill', d.fill || '#e8f0fe');
+  r.setAttribute('stroke', d.stroke || '#1a73e8');
+  r.setAttribute('stroke-width', d.strokeWidth || 2);
+  if (d.opacity) r.setAttribute('opacity', d.opacity);
+  g.appendChild(r);
+  if (d.label) {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', d.x + d.w / 2); t.setAttribute('y', d.y + d.h / 2);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('dominant-baseline', 'central');
+    t.setAttribute('font-family', 'Google Sans, system-ui'); t.setAttribute('font-size', d.fontSize || 14);
+    t.setAttribute('fill', d.labelColor || '#202124'); t.setAttribute('font-weight', d.fontWeight || '500');
+    t.textContent = d.label;
+    g.appendChild(t);
+  }
+  svg.appendChild(g);
+  updateCount();
+}
+
+function addText(d) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-id', d.id);
+  g.classList.add('anim-in');
+  const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  t.setAttribute('x', d.x); t.setAttribute('y', d.y);
+  t.setAttribute('text-anchor', d.anchor || 'start'); t.setAttribute('dominant-baseline', d.baseline || 'auto');
+  t.setAttribute('font-family', d.fontFamily || 'Google Sans, system-ui');
+  t.setAttribute('font-size', d.fontSize || 16);
+  t.setAttribute('fill', d.color || '#202124');
+  t.setAttribute('font-weight', d.fontWeight || '400');
+  if (d.text.includes('\n')) {
+    d.text.split('\n').forEach((line, i) => {
+      const ts = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+      ts.setAttribute('x', d.x); ts.setAttribute('dy', i === 0 ? '0' : (d.lineHeight || '1.3em'));
+      ts.textContent = line;
+      t.appendChild(ts);
+    });
+  } else {
+    t.textContent = d.text;
+  }
+  g.appendChild(t);
+  svg.appendChild(g);
+  updateCount();
+}
+
+function addArrow(d) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-id', d.id);
+  g.classList.add('anim-in');
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('x1', d.x1); line.setAttribute('y1', d.y1);
+  line.setAttribute('x2', d.x2); line.setAttribute('y2', d.y2);
+  line.setAttribute('stroke', d.color || '#5f6368');
+  line.setAttribute('stroke-width', d.strokeWidth || 2);
+  if (d.dash) line.setAttribute('stroke-dasharray', d.dash);
+  const markerColor = d.color || '#5f6368';
+  const markerId = markerColor === '#1a73e8' ? 'arrowhead-blue' : markerColor === '#d93025' ? 'arrowhead-red' : markerColor === '#0d652d' ? 'arrowhead-green' : 'arrowhead';
+  line.setAttribute('marker-end', 'url(#' + markerId + ')');
+  g.appendChild(line);
+  if (d.label) {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', (d.x1 + d.x2) / 2); t.setAttribute('y', (d.y1 + d.y2) / 2 - 8);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-family', 'Google Sans, system-ui');
+    t.setAttribute('font-size', d.fontSize || 12); t.setAttribute('fill', d.color || '#5f6368');
+    t.textContent = d.label;
+    g.appendChild(t);
+  }
+  g.appendChild(line);
+  svg.appendChild(g);
+  updateCount();
+}
+
+function addPath(d) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-id', d.id);
+  g.classList.add('anim-in');
+  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  p.setAttribute('d', d.d);
+  p.setAttribute('stroke', d.stroke || '#5f6368');
+  p.setAttribute('stroke-width', d.strokeWidth || 2);
+  p.setAttribute('fill', d.fill || 'none');
+  if (d.dash) p.setAttribute('stroke-dasharray', d.dash);
+  if (d.markerEnd) p.setAttribute('marker-end', 'url(#' + d.markerEnd + ')');
+  g.appendChild(p);
+  svg.appendChild(g);
+  updateCount();
+}
+
+function addEllipse(d) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-id', d.id);
+  g.classList.add('anim-in');
+  const e = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+  e.setAttribute('cx', d.cx); e.setAttribute('cy', d.cy);
+  e.setAttribute('rx', d.rx); e.setAttribute('ry', d.ry);
+  e.setAttribute('fill', d.fill || '#e8f0fe');
+  e.setAttribute('stroke', d.stroke || '#1a73e8');
+  e.setAttribute('stroke-width', d.strokeWidth || 2);
+  g.appendChild(e);
+  if (d.label) {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', d.cx); t.setAttribute('y', d.cy);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('dominant-baseline', 'central');
+    t.setAttribute('font-family', 'Google Sans, system-ui'); t.setAttribute('font-size', d.fontSize || 14);
+    t.setAttribute('fill', d.labelColor || '#202124');
+    t.textContent = d.label;
+    g.appendChild(t);
+  }
+  svg.appendChild(g);
+  updateCount();
+}
+
+function addLine(d) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('data-id', d.id);
+  g.classList.add('anim-in');
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('x1', d.x1); line.setAttribute('y1', d.y1);
+  line.setAttribute('x2', d.x2); line.setAttribute('y2', d.y2);
+  line.setAttribute('stroke', d.color || '#dadce0');
+  line.setAttribute('stroke-width', d.strokeWidth || 1);
+  if (d.dash) line.setAttribute('stroke-dasharray', d.dash);
+  g.appendChild(line);
+  svg.appendChild(g);
+  updateCount();
+}
+
+function highlightElem(d) {
+  const el = svg.querySelector('[data-id="' + d.id + '"]');
+  if (!el) return;
+  el.classList.add('highlight');
+  if (d.color) {
+    const shape = el.querySelector('rect,ellipse,path');
+    if (shape) shape.setAttribute('stroke', d.color);
+  }
+  setTimeout(() => el.classList.remove('highlight'), 4000);
+}
+
+function removeElem(d) {
+  const el = svg.querySelector('[data-id="' + d.id + '"]');
+  if (el) { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => { el.remove(); updateCount(); }, 300); }
+}
+
+function clearCanvas() {
+  svg.querySelectorAll('[data-id]').forEach(el => el.remove());
+  updateCount();
+}
+
+function handleCmd(msg) {
+  switch(msg.cmd) {
+    case 'rect': addRect(msg); break;
+    case 'text': addText(msg); break;
+    case 'arrow': addArrow(msg); break;
+    case 'path': addPath(msg); break;
+    case 'ellipse': addEllipse(msg); break;
+    case 'line': addLine(msg); break;
+    case 'highlight': highlightElem(msg); break;
+    case 'remove': removeElem(msg); break;
+    case 'clear': clearCanvas(); break;
+    case 'title':
+      titleEl.textContent = msg.title || 'Jarvis Canvas';
+      subEl.textContent = msg.subtitle || '';
+      break;
+    case 'viewbox':
+      svg.setAttribute('viewBox', msg.viewBox);
+      break;
+    case 'full_state':
+      titleEl.textContent = msg.title || 'Jarvis Canvas';
+      subEl.textContent = msg.subtitle || '';
+      clearCanvas();
+      (msg.elements || []).forEach(el => handleCmd(el));
+      break;
+  }
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + basePath + '/ws');
+  ws.onopen = () => { wsOk = true; dotEl.className = 'dot on'; connText.textContent = '实时'; stopPolling(); };
+  ws.onclose = () => { wsOk = false; dotEl.className = 'dot off'; connText.textContent = '轮询'; startPolling(); setTimeout(connect, 5000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => handleCmd(JSON.parse(e.data));
+}
+async function poll() {
+  try { const r = await fetch(basePath + '/api/canvas/state?_=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) return; const s = await r.json();
+    if (s.ts !== lastTs) { lastTs = s.ts; handleCmd(s); }
+  } catch(e) {}
+}
+function startPolling() { if (!pollTimer) { poll(); pollTimer = setInterval(poll, 2000); } }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+connect(); startPolling();
+</script>
+</body>
+</html>
