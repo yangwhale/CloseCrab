@@ -178,7 +178,7 @@ _dave_backend_installed = False    # dave-py 后端替换只装一次
 # + Encryptor, 正好补上 ratchet API。
 # ⚠️ 这条线**同时碰发送加密** (client.py:_get_voice_packet 调 session.encrypt_opus),
 # 故换错会哑掉 TTS。万一发送坏了: 把这个置 False + 重启即回滚到纯 davey 稳定版。
-_DAVE_PY_BACKEND_ENABLED = False  # 2026-06-06: 测试 py-cord 原生 davey 0.1.5 解密质量
+_DAVE_PY_BACKEND_ENABLED = True  # 2026-06-06: 重新启用 dave-py per-SSRC Decryptor (跟 endcord 一致)
 
 _LISTEN_RESTART_MAX = 8      # 录音崩溃后最多自动重启次数
 
@@ -2364,6 +2364,15 @@ def _install_receive_probe():
                 dave = getattr(state, "dave_session", None)
                 if dave is not None and getattr(dave, "ready", False):
                     raw_payload = self._decryptor_rtp(packet)
+                    # 剥 RTP 扩展头体 (endcord voice.py:897 同样做法)
+                    # _decryptor_rtp 返回的 payload 可能含 RTP extension body
+                    # DAVE 只要纯加密 Opus 数据，扩展头体在前面会导致解密偏移错乱
+                    if packet.extended and raw_payload:
+                        try:
+                            ext_body_len = int.from_bytes(raw_payload[2:4], "big") * 4 + 4
+                            raw_payload = raw_payload[ext_body_len:]
+                        except Exception:
+                            pass
                     uid = state.ssrc_user_map.get(packet.ssrc)
                     if uid:
                         try:
