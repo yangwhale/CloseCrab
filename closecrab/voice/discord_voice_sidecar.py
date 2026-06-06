@@ -2375,7 +2375,8 @@ def _install_receive_probe():
                     uid = state.ssrc_user_map.get(packet.ssrc)
                     if uid:
                         try:
-                            plain = dave.decrypt(uid, None, raw_payload)
+                            import davey as _davey_mod
+                            plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
                         except Exception:
                             plain = None
                         # DAVE 明文(头=78 真 Opus)直接喂 opus, 不再后切扩展头
