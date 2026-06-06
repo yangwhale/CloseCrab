@@ -2364,15 +2364,6 @@ def _install_receive_probe():
                 dave = getattr(state, "dave_session", None)
                 if dave is not None and getattr(dave, "ready", False):
                     raw_payload = self._decryptor_rtp(packet)
-                    # 剥 RTP 扩展头体 (endcord voice.py:897 同样做法)
-                    # _decryptor_rtp 返回的 payload 可能含 RTP extension body
-                    # DAVE 只要纯加密 Opus 数据，扩展头体在前面会导致解密偏移错乱
-                    if packet.extended and raw_payload:
-                        try:
-                            ext_body_len = int.from_bytes(raw_payload[2:4], "big") * 4 + 4
-                            raw_payload = raw_payload[ext_body_len:]
-                        except Exception:
-                            pass
                     uid = state.ssrc_user_map.get(packet.ssrc)
                     if uid:
                         try:
