@@ -4489,13 +4489,12 @@ class FeishuChannel(Channel):
             pass
         # Discord 真在推流 → 发暂停/继续/重播控制卡片。控制的是服务器侧给 Discord
         # 推帧的代码 (vc.pause/resume/replay), 不是飞书客户端的播放器。
-        if streaming:
+        if streaming and fid not in self._voice_cards:
             try:
                 card = self._build_voice_control_card(open_id, chat_id, fid=fid)
                 card_id = await self._async_send_card_with_id(chat_id, card)
                 if card_id:
                     self._voice_cards[fid] = card_id
-                    # 起进度条 updater: 周期 patch 卡片 note 显示已播/总长
                     asyncio.create_task(
                         self._voice_progress_updater(fid, card_id, open_id, chat_id)
                     )
