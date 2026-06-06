@@ -2413,25 +2413,9 @@ def _install_receive_probe():
             except Exception:
                 _silence_pcm = b"\x00" * 3840
             _decode_fail_n = [0]
-            _last_seq = [None]  # 上一帧序列号 (FEC 丢包检测)
 
             def _decode_guarded(self, packet):
                 try:
-                    # FEC 丢包恢复: 检测序列号跳跃
-                    cur_seq = getattr(packet, 'sequence', None)
-                    prev = _last_seq[0]
-                    if cur_seq is not None:
-                        _last_seq[0] = cur_seq
-                    if prev is not None and cur_seq is not None:
-                        gap = (cur_seq - prev) & 0xFFFF
-                        if gap > 1 and gap < 100:
-                            # 有丢帧！先用 FEC 恢复丢失帧
-                            dd = getattr(packet, 'decrypted_data', None)
-                            if dd and self._decoder is not None:
-                                try:
-                                    self._decoder.decode(dd, fec=True)
-                                except Exception:
-                                    pass
                     return _orig_decode(self, packet)
                 except Exception:
                     _decode_fail_n[0] += 1
