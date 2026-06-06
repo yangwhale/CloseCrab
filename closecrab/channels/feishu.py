@@ -4654,7 +4654,7 @@ class FeishuChannel(Channel):
             # Debug: 同时用 FunASR 转写做 A/B 对比
             log.info("[STT-AB] check: STT_AB_DEBUG=%s, tmp=%s exists=%s",
                      os.environ.get("STT_AB_DEBUG"), tmp_path, os.path.exists(tmp_path) if tmp_path else False)
-            if False:  # A/B debug 已关闭
+            if True:  # 飞书 A/B: Gemini + FunASR 双路对比
                 try:
                     import time as _ab_time
                     from ..utils.stt import STTEngine
