@@ -1106,10 +1106,12 @@ class FeishuChannel(Channel):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._send_card, chat_id, card)
 
-    async def _async_send_card_with_id(self, chat_id: str, card: dict) -> Optional[str]:
-        """异步发送卡片，返回 message_id。"""
+    async def _async_send_card_with_id(self, chat_id: str, card: dict, id_type: str = "") -> Optional[str]:
+        """异步发送卡片，返回 message_id。id_type 自动推断: ou_ → open_id, oc_ → chat_id。"""
+        if not id_type:
+            id_type = "open_id" if chat_id.startswith("ou_") else "chat_id"
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._send_card, chat_id, card)
+        return await loop.run_in_executor(None, self._send_card, chat_id, card, id_type)
 
     async def _async_update_card(self, message_id: str, card: dict) -> bool:
         """异步更新卡片消息。"""
