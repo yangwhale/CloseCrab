@@ -2199,15 +2199,21 @@ class DaveSessionAdapter:
         # 深诊 (前 5 次失败 + 之后每 200): 用 DecryptorStats 区分故障类别 ——
         # miss_key>0 = ratchet/leaf 不对 (MLS 同步问题); bad_nonce>0 = 帧格式/nonce 不对;
         # 仅 fail 增长 = GCM 认证失败 (钥匙错/epoch 错)。帧头尾用于核对 DAVE trailer。
-        if n <= 5 or n % 200 == 0:
+        if n <= 10 or n % 100 == 0:
             try:
                 st = dec.get_stats(self._MT_AUDIO)
                 d = bytes(data)
+                ok_n = self._dec_ok.get(key, 0)
+                fail_rate = n / (ok_n + n) * 100 if (ok_n + n) > 0 else 0
+                # DAVE trailer: 最后几字节可能含 epoch/truncated_nonce 信息
+                trailer = d[-16:].hex() if len(d) >= 16 else d[-8:].hex()
                 log.warning(
-                    "[DAVE深诊] decrypt(%s) 失败#%d 群建立=%s 有ratchet=%s | 帧 in=%dB 头=%s 尾=%s | "
-                    "stats success=%d fail=%d miss_key=%d bad_nonce=%d attempts=%d",
-                    key, n, self._sess.has_established_group(), key in self._dec_has_ratchet,
-                    len(d), d[:8].hex(), d[-8:].hex(),
+                    "[DAVE深诊] decrypt(%s) 失败#%d (失败率%.1f%%) 群建立=%s 有ratchet=%s | "
+                    "帧 in=%dB 头=%s trailer=%s | "
+                    "stats ok=%d fail=%d miss_key=%d bad_nonce=%d attempts=%d",
+                    key, n, fail_rate,
+                    self._sess.has_established_group(), key in self._dec_has_ratchet,
+                    len(d), d[:8].hex(), trailer,
                     st.decrypt_success_count, st.decrypt_failure_count,
                     st.decrypt_missing_key_count, st.decrypt_invalid_nonce_count,
                     st.decrypt_attempts)
