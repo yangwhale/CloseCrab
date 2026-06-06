@@ -4547,7 +4547,7 @@ class FeishuChannel(Channel):
         log.info(f"Voice streaming done: {seg_no} segments, {total} sentences -> {chat_id}")
 
     async def _send_voice_file(self, chat_id: str, file_path: str):
-        """上传已有 ogg 文件并作为飞书语音消息发送。"""
+        """上传已有 ogg 文件并作为飞书语音消息发送。chat_id 支持 oc_ (chat) 或 ou_ (open_id)。"""
         try:
             if not os.path.exists(file_path):
                 log.warning(f"Voice file not found: {file_path}")
@@ -4585,13 +4585,14 @@ class FeishuChannel(Channel):
                 log.warning(f"Upload voice file failed: {resp.code} {resp.msg}")
                 return
 
+            id_type = "open_id" if chat_id.startswith("ou_") else "chat_id"
             msg_body = CreateMessageRequestBody.builder() \
                 .receive_id(chat_id) \
                 .msg_type("audio") \
                 .content(json.dumps({"file_key": resp.data.file_key})) \
                 .build()
             msg_req = CreateMessageRequest.builder() \
-                .receive_id_type("chat_id") \
+                .receive_id_type(id_type) \
                 .request_body(msg_body) \
                 .build()
             msg_resp = await loop.run_in_executor(
@@ -4645,6 +4646,22 @@ class FeishuChannel(Channel):
 
             # STT 转写
             text = await loop.run_in_executor(None, self._stt.transcribe, tmp_path)
+
+            # Debug: 同时用 FunASR 转写做 A/B 对比
+            log.info("[STT-AB] check: STT_AB_DEBUG=%s, tmp=%s exists=%s",
+                     os.environ.get("STT_AB_DEBUG"), tmp_path, os.path.exists(tmp_path) if tmp_path else False)
+            if True:  # TEMP: A/B debug always on
+                try:
+                    from ..utils.stt import STTEngine
+                    funasr_stt = STTEngine(engine="funasr")
+                    funasr_text = await loop.run_in_executor(None, funasr_stt.transcribe, tmp_path)
+                    log.info("[STT-AB] Gemini: %s | FunASR: %s", text[:80], funasr_text[:80])
+                    chat_id = getattr(message, "chat_id", "") or ""
+                    if chat_id:
+                        ab_msg = f"🔬 STT A/B 对比\nGemini: {text}\nFunASR: {funasr_text}"
+                        await self.send_message(chat_id, ab_msg)
+                except Exception:
+                    log.exception("[STT-AB] FunASR 对比失败")
 
             return text
 

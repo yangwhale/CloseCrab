@@ -68,6 +68,8 @@ class STTEngine:
                 return self._transcribe_whisper(file_path)
             elif self._engine == "gemini":
                 return self._transcribe_gemini(file_path)
+            elif self._engine == "funasr":
+                return self._transcribe_funasr(file_path)
             else:
                 return self._transcribe_chirp2(file_path)
         except Exception as e:

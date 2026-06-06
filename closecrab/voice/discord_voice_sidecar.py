@@ -978,6 +978,10 @@ async def _speak_consumer():
         if item.is_reply:
             _flush_hints_from_queue()
         queue_wait = (_time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
+        # 丢弃过期 hint (入队超过 5 秒的 hint 已经没意义了)
+        if not item.is_reply and queue_wait > 5000:
+            log.info("TTS 丢弃过期 hint (%.0fms): %s", queue_wait, item.text[:30])
+            continue
         if queue_wait > 50:
             log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
         try:
@@ -1611,6 +1615,52 @@ _funasr_last_feed = 0.0
 _funasr_feeding = False
 _funasr_flush_started = False
 
+# Debug: 录制 Discord 收到的原始音频，offline 结果出来后转 OGG 发飞书
+_funasr_debug_pcm = bytearray()  # 48kHz mono s16
+_funasr_debug = True  # 开关
+
+def _funasr_debug_dump(text: str):
+    """Debug: 把攒的 PCM 转 OGG 发飞书，和转写文字一起发。"""
+    global _funasr_debug_pcm
+    import time as _t, subprocess, tempfile
+    pcm = bytes(_funasr_debug_pcm)
+    _funasr_debug_pcm.clear()
+    dur = len(pcm) / 2 / 48000
+    if dur < 0.3:
+        return
+    ts = _t.strftime("%H%M%S")
+    pcm_path = f"/tmp/stt-debug-{ts}.pcm"
+    ogg_path = f"/tmp/stt-debug-{ts}.ogg"
+    try:
+        with open(pcm_path, "wb") as f:
+            f.write(pcm)
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "s16le", "-ar", "48000", "-ac", "1",
+            "-i", pcm_path, "-c:a", "libopus", "-b:a", "48k", ogg_path
+        ], capture_output=True, timeout=10)
+        os.remove(pcm_path)
+    except Exception:
+        log.exception("[STT-debug] PCM→OGG 转换失败")
+        return
+    log.info("[STT-debug] 录音 %.1fs → %s, 转写: %s", dur, ogg_path, text[:60])
+    # 发飞书: voice-file + 转写文字
+    loop = _sidecar_loop
+    feishu_ref = _feishu_ref
+    if loop is not None and feishu_ref is not None:
+        import asyncio
+        feishu = feishu_ref
+        async def _send():
+            try:
+                open_id = _feishu_open_id
+                if not open_id:
+                    return
+                await feishu._send_voice_file(open_id, ogg_path)
+                await feishu.send_to_user(open_id, f"🔍 STT debug ({dur:.1f}s)\n转写: {text}")
+            except Exception:
+                log.exception("[STT-debug] 发飞书失败")
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send()))
+
+
 def _funasr_init():
     """初始化 FunASR WebSocket 连接 (C++ 服务端)。断线自动重连。"""
     global _funasr_ws
@@ -1650,6 +1700,9 @@ def _funasr_init():
                     log.info("[FunASR] %s: %s", mode, text[:80])
                     if "offline" in mode and _funasr_is_primary:
                         log.info("[FunASR→LLM] offline → %s", text[:80])
+                        # Debug: 把收到的原始音频转 OGG 发飞书
+                        if _funasr_debug and len(_funasr_debug_pcm) > 0:
+                            _funasr_debug_dump(text)
                         session = _agent_session
                         loop = _sidecar_loop
                         if session is not None and loop is not None:
@@ -1689,6 +1742,10 @@ def _funasr_ab_feed(mono_48k: bytes):
             _funasr_flush_started = True
             import threading
             threading.Thread(target=_funasr_flush_thread, daemon=True, name="funasr-flush").start()
+    if _funasr_debug:
+        _funasr_debug_pcm.extend(mono_48k)
+        if len(_funasr_debug_pcm) > 48000 * 2 * 30:  # cap 30s
+            del _funasr_debug_pcm[:len(_funasr_debug_pcm) - 48000 * 2 * 30]
     ws = _funasr_init()
     if ws is None:
         return
