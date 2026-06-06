@@ -824,11 +824,12 @@ def _get_persistent_source():
     if _persistent_source is not None:
         if vc.is_playing():
             return _persistent_source
-        # idle 停播后重新 play 同一个 source (reset idle 计数器)
+        # idle 停播后重新 play: 清空残留 buffer + reset idle 计数器
         _persistent_source._consec_silence = 0
+        _persistent_source.clear()  # 丢掉上一轮残留的 PCM，防止播旧音频
         try:
             vc.play(_persistent_source)
-            log.info("持久 source idle 后唤醒, 重新 vc.play()")
+            log.info("持久 source idle 后唤醒, 重新 vc.play() (buffer已清)")
             return _persistent_source
         except Exception:
             log.exception("持久 source 唤醒失败, 重建")
