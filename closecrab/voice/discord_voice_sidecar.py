@@ -2385,6 +2385,17 @@ def _install_receive_probe():
         PacketDecryptor.decrypt_rtp = _probed
         _receive_probe_installed = True
         log.info("decrypt_rtp ssrc 探针已挂载 (接收路径专用, 不影响发送)")
+
+        # 阻止 py-cord _decode_packet 里的 can_passthrough 二次解密：
+        # 我们已在 _probed 里完成 DAVE 解密，decrypted_data 是明文 Opus。
+        # 如果 can_passthrough 返回 True，py-cord 会对解码后的 PCM 再 dave.decrypt
+        # 一次，把好音频搞成乱码。强制 davey.DaveSession.can_passthrough = lambda: False。
+        try:
+            import davey
+            davey.DaveSession.can_passthrough = lambda self, uid: False
+            log.info("davey.DaveSession.can_passthrough 已强制 False (防 PCM 二次解密)")
+        except Exception:
+            log.exception("can_passthrough monkeypatch 失败")
     except Exception:
         log.exception("decrypt_rtp ssrc 探针挂载失败 (ssrc 自动推断将退化)")
 
