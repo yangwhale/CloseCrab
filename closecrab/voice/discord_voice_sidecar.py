@@ -795,7 +795,7 @@ def _get_source_class():
                     return b""
                 self._silence += 1
                 self._consec_silence += 1
-                if self._persistent and self._consec_silence >= self._IDLE_STOP_FRAMES:
+                if self._persistent and self._consec_silence >= self._IDLE_STOP_FRAMES and not _tts_active:
                     log.info("持久 source idle 2s, 停播释放 speaking 状态 "
                              "(真帧 %d, 静音帧 %d)", self._real, self._silence)
                     return b""
@@ -810,6 +810,7 @@ def _get_source_class():
 
 _persistent_source = None
 _tts_interrupted = False  # barge-in: LiveKit 打断时设 True，_do_speak 检查后停止生成
+_tts_active = False       # _do_speak 运行中: 抑制 source idle 停播 (防批间间隔触发 idle)
 
 def _get_persistent_source():
     """获取或创建持久 source。idle 2s 自动停播, 新音频到时重新 vc.play()。"""
@@ -878,7 +879,9 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     if source is None:
         return
 
+    global _tts_active
     _tts_interrupted = False  # 新一轮生成，重置中断标志
+    _tts_active = True        # 抑制 source idle 停播
 
     tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "gemini")
 
@@ -953,6 +956,8 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                 pass
         if fid:
             _set_progress(fid, total=source._written, active=False)
+
+    _tts_active = False  # TTS 生成结束，允许 source idle 停播
 
     # 等本次写入的音频播完再返回（扣除生成期间已播放的时间）
     if wrote > 0 and not _tts_interrupted:
