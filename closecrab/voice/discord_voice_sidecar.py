@@ -1661,7 +1661,7 @@ _funasr_flush_started = False
 
 # Debug: 录制 Discord 收到的原始音频，offline 结果出来后转 OGG 发飞书
 _funasr_debug_pcm = bytearray()  # 48kHz mono s16
-_funasr_debug = False  # 关闭 debug 录音 + Gemini A/B 对比
+_funasr_debug = True  # 录音推飞书（不跑 Gemini 对比）
 
 def _funasr_debug_dump(text: str):
     """Debug: PCM→OGG, 同时跑 Gemini STT 对比, 发飞书。"""
@@ -1686,28 +1686,7 @@ def _funasr_debug_dump(text: str):
     except Exception:
         log.exception("[STT-debug] PCM→OGG 转换失败")
         return
-    # Gemini A/B: 对同一段 Discord 音频也跑 Gemini STT
-    gemini_text = ""
-    gemini_ms = 0
-    try:
-        from .stt_utils import _gemini_transcribe_file
-    except ImportError:
-        _gemini_transcribe_file = None
-    if _gemini_transcribe_file is None:
-        try:
-            from ..utils.stt import STTEngine
-            _gem_stt = STTEngine(engine="gemini")
-            t0 = _t.monotonic()
-            gemini_text = _gem_stt.transcribe(ogg_path)
-            gemini_ms = int((_t.monotonic() - t0) * 1000)
-        except Exception as e:
-            gemini_text = f"[Gemini 失败: {e}]"
-    else:
-        t0 = _t.monotonic()
-        gemini_text = _gemini_transcribe_file(ogg_path)
-        gemini_ms = int((_t.monotonic() - t0) * 1000)
-    log.info("[STT-AB Discord] %.1fs | FunASR: %s | Gemini(%dms): %s",
-             dur, text[:60], gemini_ms, gemini_text[:60])
+    log.info("[STT-debug] %.1fs | FunASR: %s", dur, text[:80])
     # 发飞书
     loop = _sidecar_loop
     feishu_ref = _feishu_ref
@@ -1720,10 +1699,7 @@ def _funasr_debug_dump(text: str):
                 if not open_id:
                     return
                 await feishu._send_voice_file(open_id, ogg_path)
-                msg = (f"🔬 Discord STT A/B ({dur:.1f}s)\n"
-                       f"FunASR: {text}\n"
-                       f"Gemini ({gemini_ms}ms): {gemini_text}")
-                await feishu.send_to_user(open_id, msg)
+                await feishu.send_to_user(open_id, f"🎤 Discord 录音 ({dur:.1f}s)\nFunASR: {text}")
             except Exception:
                 log.exception("[STT-debug] 发飞书失败")
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send()))
