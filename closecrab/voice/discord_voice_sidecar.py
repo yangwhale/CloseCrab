@@ -1378,7 +1378,8 @@ def _get_stt_sink_class():
             name = getattr(user, "display_name", None) or getattr(
                 user, "name", None) or str(getattr(user, "id", "?"))
             try:
-                mono = audioop.tomono(pcm, 2, 0.5, 0.5)  # 48kHz stereo → mono
+                mono = audioop.tomono(pcm, 2, 1.0, 1.0)  # 48kHz stereo → mono (sum, 不减半)
+                mono = audioop.mul(mono, 2, 2.0)  # 音量增益 +6dB
             except Exception:
                 return
             with self._lock:
