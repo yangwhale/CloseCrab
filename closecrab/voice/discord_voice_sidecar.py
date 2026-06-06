@@ -146,20 +146,24 @@ _listen_vc = None           # 当前收音的 voice client
 _feishu_ref = None          # FeishuChannel 实例
 _feishu_loop = None         # 飞书 event loop (CloseCrabLLM 跨 loop 调 worker 用)
 _feishu_open_id = ""        # Chris 的飞书 open_id
+_feishu_chat_id = ""        # Chris 的飞书 p2p chat_id (oc_ 开头, 发卡片/语音用)
 _audio_output = None        # 当前 _DiscordAudioOutput 实例 (出口音频桥)
 
 
-def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str) -> None:
+def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str, chat_id: str = "") -> None:
     """【飞书线程调用】注册飞书大脑入口, 供 Discord 语音全双工复用 CloseCrabLLM。
 
     幂等: 飞书 start() / on_ready 后调一次即可。open_id 为空时不覆盖已有值。
     """
-    global _feishu_ref, _feishu_loop, _feishu_open_id
+    global _feishu_ref, _feishu_loop, _feishu_open_id, _feishu_chat_id
     _feishu_ref = feishu_channel
     _feishu_loop = feishu_loop
     if open_id:
         _feishu_open_id = open_id
-    log.info("飞书大脑桥已注册 (open_id=%s…) → Discord 语音可全双工", open_id[:8] if open_id else "?")
+    if chat_id:
+        _feishu_chat_id = chat_id
+    log.info("飞书大脑桥已注册 (open_id=%s… chat_id=%s…) → Discord 语音可全双工",
+             open_id[:8] if open_id else "?", chat_id[:8] if chat_id else "?")
 _listen_restart_n = 0       # 录音自动重启计数 (上限保护)
 _LISTEN_AUTOSTART = True     # 连上常驻频道后由心跳自动起一次录音 (重启后接收不再静默丢)
 _autostart_done = False      # 本进程内自动收音只起一次 (尊重之后的 /stoplisten)
@@ -1033,6 +1037,8 @@ def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
         return False
     try:
         asyncio.run_coroutine_threadsafe(_enqueue_speak(text, fid, backend=backend), loop)
+        if fid and _feishu_ref is not None and _feishu_loop is not None and _feishu_chat_id:
+            _notify_feishu_voice_card(fid)
         return True
     except Exception:
         log.exception("stream_speak_text 跨线程调度失败")
@@ -1044,12 +1050,12 @@ def _notify_feishu_voice_card(fid: str):
     feishu = _feishu_ref
     feishu_loop = _feishu_loop
     open_id = _feishu_open_id
-    if not feishu or not feishu_loop or not open_id:
+    chat_id = _feishu_chat_id
+    if not feishu or not feishu_loop or not chat_id:
         return
     import asyncio
     async def _send_card():
         try:
-            chat_id = open_id
             card = feishu._build_voice_control_card(open_id, chat_id, fid=fid)
             card_id = await feishu._async_send_card_with_id(chat_id, card)
             if card_id:

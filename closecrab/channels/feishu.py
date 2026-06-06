@@ -5441,7 +5441,8 @@ class FeishuChannel(Channel):
             _voice_open_id = next(iter(self._allowed_open_ids), "")
             if not _voice_open_id and self._user_chats:
                 _voice_open_id = list(self._user_chats.keys())[-1]
-            set_feishu_bridge(self, loop, _voice_open_id)
+            _voice_chat_id = self._user_chats.get(_voice_open_id, "") if _voice_open_id else ""
+            set_feishu_bridge(self, loop, _voice_open_id, chat_id=_voice_chat_id)
         except Exception as e:
             log.debug(f"注册 Discord 语音大脑桥失败 (不影响飞书/Discord TTS): {e}")
 
