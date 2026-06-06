@@ -2355,20 +2355,32 @@ def _install_receive_probe():
             except Exception:
                 pass
 
-            # 修 py-cord 扩展头 bug: DAVE 解密后不应再切 extended header。
-            # 方法: DAVE 激活时临时把 packet.extended 设 False，跑完再恢复。
+            # 回归自管 DAVE 解密 (不切扩展头) + 原生 davey + 正确 MediaType。
+            # py-cord 原生 decrypt_rtp 有扩展头 bug (corrupted stream)，
+            # 而 packet.extended=False 又破坏 SRTP AEAD。只能自管。
+            handled = False
             try:
                 state = self.client._connection
                 dave = getattr(state, "dave_session", None)
                 if dave is not None and getattr(dave, "ready", False):
-                    orig_ext = packet.extended
-                    packet.extended = False  # 阻止 py-cord 在 DAVE 解密后错误切扩展头
-                    result = _orig(self, packet)
-                    packet.extended = orig_ext
-                    return result
+                    raw_payload = self._decryptor_rtp(packet)
+                    uid = state.ssrc_user_map.get(packet.ssrc)
+                    if uid:
+                        try:
+                            import davey as _davey_mod
+                            plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
+                        except Exception:
+                            plain = None
+                        packet.decrypted_data = plain if plain else OPUS_SILENCE
+                    else:
+                        packet.decrypted_data = OPUS_SILENCE
+                    result = packet.decrypted_data
+                    handled = True
             except Exception:
-                pass
-            return _orig(self, packet)
+                log.exception("[DAVE接管] decrypt_rtp 自管失败, 回落 py-cord 原实现")
+            if not handled:
+                result = _orig(self, packet)
+            return result
 
         PacketDecryptor.decrypt_rtp = _probed
         _receive_probe_installed = True
