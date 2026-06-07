@@ -2363,6 +2363,7 @@ class FeishuChannel(Channel):
             await loop.run_in_executor(
                 None, self._inbox.mark_done, record_id, "human-sender, reply in chat"
             )
+            await self._async_send_text(chat_id, f"📨 {from_bot}: {instruction}")
 
         await self._execute_task(
             task_id=task_id, summary=instruction, description="",
