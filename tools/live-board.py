@@ -501,6 +501,8 @@ def create_app():
     # Siri → Jarvis proxy
     app.router.add_post("/api/siri", api_siri)
     app.router.add_post("/board/api/siri", api_siri)
+    app.router.add_post("/siri/send", api_siri)
+    app.router.add_post("/siri/api/send", api_siri)
     return app
 
 
