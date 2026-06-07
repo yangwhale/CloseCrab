@@ -2396,6 +2396,7 @@ class FeishuChannel(Channel):
                 log.warning(f"inbox human synthetic event failed: {e}")
                 return
             log.info(f"Inbox human sender {from_bot} → normal chat path: {instruction[:60]}")
+            await self._async_send_text(chat_id, f"📨 {from_bot}: {instruction}")
             await self._handle_message_async(synthetic_event)
             return
 
