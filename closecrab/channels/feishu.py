@@ -2363,13 +2363,47 @@ class FeishuChannel(Channel):
             await loop.run_in_executor(
                 None, self._inbox.mark_done, record_id, "human-sender, reply in chat"
             )
-            await self._async_send_text(chat_id, f"📨 {from_bot}: {instruction}")
+            user_open_id = next(iter(self._user_chats), "")
+            synthetic_id = f"inbox:{record_id}:{int(loop.time()*1000)}"
+            fake_data = {
+                "schema": "2.0",
+                "header": {
+                    "event_id": synthetic_id,
+                    "event_type": "im.message.receive_v1",
+                    "create_time": "0", "token": "",
+                    "app_id": self._app_id, "tenant_key": "",
+                },
+                "event": {
+                    "sender": {
+                        "sender_id": {"open_id": user_open_id},
+                        "sender_type": "user", "tenant_key": "",
+                    },
+                    "message": {
+                        "message_id": synthetic_id,
+                        "root_id": "", "parent_id": "",
+                        "create_time": "0",
+                        "chat_id": chat_id,
+                        "chat_type": "p2p",
+                        "message_type": "text",
+                        "content": json.dumps({"text": instruction}),
+                        "mentions": [],
+                    },
+                },
+            }
+            try:
+                synthetic_event = P2ImMessageReceiveV1(fake_data)
+            except Exception as e:
+                log.warning(f"inbox human synthetic event failed: {e}")
+                return
+            log.info(f"Inbox human sender {from_bot} → normal chat path: {instruction[:60]}")
+            await self._handle_message_async(synthetic_event)
+            return
 
         await self._execute_task(
             task_id=task_id, summary=instruction, description="",
             chat_id=chat_id, id_type="chat_id",
-            inbox_from="" if is_human else from_bot,
-            inbox_record_id="" if is_human else record_id,
+            inbox_from=from_bot,
+            inbox_record_id=record_id,
         )
 
     # ===================================================================
