@@ -14,6 +14,7 @@ WebSocket 推送，Jarvis 通过 HTTP API 控制页面内容。
 import asyncio
 import json
 import logging
+import os
 from aiohttp import web
 
 log = logging.getLogger("live-board")
@@ -425,6 +426,37 @@ async def page_handler(request):
     return web.Response(text=PAGE_HTML, content_type="text/html")
 
 
+# --- Siri → Jarvis proxy ---
+
+import subprocess
+_SIRI_API_KEY = os.environ.get("SIRI_API_KEY", "UIxgVkm4v0sMv89_7YEUa5zUwC_DYb9pH_R5meXE4cI")
+_SEND_SCRIPT = str(_pathlib.Path(__file__).parent.parent / "skills" / "feishu-user-msg" / "scripts" / "send_as_user.py")
+
+
+async def api_siri(request):
+    """Siri 快捷指令入口。POST body: {"text": "...", "key": "..."}"""
+    body = await request.json()
+    key = body.get("key", request.headers.get("X-API-Key", ""))
+    if key != _SIRI_API_KEY:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    text = body.get("text", "").strip()
+    if not text:
+        return web.json_response({"error": "missing text"}, status=400)
+    loop = asyncio.get_running_loop()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", _SEND_SCRIPT, "--to", "jarvis", "--text", text,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        ok = proc.returncode == 0
+        log.info("Siri API: %s → rc=%d", text[:60], proc.returncode)
+        return web.json_response({"ok": ok, "text": text,
+                                  "detail": (stdout or stderr or b"").decode()[:200]})
+    except Exception as e:
+        log.error("Siri API error: %s", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # --- App ---
 
 def create_app():
@@ -466,6 +498,9 @@ def create_app():
     app.router.add_post("/api/draw", canvas_draw)
     app.router.add_post("/api/batch", canvas_batch)
     app.router.add_get("/api/canvas/state", canvas_state)
+    # Siri → Jarvis proxy
+    app.router.add_post("/api/siri", api_siri)
+    app.router.add_post("/board/api/siri", api_siri)
     return app
 
 
