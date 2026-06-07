@@ -499,10 +499,8 @@ def create_app():
     app.router.add_post("/api/batch", canvas_batch)
     app.router.add_get("/api/canvas/state", canvas_state)
     # Siri → Jarvis proxy
-    app.router.add_post("/api/siri", api_siri)
-    app.router.add_post("/board/api/siri", api_siri)
-    app.router.add_post("/siri/send", api_siri)
-    app.router.add_post("/siri/api/send", api_siri)
+    app.router.add_post("/feishu/send", api_siri)
+    app.router.add_post("/feishu/api/send", api_siri)
     return app
 
 
