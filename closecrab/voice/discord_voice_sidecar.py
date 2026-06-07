@@ -180,6 +180,12 @@ _dave_backend_installed = False    # dave-py 后端替换只装一次
 # 故换错会哑掉 TTS。万一发送坏了: 把这个置 False + 重启即回滚到纯 davey 稳定版。
 _DAVE_PY_BACKEND_ENABLED = True  # 2026-06-06: 重新启用 dave-py per-SSRC Decryptor (跟 endcord 一致)
 
+# ── Opus FEC 丢包恢复开关 ──────────────────────────────────────────────
+# True = 检测 RTP 序列号 gap 时用 decode(fec=True) 恢复丢失帧。
+# 实测 2026-06-06: 主要改善来自稳定网络 (不移动), FEC 恢复效果有限 (只救 1 帧,
+# 连续丢 10+ 帧的 5G 基站切换场景救不了)。Chris 要求先关掉。
+_FEC_ENABLED = False
+
 _LISTEN_RESTART_MAX = 8      # 录音崩溃后最多自动重启次数
 
 # 单声道 20ms 帧 @ 48kHz/16-bit: 喂给 AudioInput 的基本单位。
@@ -1699,7 +1705,6 @@ def _funasr_debug_dump(text: str):
                 if not open_id:
                     return
                 await feishu._send_voice_file(open_id, ogg_path)
-                await feishu.send_to_user(open_id, f"🎤 Discord 录音 ({dur:.1f}s)\nFunASR: {text}")
             except Exception:
                 log.exception("[STT-debug] 发飞书失败")
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send()))
@@ -2399,11 +2404,12 @@ def _install_receive_probe():
     except Exception:
         log.exception("decrypt_rtp ssrc 探针挂载失败 (ssrc 自动推断将退化)")
 
-    # ── opus decode 崩溃兜底 (接收路径专用, 不碰 TTS 发送) ──
-    # graceful degradation: 个别帧 decode 失败 (偶发 ssrc 未映射 / 钥匙刚切换的边界帧)
-    # 时回落一帧静音 PCM, 让 PacketRouter.run() 永不因单帧异常退出 —— 退出会触发
-    # stop_recording → 守护循环疯狂重启录音 → voice 连接抖动。正常语音帧 (DAVE 解密的
-    # 明文 Opus, 头=0x78) 照常解码。
+    # ── opus decode: FEC 丢包恢复 + 崩溃兜底 (接收路径专用, 不碰 TTS 发送) ──
+    # 1) FEC 恢复: 检测 RTP 序列号 gap → 用当前包的 FEC 数据恢复丢失帧
+    #    py-cord 2.8.0 的 JitterBuffer 不产生 FakePacket, 内置 FEC 路径是死代码。
+    #    我们在 _decode_packet 层面检测 gap 并做 decode(fec=True) + decode(fec=False)。
+    #    只在 gap>0 时触发, 不是每包都双解码 (那会破坏 Opus 状态)。
+    # 2) 崩溃兜底: 单帧 decode 失败 → 回落静音 PCM, 不让 PacketRouter 退出。
     try:
         from discord.opus import PacketDecoder, Decoder
         if not getattr(PacketDecoder, "_cc_decode_guarded", False):
@@ -2413,9 +2419,38 @@ def _install_receive_probe():
             except Exception:
                 _silence_pcm = b"\x00" * 3840
             _decode_fail_n = [0]
+            _fec_recover_n = [0]
+            _fec_fail_n = [0]
+
+            from discord.voice.utils.wrapped import gap_wrapped as _gap_wrapped
 
             def _decode_guarded(self, packet):
                 try:
+                    # FEC: 检测丢包 (序列号 gap) 并恢复
+                    if (_FEC_ENABLED and packet and hasattr(self, '_last_seq')
+                            and self._last_seq >= 0
+                            and self._decoder is not None
+                            and packet.decrypted_data):
+                        gap = _gap_wrapped(self._last_seq, packet.sequence)
+                        if 0 < gap < 50:
+                            try:
+                                fec_pcm = self._decoder.decode(
+                                    packet.decrypted_data, fec=True)
+                                cur_pcm = self._decoder.decode(
+                                    packet.decrypted_data, fec=False)
+                                _fec_recover_n[0] += 1
+                                if _fec_recover_n[0] <= 10 or _fec_recover_n[0] % 200 == 0:
+                                    log.info(
+                                        "[FEC] 丢包恢复 #%d: gap=%d seq=%d→%d",
+                                        _fec_recover_n[0], gap,
+                                        self._last_seq, packet.sequence)
+                                return packet, fec_pcm + cur_pcm
+                            except Exception as e:
+                                _fec_fail_n[0] += 1
+                                if _fec_fail_n[0] <= 5 or _fec_fail_n[0] % 100 == 0:
+                                    log.warning(
+                                        "[FEC] 恢复失败 #%d (gap=%d): %s, 回退正常解码",
+                                        _fec_fail_n[0], gap, e)
                     return _orig_decode(self, packet)
                 except Exception:
                     _decode_fail_n[0] += 1
@@ -2426,9 +2461,9 @@ def _install_receive_probe():
 
             PacketDecoder._decode_packet = _decode_guarded
             PacketDecoder._cc_decode_guarded = True
-            log.info("opus _decode_packet 崩溃兜底已挂载")
+            log.info("opus _decode_packet FEC恢复 + 崩溃兜底已挂载")
     except Exception:
-        log.exception("opus _decode_packet 崩溃兜底挂载失败")
+        log.exception("opus _decode_packet FEC+兜底挂载失败")
 
 
 async def _ssrc_infer_loop(period: float = 0.3):

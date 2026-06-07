@@ -16,7 +16,7 @@ description: Real-time SVG whiteboard for teaching. Draw shapes, arrows, text st
 ## 架构
 
 ```
-Jarvis (curl API)  ──→  live-board.py (port 8766)  ──→  WebSocket  ──→  浏览器
+Jarvis (curl API)  ──→  cc-api.py (port 8766)  ──→  WebSocket  ──→  浏览器
                          ↓
                    HTTP API + SVG state
                          ↓
@@ -32,7 +32,7 @@ Jarvis (curl API)  ──→  live-board.py (port 8766)  ──→  WebSocket  �
 ss -tlnp | grep 8766
 
 # 没跑的话启动
-cd ~/CloseCrab && setsid python3 tools/live-board.py --port 8766 > /tmp/live-board.log 2>&1 &
+cd ~/CloseCrab && setsid python3 tools/cc-api.py --port 8766 > /tmp/live-board.log 2>&1 &
 ```
 
 ### 2. 画图 API
@@ -161,7 +161,7 @@ arrow 的 `color` 字段自动匹配对应 marker。
 
 | 文件 | 用途 |
 |------|------|
-| `tools/live-board.py` | 服务端 (aiohttp + WebSocket) |
+| `tools/cc-api.py` | 服务端 (aiohttp + WebSocket) |
 | `tools/board-canvas.html` | Canvas 前端模板 |
 | `tools/board-page.html` | Slide 前端模板 (幻灯片模式) |
 | `skills/live-canvas/scripts/export-canvas.py` | 导出静态快照到 CC Pages |

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Jarvis Live Board — 实时教学白板服务器。
+"""CC API — CloseCrab 通用 HTTP API 服务。
 
-WebSocket 推送，Jarvis 通过 HTTP API 控制页面内容。
-浏览器端自动重连，内容实时更新。
+包含：
+  /board/*   实时教学白板（WebSocket + HTTP API）
+  /canvas/*  SVG 画布模式
+  /feishu/*  飞书消息 API（以 Chris 身份发消息）
 
 用法:
-    python3 tools/live-board.py              # 启动服务 (port 8765)
-    curl localhost:8765/api/add -d '{"html":"<h2>Hello</h2>"}'
-    curl localhost:8765/api/clear
-    curl localhost:8765/api/highlight -d '{"step":1}'
+    python3 tools/cc-api.py --port 8766
 """
 
 import asyncio
@@ -17,7 +16,7 @@ import logging
 import os
 from aiohttp import web
 
-log = logging.getLogger("live-board")
+log = logging.getLogger("cc-api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 # 全局状态
