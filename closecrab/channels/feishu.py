@@ -2355,10 +2355,20 @@ class FeishuChannel(Channel):
                 )
             return
 
+        # 人类用户通过 inbox 发消息时, 不回写 inbox (他们直接看飞书窗口)
+        _HUMAN_SENDERS = {"chris", "chrisya"}
+        is_human = from_bot.lower() in _HUMAN_SENDERS
+
+        if is_human and self._inbox:
+            await loop.run_in_executor(
+                None, self._inbox.mark_done, record_id, "human-sender, reply in chat"
+            )
+
         await self._execute_task(
             task_id=task_id, summary=instruction, description="",
             chat_id=chat_id, id_type="chat_id",
-            inbox_from=from_bot, inbox_record_id=record_id,
+            inbox_from="" if is_human else from_bot,
+            inbox_record_id="" if is_human else record_id,
         )
 
     # ===================================================================
@@ -4654,7 +4664,7 @@ class FeishuChannel(Channel):
             # Debug: 同时用 FunASR 转写做 A/B 对比
             log.info("[STT-AB] check: STT_AB_DEBUG=%s, tmp=%s exists=%s",
                      os.environ.get("STT_AB_DEBUG"), tmp_path, os.path.exists(tmp_path) if tmp_path else False)
-            if True:  # 飞书 A/B: Gemini + FunASR 双路对比
+            if False:  # 飞书 A/B: Gemini + FunASR 双路对比 (2026-06-06 关闭, 对比已完成)
                 try:
                     import time as _ab_time
                     from ..utils.stt import STTEngine
