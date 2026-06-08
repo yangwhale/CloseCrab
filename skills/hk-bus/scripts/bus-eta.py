@@ -9,10 +9,14 @@ KMB_BASE = "https://data.etabus.gov.hk/v1/transport/kmb"
 CTB_BASE = "https://rt.data.gov.hk/v2/transport/citybus"
 
 FAVORITE_STOPS = {
+    # 去公司方向 (outbound)
     "113": {"stop": "9DBBC71CB1578A87", "name": "喇沙利道", "seq": 12, "bound": "outbound", "company": "KMB"},
     "182": {"stop": "3821D64D2BF1BB66", "name": "九龍醫院", "seq": 17, "bound": "outbound", "company": "KMB"},
     "170": {"stop": "3821D64D2BF1BB66", "name": "九龍醫院", "seq": 13, "bound": "outbound", "company": "KMB"},
     "103": {"stop": "3821D64D2BF1BB66", "name": "九龍醫院", "seq": 10, "bound": "outbound", "company": "KMB"},
+    # 回家方向 (inbound) — 从公司附近上车
+    "113回": {"stop": "5E580B75E8AF99F3", "name": "堅拿道西(銅鑼灣)", "seq": 17, "bound": "inbound", "company": "KMB", "route": "113"},
+    "182回": {"stop": "4A626ACDA2618AC3", "name": "堅拿道西(灣仔)", "seq": 10, "bound": "inbound", "company": "KMB", "route": "182"},
 }
 
 def get_kmb_eta(route: str, stop_id: str, service_type: str = "1"):
@@ -51,22 +55,27 @@ def query_route(route: str, stop_override: str = None):
     info = get_route_info(route)
 
     fav = FAVORITE_STOPS.get(route)
+    actual_route = route
     if stop_override:
         stop_id = stop_override
         stop_name = stop_override
     elif fav:
         stop_id = fav["stop"]
         stop_name = fav["name"]
+        actual_route = fav.get("route", route)
     else:
         print(f"路线 {route} 不在常用列表中，请指定 --stop")
         sys.exit(1)
 
-    print(f"🚌 {route} ({info.get('orig_tc', '')} → {info.get('dest_tc', '')})")
+    if actual_route != route:
+        info = get_route_info(actual_route)
+    direction = "回家" if fav and fav.get("bound") == "inbound" else "去公司"
+    print(f"🚌 {actual_route} ({info.get('orig_tc', '')} → {info.get('dest_tc', '')}) [{direction}]")
     print(f"📍 查询站: {stop_name}")
     print(f"⏰ 查询时间: {datetime.now(HKT).strftime('%H:%M:%S')}")
     print()
 
-    etas = get_kmb_eta(route, stop_id)
+    etas = get_kmb_eta(actual_route, stop_id)
     if not etas or not any(e.get("eta") for e in etas):
         etas = get_ctb_eta(route, stop_id.replace("KMB", ""))
 
