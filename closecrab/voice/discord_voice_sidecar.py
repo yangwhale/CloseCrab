@@ -523,15 +523,29 @@ async def _gemini_tts_stream(text: str):
                             if inline and inline.data:
                                 got += len(inline.data)
                                 yield bytes(inline.data)
-                break  # success
+                if got > 0:
+                    break  # success with audio data
+                log.warning("TTS 批 #%d/%d Gemini 返回 0 字节 (finish=%s), retry %d/%d",
+                            idx, len(batches), last_finish, attempt + 1, max_retries)
+                if attempt < max_retries:
+                    await asyncio.sleep(1 + attempt)
             except Exception as exc:
                 if attempt < max_retries:
                     log.warning("TTS 批 #%d/%d 失败(retry %d/%d): %s",
                                 idx, len(batches), attempt + 1, max_retries, exc)
                     await asyncio.sleep(1 + attempt)
                 else:
-                    log.error("TTS 批 #%d/%d 最终失败，跳过(%dc): %s",
-                              idx, len(batches), len(batch), exc)
+                    log.error("TTS 批 #%d/%d Gemini 最终失败，fallback Qwen3 (%dc)",
+                              idx, len(batches), len(batch))
+        if got == 0:
+            try:
+                log.info("TTS 批 #%d/%d fallback → Qwen3 (%dc)", idx, len(batches), len(batch))
+                async for pcm_chunk in _qwen3_tts_stream(batch):
+                    got += len(pcm_chunk)
+                    yield pcm_chunk
+                last_finish = "Qwen3-fallback"
+            except Exception as qe:
+                log.error("TTS 批 #%d/%d Qwen3 fallback 也失败: %s", idx, len(batches), qe)
         log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
                  idx, len(batches), len(batch), got / 2 / 24000, last_finish)
 
