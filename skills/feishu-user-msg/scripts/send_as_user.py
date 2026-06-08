@@ -137,9 +137,10 @@ def send_text(token: str, chat_id: str, text: str):
     print(f"✅ Sent to {chat_id}: {text[:60]}")
 
 def send_audio(token: str, chat_id: str, audio_path: str):
+    bot_token = _get_tenant_token()
     with open(audio_path, "rb") as f:
         up = requests.post("https://open.feishu.cn/open-apis/im/v1/files",
-                           headers={"Authorization": f"Bearer {token}"},
+                           headers={"Authorization": f"Bearer {bot_token}"},
                            data={"file_type": "opus", "file_name": os.path.basename(audio_path)},
                            files={"file": (os.path.basename(audio_path), f, "audio/ogg")}, timeout=30)
     ur = up.json()
@@ -153,8 +154,18 @@ def send_audio(token: str, chat_id: str, audio_path: str):
                                "content": json.dumps({"file_key": file_key})}, timeout=10)
     r = resp.json()
     if r.get("code") != 0:
-        print(f"Send audio failed: {r}", file=sys.stderr)
-        sys.exit(1)
+        # user token 发语音失败，fallback 用 bot token 发
+        print(f"User send failed ({r.get('code')}), fallback to bot token", file=sys.stderr)
+        resp2 = requests.post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+                              headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                              json={"receive_id": chat_id, "msg_type": "audio",
+                                    "content": json.dumps({"file_key": file_key})}, timeout=10)
+        r2 = resp2.json()
+        if r2.get("code") != 0:
+            print(f"Bot send also failed: {r2}", file=sys.stderr)
+            sys.exit(1)
+        print(f"✅ Sent audio (as bot) to {chat_id}: {audio_path}")
+        return
     print(f"✅ Sent audio to {chat_id}: {audio_path}")
 
 def init_token(code: str):
