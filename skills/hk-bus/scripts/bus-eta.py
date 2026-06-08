@@ -75,21 +75,36 @@ def query_route(route: str, stop_override: str = None):
     print(f"⏰ 查询时间: {datetime.now(HKT).strftime('%H:%M:%S')}")
     print()
 
-    etas = get_kmb_eta(actual_route, stop_id)
-    if not etas or not any(e.get("eta") for e in etas):
-        etas = get_ctb_eta(route, stop_id.replace("KMB", ""))
+    kmb_etas = get_kmb_eta(actual_route, stop_id)
+    ctb_etas = []
+    try:
+        ctb_etas = get_ctb_eta(actual_route, stop_id)
+    except Exception:
+        pass
+    etas = kmb_etas + ctb_etas
 
     valid = [e for e in etas if e.get("eta")]
     if not valid:
         print("  ❌ 目前没有到站信息（可能已收车）")
         return
 
-    for e in valid[:5]:
-        eta_str = format_eta(e["eta"])
+    seen = set()
+    sorted_etas = sorted(valid, key=lambda e: e.get("eta", ""))
+    idx = 0
+    for e in sorted_etas:
+        eta_val = e["eta"]
+        if eta_val in seen:
+            continue
+        seen.add(eta_val)
+        idx += 1
+        eta_str = format_eta(eta_val)
         rmk = e.get("rmk_tc", "")
-        seq = e.get("eta_seq", "")
-        flag = " ⚠️ " + rmk if rmk else ""
-        print(f"  🕐 第{seq}班: {eta_str}{flag}")
+        co = e.get("co", "")
+        company_tag = f" [{co}]" if co else ""
+        flag = f" ⚠️ {rmk}" if rmk else ""
+        print(f"  🕐 第{idx}班: {eta_str}{company_tag}{flag}")
+        if idx >= 5:
+            break
 
 def list_routes():
     print("常用路线（九龙城附近上车）：")
