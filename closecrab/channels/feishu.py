@@ -3346,8 +3346,20 @@ class FeishuChannel(Channel):
                         if m.key:
                             content = content.replace(m.key, "").strip()
 
+            elif msg_type == "location":
+                try:
+                    loc_data = json.loads(message.content)
+                    lat = loc_data.get("latitude", "")
+                    lon = loc_data.get("longitude", "")
+                    name = loc_data.get("name", "")
+                    addr = loc_data.get("address", "")
+                    content = f"[用户分享了位置] {name} {addr} (lat={lat}, lon={lon})"
+                    log.info(f"Location message: {content}")
+                except Exception as e:
+                    log.warning(f"Location parse failed: {e}")
+                    content = "(位置消息解析失败)"
+
             else:
-                # 不支持的消息类型
                 log.info(f"Unsupported msg_type: {msg_type}")
                 return
 
