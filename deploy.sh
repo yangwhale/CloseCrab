@@ -914,7 +914,7 @@ if 'NotebookLM-API' in cfg['mcpServers']:
         del cfg['mcpServers']['NotebookLM-API']
         print('  [gemini] Removed gLinux-only NotebookLM-API MCP')
         changed = True
-# jina-ai MCP
+# jina-ai MCP (Gemini CLI still uses stdio; remote MCP not supported in Gemini CLI ACP)
 jina_key = os.environ.get('JINA_API_KEY', '')
 if 'jina-ai' not in cfg['mcpServers'] and jina_key:
     cfg['mcpServers']['jina-ai'] = {
@@ -922,7 +922,7 @@ if 'jina-ai' not in cfg['mcpServers'] and jina_key:
         'args': ['-y', 'jina-ai-mcp-server'],
         'env': {'JINA_API_KEY': jina_key}
     }
-    print('  [gemini] jina-ai MCP 已注入')
+    print('  [gemini] jina-ai MCP 已注入 (stdio, Gemini CLI 不支持远程 MCP)')
     changed = True
 elif 'jina-ai' in cfg['mcpServers']:
     print('  [gemini] jina-ai MCP 已存在, 跳过')
@@ -989,18 +989,32 @@ cfg.setdefault('mcpServers', {})
 if 'cc-memory' in cfg['mcpServers']:
     del cfg['mcpServers']['cc-memory']
     print('  Removed deprecated cc-memory MCP')
-# jina-ai MCP
+# jina-ai MCP (remote server at mcp.jina.ai)
 jina_key = os.environ.get('JINA_API_KEY', '')
-if 'jina-ai' in cfg['mcpServers']:
-    print('  jina-ai MCP 配置已存在, 跳过')
-elif jina_key:
+old_jina = cfg['mcpServers'].get('jina-ai', {})
+if old_jina.get('command') == 'npx':
+    # Upgrade from old stdio NPM package to remote server
+    if jina_key or old_jina.get('env', {}).get('JINA_API_KEY'):
+        key = jina_key or old_jina['env']['JINA_API_KEY']
+        cfg['mcpServers']['jina-ai'] = {
+            'type': 'http',
+            'url': 'https://mcp.jina.ai/v1',
+            'headers': {'Authorization': f'Bearer {key}'}
+        }
+        print('  jina-ai MCP 已从 stdio 升级到远程 mcp.jina.ai')
+        changed = True
+    else:
+        print('  jina-ai MCP 跳过升级 (无 API key)')
+elif 'jina-ai' not in cfg['mcpServers'] and jina_key:
     cfg['mcpServers']['jina-ai'] = {
-        'type': 'stdio',
-        'command': 'npx',
-        'args': ['-y', 'jina-ai-mcp-server'],
-        'env': {'JINA_API_KEY': jina_key}
+        'type': 'http',
+        'url': 'https://mcp.jina.ai/v1',
+        'headers': {'Authorization': f'Bearer {jina_key}'}
     }
-    print('  jina-ai MCP 配置已注入')
+    print('  jina-ai MCP 配置已注入 (远程)')
+    changed = True
+elif 'jina-ai' in cfg['mcpServers']:
+    print('  jina-ai MCP 配置已存在, 跳过')
 else:
     print('  jina-ai MCP 跳过 (JINA_API_KEY 未设置)')
 # Remove deprecated pipecat MCP if present
