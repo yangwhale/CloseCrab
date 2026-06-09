@@ -56,6 +56,7 @@ log = logging.getLogger("closecrab.discord_voice_sidecar")
 # 文件 = 实际推给 Discord 的 48kHz/stereo/s16 raw PCM (跟 _StreamPCMSource 一致),
 # 重播直接 _FilePCMSource 顺读, 不重新调 Gemini, 也不丢音。fid 编码进飞书重播按钮。
 _BUF_DIR = "/tmp/jarvis-tts-buf"
+_TTS_CACHE_DIR = os.path.expanduser("~/.closecrab/tts-cache")
 _FID_RE = re.compile(r"^[0-9a-zA-Z_-]{1,64}$")  # 防路径穿越: 只许字母数字下划线连字符
 _PCM_BYTES_PER_SEC = 48000 * 2 * 2  # 48kHz * stereo * s16
 
@@ -91,6 +92,42 @@ def get_playback_progress():
             _progress["active"],
             _progress["fid"],
         )
+
+
+def _cache_key_for_batch(text: str, voice: str) -> str:
+    import hashlib
+    return hashlib.sha256(f"gemini|{voice.lower()}|{text}".encode()).hexdigest()
+
+
+def _cache_get_pcm(text: str, voice: str) -> bytes | None:
+    key = _cache_key_for_batch(text, voice)
+    ogg = os.path.join(_TTS_CACHE_DIR, f"{key}.ogg")
+    if not os.path.exists(ogg) or os.path.getsize(ogg) == 0:
+        return None
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-i", ogg, "-f", "s16le", "-ar", "24000", "-ac", "1", "-"],
+            capture_output=True, timeout=10,
+        )
+        return r.stdout if r.returncode == 0 and len(r.stdout) > 0 else None
+    except Exception:
+        return None
+
+
+def _cache_save_pcm(text: str, voice: str, pcm: bytes):
+    if not pcm:
+        return
+    key = _cache_key_for_batch(text, voice)
+    ogg = os.path.join(_TTS_CACHE_DIR, f"{key}.ogg")
+    os.makedirs(_TTS_CACHE_DIR, exist_ok=True)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "-",
+             "-c:a", "libopus", "-b:a", "48k", ogg],
+            input=pcm, capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def _buf_path(fid: str) -> str:
@@ -471,12 +508,70 @@ def _plan_tts_batches(cleaned: str):
 
 _tts_client_cache = None  # module-level singleton for HTTP keep-alive
 
+async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
+                              idx: int, total: int) -> tuple[bytes, str]:
+    """生成单个 batch 的完整 PCM (含缓存检查 + retry + Qwen3 fallback)。
+    返回 (pcm_bytes, finish_reason_str)。"""
+    cached = _cache_get_pcm(batch, voice)
+    if cached is not None:
+        log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
+                 idx, total, len(batch), len(cached) / 2 / 24000)
+        return cached, "cache"
+
+    chunks = []
+    last_finish = None
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=model, contents=batch, config=config
+            )
+            async for chunk in stream:
+                for cand in getattr(chunk, "candidates", None) or []:
+                    fr = getattr(cand, "finish_reason", None)
+                    if fr is not None:
+                        last_finish = fr
+                    content = getattr(cand, "content", None)
+                    for part in getattr(content, "parts", None) or []:
+                        inline = getattr(part, "inline_data", None)
+                        if inline and inline.data:
+                            chunks.append(bytes(inline.data))
+            if chunks:
+                break
+            log.warning("TTS 批 #%d/%d Gemini 返回 0 字节 (finish=%s), retry %d/%d",
+                        idx, total, last_finish, attempt + 1, max_retries)
+            if attempt < max_retries:
+                await asyncio.sleep(1 + attempt)
+        except Exception as exc:
+            if attempt < max_retries:
+                log.warning("TTS 批 #%d/%d 失败(retry %d/%d): %s",
+                            idx, total, attempt + 1, max_retries, exc)
+                await asyncio.sleep(1 + attempt)
+            else:
+                log.error("TTS 批 #%d/%d Gemini 最终失败，fallback Qwen3 (%dc)",
+                          idx, total, len(batch))
+    if not chunks:
+        try:
+            log.info("TTS 批 #%d/%d fallback → Qwen3 (%dc)", idx, total, len(batch))
+            async for pcm_chunk in _qwen3_tts_stream(batch):
+                chunks.append(pcm_chunk)
+            last_finish = "Qwen3-fallback"
+        except Exception as qe:
+            log.error("TTS 批 #%d/%d Qwen3 fallback 也失败: %s", idx, total, qe)
+
+    pcm = b"".join(chunks)
+    if pcm:
+        _cache_save_pcm(batch, voice, pcm)
+    log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
+             idx, total, len(batch), len(pcm) / 2 / 24000 if pcm else 0, last_finish)
+    return pcm, str(last_finish)
+
+
 async def _gemini_tts_stream(text: str):
     """分批流式调 Gemini TTS, 逐 chunk yield 24kHz mono s16 PCM bytes。
 
-    复用 gemini_tts 的 client 构造 + 文本清洗 + config, 保证与飞书 ogg 同
-    model/voice (orus→"Orus")。整段先切句打包成多批, 逐批 generate_content_stream,
-    PCM 连续 yield (消费方 _gen_worker 无感知分批, ratecv state 跨批连续)。
+    优化: OGG 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
+    首批仍流式保证最快首帧, 后续批从预取缓冲直接 yield。
     """
     global _tts_client_cache
     from google.genai import types as gt
@@ -489,7 +584,7 @@ async def _gemini_tts_stream(text: str):
         _tts_client_cache = _build_genai_client(None)
     client = _tts_client_cache
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
-    voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")  # 对齐飞书 --voice orus
+    voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
     config = gt.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=gt.SpeechConfig(
@@ -499,55 +594,84 @@ async def _gemini_tts_stream(text: str):
         ),
     )
     batches = _plan_tts_batches(cleaned)
-    log.info("TTS 分批: %dc → %d 批 (首批 %dc)", len(cleaned), len(batches),
+    n = len(batches)
+    log.info("TTS 分批: %dc → %d 批 (首批 %dc)", len(cleaned), n,
              len(batches[0]) if batches else 0)
-    for idx, batch in enumerate(batches, 1):
-        if idx > 1:
-            await asyncio.sleep(2)  # 批间延迟防 API 限流
-        last_finish = None
-        got = 0
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                stream = await client.aio.models.generate_content_stream(
-                    model=model, contents=batch, config=config
-                )
-                async for chunk in stream:
-                    for cand in getattr(chunk, "candidates", None) or []:
-                        fr = getattr(cand, "finish_reason", None)
-                        if fr is not None:
-                            last_finish = fr
-                        content = getattr(cand, "content", None)
-                        for part in getattr(content, "parts", None) or []:
-                            inline = getattr(part, "inline_data", None)
-                            if inline and inline.data:
-                                got += len(inline.data)
-                                yield bytes(inline.data)
-                if got > 0:
-                    break  # success with audio data
-                log.warning("TTS 批 #%d/%d Gemini 返回 0 字节 (finish=%s), retry %d/%d",
-                            idx, len(batches), last_finish, attempt + 1, max_retries)
-                if attempt < max_retries:
-                    await asyncio.sleep(1 + attempt)
-            except Exception as exc:
-                if attempt < max_retries:
-                    log.warning("TTS 批 #%d/%d 失败(retry %d/%d): %s",
-                                idx, len(batches), attempt + 1, max_retries, exc)
-                    await asyncio.sleep(1 + attempt)
-                else:
-                    log.error("TTS 批 #%d/%d Gemini 最终失败，fallback Qwen3 (%dc)",
-                              idx, len(batches), len(batch))
-        if got == 0:
-            try:
-                log.info("TTS 批 #%d/%d fallback → Qwen3 (%dc)", idx, len(batches), len(batch))
-                async for pcm_chunk in _qwen3_tts_stream(batch):
-                    got += len(pcm_chunk)
-                    yield pcm_chunk
-                last_finish = "Qwen3-fallback"
-            except Exception as qe:
-                log.error("TTS 批 #%d/%d Qwen3 fallback 也失败: %s", idx, len(batches), qe)
-        log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
-                 idx, len(batches), len(batch), got / 2 / 24000, last_finish)
+
+    current_prefetch = None  # asyncio.Task for the batch we're about to yield
+
+    for idx in range(n):
+        batch = batches[idx]
+
+        # Start prefetching NEXT batch in background (runs while we yield current)
+        next_prefetch = None
+        if idx + 1 < n:
+            next_prefetch = asyncio.create_task(
+                _generate_batch_pcm(client, model, config, batches[idx + 1],
+                                    voice, idx + 2, n)
+            )
+
+        if current_prefetch is not None:
+            # This batch was prefetched — await result and yield
+            pcm, _ = await current_prefetch
+            if pcm:
+                yield pcm
+        else:
+            # First batch (or no prefetch): check cache, then stream for low latency
+            cached = _cache_get_pcm(batch, voice)
+            if cached is not None:
+                log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
+                         idx + 1, n, len(batch), len(cached) / 2 / 24000)
+                yield cached
+            else:
+                pcm_accum = []
+                last_finish = None
+                max_retries = 2
+                for attempt in range(max_retries + 1):
+                    try:
+                        stream = await client.aio.models.generate_content_stream(
+                            model=model, contents=batch, config=config
+                        )
+                        async for chunk in stream:
+                            for cand in getattr(chunk, "candidates", None) or []:
+                                fr = getattr(cand, "finish_reason", None)
+                                if fr is not None:
+                                    last_finish = fr
+                                content = getattr(cand, "content", None)
+                                for part in getattr(content, "parts", None) or []:
+                                    inline = getattr(part, "inline_data", None)
+                                    if inline and inline.data:
+                                        d = bytes(inline.data)
+                                        pcm_accum.append(d)
+                                        yield d
+                        if pcm_accum:
+                            break
+                        log.warning("TTS 批 #%d/%d 返回 0 字节, retry %d/%d",
+                                    idx + 1, n, attempt + 1, max_retries)
+                        if attempt < max_retries:
+                            await asyncio.sleep(1 + attempt)
+                    except Exception as exc:
+                        if attempt < max_retries:
+                            log.warning("TTS 批 #%d/%d 失败(retry %d): %s",
+                                        idx + 1, n, attempt + 1, exc)
+                            await asyncio.sleep(1 + attempt)
+                        else:
+                            log.error("TTS 批 #%d/%d Gemini 最终失败", idx + 1, n)
+                if not pcm_accum:
+                    try:
+                        async for pcm_chunk in _qwen3_tts_stream(batch):
+                            pcm_accum.append(pcm_chunk)
+                            yield pcm_chunk
+                    except Exception:
+                        pass
+                full_pcm = b"".join(pcm_accum)
+                if full_pcm:
+                    _cache_save_pcm(batch, voice, full_pcm)
+                log.info("TTS 批 #%d/%d: %dc → %.1fs finish=%s",
+                         idx + 1, n, len(batch),
+                         len(full_pcm) / 2 / 24000 if full_pcm else 0, last_finish)
+
+        current_prefetch = next_prefetch
 
 
 _EMOTION_TAG_RE = re.compile(r'\[(?:casually|friendly|warmly|amused|cheerfully|playful|'
