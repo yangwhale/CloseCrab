@@ -12,12 +12,16 @@ Output: prints the path to the generated .ogg file on stdout.
 import argparse
 import asyncio
 import base64
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import wave
+
+CACHE_DIR = os.path.expanduser("~/.closecrab/tts-cache")
 
 # ── Gemini voices ──
 
@@ -53,6 +57,24 @@ EDGE_VOICES = {
 }
 
 DEFAULT_EDGE_VOICE = "xiaoxiao"
+
+
+def _cache_key(text: str, voice: str, engine: str) -> str:
+    return hashlib.sha256(f"{engine}|{voice}|{text}".encode()).hexdigest()
+
+
+def _cache_get(key: str) -> str | None:
+    path = os.path.join(CACHE_DIR, f"{key}.ogg")
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    return None
+
+
+def _cache_put(key: str, src_ogg: str) -> str:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    dst = os.path.join(CACHE_DIR, f"{key}.ogg")
+    shutil.copy2(src_ogg, dst)
+    return dst
 
 
 def _wav_write(path: str, pcm: bytes, rate: int = 24000):
@@ -324,10 +346,16 @@ def main():
 
     engine = args.engine
     voice = args.voice
+    if voice is None:
+        voice = DEFAULT_GEMINI_VOICE if engine == "gemini" else DEFAULT_EDGE_VOICE
+
+    key = _cache_key(args.text, voice, engine)
+    cached = _cache_get(key)
+    if cached:
+        print(cached)
+        return
 
     if engine == "gemini":
-        if voice is None:
-            voice = DEFAULT_GEMINI_VOICE
         try:
             ogg_path = generate_gemini(args.text, voice)
         except Exception as e:
@@ -346,12 +374,13 @@ def main():
                 pass
             voice = DEFAULT_EDGE_VOICE
             ogg_path = asyncio.run(generate_edge(args.text, voice, args.rate))
+            key = _cache_key(args.text, voice, "edge")
     else:
-        if voice is None:
-            voice = DEFAULT_EDGE_VOICE
         ogg_path = asyncio.run(generate_edge(args.text, voice, args.rate))
 
-    print(ogg_path)
+    cache_path = _cache_put(key, ogg_path)
+    os.unlink(ogg_path)
+    print(cache_path)
 
 
 if __name__ == "__main__":
