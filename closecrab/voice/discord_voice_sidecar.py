@@ -1036,7 +1036,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     _tts_interrupted = False  # 新一轮生成，重置中断标志
     _tts_active = True        # 抑制 source idle 停播
 
-    tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "qwen3")
+    tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "gemini")
 
     buf_f = None
     bpath = _buf_path(fid)
