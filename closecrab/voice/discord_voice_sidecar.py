@@ -611,7 +611,7 @@ async def _gemini_tts_stream(text: str):
                 yield pcm
             # Prefetch NEXT batch AFTER current finishes (avoids concurrent API calls)
             if idx + 1 < n:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.05)
                 current_prefetch = asyncio.create_task(
                     _generate_batch_pcm(client, model, config, batches[idx + 1],
                                         voice, idx + 2, n)
@@ -672,7 +672,7 @@ async def _gemini_tts_stream(text: str):
                          len(full_pcm) / 2 / 24000 if full_pcm else 0, last_finish)
             # First batch done, start prefetch for next (sequential, no concurrent API)
             if idx + 1 < n:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.05)
                 current_prefetch = asyncio.create_task(
                     _generate_batch_pcm(client, model, config, batches[idx + 1],
                                         voice, idx + 2, n)
