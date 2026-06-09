@@ -603,19 +603,19 @@ async def _gemini_tts_stream(text: str):
     for idx in range(n):
         batch = batches[idx]
 
-        # Start prefetching NEXT batch in background (runs while we yield current)
-        next_prefetch = None
-        if idx + 1 < n:
-            next_prefetch = asyncio.create_task(
-                _generate_batch_pcm(client, model, config, batches[idx + 1],
-                                    voice, idx + 2, n)
-            )
-
         if current_prefetch is not None:
             # This batch was prefetched — await result and yield
             pcm, _ = await current_prefetch
+            current_prefetch = None
             if pcm:
                 yield pcm
+            # Prefetch NEXT batch AFTER current finishes (avoids concurrent API calls)
+            if idx + 1 < n:
+                await asyncio.sleep(0.2)
+                current_prefetch = asyncio.create_task(
+                    _generate_batch_pcm(client, model, config, batches[idx + 1],
+                                        voice, idx + 2, n)
+                )
         else:
             # First batch (or no prefetch): check cache, then stream for low latency
             cached = _cache_get_pcm(batch, voice)
@@ -670,8 +670,13 @@ async def _gemini_tts_stream(text: str):
                 log.info("TTS 批 #%d/%d: %dc → %.1fs finish=%s",
                          idx + 1, n, len(batch),
                          len(full_pcm) / 2 / 24000 if full_pcm else 0, last_finish)
-
-        current_prefetch = next_prefetch
+            # First batch done, start prefetch for next (sequential, no concurrent API)
+            if idx + 1 < n:
+                await asyncio.sleep(0.2)
+                current_prefetch = asyncio.create_task(
+                    _generate_batch_pcm(client, model, config, batches[idx + 1],
+                                        voice, idx + 2, n)
+                )
 
 
 _EMOTION_TAG_RE = re.compile(r'\[(?:casually|friendly|warmly|amused|cheerfully|playful|'
