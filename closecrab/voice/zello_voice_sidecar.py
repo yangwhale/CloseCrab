@@ -729,7 +729,11 @@ def _hkt_now() -> str:
 
 
 def _inject_to_botcore(text: str, speaker: str):
-    """把 Zello STT 结果注入 BotCore, 回复直接发飞书聊天。"""
+    """把 Zello STT 结果通过飞书语音消息流程处理 (进度卡片 + BotCore + 回复 + TTS)。
+
+    用 _run_voice_message_with_card 而不是直接 handle_message，
+    因为后者被 per-user lock 阻塞 (当前 turn 持锁，注入的消息排在后面)。
+    """
     feishu = _feishu_ref
     f_loop = _feishu_loop
     if feishu is None or f_loop is None or not _feishu_open_id:
@@ -737,7 +741,6 @@ def _inject_to_botcore(text: str, speaker: str):
         return
 
     content = (
-        f"[channel: voice]\n"
         f"[当前时间: {_hkt_now()}]\n"
         f"[from: Zello PTT · {speaker}]\n"
         f"{text}"
@@ -745,36 +748,18 @@ def _inject_to_botcore(text: str, speaker: str):
 
     async def _do():
         try:
-            from ..core.types import UnifiedMessage
-            chat_id = _feishu_chat_id
-
-            async def _reply(reply_text: str):
-                log.info("[Zello→飞书] reply 回调触发: chat_id=%s, len=%d, text=%s",
-                         chat_id, len(reply_text), reply_text[:60])
-                try:
-                    feishu._send_text(chat_id, reply_text)
-                    log.info("[Zello→飞书] _send_text 完成")
-                except Exception:
-                    log.exception("Zello→飞书回复发送失败")
-
-            msg = UnifiedMessage(
-                channel_type="feishu",
-                user_id=_feishu_open_id,
+            await feishu._run_voice_message_with_card(
+                chat_id=_feishu_chat_id,
+                user_key=_feishu_open_id,
                 content=content,
-                reply=_reply,
-                metadata={
-                    "chat_id": chat_id,
-                    "from_voice": True,
-                    "from_zello": True,
-                },
             )
-            await feishu._core.handle_message(msg)
+            log.info("[Zello→BotCore] 语音消息处理完成")
         except Exception:
-            log.exception("STT 注入 BotCore 失败")
+            log.exception("STT 注入失败")
 
     try:
         f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_do()))
-        log.info("STT → BotCore: %s", text[:60])
+        log.info("STT → BotCore (voice_with_card): %s", text[:60])
     except Exception:
         log.exception("跨线程注入失败")
 
