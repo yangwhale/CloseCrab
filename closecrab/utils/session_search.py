@@ -141,6 +141,13 @@ class SessionIndex:
         self.bot_name = bot_name
         self.db_path = (db_dir or _DEFAULT_DIR) / f"{bot_name}.db"
         self._initialized = False
+        self._conn: "sqlite3.Connection | None" = None
+
+    def _get_conn(self) -> "sqlite3.Connection":
+        """常驻连接: 首次打开后复用, 避免每次查询重新 open 文件。"""
+        if self._conn is None:
+            self._conn = _connect(self.db_path)
+        return self._conn
 
     def init_db(self) -> None:
         """Create tables + FTS + triggers. Safe to call repeatedly.
@@ -151,7 +158,8 @@ class SessionIndex:
         """
         if self._initialized:
             return
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.executescript(_SCHEMA)
             conn.execute(_FTS_MAIN)
             conn.execute(_FTS_TRIGRAM)
@@ -198,7 +206,8 @@ class SessionIndex:
                          assistant_text, log_id, info_density_assistant))
         if not rows:
             return
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.executemany(
                 "INSERT INTO messages(ts, bot_name, user_id, channel, role, "
                 "text, log_id, info_density) VALUES (?,?,?,?,?,?,?,?)",
@@ -220,7 +229,8 @@ class SessionIndex:
         """
         self.init_db()
         updated = 0
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             if info_density_user is not None:
                 cur = conn.execute(
                     "UPDATE messages SET info_density = ? "
@@ -240,7 +250,8 @@ class SessionIndex:
     def update_density_by_row_id(self, row_id: int, density: float) -> int:
         """Direct row-id update used by the backfill script."""
         self.init_db()
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             cur = conn.execute(
                 "UPDATE messages SET info_density = ? WHERE id = ?",
                 (float(density), int(row_id)),
@@ -291,7 +302,8 @@ class SessionIndex:
                 f"WHERE f.text MATCH ?{where_extra} "
                 f"ORDER BY m.ts DESC LIMIT ?"
             )
-            with _connect(self.db_path) as conn:
+            conn = self._get_conn()
+        with conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute(sql, [match_arg, *params, limit])
                 return [dict(r) for r in cur.fetchall()]
@@ -314,7 +326,8 @@ class SessionIndex:
                 "FROM messages m WHERE text LIKE ?"
                 + where_extra + " ORDER BY ts DESC LIMIT ?"
             )
-            with _connect(self.db_path) as conn:
+            conn = self._get_conn()
+        with conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute(
                     sql, [f"%{query}%", *params, limit]
@@ -336,7 +349,8 @@ class SessionIndex:
     def total_docs(self) -> int:
         """Total indexed message count — the denominator N for IDF weighting."""
         self.init_db()
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             row = conn.execute("SELECT COUNT(*) FROM messages").fetchone()
             return int(row[0]) if row else 0
 
@@ -355,7 +369,8 @@ class SessionIndex:
         if not term:
             return 0
         match_arg = '"' + term.replace('"', '""') + '"'
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             for table in ("messages_fts", "messages_fts_trigram"):
                 try:
                     row = conn.execute(
@@ -369,7 +384,8 @@ class SessionIndex:
 
     def stats(self) -> dict:
         self.init_db()
-        with _connect(self.db_path) as conn:
+        conn = self._get_conn()
+        with conn:
             conn.row_factory = sqlite3.Row
             total = conn.execute(
                 "SELECT COUNT(*) AS c FROM messages"
