@@ -1035,7 +1035,6 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     global _tts_active
     _tts_interrupted = False  # 新一轮生成，重置中断标志
     _tts_active = True        # 抑制 source idle 停播
-    _zello_pcm24_buf = bytearray()  # Zello 旁路: 累积 24kHz mono PCM
 
     tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "gemini")
 
@@ -1073,7 +1072,11 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
                     source.write(stereo)
-                    _zello_pcm24_buf.extend(pcm24)
+                    try:
+                        from .zello_voice_sidecar import zello_feed_pcm24
+                        zello_feed_pcm24(pcm24)
+                    except Exception:
+                        pass
                     wrote += len(stereo)
                     if buf_f is not None:
                         buf_f.write(stereo)
@@ -1103,19 +1106,6 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                  (t_done - t_start) * 1000, wrote / 4 / 48000,
                  len(text), text[:30])
 
-        # Zello 旁路: 累积的 24kHz mono PCM 推 Zello (与 Discord 同源, 零额外 TTS 开销)
-        if _zello_pcm24_buf:
-            try:
-                from .zello_voice_sidecar import is_connected as _zc, _zello_client
-                if _zc() and _zello_client is not None:
-                    pcm_copy = bytes(_zello_pcm24_buf)
-                    from .zello_voice_sidecar import _sidecar_loop as _zl
-                    if _zl:
-                        import asyncio as _aio
-                        _aio.run_coroutine_threadsafe(_zello_client.send_voice(pcm_copy), _zl)
-                        log.info("TTS → Zello 旁路: %.1fs PCM", len(pcm_copy) / 2 / 24000)
-            except Exception:
-                log.debug("Zello 旁路跳过 (未加载或未连接)")
     except Exception:
         log.exception("流式 TTS 生成失败")
     finally:

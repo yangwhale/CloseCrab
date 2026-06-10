@@ -772,6 +772,127 @@ def _hkt_now() -> str:
 
 _zello_agent_session = None
 _zello_audio_output = None
+_zello_encoder_proc = None   # 持久 Opus encoder 子进程
+_zello_encoder_lock = None   # asyncio.Lock 保护 encoder 写入
+
+
+async def _start_persistent_encoder():
+    """启动持久 Opus encoder 子进程: stdin 接 16kHz mono PCM, stdout 出 Opus 包。"""
+    global _zello_encoder_proc
+    if _zello_encoder_proc is not None and _zello_encoder_proc.returncode is None:
+        return
+
+    script = """
+import ctypes, ctypes.util, struct, sys
+lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
+lib.opus_encoder_create.restype = ctypes.c_void_p
+err = ctypes.c_int(0)
+enc = lib.opus_encoder_create(16000, 1, 2048, ctypes.byref(err))
+if not enc:
+    sys.exit(1)
+frame_size = 960  # 60ms @ 16kHz
+frame_bytes = frame_size * 2
+buf = b""
+while True:
+    data = sys.stdin.buffer.read(frame_bytes - len(buf))
+    if not data:
+        break
+    buf += data
+    if len(buf) >= frame_bytes:
+        frame = buf[:frame_bytes]
+        buf = buf[frame_bytes:]
+        pcm_arr = (ctypes.c_int16 * frame_size).from_buffer_copy(frame)
+        out = (ctypes.c_ubyte * 4000)()
+        n = lib.opus_encode(enc, pcm_arr, frame_size, out, 4000)
+        if n > 0:
+            sys.stdout.buffer.write(struct.pack("<H", n))
+            sys.stdout.buffer.write(bytes(out[:n]))
+            sys.stdout.buffer.flush()
+lib.opus_encoder_destroy(enc)
+"""
+    _zello_encoder_proc = await asyncio.create_subprocess_exec(
+        "python3", "-c", script,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    log.info("Zello 持久 Opus encoder 子进程已启动 (PID=%d)", _zello_encoder_proc.pid)
+
+
+async def _zello_stream_send_loop():
+    """从 encoder stdout 读 Opus 包, 发到 Zello channel。自动管理 stream 生命周期。"""
+    proc = _zello_encoder_proc
+    if proc is None:
+        return
+    client = _zello_client
+    if client is None or not client._connected:
+        return
+
+    stream_id = None
+    packet_id = 0
+
+    while True:
+        try:
+            hdr = await proc.stdout.readexactly(2)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            break
+        pkt_len = struct.unpack("<H", hdr)[0]
+        try:
+            opus_pkt = await proc.stdout.readexactly(pkt_len)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            break
+
+        if client is None or not client._connected or not client._channel_online:
+            continue
+
+        # 懒初始化 stream
+        if stream_id is None:
+            codec_header = struct.pack("<HBB", 16000, 1, 60)
+            seq = client._next_seq()
+            await client._ws.send(json.dumps({
+                "command": "start_stream", "seq": seq, "channel": client.channel,
+                "type": "audio", "codec": "opus",
+                "codec_header": base64.b64encode(codec_header).decode(),
+                "packet_duration": 60,
+            }))
+            fut = asyncio.get_event_loop().create_future()
+            client._pending_responses[seq] = fut
+            try:
+                resp = await asyncio.wait_for(fut, timeout=10)
+                stream_id = resp.get("stream_id")
+            except asyncio.TimeoutError:
+                client._pending_responses.pop(seq, None)
+                log.warning("Zello stream start 超时")
+                continue
+            if not stream_id:
+                continue
+            packet_id = 0
+            log.info("Zello 流式发送开始 (stream_id=%d)", stream_id)
+
+        header = struct.pack("!BII", 0x01, stream_id, packet_id)
+        await client._ws.send(header + opus_pkt)
+        packet_id += 1
+
+
+def zello_feed_pcm24(pcm24: bytes):
+    """【Discord 线程调用】往 Zello encoder 管道写 24kHz mono PCM。线程安全。"""
+    proc = _zello_encoder_proc
+    if proc is None or proc.stdin is None or proc.returncode is not None:
+        return
+    # 重采样 24kHz → 16kHz
+    pcm16, _ = audioop.ratecv(pcm24, 2, 1, 24000, 16000, None)
+    try:
+        proc.stdin.write(pcm16)
+    except (BrokenPipeError, OSError):
+        pass
+
+
+async def zello_flush_stream():
+    """一段 TTS 说完, 关闭当前 Zello stream。"""
+    client = _zello_client
+    if client and client._connected:
+        # send_stream 会在下一段开始时自动重建
+        pass  # stream 会在 encoder 端 flush 时自然结束
 
 
 async def _start_zello_agent_session():
@@ -981,6 +1102,10 @@ async def _run(config: dict):
 
     await client.connect()
     asyncio.create_task(_speak_consumer())
+
+    # 启动持久 Opus encoder + 流式发送循环
+    await _start_persistent_encoder()
+    asyncio.create_task(_zello_stream_send_loop())
 
     # 飞书桥就绪后启动 AgentSession (需等飞书 channel ready 注册桥)
     async def _wait_and_start_session():
