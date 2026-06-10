@@ -956,3 +956,27 @@ def stop():
     _zello_client = None
     _sidecar_loop = None
     log.info("Zello sidecar 已停止")
+
+
+def start_sidecar(bot_name: str) -> tuple[bool, str]:
+    """【飞书 /zelloon 调用】运行时启动 Zello sidecar。"""
+    if is_connected():
+        return True, "Zello 已经连着 closecrab 频道了。"
+    ok = start(bot_name)
+    if not ok:
+        return False, "Zello 启动失败 (缺配置？看 bot.log)。"
+    import time as _t
+    for _ in range(30):
+        if is_connected():
+            return True, "✅ Zello 已连进 closecrab 频道，开始语音收发。"
+        _t.sleep(0.3)
+    return True, "⚠️ Zello 已启动但还没连上频道，稍等看 bot.log。"
+
+
+def stop_sidecar(bot_name: str) -> tuple[bool, str]:
+    """【飞书 /zellooff 调用】运行时停止 Zello sidecar。"""
+    if not is_connected() and _sidecar_loop is None:
+        return True, "Zello 本来就没连。"
+    stop()
+    return True, "✅ Zello 已断开。"
+    log.info("Zello sidecar 已停止")

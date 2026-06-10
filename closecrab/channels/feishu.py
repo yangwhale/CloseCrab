@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff"}
 
 # 语音情绪标签: Gemini TTS 用的 [casually] / [thinking] 这种，全小写、不跟 "(".
 # 用全小写排除标题里的 [External]；用 (?!\() 排除 markdown 链接 [title](url)。
@@ -4098,6 +4098,17 @@ class FeishuChannel(Channel):
             # 断开 Discord 语音 + 持久化 voice_sidecar=false (重启后也不连)。
             from ..voice.discord_voice_sidecar import stop_sidecar
             ok, msg = await asyncio.to_thread(stop_sidecar, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/zelloon":
+            from ..voice.zello_voice_sidecar import start_sidecar as zello_start
+            await self._async_send_text(chat_id, "正在连 Zello closecrab 频道…")
+            ok, msg = await asyncio.to_thread(zello_start, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/zellooff":
+            from ..voice.zello_voice_sidecar import stop_sidecar as zello_stop
+            ok, msg = await asyncio.to_thread(zello_stop, self._bot_name)
             await self._async_send_text(chat_id, msg)
 
         elif cmd == "/context":
