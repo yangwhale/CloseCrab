@@ -710,19 +710,6 @@ async def _zello_stream_send_loop():
         packet_id += 1
 
 
-def zello_feed_pcm24(pcm24: bytes):
-    """输入 24kHz mono，升采样到 48kHz stereo 再写 encoder。线程安全。"""
-    proc = _zello_encoder_proc
-    if proc is None or proc.stdin is None or proc.returncode is not None:
-        return
-    pcm48, _ = audioop.ratecv(pcm24, 2, 1, 24000, 48000, None)
-    stereo = audioop.tostereo(pcm48, 2, 1, 1)
-    try:
-        proc.stdin.write(stereo)
-    except (BrokenPipeError, OSError):
-        pass
-
-
 def zello_feed_pcm48_stereo(pcm48_stereo: bytes):
     """输入 48kHz stereo s16le，直灌 encoder。零转换。线程安全。"""
     proc = _zello_encoder_proc
