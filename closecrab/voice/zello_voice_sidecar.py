@@ -395,33 +395,9 @@ class ZelloClient:
         text = await _funasr_recognize(pcm_16k)
         t.append(time.monotonic())  # t[4] = stt done
 
-        # 5. 推飞书 (语音文件 + 文字 + BotCore 注入)
-        feishu = _feishu_ref
-        f_loop = _feishu_loop
-        if feishu is not None and f_loop is not None and _feishu_chat_id:
-            async def _send_and_inject(ogg=ogg_path, txt=text, spk=speaker):
-                t_send = time.monotonic()
-                try:
-                    # 发 OGG 语音文件
-                    if ogg and os.path.exists(ogg):
-                        await feishu._send_voice_file(_feishu_open_id, ogg)
-                    t_ogg_sent = time.monotonic()
-
-                    # 发 STT 文字
-                    if txt:
-                        feishu._send_text(_feishu_chat_id, f"🎤 [Zello·{spk}] {txt}")
-                    t_txt_sent = time.monotonic()
-
-                    log.info("[Zello→飞书] OGG发送 %.0fms, 文字发送 %.0fms",
-                             (t_ogg_sent - t_send) * 1000, (t_txt_sent - t_ogg_sent) * 1000)
-                except Exception:
-                    log.exception("[Zello→飞书] 发送失败")
-
-            f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send_and_inject()))
-
-            # 注入 BotCore 处理
-            if text:
-                _inject_to_botcore(text, speaker)
+        # 5. 注入 BotCore 处理 (echo 由 CloseCrabLLM 统一发飞书, 不再单独发 OGG/文字)
+        if text and _feishu_ref is not None and _feishu_loop is not None and _feishu_chat_id:
+            _inject_to_botcore(text, speaker)
 
         t.append(time.monotonic())  # t[5] = inject done
 
