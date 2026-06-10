@@ -948,7 +948,7 @@ async def _start_zello_agent_session():
         tts = GeminiTTS(model=model, voice=voice)
 
         class _ZelloAudioOutput(AudioOutput):
-            """TTS 帧 → 累积 PCM → flush 时发到 Zello channel。"""
+            """TTS 帧 → 逐帧走 persistent encoder 管道 → Zello channel。"""
 
             def __init__(self):
                 super().__init__(
@@ -956,34 +956,23 @@ async def _start_zello_agent_session():
                     capabilities=AudioOutputCapabilities(pause=False),
                     sample_rate=24000,
                 )
-                self._pcm_buf = bytearray()
                 self._seg_frames = 0
 
             async def capture_frame(self, frame) -> None:
                 await super().capture_frame(frame)
-                self._pcm_buf.extend(bytes(frame.data))
+                pcm24 = bytes(frame.data)
+                if pcm24:
+                    zello_feed_pcm24(pcm24)
                 self._seg_frames += 1
 
             def flush(self) -> None:
                 super().flush()
-                pcm = bytes(self._pcm_buf)
                 played = self._seg_frames * 0.02
-                self._pcm_buf.clear()
                 self._seg_frames = 0
-                if pcm and _zello_client is not None:
-                    asyncio.create_task(self._send_to_zello(pcm))
                 self.on_playback_finished(playback_position=played, interrupted=False)
-
-            async def _send_to_zello(self, pcm_24k: bytes):
-                try:
-                    await _zello_client.send_voice(pcm_24k)
-                    log.info("[Zello TTS] 发送 %.1fs 音频", len(pcm_24k) / 2 / 24000)
-                except Exception:
-                    log.exception("[Zello TTS] 发送失败")
 
             def clear_buffer(self) -> None:
                 played = self._seg_frames * 0.02
-                self._pcm_buf.clear()
                 self._seg_frames = 0
                 self.on_playback_finished(playback_position=played, interrupted=True)
 
