@@ -899,6 +899,14 @@ def _get_source_class():
             with self._lock:
                 self._buf.extend(pcm)
                 self._written += len(pcm)
+            # Zello 旁路: 48kHz stereo → downsample 到 24kHz mono 写 encoder 管道
+            try:
+                from .zello_voice_sidecar import zello_feed_pcm24
+                mono = audioop.tomono(pcm, 2, 1, 1)  # stereo → mono
+                pcm24, _ = audioop.ratecv(mono, 2, 1, 48000, 24000, None)
+                zello_feed_pcm24(pcm24)
+            except Exception:
+                pass
 
         def buffered(self) -> int:
             with self._lock:
@@ -1072,11 +1080,6 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
                     source.write(stereo)
-                    try:
-                        from .zello_voice_sidecar import zello_feed_pcm24
-                        zello_feed_pcm24(pcm24)
-                    except Exception:
-                        pass
                     wrote += len(stereo)
                     if buf_f is not None:
                         buf_f.write(stereo)
