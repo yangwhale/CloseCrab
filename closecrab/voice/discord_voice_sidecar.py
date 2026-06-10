@@ -1097,7 +1097,11 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                 pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                 stereo = audioop.tostereo(pcm48, 2, 1, 1)
                 source.write(stereo)
-                _zello_pcm24_buf.extend(pcm24)
+                try:
+                    from .zello_voice_sidecar import zello_feed_pcm24
+                    zello_feed_pcm24(pcm24)
+                except Exception:
+                    pass
                 wrote += len(stereo)
                 if buf_f is not None:
                     buf_f.write(stereo)
