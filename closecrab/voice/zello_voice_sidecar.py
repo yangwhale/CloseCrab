@@ -750,15 +750,20 @@ def _send_to_feishu(text: str, speaker: str):
         _t0 = _t.monotonic()
 
         # 1. 飞书 echo (fire-and-forget, 不等)
+        log.info("[Zello pipeline] step1: echo fire-and-forget")
         asyncio.ensure_future(feishu._send_long(chat_id, f"🎤 [Zello·{speaker}] {text}"))
 
         # 2. 直调 BotCore — 跳过 feishu 消息管线
         from ..core.types import UnifiedMessage
 
         async def _reply(reply_text: str):
+            log.info("[Zello pipeline] step4: _reply 开始, %d chars", len(reply_text))
             try:
+                log.info("[Zello pipeline] step4a: _send_long")
                 await feishu._send_long(chat_id, reply_text)
+                log.info("[Zello pipeline] step4b: _send_voice_summary")
                 await feishu._send_voice_summary(chat_id, open_id, reply_text)
+                log.info("[Zello pipeline] step4c: voice_summary 完成")
             except Exception:
                 log.exception("[Zello reply] 飞书发送失败")
 
@@ -769,11 +774,17 @@ def _send_to_feishu(text: str, speaker: str):
             reply=_reply,
             metadata={},
         )
-        log.info("[Zello→BotCore] 直调 handle_message: %.0fms", (_t.monotonic() - _t0) * 1000)
-        result = await feishu._core.handle_message(msg)
-        log.info("[Zello→BotCore] handle_message 完成: %.0fms", (_t.monotonic() - _t0) * 1000)
-        if result:
-            await _reply(result)
+        log.info("[Zello pipeline] step2: 进 handle_message: %.0fms", (_t.monotonic() - _t0) * 1000)
+        try:
+            result = await feishu._core.handle_message(msg)
+            log.info("[Zello pipeline] step3: handle_message 完成: %.0fms, result=%d chars",
+                     (_t.monotonic() - _t0) * 1000, len(result) if result else 0)
+            if result:
+                await _reply(result)
+            else:
+                log.warning("[Zello pipeline] handle_message 返回空!")
+        except Exception:
+            log.exception("[Zello pipeline] handle_message 异常")
 
     f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_botcore_then_echo()))
     log.info("STT → BotCore 直调 (飞书后置): %s", text[:60])
