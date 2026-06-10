@@ -789,12 +789,7 @@ def main():
         except Exception as e:
             log.warning(f"Discord 语音 sidecar 启动失败 (non-fatal): {e}")
 
-    # Zello PTT 语音 sidecar (接收方向: Zello → STT → BotCore)
-    # 预 import livekit_io: silero 插件要求主线程注册, Zello 子线程 lazy import 会报错
-    try:
-        from .voice import livekit_io as _  # noqa: F401
-    except Exception:
-        pass
+    # Zello PTT 语音 sidecar (接收方向: Zello → STT → feishu 消息通道)
     try:
         from .voice.zello_voice_sidecar import start as start_zello_sidecar
         start_zello_sidecar(bot_name)

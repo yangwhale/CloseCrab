@@ -1673,6 +1673,42 @@ class FeishuChannel(Channel):
 
         await self._handle_message_async(synthetic_event)
 
+    async def inject_synthetic_text(self, open_id: str, chat_id: str, text: str):
+        """外部注入一条文字消息到消息处理流程（Zello STT 等外部语音通道用）。"""
+        synthetic_id = f"zello-stt-{int(time.time() * 1000)}"
+        fake_data = {
+            "schema": "2.0",
+            "header": {
+                "event_id": synthetic_id,
+                "event_type": "im.message.receive_v1",
+                "create_time": "0",
+                "token": "",
+                "app_id": self._app_id,
+                "tenant_key": "",
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {"open_id": open_id},
+                    "sender_type": "user",
+                    "tenant_key": "",
+                },
+                "message": {
+                    "message_id": synthetic_id,
+                    "chat_id": chat_id,
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": json.dumps({"text": text}),
+                    "mentions": [],
+                },
+            },
+        }
+        try:
+            synthetic_event = P2ImMessageReceiveV1(fake_data)
+        except Exception as e:
+            log.warning(f"inject_synthetic_text construct failed: {e}")
+            return
+        await self._handle_message_async(synthetic_event)
+
     def _on_bot_menu_clicked(self, data) -> None:
         """P3-5: bot 自定义菜单点击事件回调（SDK 线程）。
 

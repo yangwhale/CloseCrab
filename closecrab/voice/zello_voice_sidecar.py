@@ -42,7 +42,6 @@ _sidecar_loop: "asyncio.AbstractEventLoop | None" = None
 _sidecar_thread: "threading.Thread | None" = None
 _zello_client: "ZelloClient | None" = None
 _speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
-_stt_callback = None   # fn(text: str, speaker: str) — 收到 STT 结果时回调
 _feishu_ref = None     # FeishuChannel 实例 (全双工桥)
 _feishu_loop = None
 _feishu_open_id = ""
@@ -274,11 +273,6 @@ class ZelloClient:
             text = data.get("text", "")
             sender = data.get("from", "?")
             log.info("Zello 文字 from %s: %s", sender, text[:80])
-            if _stt_callback and text:
-                try:
-                    _stt_callback(text, sender)
-                except Exception:
-                    log.exception("文字消息回调异常")
 
         elif cmd == "on_error":
             log.error("Zello 错误: %s", data.get("error"))
@@ -361,9 +355,9 @@ class ZelloClient:
         text = await _funasr_recognize(pcm_16k)
         t.append(time.monotonic())  # t[4] = stt done
 
-        # 5. 注入 BotCore 处理 (echo 由 CloseCrabLLM 统一发飞书, 不再单独发 OGG/文字)
+        # 5. 送飞书消息通道 (instant ack + BotCore 处理)
         if text and _feishu_ref is not None and _feishu_loop is not None and _feishu_chat_id:
-            _inject_to_botcore(text, speaker)
+            _send_to_feishu(text, speaker)
 
         t.append(time.monotonic())  # t[5] = inject done
 
@@ -598,8 +592,6 @@ def _hkt_now() -> str:
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
 
 
-_zello_agent_session = None
-_zello_audio_output = None
 _zello_encoder_proc = None   # 持久 Opus encoder 子进程
 _zello_encoder_lock = None   # asyncio.Lock 保护 encoder 写入
 
@@ -750,115 +742,41 @@ async def zello_flush_stream():
         pass  # stream 会在 encoder 端 flush 时自然结束
 
 
-async def _start_zello_agent_session():
-    """在 Zello sidecar loop 上启动 AgentSession (CloseCrabLLM + GeminiTTS + ZelloAudioOutput)。"""
-    global _zello_agent_session, _zello_audio_output
+_INSTANT_ACK_PHRASES = [
+    "嗯，这个得好好想想，你等我一下下啊！",
+    "收到，让我想想。",
+    "好问题，稍等！",
+    "这个有点意思，让我查查。",
+    "嗯嗯，马上回你。",
+    "不是哥们，这个问题含金量太高了，让我好好想想！",
+    "这个有点复杂，我捋一捋啊，稍等！",
+    "嗯嗯嗯，这个烧脑，让我仔细想想再回你！",
+]
 
-    if _zello_agent_session is not None:
+
+def _send_to_feishu(text: str, speaker: str):
+    """Zello STT → 飞书消息通道 (instant ack + BotCore 处理)。"""
+    feishu = _feishu_ref
+    f_loop = _feishu_loop
+    if feishu is None or f_loop is None or not _feishu_chat_id:
+        log.warning("[Zello→飞书] 飞书桥未注册, 跳过")
         return
 
-    if _feishu_ref is None or _feishu_loop is None or not _feishu_open_id:
-        log.warning("飞书桥未注册, 无法启动 AgentSession")
-        return
-
-    try:
-        from livekit.agents import Agent, AgentSession
-        from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities, AudioInput
-        from .livekit_io import CloseCrabLLM
-        from .gemini_tts import GeminiTTS
-
-        llm = CloseCrabLLM(_feishu_ref, _feishu_loop, _feishu_open_id)
-        voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
-        model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
-        tts = GeminiTTS(model=model, voice=voice)
-
-        class _ZelloAudioOutput(AudioOutput):
-            """TTS 帧 → 逐帧走 persistent encoder 管道 → Zello channel。"""
-
-            def __init__(self):
-                super().__init__(
-                    label="zello",
-                    capabilities=AudioOutputCapabilities(pause=False),
-                    sample_rate=24000,
-                )
-                self._seg_frames = 0
-
-            async def capture_frame(self, frame) -> None:
-                await super().capture_frame(frame)
-                pcm24 = bytes(frame.data)
-                if pcm24:
-                    zello_feed_pcm24(pcm24)
-                self._seg_frames += 1
-
-            def flush(self) -> None:
-                super().flush()
-                played = self._seg_frames * 0.02
-                self._seg_frames = 0
-                self.on_playback_finished(playback_position=played, interrupted=False)
-
-            def clear_buffer(self) -> None:
-                played = self._seg_frames * 0.02
-                self._seg_frames = 0
-                self.on_playback_finished(playback_position=played, interrupted=True)
-
-        # 空壳 AudioInput (AgentSession 要求有, 但 STT 由 FunASR 独立驱动)
-        class _DummyAudioInput(AudioInput):
-            def __init__(self):
-                super().__init__(label="zello-dummy")
-            async def __anext__(self):
-                await asyncio.sleep(3600)
-                raise StopAsyncIteration
-
-        ao = _ZelloAudioOutput()
-        ai = _DummyAudioInput()
-        session = AgentSession(llm=llm, tts=tts)
-        session.input.audio = ai
-        session.output.audio = ao
-        await session.start(Agent(instructions=" "))
-        _zello_agent_session = session
-        _zello_audio_output = ao
-        log.info("Zello AgentSession 已启动 (CloseCrabLLM + GeminiTTS + ZelloAudioOutput)")
-    except Exception:
-        log.exception("Zello AgentSession 启动失败")
-
-
-def _inject_to_botcore(text: str, speaker: str):
-    """通过 Zello 本地 AgentSession.generate_reply 处理 STT 文字。
-
-    路径: AgentSession → CloseCrabLLM → feishu worker → GeminiTTS → Zello 语音输出。
-    """
-    session = _zello_agent_session
-    if session is None:
-        log.warning("[Zello→LLM] AgentSession 未就绪, 跳过")
-        return
+    import random
+    ack = random.choice(_INSTANT_ACK_PHRASES)
+    speak_text(ack)
 
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
-
-    try:
-        from .livekit_io import _closecrab_llm_instance
-        llm = _closecrab_llm_instance()
-        if llm is not None:
-            llm._skip_next_debounce = True
-    except Exception:
-        pass
-
-    loop = _sidecar_loop
-    if loop:
-        loop.call_soon_threadsafe(lambda: session.generate_reply(user_input=content))
-        log.info("STT → AgentSession.generate_reply: %s", text[:60])
-    else:
-        log.warning("[Zello→LLM] sidecar loop 不可用")
+    asyncio.run_coroutine_threadsafe(
+        feishu.inject_synthetic_text(_feishu_open_id, _feishu_chat_id, content),
+        f_loop,
+    )
+    log.info("STT → feishu 消息通道: %s", text[:60])
 
 
 # ═══════════════════════════════════════════════════════════════════════
 #  模块级 API (给外部线程调用)
 # ═══════════════════════════════════════════════════════════════════════
-
-def set_stt_callback(fn):
-    """注册 STT 回调: fn(text: str, speaker: str)。线程安全。"""
-    global _stt_callback
-    _stt_callback = fn
-
 
 def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str, chat_id: str = ""):
     """注册飞书大脑入口, 供全双工。"""
@@ -951,15 +869,15 @@ async def _run(config: dict):
     await _start_persistent_encoder()
     asyncio.create_task(_zello_stream_send_loop())
 
-    # 飞书桥就绪后启动 AgentSession (需等飞书 channel ready 注册桥)
-    async def _wait_and_start_session():
+    # 等飞书桥注册就绪 (Zello STT 需要 feishu channel 路由消息)
+    async def _wait_bridge():
         for _ in range(60):
             if _feishu_ref is not None and _feishu_loop is not None and _feishu_open_id:
-                await _start_zello_agent_session()
+                log.info("Zello 飞书桥已就绪, STT 消息可路由")
                 return
             await asyncio.sleep(1)
-        log.warning("等待飞书桥超时, AgentSession 未启动")
-    asyncio.create_task(_wait_and_start_session())
+        log.warning("等待飞书桥超时")
+    asyncio.create_task(_wait_bridge())
 
     await client.recv_loop()
 
