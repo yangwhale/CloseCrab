@@ -728,43 +728,42 @@ def _hkt_now() -> str:
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
 
 
-_SEND_AS_USER = os.path.expanduser(
-    "~/CloseCrab/skills/feishu-user-msg/scripts/send_as_user.py"
-)
-
-
 def _inject_to_botcore(text: str, speaker: str):
-    """以 Chris 身份发飞书消息, bot 收到后走正常 _handle_message_async 流程。
+    """通过 AgentSession.generate_reply 注入 STT 文字, 跟 Discord 一模一样。
 
-    绕过 per-user lock: 不直接调 handle_message, 而是通过 send_as_user.py
-    发一条真正的飞书消息。飞书 bot 收到后按正常文字消息处理 (进度卡片+回复+TTS)。
+    路径: AgentSession → CloseCrabLLM → feishu worker → TTS → 播放。
+    完全不走 BotCore handle_message, 没有 per-user lock。
     """
+    try:
+        from .discord_voice_sidecar import _agent_session, _sidecar_loop as dc_loop
+        from .livekit_io import _closecrab_llm_instance
+    except ImportError:
+        log.warning("Discord sidecar 未加载, 无法注入 AgentSession")
+        return
+
+    session = _agent_session
+    if session is None:
+        log.warning("[Zello→LLM] AgentSession 未就绪, 跳过")
+        return
+    dc = dc_loop
+    if dc is None:
+        log.warning("[Zello→LLM] Discord sidecar loop 不可用")
+        return
+
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
 
-    async def _do():
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "python3", _SEND_AS_USER, "--to", _bot_name, "--text", content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
-            if proc.returncode == 0:
-                log.info("[Zello→飞书] 消息已发 (as user): %s", text[:60])
-            else:
-                log.warning("[Zello→飞书] send_as_user 失败 rc=%d: %s",
-                            proc.returncode, (err or out or b"").decode()[:200])
-        except asyncio.TimeoutError:
-            log.warning("[Zello→飞书] send_as_user 超时")
-        except Exception:
-            log.exception("[Zello→飞书] send_as_user 异常")
+    def _do():
+        llm = _closecrab_llm_instance()
+        if llm is not None:
+            llm._skip_next_debounce = True
+        session.generate_reply(user_input=content)
+        log.info("[Zello→LLM] generate_reply: %s", text[:60])
 
-    loop = _sidecar_loop
-    if loop:
-        asyncio.run_coroutine_threadsafe(_do(), loop)
-        log.info("STT → send_as_user: %s", text[:60])
-    else:
-        log.warning("sidecar loop 不可用")
+    try:
+        dc.call_soon_threadsafe(_do)
+        log.info("STT → AgentSession: %s", text[:60])
+    except Exception:
+        log.exception("[Zello→LLM] 调度失败")
 
 
 # ═══════════════════════════════════════════════════════════════════════
