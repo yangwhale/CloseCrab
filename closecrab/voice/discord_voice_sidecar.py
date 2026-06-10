@@ -899,12 +899,11 @@ def _get_source_class():
             with self._lock:
                 self._buf.extend(pcm)
                 self._written += len(pcm)
-            # Zello 旁路: 48kHz stereo → downsample 到 24kHz mono 写 encoder 管道
+            # Zello 旁路: 48kHz stereo → mono → encoder 管道 (48kHz 直送, 无需降采样)
             try:
-                from .zello_voice_sidecar import zello_feed_pcm24
-                mono = audioop.tomono(pcm, 2, 1, 1)  # stereo → mono
-                pcm24, _ = audioop.ratecv(mono, 2, 1, 48000, 24000, None)
-                zello_feed_pcm24(pcm24)
+                from .zello_voice_sidecar import zello_feed_pcm48
+                mono = audioop.tomono(pcm, 2, 1, 1)
+                zello_feed_pcm48(mono)
             except Exception:
                 pass
 
@@ -1318,12 +1317,11 @@ def _get_file_source_class():
             _set_progress(self._fid, played=self._played, active=True)
             if len(chunk) < self.FRAME:  # 末帧补齐静音
                 chunk = chunk + b"\x00" * (self.FRAME - len(chunk))
-            # Zello 旁路 (跟 _StreamPCMSource.write 一样)
+            # Zello 旁路: 48kHz stereo → mono → encoder (48kHz 直送)
             try:
-                from .zello_voice_sidecar import zello_feed_pcm24
+                from .zello_voice_sidecar import zello_feed_pcm48
                 mono = audioop.tomono(chunk, 2, 1, 1)
-                pcm24, _ = audioop.ratecv(mono, 2, 1, 48000, 24000, None)
-                zello_feed_pcm24(pcm24)
+                zello_feed_pcm48(mono)
             except Exception:
                 pass
             return chunk

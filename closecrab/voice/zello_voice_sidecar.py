@@ -479,9 +479,10 @@ lib.opus_decoder_destroy(dec)
         if not pcm_24k:
             return
 
-        sample_rate = 24000
+        pcm_48k, _ = audioop.ratecv(pcm_24k, 2, 1, 24000, 48000, None)
+        sample_rate = 48000
         frame_size_ms = 60
-        frame_size = int(sample_rate * frame_size_ms / 1000)  # 1440 samples
+        frame_size = int(sample_rate * frame_size_ms / 1000)  # 2880 samples
 
         # Opus 编码 (subprocess 隔离, 防 libopus segfault)
         import tempfile
@@ -489,7 +490,7 @@ lib.opus_decoder_destroy(dec)
         opus_path = raw_path.replace(".pcm", ".opus_pkts")
         try:
             with open(raw_path, "wb") as f:
-                f.write(pcm_24k)
+                f.write(pcm_48k)
             encode_script = f"""
 import ctypes, ctypes.util, struct, sys
 lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
@@ -777,10 +778,10 @@ import ctypes, ctypes.util, struct, sys
 lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
 lib.opus_encoder_create.restype = ctypes.c_void_p
 err = ctypes.c_int(0)
-enc = lib.opus_encoder_create(24000, 1, 2048, ctypes.byref(err))
+enc = lib.opus_encoder_create(48000, 1, 2048, ctypes.byref(err))
 if not enc:
     sys.exit(1)
-frame_size = 1440  # 60ms @ 24kHz
+frame_size = 2880  # 60ms @ 48kHz
 frame_bytes = frame_size * 2
 buf = b""
 while True:
@@ -852,7 +853,7 @@ async def _zello_stream_send_loop():
 
         # 懒初始化 stream (每段 TTS 开始时自动创建)
         if stream_id is None:
-            codec_header = struct.pack("<HBB", 24000, 1, 60)
+            codec_header = struct.pack("<HBB", 48000, 1, 60)
             seq = client._next_seq()
             await client._ws.send(json.dumps({
                 "command": "start_stream", "seq": seq, "channel": client.channel,
@@ -880,12 +881,24 @@ async def _zello_stream_send_loop():
 
 
 def zello_feed_pcm24(pcm24: bytes):
-    """【Discord 线程调用】往 Zello encoder 管道写 24kHz mono PCM。线程安全。"""
+    """往 Zello encoder 管道写 PCM。输入 24kHz mono，内部升采样到 48kHz。线程安全。"""
+    proc = _zello_encoder_proc
+    if proc is None or proc.stdin is None or proc.returncode is not None:
+        return
+    pcm48, _ = audioop.ratecv(pcm24, 2, 1, 24000, 48000, None)
+    try:
+        proc.stdin.write(pcm48)
+    except (BrokenPipeError, OSError):
+        pass
+
+
+def zello_feed_pcm48(pcm48_mono: bytes):
+    """往 Zello encoder 管道写 48kHz mono PCM。无需重采样。线程安全。"""
     proc = _zello_encoder_proc
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
     try:
-        proc.stdin.write(pcm24)
+        proc.stdin.write(pcm48_mono)
     except (BrokenPipeError, OSError):
         pass
 
@@ -1263,8 +1276,7 @@ async def _play_buffer(fid: str, start_byte: int = 0):
             if len(chunk) < _PCM_FRAME:
                 chunk += b"\x00" * (_PCM_FRAME - len(chunk))
             mono = audioop.tomono(chunk, 2, 1, 1)
-            pcm24, _ = audioop.ratecv(mono, 2, 1, 48000, 24000, None)
-            zello_feed_pcm24(pcm24)
+            zello_feed_pcm48(mono)
             played += len(chunk)
             _set_progress(fid, played=played, active=True)
             await asyncio.sleep(0.02)
