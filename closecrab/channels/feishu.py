@@ -1675,7 +1675,9 @@ class FeishuChannel(Channel):
 
     async def inject_synthetic_text(self, open_id: str, chat_id: str, text: str):
         """外部注入一条文字消息到消息处理流程（Zello STT 等外部语音通道用）。"""
-        synthetic_id = f"zello-stt-{int(time.time() * 1000)}"
+        import time as _t
+        _t0 = _t.monotonic()
+        synthetic_id = f"zello-stt-{int(_t.time() * 1000)}"
         fake_data = {
             "schema": "2.0",
             "header": {
@@ -1707,7 +1709,11 @@ class FeishuChannel(Channel):
         except Exception as e:
             log.warning(f"inject_synthetic_text construct failed: {e}")
             return
+        log.info("[Zello inject] event 构造: %.0fms, 进入 _handle_message_async",
+                 (_t.monotonic() - _t0) * 1000)
         await self._handle_message_async(synthetic_event)
+        log.info("[Zello inject] _handle_message_async 完成: %.0fms",
+                 (_t.monotonic() - _t0) * 1000)
 
     def _on_bot_menu_clicked(self, data) -> None:
         """P3-5: bot 自定义菜单点击事件回调（SDK 线程）。

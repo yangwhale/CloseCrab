@@ -149,11 +149,15 @@ class BotCore:
         Returns:
             Worker 的回复文本
         """
+        import time as _t
+        _hm_t0 = _t.monotonic()
         user_key = msg.user_id
         on_progress = msg.metadata.get("on_progress")
         on_tui_step = msg.metadata.get("on_tui_step")
 
+        log.info("[handle_message] 等 lock: user=%s channel=%s", user_key[:12], msg.channel_type)
         lock = await self._acquire_user_task_lock(user_key)
+        log.info("[handle_message] lock 拿到: %.0fms", (_t.monotonic() - _hm_t0) * 1000)
         try:
             return await self._handle_message_locked(
                 msg, user_key, on_progress, on_tui_step,

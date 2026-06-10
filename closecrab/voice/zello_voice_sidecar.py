@@ -766,11 +766,14 @@ def _send_to_feishu(text: str, speaker: str):
 
     # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
+    import time as _t
+    _t0 = _t.monotonic()
     asyncio.run_coroutine_threadsafe(
         feishu.inject_synthetic_text(_feishu_open_id, _feishu_chat_id, content),
         f_loop,
     )
-    log.info("STT → feishu 消息通道: %s", text[:60])
+    log.info("STT → feishu synthetic event: %.0fms, %s",
+             (_t.monotonic() - _t0) * 1000, text[:60])
 
 
 # ═══════════════════════════════════════════════════════════════════════
