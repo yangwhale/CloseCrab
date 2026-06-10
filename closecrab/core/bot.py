@@ -267,25 +267,24 @@ class BotCore:
         steps: list[str] = []
 
         # 实时日志：对话开始时创建 log doc，每个 step 实时追加
+        # fire-and-forget: 不阻塞 worker.send()，后台写 Firestore
         log_ref = None
         if self._db:
             try:
                 from google.cloud.firestore import SERVER_TIMESTAMP
                 log_ref = self._db.collection("bots").document(self.bot_name).collection("logs").document()
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, lambda: log_ref.set({
+                _log_data = {
                     "timestamp": SERVER_TIMESTAMP,
                     "session_id": worker.session_id or "",
-                    # Persist the user's actual words, not the content padded
-                    # with S1 recall block / dirty-restart prefix. Otherwise
-                    # backfill re-ingests those into SessionIndex and creates
-                    # a recursive recall pollution loop.
                     "user": original_user_text[:5000],
                     "assistant": "",
                     "source": msg.channel_type,
                     "status": "running",
                     "steps": [],
-                }))
+                }
+                _log_ref = log_ref
+                asyncio.ensure_future(loop.run_in_executor(None, lambda: _log_ref.set(_log_data)))
                 log.info(f"Live log doc created: {log_ref.id}")
             except Exception as e:
                 log.warning(f"Failed to create live log doc: {e}")
