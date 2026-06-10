@@ -55,6 +55,7 @@ _display_names: dict[str, str] = {}  # Zello username → display name
 class _SpeakItem:
     text: str
     enqueue_time: float = 0.0
+    fid: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -756,7 +757,7 @@ async def _speak_consumer():
                      (t_tts - t0) * 1000, len(pcm) / 2 / 24000, item.text[:40])
             # 存 buffer (48kHz stereo) 供重播/快进快退, 跟 Discord 格式一致
             try:
-                fid = f"{int(time.time() * 1000):x}"
+                fid = item.fid or f"{int(time.time() * 1000):x}"
                 pcm48, _ = audioop.ratecv(pcm, 2, 1, 24000, 48000, None)
                 stereo = audioop.tostereo(pcm48, 2, 1, 1)
                 bpath = os.path.join(_BUF_DIR, f"{fid}.pcm")
@@ -1057,7 +1058,7 @@ def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str, chat_id: str = 
     log.info("飞书桥注册 → Zello 全双工可用")
 
 
-def speak_text(text: str) -> bool:
+def speak_text(text: str, fid: str = "") -> bool:
     """【跨线程调用】把文本推到 Zello TTS 队列。sidecar 未启动时静默返回 False。"""
     if not text or not text.strip():
         return False
@@ -1066,7 +1067,7 @@ def speak_text(text: str) -> bool:
         return False
     try:
         asyncio.run_coroutine_threadsafe(
-            _speak_queue.put(_SpeakItem(text=text, enqueue_time=time.monotonic())),
+            _speak_queue.put(_SpeakItem(text=text, enqueue_time=time.monotonic(), fid=fid)),
             loop,
         )
         return True
