@@ -797,7 +797,7 @@ async def _start_zello_agent_session():
         # 空壳 AudioInput (AgentSession 要求有, 但 STT 由 FunASR 独立驱动)
         class _DummyAudioInput(AudioInput):
             def __init__(self):
-                super().__init__(label="zello-dummy", sample_rate=16000)
+                super().__init__(label="zello-dummy")
             async def __anext__(self):
                 await asyncio.sleep(3600)
                 raise StopAsyncIteration
