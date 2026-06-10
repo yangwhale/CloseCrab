@@ -728,40 +728,43 @@ def _hkt_now() -> str:
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
 
 
+_SEND_AS_USER = os.path.expanduser(
+    "~/CloseCrab/skills/feishu-user-msg/scripts/send_as_user.py"
+)
+
+
 def _inject_to_botcore(text: str, speaker: str):
-    """把 Zello STT 结果通过飞书语音消息流程处理 (进度卡片 + BotCore + 回复 + TTS)。
+    """以 Chris 身份发飞书消息, bot 收到后走正常 _handle_message_async 流程。
 
-    用 _run_voice_message_with_card 而不是直接 handle_message，
-    因为后者被 per-user lock 阻塞 (当前 turn 持锁，注入的消息排在后面)。
+    绕过 per-user lock: 不直接调 handle_message, 而是通过 send_as_user.py
+    发一条真正的飞书消息。飞书 bot 收到后按正常文字消息处理 (进度卡片+回复+TTS)。
     """
-    feishu = _feishu_ref
-    f_loop = _feishu_loop
-    if feishu is None or f_loop is None or not _feishu_open_id:
-        log.debug("飞书桥未注册, STT 结果不注入")
-        return
-
-    content = (
-        f"[当前时间: {_hkt_now()}]\n"
-        f"[from: Zello PTT · {speaker}]\n"
-        f"{text}"
-    )
+    content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
 
     async def _do():
         try:
-            await feishu._run_voice_message_with_card(
-                chat_id=_feishu_chat_id,
-                user_key=_feishu_open_id,
-                content=content,
+            proc = await asyncio.create_subprocess_exec(
+                "python3", _SEND_AS_USER, "--to", _bot_name, "--text", content,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            log.info("[Zello→BotCore] 语音消息处理完成")
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode == 0:
+                log.info("[Zello→飞书] 消息已发 (as user): %s", text[:60])
+            else:
+                log.warning("[Zello→飞书] send_as_user 失败 rc=%d: %s",
+                            proc.returncode, (err or out or b"").decode()[:200])
+        except asyncio.TimeoutError:
+            log.warning("[Zello→飞书] send_as_user 超时")
         except Exception:
-            log.exception("STT 注入失败")
+            log.exception("[Zello→飞书] send_as_user 异常")
 
-    try:
-        f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_do()))
-        log.info("STT → BotCore (voice_with_card): %s", text[:60])
-    except Exception:
-        log.exception("跨线程注入失败")
+    loop = _sidecar_loop
+    if loop:
+        asyncio.run_coroutine_threadsafe(_do(), loop)
+        log.info("STT → send_as_user: %s", text[:60])
+    else:
+        log.warning("sidecar loop 不可用")
 
 
 # ═══════════════════════════════════════════════════════════════════════
