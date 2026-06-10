@@ -729,38 +729,52 @@ _INSTANT_ACK_PHRASES = [
 
 
 def _send_to_feishu(text: str, speaker: str):
-    """Zello STT → feishu synthetic event → BotCore。"""
+    """Zello STT → BotCore 优先, 飞书 echo 后置。"""
     feishu = _feishu_ref
     f_loop = _feishu_loop
     if feishu is None or f_loop is None or not _feishu_chat_id:
         log.warning("[Zello→飞书] 飞书桥未注册, 跳过")
         return
 
-    # echo (fire-and-forget)
-    try:
-        f_loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(
-                feishu._send_long(_feishu_chat_id, f"🎤 [Zello·{speaker}] {text}"),
-                loop=f_loop,
-            )
-        )
-    except Exception:
-        pass
-
-    # instant ack (fire-and-forget)
+    # instant ack (fire-and-forget, 不阻塞 LLM)
     import random
     speak_text(random.choice(_INSTANT_ACK_PHRASES))
 
-    # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
-    import time as _t
-    _t0 = _t.monotonic()
-    asyncio.run_coroutine_threadsafe(
-        feishu.inject_synthetic_text(_feishu_open_id, _feishu_chat_id, content),
-        f_loop,
-    )
-    log.info("STT → feishu synthetic event: %.0fms, %s",
-             (_t.monotonic() - _t0) * 1000, text[:60])
+    open_id = _feishu_open_id
+    chat_id = _feishu_chat_id
+
+    async def _botcore_then_echo():
+        """BotCore 优先 → LLM 立刻启动, 飞书 echo 后置。"""
+        import time as _t
+        _t0 = _t.monotonic()
+
+        # 1. 飞书 echo (fire-and-forget, 不等)
+        asyncio.ensure_future(feishu._send_long(chat_id, f"🎤 [Zello·{speaker}] {text}"))
+
+        # 2. 直调 BotCore — 跳过 feishu 消息管线
+        from ..core.types import UnifiedMessage
+
+        async def _reply(reply_text: str):
+            try:
+                await feishu._send_long(chat_id, reply_text)
+                await feishu._send_voice_summary(chat_id, open_id, reply_text)
+            except Exception:
+                log.exception("[Zello reply] 飞书发送失败")
+
+        msg = UnifiedMessage(
+            channel_type="zello",
+            user_id=open_id,
+            content=content,
+            reply=_reply,
+            metadata={},
+        )
+        log.info("[Zello→BotCore] 直调 handle_message: %.0fms", (_t.monotonic() - _t0) * 1000)
+        await feishu.core.handle_message(msg)
+        log.info("[Zello→BotCore] handle_message 完成: %.0fms", (_t.monotonic() - _t0) * 1000)
+
+    f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_botcore_then_echo()))
+    log.info("STT → BotCore 直调 (飞书后置): %s", text[:60])
 
 
 # ═══════════════════════════════════════════════════════════════════════
