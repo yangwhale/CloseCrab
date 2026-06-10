@@ -778,11 +778,12 @@ import ctypes, ctypes.util, struct, sys
 lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
 lib.opus_encoder_create.restype = ctypes.c_void_p
 err = ctypes.c_int(0)
-enc = lib.opus_encoder_create(48000, 1, 2048, ctypes.byref(err))
+enc = lib.opus_encoder_create(48000, 2, 2048, ctypes.byref(err))
 if not enc:
     sys.exit(1)
-frame_size = 2880  # 60ms @ 48kHz
-frame_bytes = frame_size * 2
+channels = 2
+frame_size = 2880  # 60ms @ 48kHz per channel
+frame_bytes = frame_size * channels * 2
 buf = b""
 while True:
     data = sys.stdin.buffer.read(frame_bytes - len(buf))
@@ -792,7 +793,7 @@ while True:
     if len(buf) >= frame_bytes:
         frame = buf[:frame_bytes]
         buf = buf[frame_bytes:]
-        pcm_arr = (ctypes.c_int16 * frame_size).from_buffer_copy(frame)
+        pcm_arr = (ctypes.c_int16 * (frame_size * channels)).from_buffer_copy(frame)
         out = (ctypes.c_ubyte * 4000)()
         n = lib.opus_encode(enc, pcm_arr, frame_size, out, 4000)
         if n > 0:
@@ -881,24 +882,25 @@ async def _zello_stream_send_loop():
 
 
 def zello_feed_pcm24(pcm24: bytes):
-    """往 Zello encoder 管道写 PCM。输入 24kHz mono，内部升采样到 48kHz。线程安全。"""
+    """输入 24kHz mono，升采样到 48kHz stereo 再写 encoder。线程安全。"""
     proc = _zello_encoder_proc
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
     pcm48, _ = audioop.ratecv(pcm24, 2, 1, 24000, 48000, None)
+    stereo = audioop.tostereo(pcm48, 2, 1, 1)
     try:
-        proc.stdin.write(pcm48)
+        proc.stdin.write(stereo)
     except (BrokenPipeError, OSError):
         pass
 
 
-def zello_feed_pcm48(pcm48_mono: bytes):
-    """往 Zello encoder 管道写 48kHz mono PCM。无需重采样。线程安全。"""
+def zello_feed_pcm48_stereo(pcm48_stereo: bytes):
+    """输入 48kHz stereo s16le，直灌 encoder。零转换。线程安全。"""
     proc = _zello_encoder_proc
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
     try:
-        proc.stdin.write(pcm48_mono)
+        proc.stdin.write(pcm48_stereo)
     except (BrokenPipeError, OSError):
         pass
 
@@ -1275,8 +1277,7 @@ async def _play_buffer(fid: str, start_byte: int = 0):
                 break
             if len(chunk) < _PCM_FRAME:
                 chunk += b"\x00" * (_PCM_FRAME - len(chunk))
-            mono = audioop.tomono(chunk, 2, 1, 1)
-            zello_feed_pcm48(mono)
+            zello_feed_pcm48_stereo(chunk)
             played += len(chunk)
             _set_progress(fid, played=played, active=True)
             await asyncio.sleep(0.02)

@@ -899,11 +899,10 @@ def _get_source_class():
             with self._lock:
                 self._buf.extend(pcm)
                 self._written += len(pcm)
-            # Zello 旁路: 48kHz stereo → mono → encoder 管道 (48kHz 直送, 无需降采样)
+            # Zello 旁路: 48kHz stereo 直灌 encoder (stereo Opus 编码)
             try:
-                from .zello_voice_sidecar import zello_feed_pcm48
-                mono = audioop.tomono(pcm, 2, 1, 1)
-                zello_feed_pcm48(mono)
+                from .zello_voice_sidecar import zello_feed_pcm48_stereo
+                zello_feed_pcm48_stereo(pcm)
             except Exception:
                 pass
 
@@ -1317,11 +1316,10 @@ def _get_file_source_class():
             _set_progress(self._fid, played=self._played, active=True)
             if len(chunk) < self.FRAME:  # 末帧补齐静音
                 chunk = chunk + b"\x00" * (self.FRAME - len(chunk))
-            # Zello 旁路: 48kHz stereo → mono → encoder (48kHz 直送)
+            # Zello 旁路: 48kHz stereo 直灌 encoder
             try:
-                from .zello_voice_sidecar import zello_feed_pcm48
-                mono = audioop.tomono(chunk, 2, 1, 1)
-                zello_feed_pcm48(mono)
+                from .zello_voice_sidecar import zello_feed_pcm48_stereo
+                zello_feed_pcm48_stereo(chunk)
             except Exception:
                 pass
             return chunk
