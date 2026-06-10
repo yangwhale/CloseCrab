@@ -755,12 +755,23 @@ _INSTANT_ACK_PHRASES = [
 
 
 def _send_to_feishu(text: str, speaker: str):
-    """Zello STT → 飞书消息通道 (instant ack + BotCore 处理)。"""
+    """Zello STT → 飞书消息通道 (echo + instant ack + BotCore 处理)。"""
     feishu = _feishu_ref
     f_loop = _feishu_loop
     if feishu is None or f_loop is None or not _feishu_chat_id:
         log.warning("[Zello→飞书] 飞书桥未注册, 跳过")
         return
+
+    # echo STT 文字到飞书 (用户在飞书能看到自己在 Zello 说了什么)
+    try:
+        f_loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                feishu._send_long(_feishu_chat_id, f"🎤 [Zello·{speaker}] {text}"),
+                loop=f_loop,
+            )
+        )
+    except Exception:
+        pass
 
     import random
     ack = random.choice(_INSTANT_ACK_PHRASES)
