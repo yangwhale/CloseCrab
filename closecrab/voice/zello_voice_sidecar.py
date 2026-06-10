@@ -338,36 +338,23 @@ class ZelloClient:
             pcm_16k = audioop.mul(pcm_16k, 2, gain)
         t.append(time.monotonic())  # t[2] = agc done
 
-        # 3. PCM → OGG
-        ts_str = time.strftime("%H%M%S")
-        ogg_path = f"/tmp/zello-recv-{ts_str}.ogg"
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-f", "s16le", "-ar", "16000", "-ac", "1",
-            "-i", "pipe:0", "-c:a", "libopus", "-b:a", "48k", ogg_path,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate(input=pcm_16k)
-        t.append(time.monotonic())  # t[3] = ogg done
-
-        # 4. FunASR STT
+        # 3. FunASR STT
         text = await _funasr_recognize(pcm_16k)
-        t.append(time.monotonic())  # t[4] = stt done
+        t.append(time.monotonic())  # t[3] = stt done
 
-        # 5. 送飞书消息通道 (instant ack + BotCore 处理)
+        # 4. 送飞书消息通道 (instant ack + BotCore 处理)
         if text and _feishu_ref is not None and _feishu_loop is not None and _feishu_chat_id:
             _send_to_feishu(text, speaker)
 
-        t.append(time.monotonic())  # t[5] = inject done
+        t.append(time.monotonic())  # t[4] = inject done
 
         # 时间汇总
         log.info("[Zello 时间线] %s | 音频=%.1fs | Opus解码=%.0fms | AGC=%.0fms | "
-                 "OGG编码=%.0fms | FunASR=%.0fms | 总计=%.0fms | STT='%s'",
+                 "FunASR=%.0fms | 总计=%.0fms | STT='%s'",
                  speaker, audio_dur,
                  (t[1]-t[0])*1000, (t[2]-t[1])*1000,
-                 (t[3]-t[2])*1000, (t[4]-t[3])*1000,
-                 (t[5]-t[0])*1000,
+                 (t[3]-t[2])*1000,
+                 (t[4]-t[0])*1000,
                  (text or "")[:40])
 
     async def _decode_packets(self, packets: list[bytes], sample_rate: int, frame_size_ms: int) -> bytes:
