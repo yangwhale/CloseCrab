@@ -308,11 +308,15 @@ class _CloseCrabStream(llm.LLMStream):
         chat_id = feishu._user_chats.get(open_id, "")
 
         # ── Step 1: echo 到飞书 (fire-and-forget, 不阻塞 LLM 管线) ─────
-        if chat_id:
+        # 剥掉 LLM 元数据行 ([channel:] [当前时间:] [from:] [来自]) — 这些给 LLM 看，不该显示
+        echo_lines = [l for l in transcript.split("\n")
+                      if not l.strip().startswith(("[channel:", "[当前时间:", "[from:", "[来自"))]
+        echo_text = "\n".join(echo_lines).strip()
+        if chat_id and echo_text:
             try:
                 feishu_loop.call_soon_threadsafe(
                     lambda: asyncio.ensure_future(
-                        feishu._send_long(chat_id, f"🎤 {transcript}"),
+                        feishu._send_long(chat_id, f"🎤 {echo_text}"),
                         loop=feishu_loop,
                     )
                 )
