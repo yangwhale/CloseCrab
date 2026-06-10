@@ -832,8 +832,23 @@ async def _zello_stream_send_loop():
     packet_id = 0
 
     while True:
+        # 读 Opus 包, 带超时: 500ms 没新包 → 关闭当前 stream
         try:
-            hdr = await proc.stdout.readexactly(2)
+            hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=0.5)
+        except asyncio.TimeoutError:
+            if stream_id is not None:
+                try:
+                    seq = client._next_seq()
+                    await client._ws.send(json.dumps({
+                        "command": "stop_stream", "seq": seq,
+                        "stream_id": stream_id, "channel": client.channel,
+                    }))
+                    log.info("Zello stream 关闭 (stream_id=%d, %d 包)", stream_id, packet_id)
+                except Exception:
+                    pass
+                stream_id = None
+                packet_id = 0
+            continue
         except (asyncio.IncompleteReadError, ConnectionError):
             break
         pkt_len = struct.unpack("<H", hdr)[0]
@@ -845,7 +860,7 @@ async def _zello_stream_send_loop():
         if client is None or not client._connected or not client._channel_online:
             continue
 
-        # 懒初始化 stream
+        # 懒初始化 stream (每段 TTS 开始时自动创建)
         if stream_id is None:
             codec_header = struct.pack("<HBB", 16000, 1, 60)
             seq = client._next_seq()
