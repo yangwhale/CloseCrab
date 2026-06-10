@@ -4557,6 +4557,16 @@ class FeishuChannel(Channel):
             streaming = stream_speak_text(text, fid=fid)
         except Exception:
             pass
+        # Discord 不在线但 Zello 在线 → 走 Zello 独立 TTS 路径
+        if not streaming:
+            try:
+                from ..voice.zello_voice_sidecar import is_connected as _zc, speak_text as _zs
+                if _zc():
+                    _zs(text)
+                    streaming = True
+                    log.info("Voice summary via Zello (Discord offline)")
+            except Exception:
+                pass
         # Discord 真在推流 → 发暂停/继续/重播控制卡片。控制的是服务器侧给 Discord
         # 推帧的代码 (vc.pause/resume/replay), 不是飞书客户端的播放器。
         if streaming and fid not in self._voice_cards:
