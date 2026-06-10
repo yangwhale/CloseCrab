@@ -742,14 +742,14 @@ _INSTANT_ACK_PHRASES = [
 
 
 def _send_to_feishu(text: str, speaker: str):
-    """Zello STT → 飞书消息通道 (echo + instant ack + BotCore 处理)。"""
+    """Zello STT → 直调 BotCore (跳过飞书消息管线, 省 ~600ms)。"""
     feishu = _feishu_ref
     f_loop = _feishu_loop
     if feishu is None or f_loop is None or not _feishu_chat_id:
-        log.warning("[Zello→飞书] 飞书桥未注册, 跳过")
+        log.warning("[Zello→BotCore] 飞书桥未注册, 跳过")
         return
 
-    # echo STT 文字到飞书 (用户在飞书能看到自己在 Zello 说了什么)
+    # echo + instant ack (fire-and-forget, 不阻塞 LLM)
     try:
         f_loop.call_soon_threadsafe(
             lambda: asyncio.ensure_future(
@@ -759,17 +759,34 @@ def _send_to_feishu(text: str, speaker: str):
         )
     except Exception:
         pass
-
     import random
-    ack = random.choice(_INSTANT_ACK_PHRASES)
-    speak_text(ack)
+    speak_text(random.choice(_INSTANT_ACK_PHRASES))
 
+    # 直接构造 UnifiedMessage 调 BotCore, 跳过 feishu 消息管线
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
-    asyncio.run_coroutine_threadsafe(
-        feishu.inject_synthetic_text(_feishu_open_id, _feishu_chat_id, content),
-        f_loop,
-    )
-    log.info("STT → feishu 消息通道: %s", text[:60])
+    open_id = _feishu_open_id
+    chat_id = _feishu_chat_id
+
+    async def _reply(reply_text: str):
+        try:
+            await feishu._send_long(chat_id, reply_text)
+            await feishu._send_voice_summary(chat_id, open_id, reply_text)
+        except Exception:
+            log.exception("[Zello reply] 飞书发送失败")
+
+    async def _do_botcore():
+        from ..core.types import UnifiedMessage
+        msg = UnifiedMessage(
+            channel_type="zello",
+            user_id=open_id,
+            content=content,
+            reply=_reply,
+            metadata={},
+        )
+        await feishu.core.handle_message(msg)
+
+    asyncio.run_coroutine_threadsafe(_do_botcore(), f_loop)
+    log.info("STT → BotCore 直调: %s", text[:60])
 
 
 # ═══════════════════════════════════════════════════════════════════════
