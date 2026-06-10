@@ -508,10 +508,68 @@ lib.opus_decoder_destroy(dec)
         sample_rate = 16000
         frame_size_ms = 60
         frame_size = int(sample_rate * frame_size_ms / 1000)  # 960 samples
-        frame_bytes = frame_size * 2
 
-        if self._encoder is None:
-            self._encoder = OpusEncoder(sample_rate, 1)
+        # Opus 编码 (subprocess 隔离, 防 libopus segfault)
+        import tempfile
+        raw_path = tempfile.mktemp(suffix=".pcm", prefix="zello-send-")
+        opus_path = raw_path.replace(".pcm", ".opus_pkts")
+        try:
+            with open(raw_path, "wb") as f:
+                f.write(pcm_16k)
+            encode_script = f"""
+import ctypes, ctypes.util, struct, sys
+lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
+lib.opus_encoder_create.restype = ctypes.c_void_p
+err = ctypes.c_int(0)
+enc = lib.opus_encoder_create({sample_rate}, 1, 2048, ctypes.byref(err))
+if not enc: sys.exit(1)
+frame_size = {frame_size}
+frame_bytes = frame_size * 2
+with open("{raw_path}", "rb") as f, open("{opus_path}", "wb") as out:
+    while True:
+        frame = f.read(frame_bytes)
+        if not frame: break
+        if len(frame) < frame_bytes:
+            frame += b"\\x00" * (frame_bytes - len(frame))
+        pcm_buf = (ctypes.c_int16 * frame_size).from_buffer_copy(frame)
+        out_buf = (ctypes.c_ubyte * 4000)()
+        n = lib.opus_encode(enc, pcm_buf, frame_size, out_buf, 4000)
+        if n > 0:
+            out.write(struct.pack("<H", n))
+            out.write(bytes(out_buf[:n]))
+lib.opus_encoder_destroy(enc)
+"""
+            proc = await asyncio.create_subprocess_exec(
+                "python3", "-c", encode_script,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            if proc.returncode != 0:
+                log.warning("Opus encode subprocess 失败: %s", stderr.decode()[:200])
+                return
+            with open(opus_path, "rb") as f:
+                opus_data = f.read()
+        finally:
+            for p in (raw_path, opus_path):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+        # 解析 Opus 包序列: [pkt_len(2 LE), pkt_data, ...]
+        opus_packets = []
+        off = 0
+        while off < len(opus_data):
+            if off + 2 > len(opus_data):
+                break
+            pkt_len = struct.unpack("<H", opus_data[off:off+2])[0]
+            off += 2
+            opus_packets.append(opus_data[off:off+pkt_len])
+            off += pkt_len
+
+        if not opus_packets:
+            log.warning("Opus 编码产出 0 包")
+            return
 
         # codec_header
         codec_header = struct.pack("<HBB", sample_rate, 1, frame_size_ms)
@@ -529,7 +587,7 @@ lib.opus_decoder_destroy(dec)
             "packet_duration": frame_size_ms,
         }))
 
-        # 等 start_stream 响应 (通过 Future, 不抢 recv_loop 的 recv)
+        # 等 start_stream 响应 (通过 Future)
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_responses[seq] = fut
         try:
@@ -544,27 +602,12 @@ lib.opus_decoder_destroy(dec)
         stream_id = resp["stream_id"]
 
         # 发送 Opus 包
-        offset = 0
-        packet_id = 0
         t0 = time.monotonic()
-        while offset < len(pcm_16k):
-            frame = pcm_16k[offset:offset + frame_bytes]
-            if len(frame) < frame_bytes:
-                frame += b"\x00" * (frame_bytes - len(frame))
-            offset += frame_bytes
-
-            try:
-                opus_pkt = self._encoder.encode(frame, frame_size)
-            except Exception:
-                log.exception("Opus 编码失败")
-                continue
-
+        for packet_id, opus_pkt in enumerate(opus_packets):
             header = struct.pack("!BII", 0x01, stream_id, packet_id)
             await self._ws.send(header + opus_pkt)
-            packet_id += 1
 
-            # 按实时速率节奏发送 (略快, 让 Zello 有 buffer)
-            target_t = t0 + packet_id * frame_size_ms / 1000 * 0.85
+            target_t = t0 + (packet_id + 1) * frame_size_ms / 1000 * 0.85
             now = time.monotonic()
             if target_t > now:
                 await asyncio.sleep(target_t - now)
