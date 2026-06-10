@@ -197,33 +197,37 @@ class BotCore:
         # S1 Background Review: auto-recall relevant history from FTS5
         # index and prepend as a context block. Silent-skip on any failure
         # so this can never block the worker.send() path.
-        try:
-            from closecrab.utils.session_recall import recall_history
-            loop = asyncio.get_event_loop()
-            # Per-conversation dedup set: rows injected earlier this
-            # conversation are filtered out, and newly-injected rows are
-            # added back into this set inside recall_history (mutated).
-            seen_ids = self._recall_seen.setdefault(msg.user_id, set())
-            recall_block = await loop.run_in_executor(
-                None,
-                lambda: recall_history(
-                    self.bot_name,
-                    msg.user_id,
-                    original_user_text,
-                    limit=5,
-                    days=60,
-                    exclude_ids=seen_ids,
-                ),
-            )
-            if recall_block:
-                content = recall_block + "\n\n---\n\n" + content
-                log.info(
-                    "S1 recall: injected %d chars (%d history lines)",
-                    len(recall_block),
-                    recall_block.count("\n"),
+        # 短消息 (<20 字纯文本) 跳过 S1 — 语音模式简单问题不需要跨 session 记忆
+        import re as _re
+        _pure_text = _re.sub(r"\[(?:channel|当前时间|from|来自)[^\]]*\]\s*", "", original_user_text).strip()
+        _skip_s1 = len(_pure_text) < 20
+        if _skip_s1:
+            log.info("S1 recall skipped: short message (%d chars < 20)", len(_pure_text))
+        else:
+            try:
+                from closecrab.utils.session_recall import recall_history
+                loop = asyncio.get_event_loop()
+                seen_ids = self._recall_seen.setdefault(msg.user_id, set())
+                recall_block = await loop.run_in_executor(
+                    None,
+                    lambda: recall_history(
+                        self.bot_name,
+                        msg.user_id,
+                        original_user_text,
+                        limit=5,
+                        days=60,
+                        exclude_ids=seen_ids,
+                    ),
                 )
-        except Exception as e:
-            log.debug("S1 recall skipped: %s", e)
+                if recall_block:
+                    content = recall_block + "\n\n---\n\n" + content
+                    log.info(
+                        "S1 recall: injected %d chars (%d history lines)",
+                        len(recall_block),
+                        recall_block.count("\n"),
+                    )
+            except Exception as e:
+                log.debug("S1 recall skipped: %s", e)
 
         on_input_needed = msg.metadata.get("on_input_needed")
 
