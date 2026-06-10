@@ -4551,22 +4551,21 @@ class FeishuChannel(Channel):
         # 最早开始出声, 不被后面飞书 ogg 的"整段生成+上传"拖住。
         streaming = False
         fid = f"{int(time.time() * 1000):x}"  # 这次播报的 buffer 标识 (落盘 + 重播)
-        # 动态路由: Zello 在线优先发 Zello, 否则走 Discord
+        # 并行推: 在线的 channel 都推, 互不影响
+        try:
+            from ..voice.discord_voice_sidecar import stream_speak_text
+            streaming = stream_speak_text(text, fid=fid)
+        except Exception:
+            pass
         try:
             from ..voice.zello_voice_sidecar import is_connected as zello_connected, speak_text as zello_speak
             if zello_connected():
                 zello_speak(text)
-                streaming = True
-                log.info("Voice summary via Zello (fid=%s)", fid)
-            else:
-                from ..voice.discord_voice_sidecar import stream_speak_text
-                streaming = stream_speak_text(text, fid=fid)
+                if not streaming:
+                    streaming = True
+                log.info("Voice summary also via Zello")
         except Exception:
-            try:
-                from ..voice.discord_voice_sidecar import stream_speak_text
-                streaming = stream_speak_text(text, fid=fid)
-            except Exception:
-                pass
+            pass
         # Discord 真在推流 → 发暂停/继续/重播控制卡片。控制的是服务器侧给 Discord
         # 推帧的代码 (vc.pause/resume/replay), 不是飞书客户端的播放器。
         if streaming and fid not in self._voice_cards:
