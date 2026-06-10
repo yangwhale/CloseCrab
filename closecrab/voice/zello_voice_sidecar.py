@@ -479,12 +479,9 @@ lib.opus_decoder_destroy(dec)
         if not pcm_24k:
             return
 
-        # 重采样 24kHz → 16kHz
-        pcm_16k, _ = audioop.ratecv(pcm_24k, 2, 1, 24000, 16000, None)
-
-        sample_rate = 16000
+        sample_rate = 24000
         frame_size_ms = 60
-        frame_size = int(sample_rate * frame_size_ms / 1000)  # 960 samples
+        frame_size = int(sample_rate * frame_size_ms / 1000)  # 1440 samples
 
         # Opus 编码 (subprocess 隔离, 防 libopus segfault)
         import tempfile
@@ -492,7 +489,7 @@ lib.opus_decoder_destroy(dec)
         opus_path = raw_path.replace(".pcm", ".opus_pkts")
         try:
             with open(raw_path, "wb") as f:
-                f.write(pcm_16k)
+                f.write(pcm_24k)
             encode_script = f"""
 import ctypes, ctypes.util, struct, sys
 lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
@@ -780,10 +777,10 @@ import ctypes, ctypes.util, struct, sys
 lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
 lib.opus_encoder_create.restype = ctypes.c_void_p
 err = ctypes.c_int(0)
-enc = lib.opus_encoder_create(16000, 1, 2048, ctypes.byref(err))
+enc = lib.opus_encoder_create(24000, 1, 2048, ctypes.byref(err))
 if not enc:
     sys.exit(1)
-frame_size = 960  # 60ms @ 16kHz
+frame_size = 1440  # 60ms @ 24kHz
 frame_bytes = frame_size * 2
 buf = b""
 while True:
@@ -855,7 +852,7 @@ async def _zello_stream_send_loop():
 
         # 懒初始化 stream (每段 TTS 开始时自动创建)
         if stream_id is None:
-            codec_header = struct.pack("<HBB", 16000, 1, 60)
+            codec_header = struct.pack("<HBB", 24000, 1, 60)
             seq = client._next_seq()
             await client._ws.send(json.dumps({
                 "command": "start_stream", "seq": seq, "channel": client.channel,
@@ -887,10 +884,8 @@ def zello_feed_pcm24(pcm24: bytes):
     proc = _zello_encoder_proc
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
-    # 重采样 24kHz → 16kHz
-    pcm16, _ = audioop.ratecv(pcm24, 2, 1, 24000, 16000, None)
     try:
-        proc.stdin.write(pcm16)
+        proc.stdin.write(pcm24)
     except (BrokenPipeError, OSError):
         pass
 
