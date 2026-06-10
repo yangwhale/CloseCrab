@@ -778,7 +778,7 @@ def _send_to_feishu(text: str, speaker: str):
         from ..core.types import UnifiedMessage
         msg = UnifiedMessage(
             channel_type="zello",
-            user_id=f"{open_id}:zello",
+            user_id=open_id,
             content=content,
             reply=_reply,
             metadata={},
