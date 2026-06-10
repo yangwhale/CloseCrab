@@ -590,7 +590,8 @@ async def _gemini_tts_stream(text: str):
         speech_config=gt.SpeechConfig(
             voice_config=gt.VoiceConfig(
                 prebuilt_voice_config=gt.PrebuiltVoiceConfig(voice_name=voice)
-            )
+            ),
+            language_code="zh-CN",
         ),
     )
     batches = _plan_tts_batches(cleaned)

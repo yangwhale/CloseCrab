@@ -208,7 +208,8 @@ class _GeminiChunkedStream(tts.ChunkedStream):
                     prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
                         voice_name=opts.voice
                     )
-                )
+                ),
+                language_code="zh-CN",
             ),
         )
 
