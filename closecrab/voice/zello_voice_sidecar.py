@@ -728,42 +728,119 @@ def _hkt_now() -> str:
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
 
 
-def _inject_to_botcore(text: str, speaker: str):
-    """通过 AgentSession.generate_reply 注入 STT 文字, 跟 Discord 一模一样。
+_zello_agent_session = None
+_zello_audio_output = None
 
-    路径: AgentSession → CloseCrabLLM → feishu worker → TTS → 播放。
-    完全不走 BotCore handle_message, 没有 per-user lock。
-    """
-    try:
-        from .discord_voice_sidecar import _agent_session, _sidecar_loop as dc_loop
-        from .livekit_io import _closecrab_llm_instance
-    except ImportError:
-        log.warning("Discord sidecar 未加载, 无法注入 AgentSession")
+
+async def _start_zello_agent_session():
+    """在 Zello sidecar loop 上启动 AgentSession (CloseCrabLLM + GeminiTTS + ZelloAudioOutput)。"""
+    global _zello_agent_session, _zello_audio_output
+
+    if _zello_agent_session is not None:
         return
 
-    session = _agent_session
+    if _feishu_ref is None or _feishu_loop is None or not _feishu_open_id:
+        log.warning("飞书桥未注册, 无法启动 AgentSession")
+        return
+
+    try:
+        from livekit.agents import Agent, AgentSession
+        from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities, AudioInput
+        from .livekit_io import CloseCrabLLM
+        from .gemini_tts import GeminiTTS
+
+        llm = CloseCrabLLM(_feishu_ref, _feishu_loop, _feishu_open_id)
+        voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
+        model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
+        tts = GeminiTTS(model=model, voice=voice)
+
+        class _ZelloAudioOutput(AudioOutput):
+            """TTS 帧 → 累积 PCM → flush 时发到 Zello channel。"""
+
+            def __init__(self):
+                super().__init__(
+                    label="zello",
+                    capabilities=AudioOutputCapabilities(pause=False),
+                    sample_rate=24000,
+                )
+                self._pcm_buf = bytearray()
+                self._seg_frames = 0
+
+            async def capture_frame(self, frame) -> None:
+                await super().capture_frame(frame)
+                self._pcm_buf.extend(bytes(frame.data))
+                self._seg_frames += 1
+
+            def flush(self) -> None:
+                super().flush()
+                pcm = bytes(self._pcm_buf)
+                played = self._seg_frames * 0.02
+                self._pcm_buf.clear()
+                self._seg_frames = 0
+                if pcm and _zello_client is not None:
+                    asyncio.create_task(self._send_to_zello(pcm))
+                self.on_playback_finished(playback_position=played, interrupted=False)
+
+            async def _send_to_zello(self, pcm_24k: bytes):
+                try:
+                    await _zello_client.send_voice(pcm_24k)
+                    log.info("[Zello TTS] 发送 %.1fs 音频", len(pcm_24k) / 2 / 24000)
+                except Exception:
+                    log.exception("[Zello TTS] 发送失败")
+
+            def clear_buffer(self) -> None:
+                played = self._seg_frames * 0.02
+                self._pcm_buf.clear()
+                self._seg_frames = 0
+                self.on_playback_finished(playback_position=played, interrupted=True)
+
+        # 空壳 AudioInput (AgentSession 要求有, 但 STT 由 FunASR 独立驱动)
+        class _DummyAudioInput(AudioInput):
+            def __init__(self):
+                super().__init__(label="zello-dummy", sample_rate=16000)
+            async def __anext__(self):
+                await asyncio.sleep(3600)
+                raise StopAsyncIteration
+
+        ao = _ZelloAudioOutput()
+        ai = _DummyAudioInput()
+        session = AgentSession(llm=llm, tts=tts)
+        session.input.audio = ai
+        session.output.audio = ao
+        await session.start(Agent(instructions=" "))
+        _zello_agent_session = session
+        _zello_audio_output = ao
+        log.info("Zello AgentSession 已启动 (CloseCrabLLM + GeminiTTS + ZelloAudioOutput)")
+    except Exception:
+        log.exception("Zello AgentSession 启动失败")
+
+
+def _inject_to_botcore(text: str, speaker: str):
+    """通过 Zello 本地 AgentSession.generate_reply 处理 STT 文字。
+
+    路径: AgentSession → CloseCrabLLM → feishu worker → GeminiTTS → Zello 语音输出。
+    """
+    session = _zello_agent_session
     if session is None:
         log.warning("[Zello→LLM] AgentSession 未就绪, 跳过")
-        return
-    dc = dc_loop
-    if dc is None:
-        log.warning("[Zello→LLM] Discord sidecar loop 不可用")
         return
 
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
 
-    def _do():
+    try:
+        from .livekit_io import _closecrab_llm_instance
         llm = _closecrab_llm_instance()
         if llm is not None:
             llm._skip_next_debounce = True
-        session.generate_reply(user_input=content)
-        log.info("[Zello→LLM] generate_reply: %s", text[:60])
-
-    try:
-        dc.call_soon_threadsafe(_do)
-        log.info("STT → AgentSession: %s", text[:60])
     except Exception:
-        log.exception("[Zello→LLM] 调度失败")
+        pass
+
+    loop = _sidecar_loop
+    if loop:
+        loop.call_soon_threadsafe(lambda: session.generate_reply(user_input=content))
+        log.info("STT → AgentSession.generate_reply: %s", text[:60])
+    else:
+        log.warning("[Zello→LLM] sidecar loop 不可用")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -862,6 +939,17 @@ async def _run(config: dict):
 
     await client.connect()
     asyncio.create_task(_speak_consumer())
+
+    # 飞书桥就绪后启动 AgentSession (需等飞书 channel ready 注册桥)
+    async def _wait_and_start_session():
+        for _ in range(60):
+            if _feishu_ref is not None and _feishu_loop is not None and _feishu_open_id:
+                await _start_zello_agent_session()
+                return
+            await asyncio.sleep(1)
+        log.warning("等待飞书桥超时, AgentSession 未启动")
+    asyncio.create_task(_wait_and_start_session())
+
     await client.recv_loop()
 
 
