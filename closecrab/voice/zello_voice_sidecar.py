@@ -179,6 +179,7 @@ class ZelloClient:
         self._decoder: OpusDecoder | None = None
         self._encoder: OpusEncoder | None = None
         self._reconnect_delay = 2.0
+        self._pending_responses: dict[int, asyncio.Future] = {}  # seq → Future
 
     @property
     def ws_url(self) -> str:
@@ -258,6 +259,14 @@ class ZelloClient:
     # ── JSON 事件处理 ──
 
     async def _on_json(self, data: dict):
+        # 分发 seq 响应给等待的 Future (send_voice 的 start_stream 响应)
+        seq = data.get("seq")
+        if seq and seq in self._pending_responses:
+            fut = self._pending_responses.pop(seq)
+            if not fut.done():
+                fut.set_result(data)
+            return
+
         cmd = data.get("command", "")
 
         if cmd == "on_channel_status":
@@ -520,29 +529,19 @@ lib.opus_decoder_destroy(dec)
             "packet_duration": frame_size_ms,
         }))
 
-        # 等 start_stream 响应 (可能穿插其他事件)
-        stream_id = None
-        for _ in range(20):
-            try:
-                resp_raw = await asyncio.wait_for(self._ws.recv(), timeout=5)
-            except asyncio.TimeoutError:
-                break
-            if isinstance(resp_raw, str):
-                resp = json.loads(resp_raw)
-                if resp.get("seq") == seq:
-                    if not resp.get("success"):
-                        log.error("start_stream 失败: %s", resp.get("error"))
-                        return
-                    stream_id = resp["stream_id"]
-                    break
-                else:
-                    await self._on_json(resp)
-            elif isinstance(resp_raw, bytes):
-                self._on_binary(resp_raw)
-
-        if stream_id is None:
-            log.error("start_stream 未收到 stream_id")
+        # 等 start_stream 响应 (通过 Future, 不抢 recv_loop 的 recv)
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_responses[seq] = fut
+        try:
+            resp = await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending_responses.pop(seq, None)
+            log.error("start_stream 超时")
             return
+        if not resp.get("success"):
+            log.error("start_stream 失败: %s", resp.get("error"))
+            return
+        stream_id = resp["stream_id"]
 
         # 发送 Opus 包
         offset = 0
