@@ -754,6 +754,20 @@ async def _speak_consumer():
             t_tts = time.monotonic()
             log.info("Zello TTS 生成: %.0fms, %.1fs 音频, %s",
                      (t_tts - t0) * 1000, len(pcm) / 2 / 24000, item.text[:40])
+            # 存 buffer (48kHz stereo) 供重播/快进快退, 跟 Discord 格式一致
+            try:
+                fid = f"{int(time.time() * 1000):x}"
+                pcm48, _ = audioop.ratecv(pcm, 2, 1, 24000, 48000, None)
+                stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                bpath = os.path.join(_BUF_DIR, f"{fid}.pcm")
+                os.makedirs(_BUF_DIR, exist_ok=True)
+                with open(bpath, "wb") as bf:
+                    bf.write(stereo)
+                from .discord_voice_sidecar import _set_progress
+                _set_progress(fid, played=0, total=len(stereo), active=True)
+                log.info("Zello buffer 存盘: %s (%.1fs)", bpath, len(stereo) / 4 / 48000)
+            except Exception:
+                log.debug("Zello buffer 存盘失败 (non-fatal)")
             await _zello_client.send_voice(pcm)
         except asyncio.CancelledError:
             raise
