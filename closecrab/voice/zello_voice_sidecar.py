@@ -335,6 +335,8 @@ class ZelloClient:
             log.exception("语音处理异常 (speaker=%s, %d pkts)", speaker, len(packets))
 
     async def _do_process_voice(self, stream, speaker, packets, dur):
+        t = [time.monotonic()]  # t[0] = stream stop
+
         # 解析 codec_header
         sample_rate, frame_size_ms = 16000, 60
         ch = stream.get("codec_header", "")
@@ -346,80 +348,81 @@ class ZelloClient:
             except Exception:
                 pass
 
-        # Opus 解码 (subprocess 隔离, 防 segfault)
+        # 1. Opus 解码
         pcm = await self._decode_packets(packets, sample_rate, frame_size_ms)
-        log.info("[Zello→STT] 1/4 Opus 解码: %d bytes = %.1fs @ %dHz",
-                 len(pcm), len(pcm) / 2 / sample_rate, sample_rate)
+        t.append(time.monotonic())  # t[1] = opus done
+        audio_dur = len(pcm) / 2 / sample_rate
 
-        if len(pcm) < 3200:  # < 100ms
-            log.info("[Zello→STT] 跳过: 音频太短 (%d bytes)", len(pcm))
+        if len(pcm) < 3200:
+            log.info("[Zello] 跳过: 音频太短 (%d bytes)", len(pcm))
             return
 
-        # 重采样到 16kHz mono
+        # 2. 重采样 + AGC
         pcm_16k = pcm
         if sample_rate != 16000:
             pcm_16k, _ = audioop.ratecv(pcm, 2, 1, sample_rate, 16000, None)
-
-        # 自动增益 (AGC): 测量 MAX, 算增益到目标 ~26000 (80% 满标度)
-        # 音量已经够大(MAX≥26000)不增益; 封顶 10x 防爆音; 用浮点乘避免整数 clip
         _AGC_TARGET = 26000
-        _AGC_MAX_GAIN = 10
-        try:
-            maxvol = audioop.max(pcm_16k, 2)
-            if 0 < maxvol < _AGC_TARGET:
-                gain = min(_AGC_TARGET / maxvol, _AGC_MAX_GAIN)
-                pcm_16k = audioop.mul(pcm_16k, 2, gain)
-                log.info("AGC: %.1fx (MAX %d → %d)", gain, maxvol, audioop.max(pcm_16k, 2))
-        except Exception:
-            pass
+        maxvol = audioop.max(pcm_16k, 2)
+        if 0 < maxvol < _AGC_TARGET:
+            gain = min(_AGC_TARGET / maxvol, 10)
+            pcm_16k = audioop.mul(pcm_16k, 2, gain)
+        t.append(time.monotonic())  # t[2] = agc done
 
-        log.info("[Zello→STT] 2/4 AGC 完成, PCM=%d bytes", len(pcm_16k))
+        # 3. PCM → OGG
+        ts_str = time.strftime("%H%M%S")
+        ogg_path = f"/tmp/zello-recv-{ts_str}.ogg"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-f", "s16le", "-ar", "16000", "-ac", "1",
+            "-i", "pipe:0", "-c:a", "libopus", "-b:a", "48k", ogg_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate(input=pcm_16k)
+        t.append(time.monotonic())  # t[3] = ogg done
 
-        log.info("[Zello→STT] 2/4 AGC done, PCM=%d bytes", len(pcm_16k))
+        # 4. FunASR STT
+        text = await _funasr_recognize(pcm_16k)
+        t.append(time.monotonic())  # t[4] = stt done
 
-        # 3/4: 存 OGG + 推飞书语音消息 (Debug 模式, 复刻 Discord 流程)
-        ts = time.strftime("%H%M%S")
-        ogg_path = f"/tmp/zello-recv-{ts}.ogg"
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-f", "s16le", "-ar", "16000", "-ac", "1",
-                "-i", "pipe:0", "-c:a", "libopus", "-b:a", "48k", ogg_path,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate(input=pcm_16k)
-            log.info("[Zello→STT] 3/4 OGG 存: %s (%.1fs)", ogg_path, len(pcm_16k) / 2 / 16000)
-        except Exception:
-            log.exception("PCM→OGG 失败")
-            ogg_path = ""
-
-        # 推飞书: 语音文件 + FunASR 文字
+        # 5. 推飞书 (语音文件 + 文字 + BotCore 注入)
         feishu = _feishu_ref
         f_loop = _feishu_loop
         if feishu is not None and f_loop is not None and _feishu_chat_id:
-            # FunASR STT
-            log.info("[Zello→STT] 4/4 FunASR 开始...")
-            text = await _funasr_recognize(pcm_16k)
-            log.info("[Zello→STT] 4/4 FunASR: '%s'", text[:80] if text else "(空)")
-
-            async def _send_to_feishu(ogg=ogg_path, txt=text, spk=speaker):
+            async def _send_and_inject(ogg=ogg_path, txt=text, spk=speaker):
+                t_send = time.monotonic()
                 try:
-                    chat_id = _feishu_chat_id
-                    # 发语音文件
+                    # 发 OGG 语音文件
                     if ogg and os.path.exists(ogg):
                         await feishu._send_voice_file(_feishu_open_id, ogg)
-                        log.info("[Zello→飞书] 语音文件已发: %s", ogg)
-                    # 发文字
+                    t_ogg_sent = time.monotonic()
+
+                    # 发 STT 文字
                     if txt:
-                        feishu._send_text(chat_id, f"🎤 [Zello·{spk}] {txt}")
-                        log.info("[Zello→飞书] 文字已发: %s", txt[:60])
+                        feishu._send_text(_feishu_chat_id, f"🎤 [Zello·{spk}] {txt}")
+                    t_txt_sent = time.monotonic()
+
+                    log.info("[Zello→飞书] OGG发送 %.0fms, 文字发送 %.0fms",
+                             (t_ogg_sent - t_send) * 1000, (t_txt_sent - t_ogg_sent) * 1000)
                 except Exception:
                     log.exception("[Zello→飞书] 发送失败")
 
-            f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send_to_feishu()))
-        else:
-            log.warning("飞书桥未注册, 跳过推送")
+            f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send_and_inject()))
+
+            # 注入 BotCore 处理
+            if text:
+                _inject_to_botcore(text, speaker)
+
+        t.append(time.monotonic())  # t[5] = inject done
+
+        # 时间汇总
+        log.info("[Zello 时间线] %s | 音频=%.1fs | Opus解码=%.0fms | AGC=%.0fms | "
+                 "OGG编码=%.0fms | FunASR=%.0fms | 总计=%.0fms | STT='%s'",
+                 speaker, audio_dur,
+                 (t[1]-t[0])*1000, (t[2]-t[1])*1000,
+                 (t[3]-t[2])*1000, (t[4]-t[3])*1000,
+                 (t[5]-t[0])*1000,
+                 (text or "")[:40])
 
     async def _decode_packets(self, packets: list[bytes], sample_rate: int, frame_size_ms: int) -> bytes:
         """Opus 解码: 用 subprocess 隔离 native 代码, 防止 libopus segfault 杀进程。"""
