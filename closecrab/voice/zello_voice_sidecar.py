@@ -770,8 +770,10 @@ def _send_to_feishu(text: str, speaker: str):
             metadata={},
         )
         log.info("[Zello→BotCore] 直调 handle_message: %.0fms", (_t.monotonic() - _t0) * 1000)
-        await feishu._core.handle_message(msg)
+        result = await feishu._core.handle_message(msg)
         log.info("[Zello→BotCore] handle_message 完成: %.0fms", (_t.monotonic() - _t0) * 1000)
+        if result:
+            await _reply(result)
 
     f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_botcore_then_echo()))
     log.info("STT → BotCore 直调 (飞书后置): %s", text[:60])
