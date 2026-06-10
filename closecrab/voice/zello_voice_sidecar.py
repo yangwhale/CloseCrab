@@ -769,17 +769,9 @@ async def _speak_consumer():
                 log.info("Zello buffer 存盘: %s (%.1fs)", bpath, len(stereo) / 4 / 48000)
             except Exception:
                 log.debug("Zello buffer 存盘失败 (non-fatal)")
-            # 逐帧 feed 到 streaming encoder 管道 (跟重播/Discord 同路径)
-            FRAME = int(24000 * 0.02) * 2  # 20ms @ 24kHz mono s16 = 960 bytes
-            off = 0
-            while off < len(pcm):
-                chunk = pcm[off:off + FRAME]
-                if len(chunk) < FRAME:
-                    chunk += b"\x00" * (FRAME - len(chunk))
-                zello_feed_pcm24(chunk)
-                off += FRAME
-                await asyncio.sleep(0.018)  # 18ms 节奏, 略快于实时
-            log.info("Zello speak_consumer: %.1fs 音频已推送", len(pcm) / 2 / 24000)
+            # 直接调 _play_buffer — 跟重播按钮走完全一样的代码路径
+            await _play_buffer(fid)
+            log.info("Zello speak_consumer: %.1fs via _play_buffer", len(pcm) / 2 / 24000)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -912,7 +904,6 @@ async def _zello_stream_send_loop():
         header = struct.pack("!BII", 0x01, stream_id, packet_id)
         await client._ws.send(header + opus_pkt)
         packet_id += 1
-        await asyncio.sleep(0.05)  # 50ms pacing, Zello 播放 60ms/包
 
 
 def zello_feed_pcm24(pcm24: bytes):
