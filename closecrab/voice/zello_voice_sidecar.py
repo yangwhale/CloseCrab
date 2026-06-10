@@ -48,6 +48,7 @@ _feishu_loop = None
 _feishu_open_id = ""
 _feishu_chat_id = ""
 _bot_name = ""
+_display_names: dict[str, str] = {}  # Zello username → display name
 
 
 @dataclass
@@ -273,13 +274,18 @@ class ZelloClient:
                 "packets": [],
                 "t_start": time.monotonic(),
             }
-            log.info("语音流开始 #%d from %s", sid, data.get("from"))
+            log.info("语音流开始 #%d from %s | raw=%s", sid, data.get("from"), json.dumps(data, ensure_ascii=False)[:300])
 
         elif cmd == "on_stream_stop":
             sid = data["stream_id"]
             stream = self._streams.pop(sid, None)
             if stream and stream["packets"]:
-                asyncio.create_task(self._process_received_voice(stream))
+                async def _safe_process(s=stream):
+                    try:
+                        await self._process_received_voice(s)
+                    except Exception:
+                        log.exception("语音处理异常")
+                asyncio.create_task(_safe_process())
 
         elif cmd == "on_transcription":
             text = data.get("text", "").strip()
@@ -319,11 +325,16 @@ class ZelloClient:
     # ── 接收语音处理: Opus 解码 → FunASR STT ──
 
     async def _process_received_voice(self, stream: dict):
-        speaker = stream["from"]
+        speaker = _display_names.get(stream["from"], stream["from"])
         packets = stream["packets"]
         dur = time.monotonic() - stream["t_start"]
         log.info("语音流结束: %s, %d 包, %.1fs", speaker, len(packets), dur)
+        try:
+            await self._do_process_voice(stream, speaker, packets, dur)
+        except Exception:
+            log.exception("语音处理异常 (speaker=%s, %d pkts)", speaker, len(packets))
 
+    async def _do_process_voice(self, stream, speaker, packets, dur):
         # 解析 codec_header
         sample_rate, frame_size_ms = 16000, 60
         ch = stream.get("codec_header", "")
@@ -335,15 +346,13 @@ class ZelloClient:
             except Exception:
                 pass
 
-        # Opus 解码
-        try:
-            pcm = self._decode_packets(packets, sample_rate, frame_size_ms)
-        except Exception:
-            log.exception("Opus 解码失败")
-            return
+        # Opus 解码 (subprocess 隔离, 防 segfault)
+        pcm = await self._decode_packets(packets, sample_rate, frame_size_ms)
+        log.info("[Zello→STT] 1/4 Opus 解码: %d bytes = %.1fs @ %dHz",
+                 len(pcm), len(pcm) / 2 / sample_rate, sample_rate)
 
         if len(pcm) < 3200:  # < 100ms
-            log.debug("音频太短 (%d bytes), 跳过", len(pcm))
+            log.info("[Zello→STT] 跳过: 音频太短 (%d bytes)", len(pcm))
             return
 
         # 重采样到 16kHz mono
@@ -364,29 +373,112 @@ class ZelloClient:
         except Exception:
             pass
 
-        # FunASR STT (2pass 模式, 离线校正更准)
-        text = await _funasr_recognize(pcm_16k)
-        if text:
-            log.info("FunASR STT [%s]: %s", speaker, text)
-            if _stt_callback:
-                try:
-                    _stt_callback(text, speaker)
-                except Exception:
-                    log.exception("STT 回调异常")
-        else:
-            log.debug("FunASR 未识别出文字 (speaker=%s, pcm=%d bytes)", speaker, len(pcm_16k))
+        log.info("[Zello→STT] 2/4 AGC 完成, PCM=%d bytes", len(pcm_16k))
 
-    def _decode_packets(self, packets: list[bytes], sample_rate: int, frame_size_ms: int) -> bytes:
-        if self._decoder is None or self._decoder.sample_rate != sample_rate:
-            self._decoder = OpusDecoder(sample_rate, 1)
+        log.info("[Zello→STT] 2/4 AGC done, PCM=%d bytes", len(pcm_16k))
+
+        # 3/4: 存 OGG + 推飞书语音消息 (Debug 模式, 复刻 Discord 流程)
+        ts = time.strftime("%H%M%S")
+        ogg_path = f"/tmp/zello-recv-{ts}.ogg"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-f", "s16le", "-ar", "16000", "-ac", "1",
+                "-i", "pipe:0", "-c:a", "libopus", "-b:a", "48k", ogg_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate(input=pcm_16k)
+            log.info("[Zello→STT] 3/4 OGG 存: %s (%.1fs)", ogg_path, len(pcm_16k) / 2 / 16000)
+        except Exception:
+            log.exception("PCM→OGG 失败")
+            ogg_path = ""
+
+        # 推飞书: 语音文件 + FunASR 文字
+        feishu = _feishu_ref
+        f_loop = _feishu_loop
+        if feishu is not None and f_loop is not None and _feishu_chat_id:
+            # FunASR STT
+            log.info("[Zello→STT] 4/4 FunASR 开始...")
+            text = await _funasr_recognize(pcm_16k)
+            log.info("[Zello→STT] 4/4 FunASR: '%s'", text[:80] if text else "(空)")
+
+            async def _send_to_feishu(ogg=ogg_path, txt=text, spk=speaker):
+                try:
+                    chat_id = _feishu_chat_id
+                    # 发语音文件
+                    if ogg and os.path.exists(ogg):
+                        await feishu._send_voice_file(_feishu_open_id, ogg)
+                        log.info("[Zello→飞书] 语音文件已发: %s", ogg)
+                    # 发文字
+                    if txt:
+                        feishu._send_text(chat_id, f"🎤 [Zello·{spk}] {txt}")
+                        log.info("[Zello→飞书] 文字已发: %s", txt[:60])
+                except Exception:
+                    log.exception("[Zello→飞书] 发送失败")
+
+            f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send_to_feishu()))
+        else:
+            log.warning("飞书桥未注册, 跳过推送")
+
+    async def _decode_packets(self, packets: list[bytes], sample_rate: int, frame_size_ms: int) -> bytes:
+        """Opus 解码: 用 subprocess 隔离 native 代码, 防止 libopus segfault 杀进程。"""
+        import tempfile
+        import subprocess as sp
         frame_size = int(sample_rate * frame_size_ms / 1000)
-        chunks = []
-        for pkt in packets:
-            try:
-                chunks.append(self._decoder.decode(pkt, frame_size))
-            except Exception:
-                pass
-        return b"".join(chunks)
+        frame_bytes = frame_size * 2  # s16le
+
+        # 方案: 每个 Opus 包单独 decode → 拼 PCM (subprocess per-batch, 不是 per-packet)
+        # 把所有包传给一个 helper 脚本一次性解码
+        raw_path = tempfile.mktemp(suffix=".opus_raw", prefix="zello-")
+        pcm_path = raw_path.replace(".opus_raw", ".pcm")
+        try:
+            # 写入格式: [pkt_len(4 bytes LE), pkt_data, ...] 连续拼接
+            with open(raw_path, "wb") as f:
+                for pkt in packets:
+                    f.write(struct.pack("<I", len(pkt)))
+                    f.write(pkt)
+
+            # 用独立 Python 子进程解码 (隔离 ctypes segfault)
+            decode_script = f"""
+import ctypes, ctypes.util, struct, sys
+lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
+lib.opus_decoder_create.restype = ctypes.c_void_p
+err = ctypes.c_int(0)
+dec = lib.opus_decoder_create({sample_rate}, 1, ctypes.byref(err))
+if not dec: sys.exit(1)
+with open("{raw_path}", "rb") as f, open("{pcm_path}", "wb") as out:
+    while True:
+        hdr = f.read(4)
+        if len(hdr) < 4: break
+        pkt_len = struct.unpack("<I", hdr)[0]
+        pkt = f.read(pkt_len)
+        if len(pkt) < pkt_len: break
+        buf = (ctypes.c_int16 * {frame_size})()
+        n = lib.opus_decode(dec, pkt, len(pkt), buf, {frame_size}, 0)
+        if n > 0:
+            out.write(bytes(ctypes.cast(buf, ctypes.POINTER(ctypes.c_char * (n * 2))).contents))
+lib.opus_decoder_destroy(dec)
+"""
+            proc = await asyncio.create_subprocess_exec(
+                "python3", "-c", decode_script,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            if proc.returncode != 0:
+                log.warning("Opus subprocess 解码失败 (rc=%d): %s", proc.returncode, stderr.decode()[:200])
+                return b""
+            if not os.path.exists(pcm_path):
+                return b""
+            with open(pcm_path, "rb") as f:
+                return f.read()
+        finally:
+            for p in (raw_path, pcm_path):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     # ── 发送语音: PCM → Opus → Zello stream ──
 
@@ -625,6 +717,66 @@ async def _speak_consumer():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  STT → BotCore 注入 (通过飞书桥)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _hkt_now() -> str:
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
+
+
+def _inject_to_botcore(text: str, speaker: str):
+    """把 Zello STT 结果注入 BotCore, 回复直接发飞书聊天。"""
+    feishu = _feishu_ref
+    f_loop = _feishu_loop
+    if feishu is None or f_loop is None or not _feishu_open_id:
+        log.debug("飞书桥未注册, STT 结果不注入")
+        return
+
+    content = (
+        f"[channel: voice]\n"
+        f"[当前时间: {_hkt_now()}]\n"
+        f"[from: Zello PTT · {speaker}]\n"
+        f"{text}"
+    )
+
+    async def _do():
+        try:
+            from ..core.types import UnifiedMessage
+            chat_id = _feishu_chat_id
+
+            async def _reply(reply_text: str):
+                log.info("[Zello→飞书] reply 回调触发: chat_id=%s, len=%d, text=%s",
+                         chat_id, len(reply_text), reply_text[:60])
+                try:
+                    feishu._send_text(chat_id, reply_text)
+                    log.info("[Zello→飞书] _send_text 完成")
+                except Exception:
+                    log.exception("Zello→飞书回复发送失败")
+
+            msg = UnifiedMessage(
+                channel_type="feishu",
+                user_id=_feishu_open_id,
+                content=content,
+                reply=_reply,
+                metadata={
+                    "chat_id": chat_id,
+                    "from_voice": True,
+                    "from_zello": True,
+                },
+            )
+            await feishu._core.handle_message(msg)
+        except Exception:
+            log.exception("STT 注入 BotCore 失败")
+
+    try:
+        f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_do()))
+        log.info("STT → BotCore: %s", text[:60])
+    except Exception:
+        log.exception("跨线程注入失败")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  模块级 API (给外部线程调用)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -738,8 +890,26 @@ def start(bot_name: str, config: dict | None = None):
 
     if config is None:
         config = _load_config(bot_name)
+        # Firestore 没配置 → 回落本地配置文件
         if config is None:
-            log.info("Zello sidecar 未启用 (bot=%s)", bot_name)
+            local_cfg = os.path.expanduser("~/.closecrab/zello/config.json")
+            if os.path.exists(local_cfg):
+                try:
+                    with open(local_cfg) as f:
+                        cfg = json.load(f)
+                    config = {
+                        "username": cfg.get("username", ""),
+                        "password": cfg.get("password", ""),
+                        "channel": cfg.get("channel", ""),
+                        "auth_token": cfg.get("dev_token", ""),
+                        "network": cfg.get("network", ""),
+                    }
+                    _display_names.update(cfg.get("display_names", {}))
+                    log.info("Zello 配置从本地文件加载: %s (display_names=%d)", local_cfg, len(_display_names))
+                except Exception as e:
+                    log.warning("读取本地 Zello 配置失败: %s", e)
+        if config is None:
+            log.info("Zello sidecar 未配置 (bot=%s)", bot_name)
             return False
 
     if not config.get("username") or not config.get("channel"):

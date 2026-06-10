@@ -5503,6 +5503,13 @@ class FeishuChannel(Channel):
         except Exception as e:
             log.debug(f"注册 Discord 语音大脑桥失败 (不影响飞书/Discord TTS): {e}")
 
+        # 注册飞书桥 → Zello PTT sidecar (接收方向: Zello → STT → BotCore)
+        try:
+            from ..voice.zello_voice_sidecar import set_feishu_bridge as zello_set_bridge
+            zello_set_bridge(self, loop, _voice_open_id, chat_id=_voice_chat_id)
+        except Exception:
+            pass
+
         # 上线通知
         if self._log_chat_id:
             self._send_text(self._log_chat_id, f"🟢 **{self._bot_name}** 上线")

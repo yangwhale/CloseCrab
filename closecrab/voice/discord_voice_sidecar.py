@@ -202,7 +202,7 @@ def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str, chat_id: str = 
     log.info("飞书大脑桥已注册 (open_id=%s… chat_id=%s…) → Discord 语音可全双工",
              open_id[:8] if open_id else "?", chat_id[:8] if chat_id else "?")
 _listen_restart_n = 0       # 录音自动重启计数 (上限保护)
-_LISTEN_AUTOSTART = True     # 连上常驻频道后由心跳自动起一次录音 (重启后接收不再静默丢)
+_LISTEN_AUTOSTART = False    # 2026-06-10: 关闭自动收音, DAVE 接收路径 crash loop, 改用 Zello PTT 收音
 _autostart_done = False      # 本进程内自动收音只起一次 (尊重之后的 /stoplisten)
 _receive_probe_installed = False  # decrypt_rtp ssrc 探针只挂一次
 _dave_backend_installed = False    # dave-py 后端替换只装一次

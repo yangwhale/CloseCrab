@@ -789,6 +789,13 @@ def main():
         except Exception as e:
             log.warning(f"Discord 语音 sidecar 启动失败 (non-fatal): {e}")
 
+    # Zello PTT 语音 sidecar (接收方向: Zello → STT → BotCore)
+    try:
+        from .voice.zello_voice_sidecar import start as start_zello_sidecar
+        start_zello_sidecar(bot_name)
+    except Exception as e:
+        log.warning(f"Zello sidecar 启动失败 (non-fatal): {e}")
+
     # 启动 Channel
     # Why os._exit instead of sys.exit / return: LiveKit Rust SDK spawns
     # native OS threads (tokio-rt-worker, AudioDevice, AudioSourceCapt,
