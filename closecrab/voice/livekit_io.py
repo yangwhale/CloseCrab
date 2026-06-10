@@ -404,7 +404,14 @@ class _CloseCrabStream(llm.LLMStream):
         # 规则：用确认/过渡语，不用正式回答，避免跟 Claude 回复语义重复。
         _instant_ack_phrases = _pick_instant_ack(combined)
         if _instant_ack_phrases:
-            stream_speak_text(_instant_ack_phrases, backend="qwen3")
+            ok = stream_speak_text(_instant_ack_phrases, backend="qwen3")
+            if not ok:
+                try:
+                    from .zello_voice_sidecar import speak_text as _zs, is_connected as _zc
+                    if _zc():
+                        _zs(_instant_ack_phrases)
+                except Exception:
+                    pass
             log.info(f"instant ack: {_instant_ack_phrases!r}")
 
         # on_input_needed 直接复用 feishu 的卡片机制: Claude 触发
@@ -586,7 +593,14 @@ class _CloseCrabStream(llm.LLMStream):
             from .discord_voice_sidecar import stream_speak_text
             import time as _t
             _fid = f"{int(_t.time() * 1000):x}"
-            stream_speak_text(speech_text, fid=_fid, backend="qwen3")
+            ok = stream_speak_text(speech_text, fid=_fid, backend="qwen3")
+            if not ok:
+                try:
+                    from .zello_voice_sidecar import speak_text as _zs, is_connected as _zc
+                    if _zc():
+                        _zs(speech_text, fid=_fid)
+                except Exception:
+                    pass
             # 推空 chunk 给 LiveKit 做 turn 管理（不触发 TTS）
             try:
                 self._event_ch.send_nowait(
