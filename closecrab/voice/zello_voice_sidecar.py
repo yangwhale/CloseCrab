@@ -912,6 +912,7 @@ async def _zello_stream_send_loop():
         header = struct.pack("!BII", 0x01, stream_id, packet_id)
         await client._ws.send(header + opus_pkt)
         packet_id += 1
+        await asyncio.sleep(0.05)  # 50ms pacing, Zello 播放 60ms/包
 
 
 def zello_feed_pcm24(pcm24: bytes):
