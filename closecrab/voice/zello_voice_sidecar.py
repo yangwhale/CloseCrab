@@ -120,39 +120,6 @@ class OpusDecoder:
                 pass
 
 
-class OpusEncoder:
-    """轻量 Opus 编码器 (ctypes)。"""
-
-    def __init__(self, sample_rate: int = 16000, channels: int = 1,
-                 application: int = _OPUS_APPLICATION_VOIP):
-        lib = _load_opus()
-        self.sample_rate = sample_rate
-        self.channels = channels
-        err = ctypes.c_int(0)
-        lib.opus_encoder_create.restype = ctypes.c_void_p
-        self._ptr = lib.opus_encoder_create(sample_rate, channels, application, ctypes.byref(err))
-        if err.value != _OPUS_OK or not self._ptr:
-            raise RuntimeError(f"opus_encoder_create failed: {err.value}")
-        self._lib = lib
-
-    def encode(self, pcm: bytes, frame_size: int) -> bytes:
-        max_out = 4000
-        out_buf = (ctypes.c_ubyte * max_out)()
-        pcm_buf = (ctypes.c_int16 * (frame_size * self.channels)).from_buffer_copy(pcm)
-        n = self._lib.opus_encode(
-            self._ptr, pcm_buf, frame_size, out_buf, max_out
-        )
-        if n < 0:
-            raise RuntimeError(f"opus_encode error: {n}")
-        return bytes(out_buf[:n])
-
-    def __del__(self):
-        if hasattr(self, "_ptr") and self._ptr:
-            try:
-                self._lib.opus_encoder_destroy(self._ptr)
-            except Exception:
-                pass
-
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Zello Channel API 客户端
@@ -178,7 +145,6 @@ class ZelloClient:
         self._channel_online = False
         self._streams: dict[int, dict] = {}
         self._decoder: OpusDecoder | None = None
-        self._encoder: OpusEncoder | None = None
         self._reconnect_delay = 2.0
         self._pending_responses: dict[int, asyncio.Future] = {}  # seq → Future
 
@@ -470,135 +436,6 @@ lib.opus_decoder_destroy(dec)
                     pass
 
     # ── 发送语音: PCM → Opus → Zello stream ──
-
-    async def send_voice(self, pcm_24k: bytes):
-        """把 24kHz mono s16 PCM 编码为 Opus 发到 Zello channel。"""
-        if not self._connected or not self._channel_online:
-            log.warning("Zello 不在线, 跳过发送")
-            return
-        if not pcm_24k:
-            return
-
-        pcm_48k, _ = audioop.ratecv(pcm_24k, 2, 1, 24000, 48000, None)
-        sample_rate = 48000
-        frame_size_ms = 60
-        frame_size = int(sample_rate * frame_size_ms / 1000)  # 2880 samples
-
-        # Opus 编码 (subprocess 隔离, 防 libopus segfault)
-        import tempfile
-        raw_path = tempfile.mktemp(suffix=".pcm", prefix="zello-send-")
-        opus_path = raw_path.replace(".pcm", ".opus_pkts")
-        try:
-            with open(raw_path, "wb") as f:
-                f.write(pcm_48k)
-            encode_script = f"""
-import ctypes, ctypes.util, struct, sys
-lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
-lib.opus_encoder_create.restype = ctypes.c_void_p
-err = ctypes.c_int(0)
-enc = lib.opus_encoder_create({sample_rate}, 1, 2048, ctypes.byref(err))
-if not enc: sys.exit(1)
-frame_size = {frame_size}
-frame_bytes = frame_size * 2
-with open("{raw_path}", "rb") as f, open("{opus_path}", "wb") as out:
-    while True:
-        frame = f.read(frame_bytes)
-        if not frame: break
-        if len(frame) < frame_bytes:
-            frame += b"\\x00" * (frame_bytes - len(frame))
-        pcm_buf = (ctypes.c_int16 * frame_size).from_buffer_copy(frame)
-        out_buf = (ctypes.c_ubyte * 4000)()
-        n = lib.opus_encode(enc, pcm_buf, frame_size, out_buf, 4000)
-        if n > 0:
-            out.write(struct.pack("<H", n))
-            out.write(bytes(out_buf[:n]))
-lib.opus_encoder_destroy(enc)
-"""
-            proc = await asyncio.create_subprocess_exec(
-                "python3", "-c", encode_script,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-            if proc.returncode != 0:
-                log.warning("Opus encode subprocess 失败: %s", stderr.decode()[:200])
-                return
-            with open(opus_path, "rb") as f:
-                opus_data = f.read()
-        finally:
-            for p in (raw_path, opus_path):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-
-        # 解析 Opus 包序列: [pkt_len(2 LE), pkt_data, ...]
-        opus_packets = []
-        off = 0
-        while off < len(opus_data):
-            if off + 2 > len(opus_data):
-                break
-            pkt_len = struct.unpack("<H", opus_data[off:off+2])[0]
-            off += 2
-            opus_packets.append(opus_data[off:off+pkt_len])
-            off += pkt_len
-
-        if not opus_packets:
-            log.warning("Opus 编码产出 0 包")
-            return
-
-        # codec_header
-        codec_header = struct.pack("<HBB", sample_rate, 1, frame_size_ms)
-        codec_header_b64 = base64.b64encode(codec_header).decode()
-
-        # start_stream
-        seq = self._next_seq()
-        await self._ws.send(json.dumps({
-            "command": "start_stream",
-            "seq": seq,
-            "channel": self.channel,
-            "type": "audio",
-            "codec": "opus",
-            "codec_header": codec_header_b64,
-            "packet_duration": frame_size_ms,
-        }))
-
-        # 等 start_stream 响应 (通过 Future)
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending_responses[seq] = fut
-        try:
-            resp = await asyncio.wait_for(fut, timeout=10)
-        except asyncio.TimeoutError:
-            self._pending_responses.pop(seq, None)
-            log.error("start_stream 超时")
-            return
-        if not resp.get("success"):
-            log.error("start_stream 失败: %s", resp.get("error"))
-            return
-        stream_id = resp["stream_id"]
-
-        # 发送 Opus 包
-        t0 = time.monotonic()
-        for packet_id, opus_pkt in enumerate(opus_packets):
-            header = struct.pack("!BII", 0x01, stream_id, packet_id)
-            await self._ws.send(header + opus_pkt)
-
-            target_t = t0 + (packet_id + 1) * frame_size_ms / 1000 * 0.85
-            now = time.monotonic()
-            if target_t > now:
-                await asyncio.sleep(target_t - now)
-
-        # stop_stream
-        seq = self._next_seq()
-        await self._ws.send(json.dumps({
-            "command": "stop_stream",
-            "seq": seq,
-            "stream_id": stream_id,
-            "channel": self.channel,
-        }))
-
-        dur = time.monotonic() - t0
-        audio_dur = len(pcm_16k) / 2 / sample_rate
-        log.info("语音发送完成: %d 包, %.1fs 音频, %.1fs 耗时", packet_id, audio_dur, dur)
 
 
 # ═══════════════════════════════════════════════════════════════════════
