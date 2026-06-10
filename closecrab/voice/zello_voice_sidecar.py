@@ -1239,4 +1239,76 @@ def stop_sidecar(bot_name: str) -> tuple[bool, str]:
         return True, "Zello 本来就没连。"
     stop()
     return True, "✅ Zello 已断开。"
-    log.info("Zello sidecar 已停止")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  通用播放控制 (从 buffer 文件播放到 Zello, 不依赖 Discord)
+# ═══════════════════════════════════════════════════════════════════════
+
+_BUF_DIR = "/tmp/jarvis-tts-buf"
+_PCM_FRAME = 3840  # 20ms @ 48kHz stereo s16
+_PCM_BYTES_PER_SEC = 48000 * 2 * 2
+_play_task = None  # 当前播放 task (支持打断)
+
+
+def _buf_path(fid: str) -> str:
+    import re
+    if not fid or not re.match(r"^[0-9a-zA-Z_-]{1,64}$", fid):
+        return ""
+    return os.path.join(_BUF_DIR, f"{fid}.pcm")
+
+
+async def _play_buffer(fid: str, start_byte: int = 0):
+    """从 buffer 文件读 PCM → downsample → 写 encoder 管道 → Zello 播放。"""
+    from .discord_voice_sidecar import _set_progress
+    path = _buf_path(fid)
+    if not path or not os.path.exists(path):
+        log.warning("Zello replay: buffer 不存在 fid=%s", fid)
+        return False
+    total = os.path.getsize(path)
+    if total <= 0:
+        return False
+
+    start_byte = max(0, min(start_byte, total))
+    start_byte -= start_byte % _PCM_FRAME  # 对齐帧边界
+
+    log.info("Zello replay 开始: fid=%s start=%.1fs total=%.1fs",
+             fid, start_byte / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
+    _set_progress(fid, played=start_byte, total=total, active=True)
+
+    with open(path, "rb") as f:
+        f.seek(start_byte)
+        played = start_byte
+        while True:
+            chunk = f.read(_PCM_FRAME)
+            if not chunk:
+                break
+            if len(chunk) < _PCM_FRAME:
+                chunk += b"\x00" * (_PCM_FRAME - len(chunk))
+            mono = audioop.tomono(chunk, 2, 1, 1)
+            pcm24, _ = audioop.ratecv(mono, 2, 1, 48000, 24000, None)
+            zello_feed_pcm24(pcm24)
+            played += len(chunk)
+            _set_progress(fid, played=played, active=True)
+            await asyncio.sleep(0.02)
+
+    _set_progress(fid, played=total, total=total, active=False)
+    log.info("Zello replay 完成: fid=%s", fid)
+    return True
+
+
+def replay_buffer(fid: str, start_byte: int = 0) -> bool:
+    """【飞书线程调用】从 buffer 播放到 Zello。线程安全。"""
+    global _play_task
+    loop = _sidecar_loop
+    if loop is None or not is_connected():
+        return False
+    # 打断上一次播放
+    if _play_task is not None and not _play_task.done():
+        _play_task.cancel()
+
+    def _start():
+        global _play_task
+        _play_task = asyncio.ensure_future(_play_buffer(fid, start_byte))
+    loop.call_soon_threadsafe(_start)
+    return True

@@ -2062,19 +2062,41 @@ class FeishuChannel(Channel):
                 # voice_replay: 从落盘 buffer 整段重播。
                 # voice_rewind / voice_forward: 从当前位置往回/往前跳 10% 继续播。
                 # 三者都重置 active=True, 故都要重新拉起进度 updater (原 updater 可能已退出)。
+                # 通用: 先试 Discord, 失败 fallback Zello (只要有一个在线就工作)。
                 fid = (decoded.get("metadata") or {}).get("fid", "") or ""
                 try:
                     if action_type == "voice_replay":
                         from ..voice.discord_voice_sidecar import replay_file
                         ok = bool(fid) and replay_file(fid)
+                        if not ok:
+                            from ..voice.zello_voice_sidecar import replay_buffer
+                            ok = bool(fid) and replay_buffer(fid)
                         msg = "🔁 开始重播" if ok else "重播失败 (buffer 不存在或未连语音)"
                     elif action_type == "voice_rewind":
                         from ..voice.discord_voice_sidecar import rewind_file
                         ok = bool(fid) and rewind_file(fid, 0.1)
+                        if not ok:
+                            from ..voice.discord_voice_sidecar import get_playback_progress, _buf_path as _dc_buf
+                            from ..voice.zello_voice_sidecar import replay_buffer
+                            prog = get_playback_progress()
+                            if prog and fid:
+                                played_s, total_s, _, p_fid = prog
+                                if p_fid == fid and total_s > 0:
+                                    start = max(0, int((played_s - total_s * 0.1) * 48000 * 4))
+                                    ok = replay_buffer(fid, start)
                         msg = "⏪ 已倒退 10%" if ok else "倒退失败 (buffer 不存在或未连语音)"
                     else:
                         from ..voice.discord_voice_sidecar import forward_file
                         ok = bool(fid) and forward_file(fid, 0.1)
+                        if not ok:
+                            from ..voice.discord_voice_sidecar import get_playback_progress
+                            from ..voice.zello_voice_sidecar import replay_buffer
+                            prog = get_playback_progress()
+                            if prog and fid:
+                                played_s, total_s, _, p_fid = prog
+                                if p_fid == fid and total_s > 0:
+                                    start = int((played_s + total_s * 0.1) * 48000 * 4)
+                                    ok = replay_buffer(fid, start)
                         msg = "⏩ 已前进 10%" if ok else "前进失败 (buffer 不存在或未连语音)"
                 except Exception as e:
                     log.error(f"Voice {action_type} failed: {e}", exc_info=True)
