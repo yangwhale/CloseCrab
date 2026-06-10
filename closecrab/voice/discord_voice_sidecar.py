@@ -1323,6 +1323,14 @@ def _get_file_source_class():
             _set_progress(self._fid, played=self._played, active=True)
             if len(chunk) < self.FRAME:  # 末帧补齐静音
                 chunk = chunk + b"\x00" * (self.FRAME - len(chunk))
+            # Zello 旁路 (跟 _StreamPCMSource.write 一样)
+            try:
+                from .zello_voice_sidecar import zello_feed_pcm24
+                mono = audioop.tomono(chunk, 2, 1, 1)
+                pcm24, _ = audioop.ratecv(mono, 2, 1, 48000, 24000, None)
+                zello_feed_pcm24(pcm24)
+            except Exception:
+                pass
             return chunk
 
         def is_opus(self) -> bool:
