@@ -736,58 +736,28 @@ def _send_to_feishu(text: str, speaker: str):
         log.warning("[Zello→飞书] 飞书桥未注册, 跳过")
         return
 
-    # instant ack (fire-and-forget, 不阻塞 LLM)
+    # echo (fire-and-forget)
+    try:
+        f_loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(
+                feishu._send_long(_feishu_chat_id, f"🎤 [Zello·{speaker}] {text}"),
+                loop=f_loop,
+            )
+        )
+    except Exception:
+        pass
+
+    # instant ack (fire-and-forget)
     import random
     speak_text(random.choice(_INSTANT_ACK_PHRASES))
 
+    # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
-    open_id = _feishu_open_id
-    chat_id = _feishu_chat_id
-
-    async def _botcore_then_echo():
-        """BotCore 优先 → LLM 立刻启动, 飞书 echo 后置。"""
-        import time as _t
-        _t0 = _t.monotonic()
-
-        # 1. 飞书 echo (fire-and-forget, 不等)
-        log.info("[Zello pipeline] step1: echo fire-and-forget")
-        asyncio.ensure_future(feishu._send_long(chat_id, f"🎤 [Zello·{speaker}] {text}"))
-
-        # 2. 直调 BotCore — 跳过 feishu 消息管线
-        from ..core.types import UnifiedMessage
-
-        async def _reply(reply_text: str):
-            log.info("[Zello pipeline] step4: _reply 开始, %d chars", len(reply_text))
-            try:
-                log.info("[Zello pipeline] step4a: _send_long")
-                await feishu._send_long(chat_id, reply_text)
-                log.info("[Zello pipeline] step4b: _send_voice_summary")
-                await feishu._send_voice_summary(chat_id, open_id, reply_text)
-                log.info("[Zello pipeline] step4c: voice_summary 完成")
-            except Exception:
-                log.exception("[Zello reply] 飞书发送失败")
-
-        msg = UnifiedMessage(
-            channel_type="zello",
-            user_id=open_id,
-            content=content,
-            reply=_reply,
-            metadata={},
-        )
-        log.info("[Zello pipeline] step2: 进 handle_message: %.0fms", (_t.monotonic() - _t0) * 1000)
-        try:
-            result = await feishu._core.handle_message(msg)
-            log.info("[Zello pipeline] step3: handle_message 完成: %.0fms, result=%d chars",
-                     (_t.monotonic() - _t0) * 1000, len(result) if result else 0)
-            if result:
-                await _reply(result)
-            else:
-                log.warning("[Zello pipeline] handle_message 返回空!")
-        except Exception:
-            log.exception("[Zello pipeline] handle_message 异常")
-
-    f_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_botcore_then_echo()))
-    log.info("STT → BotCore 直调 (飞书后置): %s", text[:60])
+    asyncio.run_coroutine_threadsafe(
+        feishu.inject_synthetic_text(_feishu_open_id, _feishu_chat_id, content),
+        f_loop,
+    )
+    log.info("STT → feishu 消息通道: %s", text[:60])
 
 
 # ═══════════════════════════════════════════════════════════════════════
