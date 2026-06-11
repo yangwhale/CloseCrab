@@ -547,6 +547,7 @@ class ZelloPlayer:
             return False
         self._paused = True
         self._buf.clear()
+        self._item_done = False
         if self._replay_task and not self._replay_task.done():
             self._replay_task.cancel()
         log.info("Zello 暂停")
