@@ -354,6 +354,34 @@ class ZelloClient:
             log.info("[Zello] 跳过: 音频太短 (%d bytes)", len(pcm))
             return
 
+        # 1.5 Debug: 长音频存 WAV 到 CC Pages 发链接 (>5s 时触发)
+        if audio_dur > 5 and _feishu_ref and _feishu_loop and _feishu_chat_id:
+            try:
+                import wave
+                ts = int(time.time())
+                fname = f"zello-debug-{ts}.wav"
+                pages_root = os.environ.get("CC_PAGES_WEB_ROOT", "/tmp")
+                wav_dir = os.path.join(pages_root, "assets")
+                os.makedirs(wav_dir, exist_ok=True)
+                wav_path = os.path.join(wav_dir, fname)
+                with wave.open(wav_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(pcm)
+                url_prefix = os.environ.get("CC_PAGES_URL_PREFIX", "")
+                url = f"{url_prefix}/assets/{fname}" if url_prefix else wav_path
+                feishu = _feishu_ref
+                f_loop = _feishu_loop
+                chat_id = _feishu_chat_id
+                msg = f"🔍 [Debug] Opus解码后 WAV: {audio_dur:.1f}s, {len(pcm)} bytes, {len(packets)} pkts\n{url}"
+                f_loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        feishu._send_long(chat_id, msg), loop=f_loop))
+                log.info("[Debug] WAV 已存: %.1fs → %s", audio_dur, wav_path)
+            except Exception:
+                log.debug("Debug WAV 保存失败 (non-fatal)")
+
         # 2. 重采样 + AGC
         pcm_16k = pcm
         if sample_rate != 16000:
