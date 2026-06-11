@@ -37,6 +37,7 @@ import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采
 from dataclasses import dataclass
 import logging
 import os
+import struct
 import re
 import threading
 import time
@@ -446,6 +447,70 @@ def _plan_tts_batches(cleaned: str):
 
 _tts_client_per_loop: dict = {}  # per-event-loop genai client (aiohttp session 绑定 loop)
 
+# ── TTS worker subprocess (独立进程, 避免 GIL 争用) ──
+_tts_worker_proc = None  # asyncio.subprocess.Process
+
+
+async def _ensure_tts_worker():
+    """启动/复用 TTS worker 子进程。返回 proc 或 None。"""
+    global _tts_worker_proc
+    if _tts_worker_proc is not None and _tts_worker_proc.returncode is None:
+        return _tts_worker_proc
+    worker_path = os.path.join(os.path.dirname(__file__), "tts_worker.py")
+    if not os.path.exists(worker_path):
+        return None
+    _tts_worker_proc = await asyncio.create_subprocess_exec(
+        "python3", worker_path,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    # 等 READY 信号 (warmup 完成)
+    try:
+        ready = await asyncio.wait_for(_tts_worker_proc.stdout.readline(), timeout=30)
+        if ready.strip() == b"READY":
+            log.info("TTS worker 子进程已就绪 (PID=%d)", _tts_worker_proc.pid)
+            return _tts_worker_proc
+    except asyncio.TimeoutError:
+        log.warning("TTS worker 启动超时")
+    _tts_worker_proc = None
+    return None
+
+
+async def _tts_worker_stream(text: str):
+    """通过 TTS worker 子进程生成 48kHz stereo PCM (独立进程, 无 GIL 争用)。"""
+    import time as _t_mod
+    proc = await _ensure_tts_worker()
+    if proc is None:
+        return
+
+    from .gemini_tts import _clean_text_for_tts
+    cleaned = _clean_text_for_tts(text)
+    if not cleaned.strip():
+        return
+
+    t0 = _t_mod.monotonic()
+    text_bytes = cleaned.encode("utf-8")
+    proc.stdin.write(struct.pack("<I", len(text_bytes)))
+    proc.stdin.write(text_bytes)
+    await proc.stdin.drain()
+
+    t_first = None
+    while True:
+        hdr = await proc.stdout.readexactly(4)
+        pkt_len = struct.unpack("<I", hdr)[0]
+        if pkt_len == 0:
+            break
+        pcm = await proc.stdout.readexactly(pkt_len)
+        if t_first is None:
+            t_first = _t_mod.monotonic()
+            log.info("TTS worker 首帧: TTFB=%.0fms, %dc",
+                     (t_first - t0) * 1000, len(cleaned))
+        yield pcm
+
+    total = _t_mod.monotonic() - t0
+    log.info("TTS worker 完成: total=%.0fms, %dc", total * 1000, len(cleaned))
+
 async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                               idx: int, total: int) -> tuple[bytes, str]:
     """生成单个 batch 的完整 48kHz stereo PCM (含缓存检查 + retry + Qwen3 fallback)。"""
@@ -524,10 +589,35 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
 async def _gemini_tts_stream(text: str):
     """分批流式调 Gemini TTS, 逐 chunk yield 48kHz stereo s16 PCM bytes。
 
-    内部完成 24kHz mono → 48kHz stereo 转换, caller 直接 write 不需转换。
-    优化: PCM 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
-    首批仍流式保证最快首帧, 后续批从预取缓冲直接 yield。
+    优先使用 TTS worker 子进程 (独立进程, 无 GIL 争用, TTFB ~1000ms)。
+    Worker 不可用时 fallback 到 in-process 调用 (TTFB ~1800ms)。
     """
+    # 先检查缓存 (不需要 worker)
+    from .gemini_tts import _clean_text_for_tts
+    cleaned = _clean_text_for_tts(text)
+    if not cleaned.strip():
+        return
+
+    # 短文本整段走 worker (不分批, 简单路径)
+    batches = _plan_tts_batches(cleaned)
+    if len(batches) == 1:
+        cached = _cache_get_pcm(batches[0], os.environ.get("DISCORD_TTS_VOICE", "Orus"))
+        if cached is not None:
+            log.info("TTS cache hit (%dc → %.1fs)", len(batches[0]), len(cached) / 4 / 48000)
+            yield cached
+            return
+        # 尝试 worker 子进程
+        try:
+            worker_ok = False
+            async for pcm in _tts_worker_stream(text):
+                worker_ok = True
+                yield pcm
+            if worker_ok:
+                return
+        except Exception as e:
+            log.warning("TTS worker 失败, fallback in-process: %s", e)
+
+    # fallback: in-process (多批 or worker 不可用)
     import time as _t_mod
     _t_enter = _t_mod.monotonic()
     from google.genai import types as gt
