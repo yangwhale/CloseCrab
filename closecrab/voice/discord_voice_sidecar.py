@@ -37,7 +37,6 @@ import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采
 from dataclasses import dataclass
 import logging
 import os
-import struct
 import re
 import threading
 import time
@@ -447,82 +446,6 @@ def _plan_tts_batches(cleaned: str):
 
 _tts_client_per_loop: dict = {}  # per-event-loop genai client (aiohttp session 绑定 loop)
 
-# ── TTS worker subprocess (独立进程, 避免 GIL 争用) ──
-_tts_worker_proc = None  # asyncio.subprocess.Process
-
-
-async def _ensure_tts_worker():
-    """启动/复用 TTS worker 子进程。返回 proc 或 None。"""
-    global _tts_worker_proc
-    if _tts_worker_proc is not None and _tts_worker_proc.returncode is None:
-        return _tts_worker_proc
-    worker_path = os.path.join(os.path.dirname(__file__), "tts_worker.py")
-    if not os.path.exists(worker_path):
-        return None
-    _tts_worker_proc = await asyncio.create_subprocess_exec(
-        "python3", worker_path,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    # 后台读 stderr 打到日志
-    async def _read_worker_stderr(proc):
-        while proc.returncode is None:
-            try:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                log.info("TTS worker stderr: %s", line.decode(errors="ignore").strip())
-            except Exception:
-                break
-    asyncio.create_task(_read_worker_stderr(_tts_worker_proc))
-
-    # 等 READY 信号 (warmup 完成)
-    try:
-        ready = await asyncio.wait_for(_tts_worker_proc.stdout.readline(), timeout=30)
-        if ready.strip() == b"READY":
-            log.info("TTS worker 子进程已就绪 (PID=%d)", _tts_worker_proc.pid)
-            return _tts_worker_proc
-    except asyncio.TimeoutError:
-        log.warning("TTS worker 启动超时")
-    _tts_worker_proc = None
-    return None
-
-
-async def _tts_worker_stream(text: str):
-    """通过 TTS worker 子进程生成 48kHz stereo PCM (独立进程, 无 GIL 争用)。"""
-    import time as _t_mod
-    proc = await _ensure_tts_worker()
-    if proc is None:
-        return
-
-    from .gemini_tts import _clean_text_for_tts
-    cleaned = _clean_text_for_tts(text)
-    if not cleaned.strip():
-        return
-
-    t0 = _t_mod.monotonic()
-    text_bytes = cleaned.encode("utf-8")
-    proc.stdin.write(struct.pack("<I", len(text_bytes)))
-    proc.stdin.write(text_bytes)
-    await proc.stdin.drain()
-
-    t_first = None
-    while True:
-        hdr = await proc.stdout.readexactly(4)
-        pkt_len = struct.unpack("<I", hdr)[0]
-        if pkt_len == 0:
-            break
-        pcm = await proc.stdout.readexactly(pkt_len)
-        if t_first is None:
-            t_first = _t_mod.monotonic()
-            log.info("TTS worker 首帧: TTFB=%.0fms, %dc",
-                     (t_first - t0) * 1000, len(cleaned))
-        yield pcm
-
-    total = _t_mod.monotonic() - t0
-    log.info("TTS worker 完成: total=%.0fms, %dc", total * 1000, len(cleaned))
-
 async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                               idx: int, total: int) -> tuple[bytes, str]:
     """生成单个 batch 的完整 48kHz stereo PCM (含缓存检查 + retry + Qwen3 fallback)。"""
@@ -601,49 +524,24 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
 async def _gemini_tts_stream(text: str):
     """分批流式调 Gemini TTS, 逐 chunk yield 48kHz stereo s16 PCM bytes。
 
-    优先使用 TTS worker 子进程 (独立进程, 无 GIL 争用, TTFB ~1000ms)。
-    Worker 不可用时 fallback 到 in-process 调用 (TTFB ~1800ms)。
+    内部完成 24kHz mono → 48kHz stereo 转换, caller 直接 write 不需转换。
+    优化: PCM 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
     """
-    # 先检查缓存 (不需要 worker)
-    from .gemini_tts import _clean_text_for_tts
-    cleaned = _clean_text_for_tts(text)
-    if not cleaned.strip():
-        return
-
-    # 尝试 worker 子进程 (独立进程, 无 GIL 争用)
-    # worker 不分批, 整段发 API (独立进程不需要分批优化)
-    try:
-        worker_ok = False
-        async for pcm in _tts_worker_stream(text):
-            worker_ok = True
-            yield pcm
-        if worker_ok:
-            return
-    except Exception as e:
-        log.warning("TTS worker 失败, fallback in-process: %s", e)
-
-    # fallback: in-process (多批 or worker 不可用)
     import time as _t_mod
-    _t_enter = _t_mod.monotonic()
     from google.genai import types as gt
     from .gemini_tts import _build_genai_client, _clean_text_for_tts
 
-    _t_import = _t_mod.monotonic()
     cleaned = _clean_text_for_tts(text)
-    _t_clean = _t_mod.monotonic()
     if not cleaned.strip():
         return
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
     voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
     loop_id = id(asyncio.get_running_loop())
     client = _tts_client_per_loop.get(loop_id)
-    _t_client_start = _t_mod.monotonic()
     if client is None:
         client = _build_genai_client(None)
         _tts_client_per_loop[loop_id] = client
-        _t_client_created = _t_mod.monotonic()
-        log.info("TTS genai client 创建: loop=%x (%.0fms), 开始 warmup...",
-                 loop_id, (_t_client_created - _t_client_start) * 1000)
+        log.info("TTS genai client 创建: loop=%x", loop_id)
         try:
             _warmup_config = gt.GenerateContentConfig(
                 response_modalities=["AUDIO"],
@@ -659,11 +557,9 @@ async def _gemini_tts_stream(text: str):
             )
             async for _wc in _warmup_stream:
                 break
-            log.info("TTS warmup 完成: %.0fms (TLS+OAuth+TCP 已预热)",
-                     (_t_mod.monotonic() - _t_client_created) * 1000)
+            log.info("TTS warmup 完成")
         except Exception as _we:
             log.warning("TTS warmup 失败 (non-fatal): %s", _we)
-    _t_client = _t_mod.monotonic()
     config = gt.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=gt.SpeechConfig(
@@ -675,14 +571,8 @@ async def _gemini_tts_stream(text: str):
     )
     batches = _plan_tts_batches(cleaned)
     n = len(batches)
-    _t_prep = _t_mod.monotonic()
-    log.info("TTS 分批: %dc → %d 批 (首批 %dc) | 准备耗时: import=%.0fms clean=%.0fms client=%.0fms config=%.0fms total=%.0fms",
-             len(cleaned), n, len(batches[0]) if batches else 0,
-             (_t_import - _t_enter) * 1000,
-             (_t_clean - _t_import) * 1000,
-             (_t_client - _t_client_start) * 1000,
-             (_t_prep - _t_client) * 1000,
-             (_t_prep - _t_enter) * 1000)
+    log.info("TTS 分批: %dc → %d 批 (首批 %dc)", len(cleaned), n,
+             len(batches[0]) if batches else 0)
 
     current_prefetch = None  # asyncio.Task for the batch we're about to yield
 
@@ -704,18 +594,12 @@ async def _gemini_tts_stream(text: str):
                 )
         else:
             # First batch (or no prefetch): check cache, then stream for low latency
-            _t_cache_start = _t_mod.monotonic()
             cached = _cache_get_pcm(batch, voice)
-            _t_cache_done = _t_mod.monotonic()
             if cached is not None:
-                log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs, lookup=%.0fms)",
-                         idx + 1, n, len(batch), len(cached) / 4 / 48000,
-                         (_t_cache_done - _t_cache_start) * 1000)
+                log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
+                         idx + 1, n, len(batch), len(cached) / 4 / 48000)
                 yield cached
             else:
-                log.info("TTS 批 #%d/%d: cache miss (%dc, lookup=%.0fms)",
-                         idx + 1, n, len(batch),
-                         (_t_cache_done - _t_cache_start) * 1000)
                 pcm_accum = []
                 last_finish = None
                 _cv_state = None
@@ -725,13 +609,9 @@ async def _gemini_tts_stream(text: str):
                         _t_api = _t_mod.monotonic()
                         log.info("TTS API 调用: 批 #%d/%d, %dc, attempt %d",
                                  idx + 1, n, len(batch), attempt + 1)
-                        _t_pre_stream = _t_mod.monotonic()
                         stream = await client.aio.models.generate_content_stream(
                             model=model, contents=batch, config=config
                         )
-                        _t_stream_got = _t_mod.monotonic()
-                        log.info("TTS API stream 对象拿到: %.0fms",
-                                 (_t_stream_got - _t_pre_stream) * 1000)
                         _t_first_chunk = None
                         async for chunk in stream:
                             for cand in getattr(chunk, "candidates", None) or []:
