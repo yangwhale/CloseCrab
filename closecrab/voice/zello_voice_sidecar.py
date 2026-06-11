@@ -787,7 +787,6 @@ async def _speak_consumer():
                 try: buf_f.close()
                 except Exception: pass
 
-            player.stream_timeout = 1.0  # 正文播完快关麦
             player.finish()
             await player.wait_drained()
 
@@ -988,6 +987,7 @@ def zello_buf_write_threadsafe(data: bytes):
 def zello_signal_done_threadsafe():
     if _player:
         _player.finish_threadsafe()
+        _player.stream_timeout = 1.0  # 主回复播完, 快关麦
 
 
 def pause_zello_stream() -> bool:
