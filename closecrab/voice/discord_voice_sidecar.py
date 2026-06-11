@@ -455,13 +455,13 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                  idx, total, len(batch), len(cached) / 4 / 48000)
         return cached, "cache"
 
-    import time as _t
+    import time as _t_mod
     chunks_24k = []
     last_finish = None
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
-            _t_api = _t.monotonic()
+            _t_api = _t_mod.monotonic()
             log.info("TTS API 调用 (prefetch): 批 #%d/%d, %dc, attempt %d",
                      idx, total, len(batch), attempt + 1)
             stream = await client.aio.models.generate_content_stream(
@@ -478,28 +478,28 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                         inline = getattr(part, "inline_data", None)
                         if inline and inline.data:
                             if _t_first_chunk is None:
-                                _t_first_chunk = _t.monotonic()
+                                _t_first_chunk = _t_mod.monotonic()
                                 log.info("TTS API 首帧 (prefetch): 批 #%d/%d, TTFB=%.0fms, %dc",
                                          idx, total, (_t_first_chunk - _t_api) * 1000, len(batch))
                             chunks_24k.append(bytes(inline.data))
             if chunks_24k:
                 log.info("TTS API 完成 (prefetch): 批 #%d/%d, 总耗时=%.0fms, %dc",
-                         idx, total, (_t.monotonic() - _t_api) * 1000, len(batch))
+                         idx, total, (_t_mod.monotonic() - _t_api) * 1000, len(batch))
                 break
             log.warning("TTS 批 #%d/%d Gemini 返回 0 字节 (%.0fms, finish=%s), retry %d/%d",
-                        idx, total, (_t.monotonic() - _t_api) * 1000,
+                        idx, total, (_t_mod.monotonic() - _t_api) * 1000,
                         last_finish, attempt + 1, max_retries)
             if attempt < max_retries:
                 await asyncio.sleep(1 + attempt)
         except Exception as exc:
             if attempt < max_retries:
                 log.warning("TTS 批 #%d/%d 失败(%.0fms, retry %d/%d): %s",
-                            idx, total, (_t.monotonic() - _t_api) * 1000,
+                            idx, total, (_t_mod.monotonic() - _t_api) * 1000,
                             attempt + 1, max_retries, exc)
                 await asyncio.sleep(1 + attempt)
             else:
                 log.error("TTS 批 #%d/%d Gemini 最终失败 (%.0fms), fallback Qwen3 (%dc)",
-                          idx, total, (_t.monotonic() - _t_api) * 1000, len(batch))
+                          idx, total, (_t_mod.monotonic() - _t_api) * 1000, len(batch))
     if not chunks_24k:
         try:
             log.info("TTS 批 #%d/%d fallback → Qwen3 (%dc)", idx, total, len(batch))
@@ -628,7 +628,7 @@ async def _gemini_tts_stream(text: str):
                                     inline = getattr(part, "inline_data", None)
                                     if inline and inline.data:
                                         if _t_first_chunk is None:
-                                            _t_first_chunk = _t.monotonic()
+                                            _t_first_chunk = _t_mod.monotonic()
                                             log.info("TTS API 首帧: 批 #%d/%d, TTFB=%.0fms, %dc",
                                                      idx + 1, n, (_t_first_chunk - _t_api) * 1000, len(batch))
                                         d = bytes(inline.data)
@@ -638,23 +638,23 @@ async def _gemini_tts_stream(text: str):
                                         yield stereo
                         if pcm_accum:
                             log.info("TTS API 完成: 批 #%d/%d, 总耗时=%.0fms, %dc → %.1fs音频",
-                                     idx + 1, n, (_t.monotonic() - _t_api) * 1000,
+                                     idx + 1, n, (_t_mod.monotonic() - _t_api) * 1000,
                                      len(batch), sum(len(c) for c in pcm_accum) / 4 / 48000)
                             break
                         log.warning("TTS 批 #%d/%d 返回 0 字节 (%.0fms), retry %d/%d",
-                                    idx + 1, n, (_t.monotonic() - _t_api) * 1000,
+                                    idx + 1, n, (_t_mod.monotonic() - _t_api) * 1000,
                                     attempt + 1, max_retries)
                         if attempt < max_retries:
                             await asyncio.sleep(1 + attempt)
                     except Exception as exc:
                         if attempt < max_retries:
                             log.warning("TTS 批 #%d/%d 失败(%.0fms, retry %d): %s",
-                                        idx + 1, n, (_t.monotonic() - _t_api) * 1000,
+                                        idx + 1, n, (_t_mod.monotonic() - _t_api) * 1000,
                                         attempt + 1, exc)
                             await asyncio.sleep(1 + attempt)
                         else:
                             log.error("TTS 批 #%d/%d Gemini 最终失败 (%.0fms)",
-                                      idx + 1, n, (_t.monotonic() - _t_api) * 1000)
+                                      idx + 1, n, (_t_mod.monotonic() - _t_api) * 1000)
                 if not pcm_accum:
                     _cv_state2 = None
                     try:
