@@ -96,36 +96,37 @@ def get_playback_progress():
 
 def _cache_key_for_batch(text: str, voice: str) -> str:
     import hashlib
-    return hashlib.sha256(f"gemini|{voice.lower()}|{text}".encode()).hexdigest()
+    return hashlib.sha256(f"48s|{voice.lower()}|{text}".encode()).hexdigest()
+
+
+_CACHE_MAX_CHARS = 30
 
 
 def _cache_get_pcm(text: str, voice: str) -> bytes | None:
+    """读缓存: 48kHz stereo s16le PCM raw 文件。超过 30 字跳过 (长文本不会重复)。"""
+    if len(text) > _CACHE_MAX_CHARS:
+        return None
     key = _cache_key_for_batch(text, voice)
-    ogg = os.path.join(_TTS_CACHE_DIR, f"{key}.ogg")
-    if not os.path.exists(ogg) or os.path.getsize(ogg) == 0:
+    path = os.path.join(_TTS_CACHE_DIR, f"{key}.pcm")
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
     try:
-        r = subprocess.run(
-            ["ffmpeg", "-i", ogg, "-f", "s16le", "-ar", "24000", "-ac", "1", "-"],
-            capture_output=True, timeout=10,
-        )
-        return r.stdout if r.returncode == 0 and len(r.stdout) > 0 else None
+        with open(path, "rb") as f:
+            return f.read()
     except Exception:
         return None
 
 
 def _cache_save_pcm(text: str, voice: str, pcm: bytes):
-    if not pcm:
+    """存缓存: 48kHz stereo s16le PCM raw 文件。超过 30 字跳过。"""
+    if not pcm or len(text) > _CACHE_MAX_CHARS:
         return
     key = _cache_key_for_batch(text, voice)
-    ogg = os.path.join(_TTS_CACHE_DIR, f"{key}.ogg")
+    path = os.path.join(_TTS_CACHE_DIR, f"{key}.pcm")
     os.makedirs(_TTS_CACHE_DIR, exist_ok=True)
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "-",
-             "-c:a", "libopus", "-b:a", "48k", ogg],
-            input=pcm, capture_output=True, timeout=10,
-        )
+        with open(path, "wb") as f:
+            f.write(pcm)
     except Exception:
         pass
 
@@ -260,30 +261,6 @@ def _load_sidecar_config(bot_name: str) -> dict | None:
         return None
 
 
-async def _generate_tts(text: str) -> tuple[str, str]:
-    """调 tts-generator skill 生成 ogg。返回 (ogg_path, error)。"""
-    tts_script = os.path.expanduser(
-        "~/CloseCrab/skills/tts-generator/scripts/tts-generate.py"
-    )
-    try:
-        # --voice orus 对齐飞书 _tts_and_send_one 的音色, 两边听感一致
-        proc = await asyncio.create_subprocess_exec(
-            "python3", tts_script, text, "--voice", "orus",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate()
-        if proc.returncode != 0:
-            return "", err.decode(errors="ignore")[:300]
-        lines = [l.strip() for l in out.decode(errors="ignore").splitlines() if l.strip()]
-        ogg_path = lines[-1] if lines else ""
-        if not ogg_path or not os.path.exists(ogg_path):
-            return "", "TTS 没产出音频文件"
-        return ogg_path, ""
-    except Exception as e:
-        log.exception("TTS 生成异常")
-        return "", str(e)
-
 
 async def _resolve_voice_channel(bot, voice_channel_id: str):
     """解析常驻语音频道：优先配置的 id，缺省取 server 第一个语音频道。"""
@@ -400,45 +377,6 @@ async def _voice_heartbeat(interval: float = 30.0):
             log.exception("voice 心跳异常，继续下个周期")
 
 
-async def _speak(text: str):
-    """在 sidecar loop 里执行：确保连上常驻频道 → TTS → 等上一段念完 → play。"""
-    import discord
-
-    vc = await _ensure_connected()
-    if vc is None:
-        return
-    ogg_path, err = await _generate_tts(text)
-    if err:
-        log.warning("Discord TTS 失败: %s", err)
-        return
-    for _ in range(300):  # 最多 ~60s 等上一段念完，避免叠音
-        if not vc.is_playing():
-            break
-        await asyncio.sleep(0.2)
-    try:
-        vc.play(discord.FFmpegOpusAudio(ogg_path))
-        log.info("Discord 念: %s", text[:50])
-    except Exception:
-        log.exception("Discord play 失败")
-
-
-def speak_text(text: str) -> bool:
-    """【飞书线程调用】把一段口语文本推到 Discord 常驻语音频道念。线程安全。
-
-    sidecar 未启动 / loop 未就绪时静默返回 False，不抛异常、不阻塞调用方。
-    """
-    if not text or not text.strip():
-        return False
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
-        return False
-    try:
-        asyncio.run_coroutine_threadsafe(_speak(text), loop)
-        return True
-    except Exception:
-        log.exception("speak_text 跨线程调度失败")
-        return False
-
 
 # ─── 流式直生路径 (替代文件式 speak_text, 低延迟) ──────────────────────────
 # 不调 tts-generate.py skill / 不落盘 ogg / 不用 ffmpeg。直接学 livekit 那套
@@ -510,15 +448,14 @@ _tts_client_cache = None  # module-level singleton for HTTP keep-alive
 
 async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                               idx: int, total: int) -> tuple[bytes, str]:
-    """生成单个 batch 的完整 PCM (含缓存检查 + retry + Qwen3 fallback)。
-    返回 (pcm_bytes, finish_reason_str)。"""
+    """生成单个 batch 的完整 48kHz stereo PCM (含缓存检查 + retry + Qwen3 fallback)。"""
     cached = _cache_get_pcm(batch, voice)
     if cached is not None:
         log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
-                 idx, total, len(batch), len(cached) / 2 / 24000)
+                 idx, total, len(batch), len(cached) / 4 / 48000)
         return cached, "cache"
 
-    chunks = []
+    chunks_24k = []
     last_finish = None
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -535,8 +472,8 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                     for part in getattr(content, "parts", None) or []:
                         inline = getattr(part, "inline_data", None)
                         if inline and inline.data:
-                            chunks.append(bytes(inline.data))
-            if chunks:
+                            chunks_24k.append(bytes(inline.data))
+            if chunks_24k:
                 break
             log.warning("TTS 批 #%d/%d Gemini 返回 0 字节 (finish=%s), retry %d/%d",
                         idx, total, last_finish, attempt + 1, max_retries)
@@ -550,27 +487,32 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
             else:
                 log.error("TTS 批 #%d/%d Gemini 最终失败，fallback Qwen3 (%dc)",
                           idx, total, len(batch))
-    if not chunks:
+    if not chunks_24k:
         try:
             log.info("TTS 批 #%d/%d fallback → Qwen3 (%dc)", idx, total, len(batch))
             async for pcm_chunk in _qwen3_tts_stream(batch):
-                chunks.append(pcm_chunk)
+                chunks_24k.append(pcm_chunk)
             last_finish = "Qwen3-fallback"
         except Exception as qe:
             log.error("TTS 批 #%d/%d Qwen3 fallback 也失败: %s", idx, total, qe)
 
-    pcm = b"".join(chunks)
-    if pcm:
-        _cache_save_pcm(batch, voice, pcm)
-    log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
-             idx, total, len(batch), len(pcm) / 2 / 24000 if pcm else 0, last_finish)
-    return pcm, str(last_finish)
+    pcm_24k = b"".join(chunks_24k)
+    if pcm_24k:
+        pcm48, _ = audioop.ratecv(pcm_24k, 2, 1, 24000, 48000, None)
+        stereo = audioop.tostereo(pcm48, 2, 1, 1)
+        _cache_save_pcm(batch, voice, stereo)
+        log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
+                 idx, total, len(batch), len(stereo) / 4 / 48000, last_finish)
+        return stereo, str(last_finish)
+    log.info("TTS 批 #%d/%d: %dc → 0s 音频 finish=%s", idx, total, len(batch), last_finish)
+    return b"", str(last_finish)
 
 
 async def _gemini_tts_stream(text: str):
-    """分批流式调 Gemini TTS, 逐 chunk yield 24kHz mono s16 PCM bytes。
+    """分批流式调 Gemini TTS, 逐 chunk yield 48kHz stereo s16 PCM bytes。
 
-    优化: OGG 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
+    内部完成 24kHz mono → 48kHz stereo 转换, caller 直接 write 不需转换。
+    优化: PCM 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
     首批仍流式保证最快首帧, 后续批从预取缓冲直接 yield。
     """
     global _tts_client_cache
@@ -622,11 +564,12 @@ async def _gemini_tts_stream(text: str):
             cached = _cache_get_pcm(batch, voice)
             if cached is not None:
                 log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
-                         idx + 1, n, len(batch), len(cached) / 2 / 24000)
+                         idx + 1, n, len(batch), len(cached) / 4 / 48000)
                 yield cached
             else:
                 pcm_accum = []
                 last_finish = None
+                _cv_state = None
                 max_retries = 2
                 for attempt in range(max_retries + 1):
                     try:
@@ -643,8 +586,10 @@ async def _gemini_tts_stream(text: str):
                                     inline = getattr(part, "inline_data", None)
                                     if inline and inline.data:
                                         d = bytes(inline.data)
-                                        pcm_accum.append(d)
-                                        yield d
+                                        pcm48, _cv_state = audioop.ratecv(d, 2, 1, 24000, 48000, _cv_state)
+                                        stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                                        pcm_accum.append(stereo)
+                                        yield stereo
                         if pcm_accum:
                             break
                         log.warning("TTS 批 #%d/%d 返回 0 字节, retry %d/%d",
@@ -659,18 +604,21 @@ async def _gemini_tts_stream(text: str):
                         else:
                             log.error("TTS 批 #%d/%d Gemini 最终失败", idx + 1, n)
                 if not pcm_accum:
+                    _cv_state2 = None
                     try:
-                        async for pcm_chunk in _qwen3_tts_stream(batch):
-                            pcm_accum.append(pcm_chunk)
-                            yield pcm_chunk
+                        async for pcm24 in _qwen3_tts_stream(batch):
+                            pcm48, _cv_state2 = audioop.ratecv(pcm24, 2, 1, 24000, 48000, _cv_state2)
+                            stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                            pcm_accum.append(stereo)
+                            yield stereo
                     except Exception:
                         pass
-                full_pcm = b"".join(pcm_accum)
-                if full_pcm:
-                    _cache_save_pcm(batch, voice, full_pcm)
+                full_stereo = b"".join(pcm_accum)
+                if full_stereo:
+                    _cache_save_pcm(batch, voice, full_stereo)
                 log.info("TTS 批 #%d/%d: %dc → %.1fs finish=%s",
                          idx + 1, n, len(batch),
-                         len(full_pcm) / 2 / 24000 if full_pcm else 0, last_finish)
+                         len(full_stereo) / 4 / 48000 if full_stereo else 0, last_finish)
             # First batch done, start prefetch for next (sequential, no concurrent API)
             if idx + 1 < n:
                 await asyncio.sleep(0.05)
@@ -1050,12 +998,12 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             buf_f = None
 
     try:
-        state = None
         wrote = 0
         t_first_pcm = None
 
         if tts_backend == "qwen3":
             segments = _split_by_emotion(text)
+            state = None
             log.info("Qwen3 TTS 分段: %d 段, %s", len(segments), text[:40])
             for seg_idx, (instruct, seg_text) in enumerate(segments):
                 if _tts_interrupted:
@@ -1081,7 +1029,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                 tts_stream = _cloud_tts_stream(text)
             else:
                 tts_stream = _gemini_tts_stream(text)
-            async for pcm24 in tts_stream:
+            async for stereo in tts_stream:
                 if _tts_interrupted:
                     log.info("TTS 被打断(barge-in), 停止生成: %dc已写, %s", wrote, text[:30])
                     break
@@ -1090,8 +1038,6 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                              (t_first_pcm - t_start) * 1000, len(text), text[:30])
                     source = _get_persistent_source() or source
-                pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
-                stereo = audioop.tostereo(pcm48, 2, 1, 1)
                 source.write(stereo)
                 wrote += len(stereo)
                 if buf_f is not None:

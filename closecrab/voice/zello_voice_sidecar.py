@@ -4,7 +4,7 @@
 纯 WebSocket JSON + binary 协议。
 
 收到语音 → Opus 解码 → 16kHz 重采样 → FunASR STT → 回调飞书
-发送语音 → Gemini TTS → 24kHz PCM → Opus 编码 → Zello stream
+发送语音 → 复用 Discord 流式 TTS → 24kHz PCM → 48kHz stereo → Opus 编码 → Zello stream
 
 启用方式 (Firestore bots/{name})::
 
@@ -478,54 +478,20 @@ async def _funasr_recognize(pcm_16k: bytes) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  TTS 生成
-# ═══════════════════════════════════════════════════════════════════════
-
-async def _generate_tts(text: str) -> tuple[str, str]:
-    """调 tts-generator skill 生成 ogg 音频。返回 (ogg_path, error)。"""
-    tts_script = os.path.expanduser(
-        "~/CloseCrab/skills/tts-generator/scripts/tts-generate.py"
-    )
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "python3", tts_script, text, "--voice", "orus",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate()
-        if proc.returncode != 0:
-            return "", err.decode(errors="ignore")[:300]
-        lines = [l.strip() for l in out.decode(errors="ignore").splitlines() if l.strip()]
-        ogg_path = lines[-1] if lines else ""
-        if not ogg_path or not os.path.exists(ogg_path):
-            return "", "TTS 没产出音频文件"
-        return ogg_path, ""
-    except Exception as e:
-        log.exception("TTS 生成异常")
-        return "", str(e)
-
-
-async def _ogg_to_pcm_24k(ogg_path: str) -> bytes:
-    """ogg → 24kHz mono s16le PCM。"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-i", ogg_path, "-f", "s16le", "-ar", "24000", "-ac", "1", "-",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, _ = await proc.communicate()
-        return out if proc.returncode == 0 else b""
-    except Exception:
-        log.exception("ogg→PCM 转换失败")
-        return b""
-
-
-# ═══════════════════════════════════════════════════════════════════════
 #  TTS 播报队列 (串行消费, 防叠音)
+#  TTS 生成器复用 discord_voice_sidecar 的流式实现, 只在推流时分叉
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _speak_consumer():
-    """从队列逐条取出, TTS 生成 → Opus 编码 → 发 Zello。"""
+    """从队列逐条取出, 复用 Discord 的流式 TTS → 48kHz stereo → Zello 推流。
+
+    TTS 生成器与 Discord 完全共用 (_gemini_tts_stream / _qwen3_tts_stream),
+    只在最后推流时分叉: Discord → source.write, Zello → zello_feed_pcm48_stereo。
+    """
+    from .discord_voice_sidecar import (
+        _gemini_tts_stream, _qwen3_tts_stream, _cloud_tts_stream,
+        _split_by_emotion, _set_progress,
+    )
     while True:
         item = await _speak_queue.get()
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
@@ -536,34 +502,58 @@ async def _speak_consumer():
             log.info("Zello TTS 排队: %.0fms, %s", queue_wait, item.text[:40])
         try:
             t0 = time.monotonic()
-            ogg_path, err = await _generate_tts(item.text)
-            if err:
-                log.warning("Zello TTS 失败: %s", err)
-                continue
-            pcm = await _ogg_to_pcm_24k(ogg_path)
-            if not pcm:
-                log.warning("Zello TTS ogg→PCM 空")
-                continue
-            t_tts = time.monotonic()
-            log.info("Zello TTS 生成: %.0fms, %.1fs 音频, %s",
-                     (t_tts - t0) * 1000, len(pcm) / 2 / 24000, item.text[:40])
-            # 存 buffer (48kHz stereo) 供重播/快进快退, 跟 Discord 格式一致
+            fid = item.fid or f"{int(time.time() * 1000):x}"
+            tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")
+
+            state = None
+            wrote = 0
+            t_first = None
+            buf_f = None
+            bpath = os.path.join(_BUF_DIR, f"{fid}.pcm")
             try:
-                fid = item.fid or f"{int(time.time() * 1000):x}"
-                pcm48, _ = audioop.ratecv(pcm, 2, 1, 24000, 48000, None)
-                stereo = audioop.tostereo(pcm48, 2, 1, 1)
-                bpath = os.path.join(_BUF_DIR, f"{fid}.pcm")
                 os.makedirs(_BUF_DIR, exist_ok=True)
-                with open(bpath, "wb") as bf:
-                    bf.write(stereo)
-                from .discord_voice_sidecar import _set_progress
-                _set_progress(fid, played=0, total=len(stereo), active=True)
-                log.info("Zello buffer 存盘: %s (%.1fs)", bpath, len(stereo) / 4 / 48000)
+                buf_f = open(bpath, "wb")
             except Exception:
-                log.debug("Zello buffer 存盘失败 (non-fatal)")
-            # 直接调 _play_buffer — 跟重播按钮走完全一样的代码路径
-            await _play_buffer(fid)
-            log.info("Zello speak_consumer: %.1fs via _play_buffer", len(pcm) / 2 / 24000)
+                log.debug("Zello buffer 打开失败 (non-fatal)")
+
+            if tts_backend == "qwen3":
+                segments = _split_by_emotion(item.text)
+                for instruct, seg_text in segments:
+                    async for pcm24 in _qwen3_tts_stream(seg_text, instructions=instruct):
+                        if t_first is None:
+                            t_first = time.monotonic()
+                            log.info("Zello TTS TTFB: %.0fms, %s",
+                                     (t_first - t0) * 1000, item.text[:40])
+                        pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
+                        stereo = audioop.tostereo(pcm48, 2, 1, 1)
+                        zello_feed_pcm48_stereo(stereo)
+                        wrote += len(stereo)
+                        if buf_f:
+                            buf_f.write(stereo)
+            else:
+                if tts_backend == "cloud_tts":
+                    tts_stream = _cloud_tts_stream(item.text)
+                else:
+                    tts_stream = _gemini_tts_stream(item.text)
+                async for stereo in tts_stream:
+                    if t_first is None:
+                        t_first = time.monotonic()
+                        log.info("Zello TTS TTFB: %.0fms, %s",
+                                 (t_first - t0) * 1000, item.text[:40])
+                    zello_feed_pcm48_stereo(stereo)
+                    wrote += len(stereo)
+                    if buf_f:
+                        buf_f.write(stereo)
+
+            if buf_f:
+                try:
+                    buf_f.close()
+                except Exception:
+                    pass
+            if wrote > 0:
+                _set_progress(fid, played=wrote, total=wrote, active=False)
+            log.info("Zello TTS 完成: %.0fms, %.1fs 音频, %s",
+                     (time.monotonic() - t0) * 1000, wrote / 4 / 48000, item.text[:40])
         except asyncio.CancelledError:
             raise
         except Exception:
