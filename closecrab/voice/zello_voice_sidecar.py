@@ -546,11 +546,7 @@ class ZelloPlayer:
         if not is_connected():
             return False
         self._paused = True
-        self._buf.clear()
-        self._item_done = False
-        if self._replay_task and not self._replay_task.done():
-            self._replay_task.cancel()
-        log.info("Zello 暂停")
+        log.info("Zello 暂停 (buf=%d bytes 保留)", len(self._buf))
         return True
 
     def resume(self) -> bool:
@@ -575,6 +571,8 @@ class ZelloPlayer:
 
     async def wait_drained(self, timeout: float = 120):
         for _ in range(int(timeout / self.INTERVAL)):
+            if self._paused:
+                return True
             if not self._buf and not self._item_done:
                 return True
             await asyncio.sleep(self.INTERVAL)
@@ -721,6 +719,8 @@ async def _speak_consumer():
     while True:
         item = await _speak_queue.get()
         player._paused = False
+        player._buf.clear()
+        player._item_done = False
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
         if queue_wait > 15000:
             log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
