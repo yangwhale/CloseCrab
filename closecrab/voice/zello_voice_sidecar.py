@@ -630,9 +630,9 @@ async def _zello_stream_send_loop():
     packet_id = 0
 
     while True:
-        # 读 Opus 包, 带超时: 500ms 没新包 → 关闭当前 stream
+        # 读 Opus 包, 带超时: 3s 没新包 → 关闭当前 stream (覆盖 TTS 分段间隔)
         try:
-            hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=0.5)
+            hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=3.0)
         except asyncio.TimeoutError:
             if stream_id is not None:
                 try:
