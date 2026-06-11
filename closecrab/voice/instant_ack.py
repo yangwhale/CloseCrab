@@ -47,11 +47,11 @@ _GREETING_TRIGGERS = frozenset((
 ))
 
 
-def pick_instant_ack(user_text: str) -> str:
-    """根据用户输入选一句即时应答。短问候匹配专用池，其他随机通用池。"""
+def pick_instant_ack(user_text: str = "") -> str:
+    """根据用户输入选一句即时应答。空文本 = 通用 ack (PTT 松手时 STT 还没出来)。"""
     t = user_text.strip().lower()
     if not t:
-        return ""
+        return random.choice(_GENERIC)
     if t in _GREETING_TRIGGERS:
         return random.choice(_GREETINGS)
     if len(t) > 30:
