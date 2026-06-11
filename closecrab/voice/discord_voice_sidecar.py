@@ -528,18 +528,25 @@ async def _gemini_tts_stream(text: str):
     优化: PCM 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
     首批仍流式保证最快首帧, 后续批从预取缓冲直接 yield。
     """
+    import time as _t_mod
+    _t_enter = _t_mod.monotonic()
     from google.genai import types as gt
     from .gemini_tts import _build_genai_client, _clean_text_for_tts
 
+    _t_import = _t_mod.monotonic()
     cleaned = _clean_text_for_tts(text)
+    _t_clean = _t_mod.monotonic()
     if not cleaned.strip():
         return
     loop_id = id(asyncio.get_running_loop())
     client = _tts_client_per_loop.get(loop_id)
+    _t_client_start = _t_mod.monotonic()
     if client is None:
         client = _build_genai_client(None)
         _tts_client_per_loop[loop_id] = client
-        log.info("TTS genai client 创建: loop=%x", loop_id)
+        log.info("TTS genai client 创建: loop=%x (%.0fms)", loop_id,
+                 (_t_mod.monotonic() - _t_client_start) * 1000)
+    _t_client = _t_mod.monotonic()
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
     voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
     config = gt.GenerateContentConfig(
@@ -553,8 +560,14 @@ async def _gemini_tts_stream(text: str):
     )
     batches = _plan_tts_batches(cleaned)
     n = len(batches)
-    log.info("TTS 分批: %dc → %d 批 (首批 %dc)", len(cleaned), n,
-             len(batches[0]) if batches else 0)
+    _t_prep = _t_mod.monotonic()
+    log.info("TTS 分批: %dc → %d 批 (首批 %dc) | 准备耗时: import=%.0fms clean=%.0fms client=%.0fms config=%.0fms total=%.0fms",
+             len(cleaned), n, len(batches[0]) if batches else 0,
+             (_t_import - _t_enter) * 1000,
+             (_t_clean - _t_import) * 1000,
+             (_t_client - _t_client_start) * 1000,
+             (_t_prep - _t_client) * 1000,
+             (_t_prep - _t_enter) * 1000)
 
     current_prefetch = None  # asyncio.Task for the batch we're about to yield
 
@@ -576,25 +589,34 @@ async def _gemini_tts_stream(text: str):
                 )
         else:
             # First batch (or no prefetch): check cache, then stream for low latency
+            _t_cache_start = _t_mod.monotonic()
             cached = _cache_get_pcm(batch, voice)
+            _t_cache_done = _t_mod.monotonic()
             if cached is not None:
-                log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
-                         idx + 1, n, len(batch), len(cached) / 4 / 48000)
+                log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs, lookup=%.0fms)",
+                         idx + 1, n, len(batch), len(cached) / 4 / 48000,
+                         (_t_cache_done - _t_cache_start) * 1000)
                 yield cached
             else:
+                log.info("TTS 批 #%d/%d: cache miss (%dc, lookup=%.0fms)",
+                         idx + 1, n, len(batch),
+                         (_t_cache_done - _t_cache_start) * 1000)
                 pcm_accum = []
                 last_finish = None
                 _cv_state = None
                 max_retries = 2
-                import time as _t
                 for attempt in range(max_retries + 1):
                     try:
-                        _t_api = _t.monotonic()
+                        _t_api = _t_mod.monotonic()
                         log.info("TTS API 调用: 批 #%d/%d, %dc, attempt %d",
                                  idx + 1, n, len(batch), attempt + 1)
+                        _t_pre_stream = _t_mod.monotonic()
                         stream = await client.aio.models.generate_content_stream(
                             model=model, contents=batch, config=config
                         )
+                        _t_stream_got = _t_mod.monotonic()
+                        log.info("TTS API stream 对象拿到: %.0fms",
+                                 (_t_stream_got - _t_pre_stream) * 1000)
                         _t_first_chunk = None
                         async for chunk in stream:
                             for cand in getattr(chunk, "candidates", None) or []:
