@@ -702,14 +702,14 @@ def zello_feed_pcm48_stereo(pcm48_stereo: bytes):
 
 
 async def zello_feed_pcm48_stereo_async(pcm48_stereo: bytes):
-    """异步版: 管道写放到线程池, 不阻塞 event loop。"""
+    """异步版: write + drain, 不阻塞 event loop 也不跨线程。"""
     proc = _zello_encoder_proc
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
-    loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(None, proc.stdin.write, pcm48_stereo)
-    except (BrokenPipeError, OSError):
+        proc.stdin.write(pcm48_stereo)
+        await proc.stdin.drain()
+    except (BrokenPipeError, OSError, ConnectionResetError):
         pass
 
 
