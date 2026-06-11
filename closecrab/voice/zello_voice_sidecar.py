@@ -789,6 +789,7 @@ async def _speak_consumer():
 
             player.finish()
             await player.wait_drained()
+            player.stream_timeout = 3.0  # 播完恢复默认, 让 stream 自然关闭
 
             if wrote > 0:
                 _set_progress(fid, played=wrote, total=wrote, active=False)
