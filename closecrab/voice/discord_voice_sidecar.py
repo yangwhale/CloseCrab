@@ -1046,6 +1046,13 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             log.exception("打开 buffer 落盘文件失败: %s", bpath)
             buf_f = None
 
+    # Zello 旁路: 同源 PCM 推 Zello playback buffer, 零额外 TTS 调用
+    try:
+        from . import zello_voice_sidecar as _zsv
+        _zello_online = _zsv.is_connected()
+    except Exception:
+        _zello_online = False
+
     try:
         wrote = 0
         t_first_pcm = None
@@ -1070,6 +1077,8 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
                     source.write(stereo)
+                    if _zello_online:
+                        _zsv.zello_buf_write_threadsafe(stereo)
                     wrote += len(stereo)
                     if buf_f is not None:
                         buf_f.write(stereo)
@@ -1088,6 +1097,8 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                              (t_first_pcm - t_start) * 1000, len(text), text[:30])
                     source = _get_persistent_source() or source
                 source.write(stereo)
+                if _zello_online:
+                    _zsv.zello_buf_write_threadsafe(stereo)
                 wrote += len(stereo)
                 if buf_f is not None:
                     buf_f.write(stereo)
@@ -1106,6 +1117,11 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                 pass
         if fid:
             _set_progress(fid, total=source._written, active=False)
+        if _zello_online:
+            try:
+                _zsv.zello_signal_done_threadsafe()
+            except Exception:
+                pass
 
     _tts_active = False  # TTS 生成结束，允许 source idle 停播
 

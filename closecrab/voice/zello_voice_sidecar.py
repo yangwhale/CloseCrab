@@ -877,6 +877,23 @@ def is_connected() -> bool:
     return bool(client and client._connected and client._channel_online)
 
 
+def zello_buf_write_threadsafe(data: bytes):
+    """【跨线程调用】Discord _do_speak 写 PCM 到 Zello 播放 buffer。"""
+    _playback_buf.extend(data)
+    loop = _sidecar_loop
+    if loop and _playback_ev:
+        loop.call_soon_threadsafe(_playback_ev.set)
+
+
+def zello_signal_done_threadsafe():
+    """【跨线程调用】Discord _do_speak TTS 结束，通知 Zello 排空 buffer。"""
+    global _playback_item_done
+    _playback_item_done = True
+    loop = _sidecar_loop
+    if loop and _playback_ev:
+        loop.call_soon_threadsafe(_playback_ev.set)
+
+
 def pause_zello_stream() -> bool:
     """【飞书线程调用】暂停 Zello 推流。线程安全 (GIL 保护 bool 写)。"""
     global _zello_paused
