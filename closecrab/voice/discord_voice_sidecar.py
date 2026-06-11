@@ -465,6 +465,18 @@ async def _ensure_tts_worker():
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    # 后台读 stderr 打到日志
+    async def _read_worker_stderr(proc):
+        while proc.returncode is None:
+            try:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                log.info("TTS worker stderr: %s", line.decode(errors="ignore").strip())
+            except Exception:
+                break
+    asyncio.create_task(_read_worker_stderr(_tts_worker_proc))
+
     # 等 READY 信号 (warmup 完成)
     try:
         ready = await asyncio.wait_for(_tts_worker_proc.stdout.readline(), timeout=30)

@@ -74,15 +74,23 @@ async def main():
         import audioop
         try:
             _cv_state = None
+            t_api = time.monotonic()
             stream = await client.aio.models.generate_content_stream(
                 model=model, contents=text, config=config
             )
+            t_first_audio = None
             async for chunk in stream:
                 for cand in getattr(chunk, "candidates", None) or []:
                     content = getattr(cand, "content", None)
                     for part in getattr(content, "parts", None) or []:
                         inline = getattr(part, "inline_data", None)
                         if inline and inline.data:
+                            if t_first_audio is None:
+                                t_first_audio = time.monotonic()
+                                sys.stderr.write(
+                                    f"[worker] API TTFB={int((t_first_audio-t_api)*1000)}ms "
+                                    f"text={len(text)}c\n")
+                                sys.stderr.flush()
                             d = bytes(inline.data)
                             pcm48, _cv_state = audioop.ratecv(d, 2, 1, 24000, 48000, _cv_state)
                             stereo = audioop.tostereo(pcm48, 2, 1, 1)
