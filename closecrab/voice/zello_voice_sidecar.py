@@ -739,7 +739,7 @@ async def _speak_consumer():
         player._item_done = False
         player._paused = False
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
-        if queue_wait > 15000:
+        if queue_wait > 120000:
             log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
             continue
         try:
