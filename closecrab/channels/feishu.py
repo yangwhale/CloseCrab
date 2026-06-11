@@ -3815,10 +3815,13 @@ class FeishuChannel(Channel):
                 header_text=_make_header(_CRAB_FRAMES[0], random.randint(0, len(_WITTY_TIPS) - 1)),
                 usage=self._core.get_context_usage(user_key) or {},
             )
-            _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
-
-            # 启动统一更新循环
+            # 启动统一更新循环 (card_id 为 None 时自动跳过更新)
             _anim_task[0] = asyncio.create_task(_card_update_loop())
+
+            # 进度卡片后台创建，不阻塞 BotCore 调用 (省 ~900ms)
+            async def _create_card_bg():
+                _progress_card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
+            asyncio.create_task(_create_card_bg())
 
             result = await self._core.handle_message(msg)
 
