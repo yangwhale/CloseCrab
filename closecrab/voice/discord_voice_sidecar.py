@@ -598,24 +598,17 @@ async def _gemini_tts_stream(text: str):
     if not cleaned.strip():
         return
 
-    # 短文本整段走 worker (不分批, 简单路径)
-    batches = _plan_tts_batches(cleaned)
-    if len(batches) == 1:
-        cached = _cache_get_pcm(batches[0], os.environ.get("DISCORD_TTS_VOICE", "Orus"))
-        if cached is not None:
-            log.info("TTS cache hit (%dc → %.1fs)", len(batches[0]), len(cached) / 4 / 48000)
-            yield cached
+    # 尝试 worker 子进程 (独立进程, 无 GIL 争用)
+    # worker 不分批, 整段发 API (独立进程不需要分批优化)
+    try:
+        worker_ok = False
+        async for pcm in _tts_worker_stream(text):
+            worker_ok = True
+            yield pcm
+        if worker_ok:
             return
-        # 尝试 worker 子进程
-        try:
-            worker_ok = False
-            async for pcm in _tts_worker_stream(text):
-                worker_ok = True
-                yield pcm
-            if worker_ok:
-                return
-        except Exception as e:
-            log.warning("TTS worker 失败, fallback in-process: %s", e)
+    except Exception as e:
+        log.warning("TTS worker 失败, fallback in-process: %s", e)
 
     # fallback: in-process (多批 or worker 不可用)
     import time as _t_mod
