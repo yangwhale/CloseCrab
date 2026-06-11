@@ -185,6 +185,17 @@ class ZelloClient:
         if not resp.get("success"):
             raise RuntimeError(f"Zello logon 失败: {resp.get('error', 'unknown')}")
 
+    async def send_text(self, text: str):
+        if not self._connected or not self._ws:
+            return
+        seq = self._next_seq()
+        await self._ws.send(json.dumps({
+            "command": "send_text_message",
+            "seq": seq,
+            "channel": self.channel,
+            "text": text,
+        }))
+
     async def disconnect(self):
         self._connected = False
         self._channel_online = False
@@ -342,6 +353,13 @@ class ZelloClient:
         # 3. FunASR STT
         text = await _funasr_recognize(pcm_16k)
         t.append(time.monotonic())  # t[3] = stt done
+
+        # 3.5 回写转录到 Zello 聊天窗口 (用户可对照原文)
+        if text and _zello_client and _zello_client._connected:
+            try:
+                await _zello_client.send_text(f"🎤 [{speaker}] {text}")
+            except Exception:
+                log.debug("Zello send_text 失败 (non-fatal)")
 
         # 4. 送飞书消息通道 (instant ack + BotCore 处理)
         if text and _feishu_ref is not None and _feishu_loop is not None and _feishu_chat_id:
