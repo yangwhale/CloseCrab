@@ -354,8 +354,8 @@ class ZelloClient:
             log.info("[Zello] 跳过: 音频太短 (%d bytes)", len(pcm))
             return
 
-        # 1.5 Debug: 长音频转 OGG 发飞书语音消息 (>5s 时触发)
-        if audio_dur > 5 and _feishu_ref and _feishu_loop and _feishu_chat_id:
+        # 1.5 Debug: 解码后音频转 OGG 发飞书语音消息
+        if _feishu_ref and _feishu_loop and _feishu_chat_id:
             try:
                 import subprocess as _sp, tempfile as _tf
                 ogg_f = _tf.NamedTemporaryFile(suffix=".ogg", prefix="zello-dbg-", delete=False)
