@@ -42,15 +42,19 @@ async def main():
         ),
     )
 
-    # warmup: TLS + OAuth + TCP
+    # warmup: TLS + OAuth + TCP (完整消费 stream 确保连接可复用)
     try:
+        t_warmup = time.monotonic()
         s = await client.aio.models.generate_content_stream(
-            model=model, contents="。", config=config
+            model=model, contents="你好", config=config
         )
         async for _ in s:
-            break
-    except Exception:
-        pass
+            pass  # 完整消费，不 break
+        sys.stderr.write(f"[worker] warmup done: {int((time.monotonic()-t_warmup)*1000)}ms\n")
+        sys.stderr.flush()
+    except Exception as e:
+        sys.stderr.write(f"[worker] warmup error: {e}\n")
+        sys.stderr.flush()
 
     stdin = asyncio.StreamReader()
     protocol = await asyncio.get_event_loop().connect_read_pipe(
