@@ -531,6 +531,7 @@ class ZelloPlayer:
         self._item_done = False
         self._replay_task: asyncio.Task | None = None
         self._encoder_proc = None
+        self.stream_timeout = 3.0  # send loop 关麦超时 (动态: ack后30s, 正文后1s)
 
     # ── 写入端 ──
 
@@ -786,6 +787,7 @@ async def _speak_consumer():
                 try: buf_f.close()
                 except Exception: pass
 
+            player.stream_timeout = 1.0  # 正文播完快关麦
             player.finish()
             await player.wait_drained()
 
@@ -821,9 +823,10 @@ async def _zello_stream_send_loop():
     packet_id = 0
 
     while True:
-        # 读 Opus 包, 带超时: 3s 没新包 → 关闭当前 stream (覆盖 TTS 分段间隔)
+        # 读 Opus 包, 动态超时: ack 后 30s 等正文, 正文后 1s 快关
+        _timeout = _player.stream_timeout if _player else 3.0
         try:
-            hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=3.0)
+            hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=_timeout)
         except asyncio.TimeoutError:
             if stream_id is not None:
                 try:
@@ -925,6 +928,8 @@ def _send_to_feishu(text: str, speaker: str):
     ack = pick_instant_ack(text)
     if ack:
         speak_text(ack)
+        if _player:
+            _player.stream_timeout = 30.0  # ack 播完等正文, 保持开麦
 
     # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
