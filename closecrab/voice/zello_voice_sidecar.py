@@ -526,7 +526,7 @@ async def _speak_consumer():
                                      (t_first - t0) * 1000, item.text[:40])
                         pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                         stereo = audioop.tostereo(pcm48, 2, 1, 1)
-                        zello_feed_pcm48_stereo(stereo)
+                        await zello_feed_pcm48_stereo_async(stereo)
                         wrote += len(stereo)
                         if buf_f:
                             buf_f.write(stereo)
@@ -540,7 +540,7 @@ async def _speak_consumer():
                         t_first = time.monotonic()
                         log.info("Zello TTS TTFB: %.0fms, %s",
                                  (t_first - t0) * 1000, item.text[:40])
-                    zello_feed_pcm48_stereo(stereo)
+                    await zello_feed_pcm48_stereo_async(stereo)
                     wrote += len(stereo)
                     if buf_f:
                         buf_f.write(stereo)
@@ -688,12 +688,27 @@ async def _zello_stream_send_loop():
 
 
 def zello_feed_pcm48_stereo(pcm48_stereo: bytes):
-    """输入 48kHz stereo s16le，直灌 encoder。零转换。线程安全。"""
+    """输入 48kHz stereo s16le，直灌 encoder。零转换。线程安全。
+
+    注意: 从 async event loop 调用时, 走 zello_feed_pcm48_stereo_async 避免阻塞。
+    """
     proc = _zello_encoder_proc
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
     try:
         proc.stdin.write(pcm48_stereo)
+    except (BrokenPipeError, OSError):
+        pass
+
+
+async def zello_feed_pcm48_stereo_async(pcm48_stereo: bytes):
+    """异步版: 管道写放到线程池, 不阻塞 event loop。"""
+    proc = _zello_encoder_proc
+    if proc is None or proc.stdin is None or proc.returncode is not None:
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, proc.stdin.write, pcm48_stereo)
     except (BrokenPipeError, OSError):
         pass
 
@@ -998,7 +1013,7 @@ async def _play_buffer(fid: str, start_byte: int = 0):
                 break
             if len(chunk) < _PCM_FRAME:
                 chunk += b"\x00" * (_PCM_FRAME - len(chunk))
-            zello_feed_pcm48_stereo(chunk)
+            await zello_feed_pcm48_stereo_async(chunk)
             played += len(chunk)
             _set_progress(fid, played=played, active=True)
             await asyncio.sleep(0.02)
