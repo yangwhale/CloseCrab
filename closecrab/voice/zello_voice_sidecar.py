@@ -850,6 +850,61 @@ async def _run(config: dict):
     await _start_persistent_encoder()
     asyncio.create_task(_zello_stream_send_loop())
 
+    # 内置 TTS benchmark: bot 进程内直接测 Gemini API TTFB
+    async def _tts_benchmark():
+        import time as _t
+        from google import genai
+        from google.genai import types as gt
+        from .gemini_tts import _build_genai_client
+        bench_client = _build_genai_client(None)
+        bench_model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
+        bench_config = gt.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=gt.SpeechConfig(
+                voice_config=gt.VoiceConfig(
+                    prebuilt_voice_config=gt.PrebuiltVoiceConfig(voice_name="Orus")
+                ),
+                language_code="zh-CN",
+            ),
+        )
+        results = []
+        log.info("[TTS bench] 开始 (bot 进程内, Zello event loop)")
+        # warmup
+        try:
+            s = await bench_client.aio.models.generate_content_stream(
+                model=bench_model, contents="。", config=bench_config)
+            async for _ in s:
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        for i in range(5):
+            t0 = _t.monotonic()
+            t_first = None
+            try:
+                stream = await bench_client.aio.models.generate_content_stream(
+                    model=bench_model, contents="你好啊", config=bench_config)
+                async for chunk in stream:
+                    for cand in getattr(chunk, "candidates", None) or []:
+                        content = getattr(cand, "content", None)
+                        for part in getattr(content, "parts", None) or []:
+                            inline = getattr(part, "inline_data", None)
+                            if inline and inline.data:
+                                if t_first is None:
+                                    t_first = _t.monotonic()
+            except Exception as e:
+                log.warning("[TTS bench] call %d failed: %s", i + 1, e)
+                continue
+            ttfb = (_t.monotonic() - t0) * 1000 if t_first is None else (t_first - t0) * 1000
+            results.append(ttfb)
+            log.info("[TTS bench] #%d TTFB=%.0fms", i + 1, ttfb)
+            await asyncio.sleep(0.3)
+        if results:
+            avg = sum(results) / len(results)
+            log.info("[TTS bench] 完成: avg=%.0fms min=%.0fms max=%.0fms (n=%d, bot进程内)",
+                     avg, min(results), max(results), len(results))
+    asyncio.create_task(_tts_benchmark())
+
     # 等飞书桥注册就绪 (Zello STT 需要 feishu channel 路由消息)
     async def _wait_bridge():
         for _ in range(60):
