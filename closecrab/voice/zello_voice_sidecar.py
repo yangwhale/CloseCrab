@@ -591,14 +591,14 @@ async def _speak_consumer():
 #  暂停 = 停取帧, 恢复 = 继续取帧, 中间音频零丢失。
 # ═══════════════════════════════════════════════════════════════════════
 
-_PLAYBACK_FRAME = 11520  # 60ms @ 48kHz stereo s16le = 2880*2*2
+_PLAYBACK_FRAME = 3840  # 20ms @ 48kHz stereo s16le — 跟 Discord 一致
 
 
 async def _zello_playback_loop():
-    """Pull-based 匀速播放: 每 60ms 从 buffer 取一帧 → encoder stdin。"""
+    """Pull-based 匀速播放: 每 20ms 从 buffer 取一帧 → encoder stdin (同 Discord)。"""
     global _playback_item_done
     FRAME = _PLAYBACK_FRAME
-    INTERVAL = 0.060
+    INTERVAL = 0.020
 
     while True:
         # 等数据或 item 结束信号
