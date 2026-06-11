@@ -531,7 +531,7 @@ class ZelloPlayer:
         self._item_done = False
         self._replay_task: asyncio.Task | None = None
         self._encoder_proc = None
-        self.stream_timeout = 3.0  # send loop 关麦超时 (动态: ack后30s, 正文后1s)
+        self.stream_timeout = 3.0  # send loop 关麦超时
 
     # ── 写入端 ──
 
@@ -789,7 +789,6 @@ async def _speak_consumer():
 
             player.finish()
             await player.wait_drained()
-            player.stream_timeout = 3.0  # 播完恢复默认, 让 stream 自然关闭
 
             if wrote > 0:
                 _set_progress(fid, played=wrote, total=wrote, active=False)
@@ -928,8 +927,6 @@ def _send_to_feishu(text: str, speaker: str):
     ack = pick_instant_ack(text)
     if ack:
         speak_text(ack)
-        if _player:
-            _player.stream_timeout = 30.0  # ack 播完等正文, 保持开麦
 
     # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
@@ -988,7 +985,6 @@ def zello_buf_write_threadsafe(data: bytes):
 def zello_signal_done_threadsafe():
     if _player:
         _player.finish_threadsafe()
-        _player.stream_timeout = 1.0  # 主回复播完, 快关麦
 
 
 def pause_zello_stream() -> bool:
