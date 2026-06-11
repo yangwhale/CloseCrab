@@ -1134,6 +1134,8 @@ async def _play_buffer(fid: str, start_byte: int = 0):
         f.seek(start_byte)
         played = start_byte
         while True:
+            while _zello_paused:
+                await asyncio.sleep(0.05)
             chunk = f.read(_PCM_FRAME)
             if not chunk:
                 break
