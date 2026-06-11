@@ -498,6 +498,7 @@ async def _speak_consumer():
     )
     while True:
         item = await _speak_queue.get()
+        global _zello_paused
         _zello_paused = False  # 新条目 = 新播放, 清上一轮暂停
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
         if queue_wait > 15000:
