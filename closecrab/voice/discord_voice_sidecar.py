@@ -748,7 +748,7 @@ async def _qwen3_tts_stream(text: str, instructions: str = ""):
 _cloud_tts_client = None  # Cloud TTS gRPC client singleton
 
 async def _cloud_tts_stream(text: str):
-    """gRPC 双向流调 Cloud TTS (Chirp3-HD-Orus), 逐 chunk yield 24kHz mono s16 PCM."""
+    """gRPC 双向流调 Cloud TTS (Chirp3-HD-Orus), 逐 chunk yield 48kHz stereo s16 PCM."""
     global _cloud_tts_client
     from .gemini_tts import _clean_text_for_tts
 
@@ -797,6 +797,7 @@ async def _cloud_tts_stream(text: str):
     t = threading.Thread(target=_producer, daemon=True, name="cloud-tts-stream")
     t.start()
 
+    _cv_state = None
     while True:
         try:
             item = pcm_q.get_nowait()
@@ -805,7 +806,8 @@ async def _cloud_tts_stream(text: str):
             continue
         if item is _sentinel:
             break
-        yield item
+        pcm48, _cv_state = audioop.ratecv(item, 2, 1, 24000, 48000, _cv_state)
+        yield audioop.tostereo(pcm48, 2, 1, 1)
 
 
 _SOURCE_CLASS = None
