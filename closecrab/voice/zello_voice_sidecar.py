@@ -706,18 +706,6 @@ async def zello_flush_stream():
         pass  # stream 会在 encoder 端 flush 时自然结束
 
 
-_INSTANT_ACK_PHRASES = [
-    "嗯，这个得好好想想，你等我一下下啊！",
-    "收到，让我想想。",
-    "好问题，稍等！",
-    "这个有点意思，让我查查。",
-    "嗯嗯，马上回你。",
-    "不是哥们，这个问题含金量太高了，让我好好想想！",
-    "这个有点复杂，我捋一捋啊，稍等！",
-    "嗯嗯嗯，这个烧脑，让我仔细想想再回你！",
-]
-
-
 def _send_to_feishu(text: str, speaker: str):
     """Zello STT → BotCore 优先, 飞书 echo 后置。"""
     feishu = _feishu_ref
@@ -737,9 +725,11 @@ def _send_to_feishu(text: str, speaker: str):
     except Exception:
         pass
 
-    # instant ack (fire-and-forget)
-    import random
-    speak_text(random.choice(_INSTANT_ACK_PHRASES))
+    # instant ack (fire-and-forget) — 复用 livekit_io 的分类词库
+    from .livekit_io import _pick_instant_ack
+    ack = _pick_instant_ack(text)
+    if ack:
+        speak_text(ack)
 
     # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
