@@ -47,6 +47,7 @@ _feishu_loop = None
 _feishu_open_id = ""
 _feishu_chat_id = ""
 _bot_name = ""
+_zello_paused = False  # 暂停推流 (飞书 ⏸ 按钮)
 _display_names: dict[str, str] = {}  # Zello username → display name
 
 
@@ -520,6 +521,8 @@ async def _speak_consumer():
                 segments = _split_by_emotion(item.text)
                 for instruct, seg_text in segments:
                     async for pcm24 in _qwen3_tts_stream(seg_text, instructions=instruct):
+                        while _zello_paused:
+                            await asyncio.sleep(0.1)
                         if t_first is None:
                             t_first = time.monotonic()
                             log.info("Zello TTS TTFB: %.0fms, %s",
@@ -536,6 +539,8 @@ async def _speak_consumer():
                 else:
                     tts_stream = _gemini_tts_stream(item.text)
                 async for stereo in tts_stream:
+                    while _zello_paused:
+                        await asyncio.sleep(0.1)
                     if t_first is None:
                         t_first = time.monotonic()
                         log.info("Zello TTS TTFB: %.0fms, %s",
@@ -793,6 +798,26 @@ def is_connected() -> bool:
     """Zello sidecar 是否已连接 channel。"""
     client = _zello_client
     return bool(client and client._connected and client._channel_online)
+
+
+def pause_zello_stream() -> bool:
+    """【飞书线程调用】暂停 Zello 推流。线程安全 (GIL 保护 bool 写)。"""
+    global _zello_paused
+    if not is_connected():
+        return False
+    _zello_paused = True
+    return True
+
+
+def resume_zello_stream() -> bool:
+    """【飞书线程调用】恢复 Zello 推流。线程安全。"""
+    global _zello_paused
+    if not is_connected():
+        return False
+    if not _zello_paused:
+        return False
+    _zello_paused = False
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════

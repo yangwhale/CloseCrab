@@ -2082,20 +2082,32 @@ class FeishuChannel(Channel):
                     )
 
             elif action_type in ("voice_pause", "voice_resume"):
-                # 控制服务器侧给 Discord 推帧的代码 (sidecar 跨线程 thread-safe)。
+                # 先试 Discord, 失败 fallback Zello (只要有一个在线就工作)。
                 try:
                     from ..voice.discord_voice_sidecar import (
                         pause_stream, resume_stream,
                     )
                     if action_type == "voice_pause":
                         ok = pause_stream()
-                        msg = "⏸ 已暂停推流" if ok else "当前没有正在推流的语音"
                     else:
                         ok = resume_stream()
-                        msg = "▶️ 已继续推流" if ok else "当前没有暂停中的语音"
-                except Exception as e:
-                    log.error(f"Voice stream control failed: {e}", exc_info=True)
-                    ok, msg = False, "推流控制失败"
+                except Exception:
+                    ok = False
+                if not ok:
+                    try:
+                        from ..voice.zello_voice_sidecar import (
+                            pause_zello_stream, resume_zello_stream,
+                        )
+                        if action_type == "voice_pause":
+                            ok = pause_zello_stream()
+                        else:
+                            ok = resume_zello_stream()
+                    except Exception:
+                        ok = False
+                if action_type == "voice_pause":
+                    msg = "⏸ 已暂停推流" if ok else "当前没有正在推流的语音"
+                else:
+                    msg = "▶️ 已继续推流" if ok else "当前没有暂停中的语音"
                 return P2CardActionTriggerResponse(
                     {"toast": {"type": "info" if ok else "warning", "content": msg}}
                 )
