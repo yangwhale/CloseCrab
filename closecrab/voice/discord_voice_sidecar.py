@@ -544,8 +544,28 @@ async def _gemini_tts_stream(text: str):
     if client is None:
         client = _build_genai_client(None)
         _tts_client_per_loop[loop_id] = client
-        log.info("TTS genai client 创建: loop=%x (%.0fms)", loop_id,
-                 (_t_mod.monotonic() - _t_client_start) * 1000)
+        _t_client_created = _t_mod.monotonic()
+        log.info("TTS genai client 创建: loop=%x (%.0fms), 开始 warmup...",
+                 loop_id, (_t_client_created - _t_client_start) * 1000)
+        try:
+            _warmup_config = gt.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=gt.SpeechConfig(
+                    voice_config=gt.VoiceConfig(
+                        prebuilt_voice_config=gt.PrebuiltVoiceConfig(voice_name=voice)
+                    ),
+                    language_code="zh-CN",
+                ),
+            )
+            _warmup_stream = await client.aio.models.generate_content_stream(
+                model=model, contents="。", config=_warmup_config
+            )
+            async for _wc in _warmup_stream:
+                break
+            log.info("TTS warmup 完成: %.0fms (TLS+OAuth+TCP 已预热)",
+                     (_t_mod.monotonic() - _t_client_created) * 1000)
+        except Exception as _we:
+            log.warning("TTS warmup 失败 (non-fatal): %s", _we)
     _t_client = _t_mod.monotonic()
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
     voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
