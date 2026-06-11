@@ -912,10 +912,13 @@ def resume_zello_stream() -> bool:
     """【飞书线程调用】恢复 Zello 推流。线程安全。"""
     global _zello_paused
     if not is_connected():
+        log.info("Zello 继续: 失败 (未连接)")
         return False
     if not _zello_paused:
+        log.info("Zello 继续: 跳过 (未暂停)")
         return False
     _zello_paused = False
+    log.info("Zello 继续: paused=%s, buf=%d bytes", _zello_paused, len(_playback_buf))
     return True
 
 
