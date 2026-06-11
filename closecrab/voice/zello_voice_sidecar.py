@@ -193,9 +193,9 @@ class ZelloClient:
         # 但提前发 start_stream 可以省 200ms 往返。
         # 这里用一帧静音触发 encoder 产出一个 Opus 包 → send loop 开 stream。
         if _player:
-            silence = b"\x00" * ZelloPlayer.FRAME
+            silence = b"\x00" * (ZelloPlayer.FRAME * 3)
             _player.write(silence)
-            log.info("Zello 预开麦: 静音帧已推")
+            log.info("Zello 预开麦: 3帧静音已推 (凑满1个Opus包)")
 
     async def send_text(self, text: str):
         if not self._connected or not self._ws:
