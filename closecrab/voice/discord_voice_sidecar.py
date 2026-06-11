@@ -538,6 +538,8 @@ async def _gemini_tts_stream(text: str):
     _t_clean = _t_mod.monotonic()
     if not cleaned.strip():
         return
+    model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
+    voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
     loop_id = id(asyncio.get_running_loop())
     client = _tts_client_per_loop.get(loop_id)
     _t_client_start = _t_mod.monotonic()
@@ -567,8 +569,6 @@ async def _gemini_tts_stream(text: str):
         except Exception as _we:
             log.warning("TTS warmup 失败 (non-fatal): %s", _we)
     _t_client = _t_mod.monotonic()
-    model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
-    voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
     config = gt.GenerateContentConfig(
         response_modalities=["AUDIO"],
         speech_config=gt.SpeechConfig(
