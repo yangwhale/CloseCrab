@@ -725,9 +725,9 @@ def _send_to_feishu(text: str, speaker: str):
     except Exception:
         pass
 
-    # instant ack (fire-and-forget) — 复用 livekit_io 的分类词库
-    from .livekit_io import _pick_instant_ack
-    ack = _pick_instant_ack(text)
+    # instant ack (fire-and-forget) — 共用 instant_ack 模块 (不依赖 livekit)
+    from .instant_ack import pick_instant_ack
+    ack = pick_instant_ack(text)
     if ack:
         speak_text(ack)
 
