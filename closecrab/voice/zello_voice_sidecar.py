@@ -47,10 +47,7 @@ _feishu_loop = None
 _feishu_open_id = ""
 _feishu_chat_id = ""
 _bot_name = ""
-_zello_paused = False       # 暂停推流 (飞书 ⏸ 按钮)
-_playback_buf = bytearray() # TTS 写入, playback loop 读取
-_playback_ev: "asyncio.Event | None" = None   # 有新数据 / TTS 结束
-_playback_item_done = False  # TTS 写完当前条目
+_player: "ZelloPlayer | None" = None  # 匀速播放器 (启动时创建)
 _display_names: dict[str, str] = {}  # Zello username → display name
 
 
@@ -482,36 +479,235 @@ async def _funasr_recognize(pcm_16k: bytes) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  TTS 播报队列 (串行消费, 防叠音)
-#  TTS 生成器复用 discord_voice_sidecar 的流式实现, 只在推流时分叉
+#  ZelloPlayer — 匀速播放器 (对标 Discord vc.play)
+#
+#  所有音频 (直播 TTS / 重播 / 共享 buffer) 统一经过:
+#      write() → self._buf → _playback_loop → encoder stdin
+#  唯一的 encoder 喂帧入口。暂停一拦全拦，不会双路推流。
+# ═══════════════════════════════════════════════════════════════════════
+
+class ZelloPlayer:
+    FRAME = 3840      # 20ms @ 48kHz stereo s16le — 同 Discord
+    INTERVAL = 0.020  # 20ms
+
+    def __init__(self):
+        self._buf = bytearray()
+        self._data_ev = asyncio.Event()
+        self._paused = False
+        self._item_done = False
+        self._replay_task: asyncio.Task | None = None
+        self._encoder_proc = None
+
+    # ── 写入端 ──
+
+    def write(self, pcm: bytes):
+        self._buf.extend(pcm)
+        self._data_ev.set()
+
+    def write_threadsafe(self, pcm: bytes):
+        self._paused = False
+        self._buf.extend(pcm)
+        loop = _sidecar_loop
+        if loop:
+            loop.call_soon_threadsafe(self._data_ev.set)
+
+    def finish(self):
+        self._item_done = True
+        self._data_ev.set()
+
+    def finish_threadsafe(self):
+        self._item_done = True
+        loop = _sidecar_loop
+        if loop:
+            loop.call_soon_threadsafe(self._data_ev.set)
+
+    # ── 控制端 (飞书按钮) ──
+
+    def pause(self) -> bool:
+        if not is_connected():
+            return False
+        self._paused = True
+        self._buf.clear()
+        if self._replay_task and not self._replay_task.done():
+            self._replay_task.cancel()
+        log.info("Zello 暂停")
+        return True
+
+    def resume(self) -> bool:
+        if not is_connected() or not self._paused:
+            return False
+        self._paused = False
+        log.info("Zello 继续")
+        return True
+
+    def replay(self, fid: str, start_byte: int = 0) -> bool:
+        if not is_connected():
+            return False
+        self._paused = False
+        self._buf.clear()
+        if self._replay_task and not self._replay_task.done():
+            self._replay_task.cancel()
+        self._replay_task = asyncio.ensure_future(
+            self._replay_from_file(fid, start_byte))
+        return True
+
+    # ── 排空等待 (speak_consumer 用) ──
+
+    async def wait_drained(self, timeout: float = 120):
+        for _ in range(int(timeout / self.INTERVAL)):
+            if not self._buf and not self._item_done:
+                return True
+            await asyncio.sleep(self.INTERVAL)
+        return False
+
+    # ── playback loop (永驻 task, 唯一的 encoder 喂帧入口) ──
+
+    async def playback_loop(self):
+        FRAME = self.FRAME
+        frames_fed = 0
+
+        while True:
+            while len(self._buf) < FRAME and not self._item_done:
+                self._data_ev.clear()
+                try:
+                    await asyncio.wait_for(self._data_ev.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
+
+            while self._paused:
+                await asyncio.sleep(0.05)
+
+            if len(self._buf) >= FRAME:
+                frame = bytes(self._buf[:FRAME])
+                del self._buf[:FRAME]
+                if frames_fed == 0:
+                    log.info("Zello playback 首帧 (buf=%d)", len(self._buf))
+            elif self._item_done and self._buf:
+                remaining = bytes(self._buf)
+                self._buf.clear()
+                frame = remaining + b"\x00" * (FRAME - len(remaining))
+            elif self._item_done:
+                if frames_fed > 0:
+                    log.info("Zello playback 排空 (%d 帧, %.1fs)",
+                             frames_fed, frames_fed * self.INTERVAL)
+                self._item_done = False
+                frames_fed = 0
+                continue
+            else:
+                continue
+
+            proc = self._encoder_proc
+            if proc and proc.stdin and proc.returncode is None:
+                try:
+                    proc.stdin.write(frame)
+                    await proc.stdin.drain()
+                    frames_fed += 1
+                except (BrokenPipeError, OSError, ConnectionResetError):
+                    pass
+
+            await asyncio.sleep(self.INTERVAL)
+
+    # ── 重播 (读 .pcm 文件 → self.write → playback_loop 统一喂 encoder) ──
+
+    async def _replay_from_file(self, fid: str, start_byte: int = 0):
+        from .discord_voice_sidecar import _set_progress
+        path = _buf_path(fid)
+        if not path or not os.path.exists(path):
+            log.warning("Zello replay: buffer 不存在 fid=%s", fid)
+            return
+        total = os.path.getsize(path)
+        if total <= 0:
+            return
+        start_byte = max(0, min(start_byte, total))
+        start_byte -= start_byte % self.FRAME
+
+        log.info("Zello replay 开始: fid=%s start=%.1fs total=%.1fs",
+                 fid, start_byte / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
+        _set_progress(fid, played=start_byte, total=total, active=True)
+
+        with open(path, "rb") as f:
+            f.seek(start_byte)
+            played = start_byte
+            while True:
+                if self._paused:
+                    await asyncio.sleep(0.05)
+                    continue
+                chunk = f.read(self.FRAME)
+                if not chunk:
+                    break
+                if len(chunk) < self.FRAME:
+                    chunk += b"\x00" * (self.FRAME - len(chunk))
+                self.write(chunk)
+                played += len(chunk)
+                _set_progress(fid, played=played, active=True)
+                # 背压: buffer 超 10 帧时等 playback loop 消费
+                while len(self._buf) > self.FRAME * 10 and not self._paused:
+                    await asyncio.sleep(self.INTERVAL)
+
+        _set_progress(fid, played=total, total=total, active=False)
+        log.info("Zello replay 完成: fid=%s", fid)
+
+    # ── Opus encoder 子进程 ──
+
+    async def start_encoder(self):
+        if self._encoder_proc is not None and self._encoder_proc.returncode is None:
+            return
+        script = (
+            "import ctypes, ctypes.util, struct, sys\n"
+            "lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library('opus') or 'libopus.so.0')\n"
+            "lib.opus_encoder_create.restype = ctypes.c_void_p\n"
+            "err = ctypes.c_int(0)\n"
+            "enc = lib.opus_encoder_create(48000, 2, 2048, ctypes.byref(err))\n"
+            "if not enc: sys.exit(1)\n"
+            "channels = 2\n"
+            "frame_size = 2880\n"
+            "frame_bytes = frame_size * channels * 2\n"
+            "buf = b''\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read(frame_bytes - len(buf))\n"
+            "    if not data: break\n"
+            "    buf += data\n"
+            "    if len(buf) >= frame_bytes:\n"
+            "        frame = buf[:frame_bytes]; buf = buf[frame_bytes:]\n"
+            "        pcm_arr = (ctypes.c_int16 * (frame_size * channels)).from_buffer_copy(frame)\n"
+            "        out = (ctypes.c_ubyte * 4000)()\n"
+            "        n = lib.opus_encode(enc, pcm_arr, frame_size, out, 4000)\n"
+            "        if n > 0:\n"
+            "            sys.stdout.buffer.write(struct.pack('<H', n))\n"
+            "            sys.stdout.buffer.write(bytes(out[:n]))\n"
+            "            sys.stdout.buffer.flush()\n"
+            "lib.opus_encoder_destroy(enc)\n"
+        )
+        self._encoder_proc = await asyncio.create_subprocess_exec(
+            "python3", "-c", script,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        log.info("Opus encoder 启动 (PID=%d)", self._encoder_proc.pid)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  TTS 播报队列 (串行消费, 复用 Discord TTS 生成器)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def _speak_consumer():
-    """从队列逐条取出, 复用 Discord 的流式 TTS → 48kHz stereo → Zello 推流。
-
-    TTS 生成器与 Discord 完全共用 (_gemini_tts_stream / _qwen3_tts_stream),
-    只在最后推流时分叉: Discord → source.write, Zello → zello_feed_pcm48_stereo。
-    """
     from .discord_voice_sidecar import (
         _gemini_tts_stream, _qwen3_tts_stream, _cloud_tts_stream,
         _split_by_emotion, _set_progress,
     )
+    player = _player
     while True:
         item = await _speak_queue.get()
-        global _zello_paused
-        _zello_paused = False  # 新条目 = 新播放, 清上一轮暂停
+        player._paused = False
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
         if queue_wait > 15000:
-            log.info("Zello TTS 丢弃过期消息 (%.0fms): %s", queue_wait, item.text[:40])
+            log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
             continue
-        if queue_wait > 50:
-            log.info("Zello TTS 排队: %.0fms, %s", queue_wait, item.text[:40])
         try:
             t0 = time.monotonic()
             fid = item.fid or f"{int(time.time() * 1000):x}"
             tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")
-
-            state = None
             wrote = 0
             t_first = None
             buf_f = None
@@ -520,16 +716,11 @@ async def _speak_consumer():
                 os.makedirs(_BUF_DIR, exist_ok=True)
                 buf_f = open(bpath, "wb")
             except Exception:
-                log.debug("Zello buffer 打开失败 (non-fatal)")
-
-            def _buf_write(data: bytes):
-                _playback_buf.extend(data)
-                if _playback_ev:
-                    _playback_ev.set()
+                pass
 
             if tts_backend == "qwen3":
-                segments = _split_by_emotion(item.text)
-                for instruct, seg_text in segments:
+                state = None
+                for instruct, seg_text in _split_by_emotion(item.text):
                     async for pcm24 in _qwen3_tts_stream(seg_text, instructions=instruct):
                         if t_first is None:
                             t_first = time.monotonic()
@@ -537,41 +728,29 @@ async def _speak_consumer():
                                      (t_first - t0) * 1000, item.text[:40])
                         pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                         stereo = audioop.tostereo(pcm48, 2, 1, 1)
-                        _buf_write(stereo)
+                        player.write(stereo)
                         wrote += len(stereo)
                         if buf_f:
                             buf_f.write(stereo)
             else:
-                if tts_backend == "cloud_tts":
-                    tts_stream = _cloud_tts_stream(item.text)
-                else:
-                    tts_stream = _gemini_tts_stream(item.text)
+                tts_stream = (_cloud_tts_stream(item.text) if tts_backend == "cloud_tts"
+                              else _gemini_tts_stream(item.text))
                 async for stereo in tts_stream:
                     if t_first is None:
                         t_first = time.monotonic()
                         log.info("Zello TTS TTFB: %.0fms, %s",
                                  (t_first - t0) * 1000, item.text[:40])
-                    _buf_write(stereo)
+                    player.write(stereo)
                     wrote += len(stereo)
                     if buf_f:
                         buf_f.write(stereo)
 
             if buf_f:
-                try:
-                    buf_f.close()
-                except Exception:
-                    pass
+                try: buf_f.close()
+                except Exception: pass
 
-            # TTS 写完 → 通知 playback loop 排空 buffer, 等播完再取下一条
-            global _playback_item_done
-            _playback_item_done = True
-            if _playback_ev:
-                _playback_ev.set()
-            # 轮询等 buffer 排空 (不用 Event, 避免 set/clear 竞态)
-            for _ in range(6000):  # 最多 ~120s
-                if not _playback_buf and not _playback_item_done:
-                    break
-                await asyncio.sleep(0.020)
+            player.finish()
+            await player.wait_drained()
 
             if wrote > 0:
                 _set_progress(fid, played=wrote, total=wrote, active=False)
@@ -584,71 +763,6 @@ async def _speak_consumer():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  匀速播放循环 — 模拟 Discord vc.play(source)
-#
-#  TTS 生成器把 PCM 写入 _playback_buf (快, 无背压限制);
-#  本循环每 60ms 取一帧喂 encoder, 让 Opus→Zello 流以 1x 实时速度推出。
-#  暂停 = 停取帧, 恢复 = 继续取帧, 中间音频零丢失。
-# ═══════════════════════════════════════════════════════════════════════
-
-_PLAYBACK_FRAME = 3840  # 20ms @ 48kHz stereo s16le — 跟 Discord 一致
-
-
-async def _zello_playback_loop():
-    """Pull-based 匀速播放: 每 20ms 从 buffer 取一帧 → encoder stdin (同 Discord)。"""
-    global _playback_item_done
-    FRAME = _PLAYBACK_FRAME
-    INTERVAL = 0.020
-    frames_fed = 0
-
-    while True:
-        # 等数据或 item 结束信号
-        while len(_playback_buf) < FRAME and not _playback_item_done:
-            if _playback_ev:
-                _playback_ev.clear()
-                try:
-                    await asyncio.wait_for(_playback_ev.wait(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(0.1)
-
-        # 暂停 gate
-        while _zello_paused:
-            await asyncio.sleep(0.05)
-
-        if len(_playback_buf) >= FRAME:
-            frame = bytes(_playback_buf[:FRAME])
-            del _playback_buf[:FRAME]
-            if frames_fed == 0:
-                log.info("Zello playback 首帧 (buf=%d bytes remaining)", len(_playback_buf))
-        elif _playback_item_done and _playback_buf:
-            remaining = bytes(_playback_buf)
-            _playback_buf.clear()
-            frame = remaining + b"\x00" * (FRAME - len(remaining))
-        elif _playback_item_done:
-            if frames_fed > 0:
-                log.info("Zello playback 排空完成 (%d 帧, %.1fs)",
-                         frames_fed, frames_fed * INTERVAL)
-            _playback_item_done = False
-            frames_fed = 0
-            continue
-        else:
-            continue
-
-        proc = _zello_encoder_proc
-        if proc and proc.stdin and proc.returncode is None:
-            try:
-                proc.stdin.write(frame)
-                await proc.stdin.drain()
-                frames_fed += 1
-            except (BrokenPipeError, OSError, ConnectionResetError):
-                log.warning("Zello playback encoder write 失败")
-
-        await asyncio.sleep(INTERVAL)
-
-
-# ═══════════════════════════════════════════════════════════════════════
 #  STT → BotCore 注入 (通过飞书桥)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -657,57 +771,9 @@ def _hkt_now() -> str:
     return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
 
 
-_zello_encoder_proc = None   # 持久 Opus encoder 子进程
-_zello_encoder_lock = None   # asyncio.Lock 保护 encoder 写入
-
-
-async def _start_persistent_encoder():
-    """启动持久 Opus encoder 子进程: stdin 接 16kHz mono PCM, stdout 出 Opus 包。"""
-    global _zello_encoder_proc
-    if _zello_encoder_proc is not None and _zello_encoder_proc.returncode is None:
-        return
-
-    script = """
-import ctypes, ctypes.util, struct, sys
-lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("opus") or "libopus.so.0")
-lib.opus_encoder_create.restype = ctypes.c_void_p
-err = ctypes.c_int(0)
-enc = lib.opus_encoder_create(48000, 2, 2048, ctypes.byref(err))
-if not enc:
-    sys.exit(1)
-channels = 2
-frame_size = 2880  # 60ms @ 48kHz per channel
-frame_bytes = frame_size * channels * 2
-buf = b""
-while True:
-    data = sys.stdin.buffer.read(frame_bytes - len(buf))
-    if not data:
-        break
-    buf += data
-    if len(buf) >= frame_bytes:
-        frame = buf[:frame_bytes]
-        buf = buf[frame_bytes:]
-        pcm_arr = (ctypes.c_int16 * (frame_size * channels)).from_buffer_copy(frame)
-        out = (ctypes.c_ubyte * 4000)()
-        n = lib.opus_encode(enc, pcm_arr, frame_size, out, 4000)
-        if n > 0:
-            sys.stdout.buffer.write(struct.pack("<H", n))
-            sys.stdout.buffer.write(bytes(out[:n]))
-            sys.stdout.buffer.flush()
-lib.opus_encoder_destroy(enc)
-"""
-    _zello_encoder_proc = await asyncio.create_subprocess_exec(
-        "python3", "-c", script,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    log.info("Zello 持久 Opus encoder 子进程已启动 (PID=%d)", _zello_encoder_proc.pid)
-
-
 async def _zello_stream_send_loop():
     """从 encoder stdout 读 Opus 包, 发到 Zello channel。自动管理 stream 生命周期。"""
-    proc = _zello_encoder_proc
+    proc = _player._encoder_proc if _player else None
     if proc is None:
         return
     client = _zello_client
@@ -776,11 +842,8 @@ async def _zello_stream_send_loop():
 
 
 def zello_feed_pcm48_stereo(pcm48_stereo: bytes):
-    """输入 48kHz stereo s16le，直灌 encoder。零转换。线程安全。
-
-    注意: 从 async event loop 调用时, 走 zello_feed_pcm48_stereo_async 避免阻塞。
-    """
-    proc = _zello_encoder_proc
+    """输入 48kHz stereo s16le，直灌 encoder。零转换。线程安全。"""
+    proc = _player._encoder_proc if _player else None
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
     try:
@@ -791,7 +854,7 @@ def zello_feed_pcm48_stereo(pcm48_stereo: bytes):
 
 async def zello_feed_pcm48_stereo_async(pcm48_stereo: bytes):
     """异步版: write + drain, 不阻塞 event loop 也不跨线程。"""
-    proc = _zello_encoder_proc
+    proc = _player._encoder_proc if _player else None
     if proc is None or proc.stdin is None or proc.returncode is not None:
         return
     try:
@@ -799,14 +862,6 @@ async def zello_feed_pcm48_stereo_async(pcm48_stereo: bytes):
         await proc.stdin.drain()
     except (BrokenPipeError, OSError, ConnectionResetError):
         pass
-
-
-async def zello_flush_stream():
-    """一段 TTS 说完, 关闭当前 Zello stream。"""
-    client = _zello_client
-    if client and client._connected:
-        # send_stream 会在下一段开始时自动重建
-        pass  # stream 会在 encoder 端 flush 时自然结束
 
 
 def _send_to_feishu(text: str, speaker: str):
@@ -884,47 +939,21 @@ def is_connected() -> bool:
 
 
 def zello_buf_write_threadsafe(data: bytes):
-    """【跨线程调用】Discord _do_speak 写 PCM 到 Zello 播放 buffer。"""
-    global _zello_paused
-    _zello_paused = False  # 新数据进来 = 新播放, 清上一轮暂停
-    _playback_buf.extend(data)
-    loop = _sidecar_loop
-    if loop and _playback_ev:
-        loop.call_soon_threadsafe(_playback_ev.set)
+    if _player:
+        _player.write_threadsafe(data)
 
 
 def zello_signal_done_threadsafe():
-    """【跨线程调用】Discord _do_speak TTS 结束，通知 Zello 排空 buffer。"""
-    global _playback_item_done
-    _playback_item_done = True
-    loop = _sidecar_loop
-    if loop and _playback_ev:
-        loop.call_soon_threadsafe(_playback_ev.set)
+    if _player:
+        _player.finish_threadsafe()
 
 
 def pause_zello_stream() -> bool:
-    """【飞书线程调用】暂停 Zello 推流。线程安全 (GIL 保护 bool 写)。"""
-    global _zello_paused
-    if not is_connected():
-        return False
-    _zello_paused = True
-    _playback_buf.clear()  # 丢掉未播 buffer, 防 resume 后继续推旧数据
-    log.info("Zello 暂停: paused=%s, buf cleared", _zello_paused)
-    return True
+    return _player.pause() if _player else False
 
 
 def resume_zello_stream() -> bool:
-    """【飞书线程调用】恢复 Zello 推流。线程安全。"""
-    global _zello_paused
-    if not is_connected():
-        log.info("Zello 继续: 失败 (未连接)")
-        return False
-    if not _zello_paused:
-        log.info("Zello 继续: 跳过 (未暂停)")
-        return False
-    _zello_paused = False
-    log.info("Zello 继续: paused=%s, buf=%d bytes", _zello_paused, len(_playback_buf))
-    return True
+    return _player.resume() if _player else False
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -962,10 +991,10 @@ def _load_config(bot_name: str) -> dict | None:
 
 async def _run(config: dict):
     """Zello sidecar 主循环。"""
-    global _zello_client, _speak_queue, _playback_ev
+    global _zello_client, _speak_queue, _player
 
     _speak_queue = asyncio.Queue()
-    _playback_ev = asyncio.Event()
+    _player = ZelloPlayer()
 
     client = ZelloClient(
         username=config["username"],
@@ -979,9 +1008,9 @@ async def _run(config: dict):
     await client.connect()
     asyncio.create_task(_speak_consumer())
 
-    # 启动持久 Opus encoder + 匀速播放循环 + 流式发送循环
-    await _start_persistent_encoder()
-    asyncio.create_task(_zello_playback_loop())
+    # 启动 encoder + 匀速播放循环 + 流式发送循环
+    await _player.start_encoder()
+    asyncio.create_task(_player.playback_loop())
     asyncio.create_task(_zello_stream_send_loop())
 
     # 等飞书桥注册就绪 (Zello STT 需要 feishu channel 路由消息)
@@ -1110,8 +1139,6 @@ def stop_sidecar(bot_name: str) -> tuple[bool, str]:
 _BUF_DIR = "/tmp/jarvis-tts-buf"
 _PCM_FRAME = 3840  # 20ms @ 48kHz stereo s16
 _PCM_BYTES_PER_SEC = 48000 * 2 * 2
-_play_task = None  # 当前播放 task (支持打断)
-
 
 def _buf_path(fid: str) -> str:
     import re
@@ -1120,60 +1147,11 @@ def _buf_path(fid: str) -> str:
     return os.path.join(_BUF_DIR, f"{fid}.pcm")
 
 
-async def _play_buffer(fid: str, start_byte: int = 0):
-    """从 buffer 文件读 PCM → downsample → 写 encoder 管道 → Zello 播放。"""
-    global _zello_paused
-    _zello_paused = False   # 重播 = 新动作, 清掉上一轮暂停
-    _playback_buf.clear()   # 清掉 playback loop 的 buffer, 防止两路同时灌 encoder
-    from .discord_voice_sidecar import _set_progress
-    path = _buf_path(fid)
-    if not path or not os.path.exists(path):
-        log.warning("Zello replay: buffer 不存在 fid=%s", fid)
-        return False
-    total = os.path.getsize(path)
-    if total <= 0:
-        return False
-
-    start_byte = max(0, min(start_byte, total))
-    start_byte -= start_byte % _PCM_FRAME  # 对齐帧边界
-
-    log.info("Zello replay 开始: fid=%s start=%.1fs total=%.1fs",
-             fid, start_byte / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
-    _set_progress(fid, played=start_byte, total=total, active=True)
-
-    with open(path, "rb") as f:
-        f.seek(start_byte)
-        played = start_byte
-        while True:
-            while _zello_paused:
-                await asyncio.sleep(0.05)
-            chunk = f.read(_PCM_FRAME)
-            if not chunk:
-                break
-            if len(chunk) < _PCM_FRAME:
-                chunk += b"\x00" * (_PCM_FRAME - len(chunk))
-            await zello_feed_pcm48_stereo_async(chunk)
-            played += len(chunk)
-            _set_progress(fid, played=played, active=True)
-            await asyncio.sleep(0.02)
-
-    _set_progress(fid, played=total, total=total, active=False)
-    log.info("Zello replay 完成: fid=%s", fid)
-    return True
-
-
 def replay_buffer(fid: str, start_byte: int = 0) -> bool:
-    """【飞书线程调用】从 buffer 播放到 Zello。线程安全。"""
-    global _play_task
-    loop = _sidecar_loop
-    if loop is None or not is_connected():
+    if not _player or not is_connected():
         return False
-    # 打断上一次播放
-    if _play_task is not None and not _play_task.done():
-        _play_task.cancel()
-
-    def _start():
-        global _play_task
-        _play_task = asyncio.ensure_future(_play_buffer(fid, start_byte))
-    loop.call_soon_threadsafe(_start)
+    loop = _sidecar_loop
+    if loop is None:
+        return False
+    loop.call_soon_threadsafe(lambda: _player.replay(fid, start_byte))
     return True
