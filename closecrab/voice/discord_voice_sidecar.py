@@ -444,7 +444,7 @@ def _plan_tts_batches(cleaned: str):
     return batches
 
 
-_tts_client_cache = None  # module-level singleton for HTTP keep-alive
+_tts_client_per_loop: dict = {}  # per-event-loop genai client (aiohttp session 绑定 loop)
 
 async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                               idx: int, total: int) -> tuple[bytes, str]:
@@ -528,16 +528,18 @@ async def _gemini_tts_stream(text: str):
     优化: PCM 缓存 (命中跳过 API) + 批次预取 (后台并行生成下一批)。
     首批仍流式保证最快首帧, 后续批从预取缓冲直接 yield。
     """
-    global _tts_client_cache
     from google.genai import types as gt
     from .gemini_tts import _build_genai_client, _clean_text_for_tts
 
     cleaned = _clean_text_for_tts(text)
     if not cleaned.strip():
         return
-    if _tts_client_cache is None:
-        _tts_client_cache = _build_genai_client(None)
-    client = _tts_client_cache
+    loop_id = id(asyncio.get_running_loop())
+    client = _tts_client_per_loop.get(loop_id)
+    if client is None:
+        client = _build_genai_client(None)
+        _tts_client_per_loop[loop_id] = client
+        log.info("TTS genai client 创建: loop=%x", loop_id)
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
     voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
     config = gt.GenerateContentConfig(
