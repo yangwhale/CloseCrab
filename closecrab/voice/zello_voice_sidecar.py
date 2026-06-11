@@ -185,6 +185,18 @@ class ZelloClient:
         if not resp.get("success"):
             raise RuntimeError(f"Zello logon 失败: {resp.get('error', 'unknown')}")
 
+    async def _pre_open_stream(self):
+        """PTT 松手时预开麦: start_stream 拿 stream_id, 供后续 ack 直接发包。"""
+        if not self._connected or not self._ws:
+            return
+        # send loop 会在收到第一个 Opus 包时自动开 stream,
+        # 但提前发 start_stream 可以省 200ms 往返。
+        # 这里用一帧静音触发 encoder 产出一个 Opus 包 → send loop 开 stream。
+        if _player:
+            silence = b"\x00" * ZelloPlayer.FRAME
+            _player.write(silence)
+            log.info("Zello 预开麦: 静音帧已推")
+
     async def send_text(self, text: str):
         if not self._connected or not self._ws:
             return
@@ -267,13 +279,9 @@ class ZelloClient:
             sid = data["stream_id"]
             stream = self._streams.pop(sid, None)
             if stream and stream["packets"]:
-                # PTT 松手 → 三件事并行:
-                # 1. instant ack (不等 STT, 立刻出声)
-                from .instant_ack import pick_instant_ack
-                ack = pick_instant_ack("")
-                if ack:
-                    speak_text(ack)
-                # 2+3. STT + 飞书注入 (后台 task)
+                # PTT 松手 → 立刻预开麦 (200ms 往返跟 STT 并行)
+                asyncio.create_task(self._pre_open_stream())
+                # STT + instant ack + 飞书注入 (后台 task)
                 async def _safe_process(s=stream):
                     try:
                         await self._process_received_voice(s)
@@ -912,7 +920,11 @@ def _send_to_feishu(text: str, speaker: str):
     except Exception:
         pass
 
-    # instant ack 已在 on_stream_stop 时提前触发, 不重复
+    # instant ack (STT 出来后按内容选, 开麦已在 on_stream_stop 预开)
+    from .instant_ack import pick_instant_ack
+    ack = pick_instant_ack(text)
+    if ack:
+        speak_text(ack)
 
     # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
