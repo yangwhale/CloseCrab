@@ -1046,12 +1046,15 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             log.exception("打开 buffer 落盘文件失败: %s", bpath)
             buf_f = None
 
-    # Zello 旁路: 同源 PCM 推 Zello playback buffer, 零额外 TTS 调用
+    # 决定输出路径: Discord vc 连着 → Discord play; 否则 → Zello playback loop
+    _dc_connected = is_voice_connected()
     try:
         from . import zello_voice_sidecar as _zsv
         _zello_online = _zsv.is_connected()
     except Exception:
         _zello_online = False
+    _use_dc = _dc_connected
+    _use_zl = not _dc_connected and _zello_online
 
     try:
         wrote = 0
@@ -1073,11 +1076,13 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                         t_first_pcm = _time.monotonic()
                         log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                                  (t_first_pcm - t_start) * 1000, len(text), text[:30])
-                        source = _get_persistent_source() or source
+                        if _use_dc:
+                            source = _get_persistent_source() or source
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
-                    source.write(stereo)
-                    if _zello_online:
+                    if _use_dc:
+                        source.write(stereo)
+                    elif _use_zl:
                         _zsv.zello_buf_write_threadsafe(stereo)
                     wrote += len(stereo)
                     if buf_f is not None:
@@ -1095,9 +1100,11 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     t_first_pcm = _time.monotonic()
                     log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                              (t_first_pcm - t_start) * 1000, len(text), text[:30])
-                    source = _get_persistent_source() or source
-                source.write(stereo)
-                if _zello_online:
+                    if _use_dc:
+                        source = _get_persistent_source() or source
+                if _use_dc:
+                    source.write(stereo)
+                elif _use_zl:
                     _zsv.zello_buf_write_threadsafe(stereo)
                 wrote += len(stereo)
                 if buf_f is not None:
@@ -1116,8 +1123,8 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             except Exception:
                 pass
         if fid:
-            _set_progress(fid, total=source._written, active=False)
-        if _zello_online:
+            _set_progress(fid, total=source._written if _use_dc else wrote, active=False)
+        if _use_zl:
             try:
                 _zsv.zello_signal_done_threadsafe()
             except Exception:

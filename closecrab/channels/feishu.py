@@ -2082,30 +2082,28 @@ class FeishuChannel(Channel):
                     )
 
             elif action_type in ("voice_pause", "voice_resume"):
-                # 两路都控制: Discord + Zello 共享 buffer, 暂停必须同时停两边。
-                ok_dc = False
+                # 同一时刻只有一路 play, 先试 Discord 再 fallback Zello。
                 try:
                     from ..voice.discord_voice_sidecar import (
                         pause_stream, resume_stream,
                     )
                     if action_type == "voice_pause":
-                        ok_dc = pause_stream()
+                        ok = pause_stream()
                     else:
-                        ok_dc = resume_stream()
+                        ok = resume_stream()
                 except Exception:
-                    pass
-                ok_zl = False
-                try:
-                    from ..voice.zello_voice_sidecar import (
-                        pause_zello_stream, resume_zello_stream,
-                    )
-                    if action_type == "voice_pause":
-                        ok_zl = pause_zello_stream()
-                    else:
-                        ok_zl = resume_zello_stream()
-                except Exception:
-                    pass
-                ok = ok_dc or ok_zl
+                    ok = False
+                if not ok:
+                    try:
+                        from ..voice.zello_voice_sidecar import (
+                            pause_zello_stream, resume_zello_stream,
+                        )
+                        if action_type == "voice_pause":
+                            ok = pause_zello_stream()
+                        else:
+                            ok = resume_zello_stream()
+                    except Exception:
+                        ok = False
                 if action_type == "voice_pause":
                     msg = "⏸ 已暂停推流" if ok else "当前没有正在推流的语音"
                 else:
