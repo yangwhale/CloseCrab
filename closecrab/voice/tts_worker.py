@@ -56,23 +56,35 @@ async def main():
         sys.stderr.write(f"[worker] warmup error: {e}\n")
         sys.stderr.flush()
 
-    stdin = asyncio.StreamReader()
-    protocol = await asyncio.get_event_loop().connect_read_pipe(
-        lambda: asyncio.StreamReaderProtocol(stdin), sys.stdin.buffer
-    )
     stdout = sys.stdout.buffer
+    raw_stdin = sys.stdin.buffer
 
     # 写 ready 信号
     stdout.write(b"READY\n")
     stdout.flush()
 
+    def _read_exact(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = raw_stdin.read(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
     while True:
-        # 读请求: 4 字节长度 + UTF-8 文本
-        hdr = await stdin.readexactly(4)
+        # 读请求: 同步阻塞读 stdin (在独立进程里没问题, 避免 pipe fd 干扰 epoll)
+        loop = asyncio.get_event_loop()
+        hdr = await loop.run_in_executor(None, _read_exact, 4)
+        if hdr is None:
+            break
         text_len = struct.unpack("<I", hdr)[0]
         if text_len == 0:
             break
-        text = (await stdin.readexactly(text_len)).decode("utf-8")
+        text_bytes = await loop.run_in_executor(None, _read_exact, text_len)
+        if text_bytes is None:
+            break
+        text = text_bytes.decode("utf-8")
 
         # 调 Gemini TTS 流式
         import audioop
