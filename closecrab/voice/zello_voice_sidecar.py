@@ -515,8 +515,8 @@ async def _funasr_recognize(pcm_16k: bytes) -> str:
 
             await ws.send(json.dumps({"is_speaking": False}))
 
-            online_text = ""
-            offline_text = ""
+            online_parts = []
+            offline_parts = []
             try:
                 while True:
                     msg = await asyncio.wait_for(ws.recv(), timeout=10)
@@ -525,14 +525,18 @@ async def _funasr_recognize(pcm_16k: bytes) -> str:
                     mode = d.get("mode", "")
                     if text:
                         if "offline" in mode:
-                            offline_text = text
+                            offline_parts.append(text)
                         else:
-                            online_text = text
+                            online_parts.append(text)
+                        log.info("[FunASR] mode=%s text=%s", mode, text[:60])
                     if d.get("is_final"):
                         break
             except asyncio.TimeoutError:
                 pass
-            return offline_text or online_text
+            result = "".join(offline_parts) or "".join(online_parts)
+            if len(offline_parts) > 1:
+                log.info("[FunASR] 多段拼接: %d 段 offline", len(offline_parts))
+            return result
     except Exception:
         log.exception("FunASR STT 失败")
         return ""
