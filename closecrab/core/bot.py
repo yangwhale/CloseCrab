@@ -201,12 +201,12 @@ class BotCore:
         # S1 Background Review: auto-recall relevant history from FTS5
         # index and prepend as a context block. Silent-skip on any failure
         # so this can never block the worker.send() path.
-        # 短消息 (<20 字纯文本) 跳过 S1 — 语音模式简单问题不需要跨 session 记忆
+        # 短消息 (<30 字纯文本) 跳过 S1 — 语音模式简单问题不需要跨 session 记忆
         import re as _re
         _pure_text = _re.sub(r"\[(?:channel|当前时间|from|来自)[^\]]*\]\s*", "", original_user_text).strip()
-        _skip_s1 = len(_pure_text) < 20
+        _skip_s1 = len(_pure_text) < 30
         if _skip_s1:
-            log.info("S1 recall skipped: short message (%d chars < 20)", len(_pure_text))
+            log.info("S1 recall skipped: short message (%d chars < 30)", len(_pure_text))
         else:
             try:
                 from closecrab.utils.session_recall import recall_history
