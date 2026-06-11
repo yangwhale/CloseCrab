@@ -904,6 +904,7 @@ def pause_zello_stream() -> bool:
     if not is_connected():
         return False
     _zello_paused = True
+    log.info("Zello 暂停: paused=%s, buf=%d bytes", _zello_paused, len(_playback_buf))
     return True
 
 
