@@ -503,7 +503,7 @@ async def _speak_consumer():
         try:
             t0 = time.monotonic()
             fid = item.fid or f"{int(time.time() * 1000):x}"
-            tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")
+            tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "qwen3")
 
             state = None
             wrote = 0
