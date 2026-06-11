@@ -599,6 +599,7 @@ async def _zello_playback_loop():
     global _playback_item_done
     FRAME = _PLAYBACK_FRAME
     INTERVAL = 0.020
+    frames_fed = 0
 
     while True:
         # 等数据或 item 结束信号
@@ -619,12 +620,18 @@ async def _zello_playback_loop():
         if len(_playback_buf) >= FRAME:
             frame = bytes(_playback_buf[:FRAME])
             del _playback_buf[:FRAME]
+            if frames_fed == 0:
+                log.info("Zello playback 首帧 (buf=%d bytes remaining)", len(_playback_buf))
         elif _playback_item_done and _playback_buf:
             remaining = bytes(_playback_buf)
             _playback_buf.clear()
             frame = remaining + b"\x00" * (FRAME - len(remaining))
         elif _playback_item_done:
+            if frames_fed > 0:
+                log.info("Zello playback 排空完成 (%d 帧, %.1fs)",
+                         frames_fed, frames_fed * INTERVAL)
             _playback_item_done = False
+            frames_fed = 0
             if _playback_done_ev:
                 _playback_done_ev.set()
             continue
@@ -636,8 +643,9 @@ async def _zello_playback_loop():
             try:
                 proc.stdin.write(frame)
                 await proc.stdin.drain()
+                frames_fed += 1
             except (BrokenPipeError, OSError, ConnectionResetError):
-                pass
+                log.warning("Zello playback encoder write 失败")
 
         await asyncio.sleep(INTERVAL)
 
