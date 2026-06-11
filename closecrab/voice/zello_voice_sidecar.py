@@ -487,8 +487,9 @@ async def _funasr_recognize(pcm_16k: bytes) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 class ZelloPlayer:
-    FRAME = 3840      # 20ms @ 48kHz stereo s16le — 同 Discord
-    INTERVAL = 0.020  # 20ms
+    FRAME = 3840       # 20ms @ 48kHz stereo s16le — 同 Discord
+    INTERVAL = 0.020   # 20ms
+    PREBUF_FRAMES = 15 # 先灌 15 帧 (300ms) 给客户端攒 jitter buffer
 
     def __init__(self):
         self._buf = bytearray()
@@ -605,7 +606,8 @@ class ZelloPlayer:
                 except (BrokenPipeError, OSError, ConnectionResetError):
                     pass
 
-            await asyncio.sleep(self.INTERVAL)
+            if frames_fed > self.PREBUF_FRAMES:
+                await asyncio.sleep(self.INTERVAL)
 
     # ── 重播 (读 .pcm 文件 → self.write → playback_loop 统一喂 encoder) ──
 
