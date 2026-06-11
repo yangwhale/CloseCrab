@@ -908,7 +908,8 @@ def pause_zello_stream() -> bool:
     if not is_connected():
         return False
     _zello_paused = True
-    log.info("Zello 暂停: paused=%s, buf=%d bytes", _zello_paused, len(_playback_buf))
+    _playback_buf.clear()  # 丢掉未播 buffer, 防 resume 后继续推旧数据
+    log.info("Zello 暂停: paused=%s, buf cleared", _zello_paused)
     return True
 
 
@@ -1122,7 +1123,8 @@ def _buf_path(fid: str) -> str:
 async def _play_buffer(fid: str, start_byte: int = 0):
     """从 buffer 文件读 PCM → downsample → 写 encoder 管道 → Zello 播放。"""
     global _zello_paused
-    _zello_paused = False  # 重播 = 新动作, 清掉上一轮暂停
+    _zello_paused = False   # 重播 = 新动作, 清掉上一轮暂停
+    _playback_buf.clear()   # 清掉 playback loop 的 buffer, 防止两路同时灌 encoder
     from .discord_voice_sidecar import _set_progress
     path = _buf_path(fid)
     if not path or not os.path.exists(path):
