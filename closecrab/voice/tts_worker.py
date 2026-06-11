@@ -19,16 +19,8 @@ async def main():
 
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "chris-pgp-host")
     location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-    use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
-
-    if use_vertex:
-        client = genai.Client(vertexai=True, project=project, location=location)
-    else:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if api_key:
-            client = genai.Client(api_key=api_key)
-        else:
-            client = genai.Client(vertexai=True, project=project, location=location)
+    # 强制 Vertex AI — 比 aistudio API key 快 2x (989ms vs 2116ms from asia-east1)
+    client = genai.Client(vertexai=True, project=project, location=location)
 
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
     voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")

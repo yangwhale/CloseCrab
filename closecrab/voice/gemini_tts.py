@@ -108,18 +108,18 @@ def _clean_text_for_tts(text: str) -> str:
 
 
 def _build_genai_client(api_key: str | None) -> genai.Client:
-    use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
-    if use_vertex:
+    # Vertex AI 优先 — 从 asia-east1 到 global endpoint 比 aistudio 快 2x
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if project:
         return genai.Client(
             vertexai=True,
-            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            project=project,
             location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
         )
     api_key = api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError(
-            "Set GOOGLE_GENAI_USE_VERTEXAI=true (+ GOOGLE_CLOUD_PROJECT) for Vertex, "
-            "or GEMINI_API_KEY for aistudio."
+            "Set GOOGLE_CLOUD_PROJECT for Vertex AI, or GEMINI_API_KEY for aistudio."
         )
     return genai.Client(api_key=api_key)
 
