@@ -562,7 +562,7 @@ class ZelloPlayer:
         self._item_done = False
         self._replay_task: asyncio.Task | None = None
         self._encoder_proc = None
-        self.stream_timeout = 1.0  # send loop 关麦超时
+        self.stream_timeout = 3.0  # send loop 关麦超时
 
     # ── 写入端 ──
 
