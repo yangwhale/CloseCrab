@@ -267,6 +267,13 @@ class ZelloClient:
             sid = data["stream_id"]
             stream = self._streams.pop(sid, None)
             if stream and stream["packets"]:
+                # PTT 松手 → 三件事并行:
+                # 1. instant ack (不等 STT, 立刻出声)
+                from .instant_ack import pick_instant_ack
+                ack = pick_instant_ack("")
+                if ack:
+                    speak_text(ack)
+                # 2+3. STT + 飞书注入 (后台 task)
                 async def _safe_process(s=stream):
                     try:
                         await self._process_received_voice(s)
@@ -905,11 +912,7 @@ def _send_to_feishu(text: str, speaker: str):
     except Exception:
         pass
 
-    # instant ack (fire-and-forget) — 共用 instant_ack 模块 (不依赖 livekit)
-    from .instant_ack import pick_instant_ack
-    ack = pick_instant_ack(text)
-    if ack:
-        speak_text(ack)
+    # instant ack 已在 on_stream_stop 时提前触发, 不重复
 
     # 走 feishu synthetic event → BotCore
     content = f"[channel: voice]\n[当前时间: {_hkt_now()}]\n[from: Zello PTT · {speaker}]\n{text}"
