@@ -498,6 +498,7 @@ async def _speak_consumer():
     )
     while True:
         item = await _speak_queue.get()
+        _zello_paused = False  # 新条目 = 新播放, 清上一轮暂停
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
         if queue_wait > 15000:
             log.info("Zello TTS 丢弃过期消息 (%.0fms): %s", queue_wait, item.text[:40])
@@ -883,6 +884,8 @@ def is_connected() -> bool:
 
 def zello_buf_write_threadsafe(data: bytes):
     """【跨线程调用】Discord _do_speak 写 PCM 到 Zello 播放 buffer。"""
+    global _zello_paused
+    _zello_paused = False  # 新数据进来 = 新播放, 清上一轮暂停
     _playback_buf.extend(data)
     loop = _sidecar_loop
     if loop and _playback_ev:
@@ -1117,6 +1120,8 @@ def _buf_path(fid: str) -> str:
 
 async def _play_buffer(fid: str, start_byte: int = 0):
     """从 buffer 文件读 PCM → downsample → 写 encoder 管道 → Zello 播放。"""
+    global _zello_paused
+    _zello_paused = False  # 重播 = 新动作, 清掉上一轮暂停
     from .discord_voice_sidecar import _set_progress
     path = _buf_path(fid)
     if not path or not os.path.exists(path):
