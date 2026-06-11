@@ -1268,7 +1268,7 @@ def pause_stream() -> bool:
         return False
     try:
         fut = asyncio.run_coroutine_threadsafe(_set_pause(True), loop)
-        return bool(fut.result(timeout=3))
+        return bool(fut.result(timeout=0.5))
     except Exception:
         log.exception("pause_stream 跨线程调度失败")
         return False
@@ -1281,7 +1281,7 @@ def resume_stream() -> bool:
         return False
     try:
         fut = asyncio.run_coroutine_threadsafe(_set_pause(False), loop)
-        return bool(fut.result(timeout=3))
+        return bool(fut.result(timeout=0.5))
     except Exception:
         log.exception("resume_stream 跨线程调度失败")
         return False
