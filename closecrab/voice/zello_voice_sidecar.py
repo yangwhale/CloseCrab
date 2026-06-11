@@ -50,7 +50,6 @@ _bot_name = ""
 _zello_paused = False       # 暂停推流 (飞书 ⏸ 按钮)
 _playback_buf = bytearray() # TTS 写入, playback loop 读取
 _playback_ev: "asyncio.Event | None" = None   # 有新数据 / TTS 结束
-_playback_done_ev: "asyncio.Event | None" = None  # playback 播完, speak_consumer 继续
 _playback_item_done = False  # TTS 写完当前条目
 _display_names: dict[str, str] = {}  # Zello username → display name
 
@@ -566,12 +565,11 @@ async def _speak_consumer():
             _playback_item_done = True
             if _playback_ev:
                 _playback_ev.set()
-            if _playback_done_ev:
-                _playback_done_ev.clear()
-                try:
-                    await asyncio.wait_for(_playback_done_ev.wait(), timeout=300)
-                except asyncio.TimeoutError:
-                    log.warning("Zello playback drain 超时 (5min)")
+            # 轮询等 buffer 排空 (不用 Event, 避免 set/clear 竞态)
+            for _ in range(6000):  # 最多 ~120s
+                if not _playback_buf and not _playback_item_done:
+                    break
+                await asyncio.sleep(0.020)
 
             if wrote > 0:
                 _set_progress(fid, played=wrote, total=wrote, active=False)
@@ -632,8 +630,6 @@ async def _zello_playback_loop():
                          frames_fed, frames_fed * INTERVAL)
             _playback_item_done = False
             frames_fed = 0
-            if _playback_done_ev:
-                _playback_done_ev.set()
             continue
         else:
             continue
@@ -957,11 +953,10 @@ def _load_config(bot_name: str) -> dict | None:
 
 async def _run(config: dict):
     """Zello sidecar 主循环。"""
-    global _zello_client, _speak_queue, _playback_ev, _playback_done_ev
+    global _zello_client, _speak_queue, _playback_ev
 
     _speak_queue = asyncio.Queue()
     _playback_ev = asyncio.Event()
-    _playback_done_ev = asyncio.Event()
 
     client = ZelloClient(
         username=config["username"],
