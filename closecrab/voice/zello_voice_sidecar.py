@@ -354,33 +354,6 @@ class ZelloClient:
             log.info("[Zello] 跳过: 音频太短 (%d bytes)", len(pcm))
             return
 
-        # 1.5 Debug: 解码后音频转 OGG 发飞书语音消息
-        if _feishu_ref and _feishu_loop and _feishu_chat_id:
-            try:
-                import subprocess as _sp, tempfile as _tf
-                ogg_f = _tf.NamedTemporaryFile(suffix=".ogg", prefix="zello-dbg-", delete=False)
-                ogg_path = ogg_f.name
-                ogg_f.close()
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-f", "s16le", "-ar", str(sample_rate),
-                    "-ac", "1", "-i", "pipe:0", "-c:a", "libopus", "-b:a", "32k",
-                    ogg_path, stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                await proc.communicate(input=pcm)
-                if os.path.exists(ogg_path) and os.path.getsize(ogg_path) > 0:
-                    feishu = _feishu_ref
-                    f_loop = _feishu_loop
-                    chat_id = _feishu_chat_id
-                    f_loop.call_soon_threadsafe(
-                        lambda p=ogg_path: asyncio.ensure_future(
-                            feishu._send_voice_file(chat_id, p), loop=f_loop))
-                    log.info("[Debug] OGG 已发飞书: %.1fs, %d pkts", audio_dur, len(packets))
-                else:
-                    try: os.unlink(ogg_path)
-                    except Exception: pass
-            except Exception:
-                log.debug("Debug OGG 转换失败 (non-fatal)")
-
         # 2. 重采样 + AGC
         pcm_16k = pcm
         if sample_rate != 16000:
