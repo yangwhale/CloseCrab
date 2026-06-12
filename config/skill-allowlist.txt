@@ -39,3 +39,16 @@ vector
 ant-tpu-sync
 live-canvas
 cc-pages-backup
+
+# ── NVIDIA GPU Skills (Megatron-Core / NeMo / TileGym) ──
+# 默认不装。需要时: deploy.sh --nvidia-skills 或手动 link
+# 存放在 skills-nvidia/ 目录，不在 skills/ 里
+# mcore-create-issue
+# mcore-linting-and-formatting
+# mcore-run-on-slurm
+# mcore-split-pr
+# mcore-testing
+# nemo-mbridge-* (17 skills)
+# nemo-automodel-* (4 skills)
+# nemo-rl-* (4 skills) + launch-nemo-rl
+# tilegym-* (7 skills)

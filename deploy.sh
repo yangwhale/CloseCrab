@@ -68,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --bot)     MODE="bot"; shift ;;
         --npm)     USE_NPM=true; shift ;;
         --voice)   INSTALL_VOICE=true; shift ;;
+        --nvidia-skills) NVIDIA_SKILLS=1; shift ;;
         --voice-frontend-domain)  VOICE_FRONTEND_DOMAIN="$2"; shift 2 ;;
         --voice-signaling-domain) VOICE_SIGNALING_DOMAIN="$2"; shift 2 ;;
         --voice-email)            VOICE_ADMIN_EMAIL="$2"; shift 2 ;;
@@ -742,6 +743,17 @@ install_cc() {
         echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, 含私有 skills, allowlist 过滤)"
     else
         echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, allowlist 过滤)"
+    fi
+
+    # NVIDIA GPU Skills (可选, --nvidia-skills 参数启用)
+    if [[ "${NVIDIA_SKILLS:-}" == "1" ]] && [[ -d "$SCRIPT_DIR/skills-nvidia" ]]; then
+        for skill_dir in "$SCRIPT_DIR/skills-nvidia/"*/; do
+            [[ -d "$skill_dir" ]] || continue
+            local skill_name="$(basename "$skill_dir")"
+            rm -rf ~/.claude/skills/"$skill_name"
+            cp -a "$skill_dir" ~/.claude/skills/
+        done
+        echo "  NVIDIA Skills 已部署 ($(ls "$SCRIPT_DIR/skills-nvidia/" | wc -l) 个: Megatron-Core/NeMo/TileGym)"
     fi
 
     # Gemini CLI skills linking (if gemini CLI is available)
