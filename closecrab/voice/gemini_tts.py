@@ -91,14 +91,16 @@ _RE_HEADING = re.compile(r"^#+\s+", re.MULTILINE)
 _RE_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
 _RE_LIST_BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
 _RE_BLANK_LINES = re.compile(r"\n{3,}")
+_RE_BARE_URL = re.compile(r"https?://\S+")
 
 
 def _clean_text_for_tts(text: str) -> str:
-    """Strip markdown / Sources / code blocks before TTS, keep emotion tags."""
+    """Strip markdown / Sources / code blocks / URLs before TTS, keep emotion tags."""
     text = _RE_SOURCES_SECTION.sub("", text)
     text = _RE_CODE_BLOCK.sub("", text)
     text = _RE_TABLE_ROW.sub("", text)
     text = _RE_MD_LINK.sub(r"\1", text)
+    text = _RE_BARE_URL.sub("", text)
     text = _RE_INLINE_CODE.sub(r"\1", text)
     text = _RE_HEADING.sub("", text)
     text = _RE_BOLD.sub(r"\1", text)

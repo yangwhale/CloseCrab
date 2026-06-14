@@ -24,6 +24,9 @@ def create_app():
     from cc_api_feishu import register_routes as feishu_routes
     feishu_routes(app)
 
+    from cc_api_live import register_routes as live_routes
+    live_routes(app)
+
     return app
 
 

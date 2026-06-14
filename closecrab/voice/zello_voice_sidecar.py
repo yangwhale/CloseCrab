@@ -27,6 +27,8 @@ import json
 import logging
 import os
 import struct
+import glob as _glob_mod
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,6 +38,90 @@ log = logging.getLogger("closecrab.zello_voice_sidecar")
 # ── Zello WebSocket 入口 ──
 _WS_URL_FF = "wss://zello.io/ws"
 _WS_URL_WORK = "wss://zellowork.io/ws"
+
+# ── HLS 直播 ──
+_hls_proc: "subprocess.Popen | None" = None
+_hls_enabled: bool = False
+_hls_current_id: str = ""
+_HLS_DIR = "/tmp/hls-live"
+
+
+
+def start_hls() -> str:
+    global _hls_proc, _hls_enabled
+    os.makedirs(_HLS_DIR, exist_ok=True)
+    if _hls_proc and _hls_proc.poll() is None:
+        return "HLS 已在运行"
+    for f in _glob_mod.glob(f"{_HLS_DIR}/seg_*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init.mp4"):
+        try: os.unlink(f)
+        except Exception: pass
+    _hls_proc = subprocess.Popen(
+        ["ffmpeg", "-y",
+         "-fflags", "+genpts",
+         "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0",
+         "-c:a", "aac", "-b:a", "64k",
+         "-f", "hls",
+         "-hls_time", "0.5",
+         "-hls_list_size", "30",
+         "-hls_segment_type", "fmp4",
+         "-hls_fmp4_init_filename", "init.mp4",
+         "-hls_segment_filename", f"{_HLS_DIR}/seg_%05d.m4s",
+         f"{_HLS_DIR}/jarvis.m3u8"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _hls_enabled = True
+    _persist_hls_enabled(True)
+    log.info("HLS 直播已启动 (真直播模式)")
+    return "HLS 直播已开启"
+
+
+def stop_hls() -> str:
+    global _hls_proc, _hls_enabled
+    _hls_enabled = False
+    _persist_hls_enabled(False)
+    if _hls_proc:
+        try:
+            _hls_proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            _hls_proc.wait(timeout=5)
+        except Exception:
+            _hls_proc.kill()
+        _hls_proc = None
+    for f in _glob_mod.glob(f"{_HLS_DIR}/seg_*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init.mp4"):
+        try:
+            os.unlink(f)
+        except Exception:
+            pass
+    log.info("HLS 直播已停止")
+    return "HLS 直播已停止"
+
+
+def _hls_append_endlist():
+    m3u8 = f"{_HLS_DIR}/jarvis.m3u8"
+    try:
+        with open(m3u8, "a") as f:
+            f.write("\n#EXT-X-ENDLIST\n")
+        log.info("HLS ENDLIST 追加 (播放器将播完所有分片)")
+    except Exception:
+        pass
+
+
+def _hls_remove_endlist():
+    m3u8 = f"{_HLS_DIR}/jarvis.m3u8"
+    try:
+        with open(m3u8, "r") as f:
+            content = f.read()
+        if "#EXT-X-ENDLIST" in content:
+            content = content.replace("\n#EXT-X-ENDLIST\n", "\n")
+            with open(m3u8, "w") as f:
+                f.write(content)
+    except Exception:
+        pass
+
 
 # ── 模块级状态 ──
 _sidecar_loop: "asyncio.AbstractEventLoop | None" = None
@@ -535,7 +621,7 @@ class ZelloPlayer:
         self._item_done = False
         self._replay_task: asyncio.Task | None = None
         self._encoder_proc = None
-        self.stream_timeout = 3.0  # send loop 关麦超时
+        self.stream_timeout = 0.2  # send loop 关麦超时 (speak_consumer 动态调: 生成中 30s, 播完 0.2s)
 
     # ── 写入端 ──
 
@@ -584,6 +670,7 @@ class ZelloPlayer:
         self._buf.clear()
         self._item_done = False
         self._paused = False
+        self.stream_timeout = 30.0  # replay 进行中用大 timeout
         self._replay_task = asyncio.ensure_future(
             self._replay_from_file(fid, start_byte))
         return True
@@ -604,14 +691,19 @@ class ZelloPlayer:
     async def playback_loop(self):
         FRAME = self.FRAME
         frames_fed = 0
+        _silence = b"\x00" * FRAME
 
         while True:
             while len(self._buf) < FRAME and not self._item_done:
                 self._data_ev.clear()
                 try:
-                    await asyncio.wait_for(self._data_ev.wait(), timeout=0.5)
+                    await asyncio.wait_for(self._data_ev.wait(), timeout=self.INTERVAL)
                 except asyncio.TimeoutError:
-                    pass
+                    if _hls_enabled and _hls_proc and _hls_proc.stdin:
+                        try:
+                            _hls_proc.stdin.write(_silence)
+                        except (BrokenPipeError, OSError):
+                            pass
 
             while self._paused:
                 await asyncio.sleep(0.05)
@@ -642,6 +734,12 @@ class ZelloPlayer:
                     await proc.stdin.drain()
                     frames_fed += 1
                 except (BrokenPipeError, OSError, ConnectionResetError):
+                    pass
+
+            if _hls_enabled and _hls_proc and _hls_proc.stdin:
+                try:
+                    _hls_proc.stdin.write(frame)
+                except (BrokenPipeError, OSError):
                     pass
 
             if frames_fed > self.PREBUF_FRAMES:
@@ -685,6 +783,8 @@ class ZelloPlayer:
                     await asyncio.sleep(self.INTERVAL)
 
         _set_progress(fid, played=total, total=total, active=False)
+        self.stream_timeout = 0.2  # replay 完成，快关麦
+        self.finish()
         log.info("Zello replay 完成: fid=%s", fid)
 
     # ── Opus encoder 子进程 ──
@@ -747,6 +847,7 @@ async def _speak_consumer():
             log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
             continue
         try:
+            player.stream_timeout = 30.0  # TTS 进行中：批间间隔可能数秒，给足 timeout
             t0 = time.monotonic()
             fid = item.fid or f"{int(time.time() * 1000):x}"
             tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")
@@ -793,6 +894,7 @@ async def _speak_consumer():
 
             player.finish()
             await player.wait_drained()
+            player.stream_timeout = 0.2  # 播完：200ms 快关麦
 
             if wrote > 0:
                 _set_progress(fid, played=wrote, total=wrote, active=False)
@@ -838,7 +940,8 @@ async def _zello_stream_send_loop():
                         "command": "stop_stream", "seq": seq,
                         "stream_id": stream_id, "channel": client.channel,
                     }))
-                    log.info("Zello stream 关闭 (stream_id=%d, %d 包)", stream_id, packet_id)
+                    log.info("Zello PTT 关麦 (stream_id=%d, %d 包, timeout=%.1fs)",
+                             stream_id, packet_id, _timeout)
                 except Exception:
                     pass
                 stream_id = None
@@ -877,7 +980,7 @@ async def _zello_stream_send_loop():
             if not stream_id:
                 continue
             packet_id = 0
-            log.info("Zello 流式发送开始 (stream_id=%d)", stream_id)
+            log.info("Zello PTT 开麦 (stream_id=%d)", stream_id)
 
         header = struct.pack("!BII", 0x01, stream_id, packet_id)
         await client._ws.send(header + opus_pkt)
@@ -1003,6 +1106,27 @@ def resume_zello_stream() -> bool:
 #  Firestore 配置读取
 # ═══════════════════════════════════════════════════════════════════════
 
+def _persist_hls_enabled(enabled: bool):
+    try:
+        from google.cloud import firestore
+        from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+        db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        db.collection("bots").document(_bot_name).update({"hls_enabled": enabled})
+    except Exception as e:
+        log.warning("HLS 状态持久化失败: %s", e)
+
+
+def _load_hls_enabled() -> bool:
+    try:
+        from google.cloud import firestore
+        from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+        db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        doc = db.collection("bots").document(_bot_name).get()
+        return bool((doc.to_dict() or {}).get("hls_enabled", False)) if doc.exists else False
+    except Exception:
+        return False
+
+
 def _load_config(bot_name: str) -> dict | None:
     """从 Firestore bots/{name} 读 Zello 配置。"""
     try:
@@ -1050,6 +1174,10 @@ async def _run(config: dict):
 
     await client.connect()
     asyncio.create_task(_speak_consumer())
+
+    if _load_hls_enabled():
+        start_hls()
+        log.info("HLS 直播自动恢复 (Firestore hls_enabled=true)")
 
     # 启动 encoder + 匀速播放循环 + 流式发送循环
     await _player.start_encoder()

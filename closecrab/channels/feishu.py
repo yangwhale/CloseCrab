@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff", "/hlson", "/hlsoff"}
 
 # 语音情绪标签: Gemini TTS 用的 [casually] / [thinking] 这种，全小写、不跟 "(".
 # 用全小写排除标题里的 [External]；用 (?!\() 排除 markdown 链接 [title](url)。
@@ -4190,6 +4190,17 @@ class FeishuChannel(Channel):
             ok, msg = await asyncio.to_thread(zello_stop, self._bot_name)
             await self._async_send_text(chat_id, msg)
 
+        elif cmd == "/hlson":
+            from ..voice.zello_voice_sidecar import start_hls
+            msg = start_hls()
+            from ..constants import G
+            await self._async_send_text(chat_id, f"{msg}\n{G.CC_PAGES_URL}/assets/live/stream.m3u8")
+
+        elif cmd == "/hlsoff":
+            from ..voice.zello_voice_sidecar import stop_hls
+            msg = stop_hls()
+            await self._async_send_text(chat_id, msg)
+
         elif cmd == "/context":
             usage = self._core.get_context_usage(user_key)
             if not usage:
@@ -4590,19 +4601,30 @@ class FeishuChannel(Channel):
 
     @staticmethod
     def _keep_tagged_paragraphs_for_tts(text: str) -> str:
-        """voice mode 过滤: 只保留含情绪标签的段落给 TTS 念。
+        """voice mode 过滤: 去掉不适合念的段落, 给漏标签的段落补默认标签。
 
-        按空行切段, 段里有 [casually] 这种小写情绪标签才留, 否则丢。
-        这样链接/列表/表格/纯展示正文 (没标签) 不会被念出来, 只在飞书显示。
-        全都没标签时回落原文 (避免意外哑掉 —— voice mode 正常每段都带标签)。
+        1. 过滤: 分隔线/纯代码块/纯表格 → 丢掉
+        2. 兜底: 没有情绪标签的文字段落 → 自动补 [casually]
+           Gemini TTS 需要情绪标签作为语音节奏锚点, 没标签容易生成静音或质量差的音频。
         """
         if not text or not text.strip():
             return text
         paras = re.split(r"\n\s*\n", text)
-        kept = [p for p in paras if _RE_VOICE_EMOTION_TAG.search(p)]
-        if not kept:
-            return text
-        return "\n\n".join(p.strip() for p in kept).strip()
+        kept = []
+        for p in paras:
+            stripped = p.strip()
+            if not stripped:
+                continue
+            if stripped == "---" or stripped == "***":
+                continue
+            if stripped.startswith("```") and stripped.endswith("```"):
+                continue
+            if all(line.strip().startswith("|") for line in stripped.splitlines()):
+                continue
+            if not _RE_VOICE_EMOTION_TAG.search(stripped):
+                stripped = "[casually] " + stripped
+            kept.append(stripped)
+        return "\n\n".join(kept).strip() if kept else text
 
     async def _send_voice_summary(self, chat_id: str, text: str):
         """生成 TTS 语音并作为飞书语音消息发送（单段，不切分）。
