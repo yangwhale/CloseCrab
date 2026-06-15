@@ -52,17 +52,17 @@ def start_hls() -> str:
     os.makedirs(_HLS_DIR, exist_ok=True)
     if _hls_proc and _hls_proc.poll() is None:
         return "HLS 已在运行"
-    for f in _glob_mod.glob(f"{_HLS_DIR}/seg_*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init.mp4"):
+    for f in _glob_mod.glob(f"{_HLS_DIR}/seg*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init*.*"):
         try: os.unlink(f)
         except Exception: pass
     _hls_proc = subprocess.Popen(
         ["ffmpeg", "-y",
          "-fflags", "+genpts",
          "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0",
-         "-c:a", "aac", "-b:a", "64k",
+         "-c:a", "libopus", "-b:a", "64k",
          "-f", "hls",
-         "-hls_time", "0.5",
-         "-hls_list_size", "30",
+         "-hls_time", "2",
+         "-hls_list_size", "600",
          "-hls_segment_type", "fmp4",
          "-hls_fmp4_init_filename", "init.mp4",
          "-hls_segment_filename", f"{_HLS_DIR}/seg_%05d.m4s",
@@ -91,7 +91,7 @@ def stop_hls() -> str:
         except Exception:
             _hls_proc.kill()
         _hls_proc = None
-    for f in _glob_mod.glob(f"{_HLS_DIR}/seg_*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init.mp4"):
+    for f in _glob_mod.glob(f"{_HLS_DIR}/seg*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init*.*"):
         try:
             os.unlink(f)
         except Exception:
@@ -1110,8 +1110,12 @@ def _persist_hls_enabled(enabled: bool):
     try:
         from google.cloud import firestore
         from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+        name = _bot_name or os.environ.get("BOT_NAME", "")
+        if not name:
+            log.warning("HLS 持久化跳过: bot_name 未设置")
+            return
         db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
-        db.collection("bots").document(_bot_name).update({"hls_enabled": enabled})
+        db.collection("bots").document(name).update({"hls_enabled": enabled})
     except Exception as e:
         log.warning("HLS 状态持久化失败: %s", e)
 
@@ -1120,8 +1124,11 @@ def _load_hls_enabled() -> bool:
     try:
         from google.cloud import firestore
         from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+        name = _bot_name or os.environ.get("BOT_NAME", "")
+        if not name:
+            return False
         db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
-        doc = db.collection("bots").document(_bot_name).get()
+        doc = db.collection("bots").document(name).get()
         return bool((doc.to_dict() or {}).get("hls_enabled", False)) if doc.exists else False
     except Exception:
         return False
