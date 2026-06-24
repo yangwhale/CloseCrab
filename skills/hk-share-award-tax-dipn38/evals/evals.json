@@ -1,0 +1,59 @@
+{
+  "skill_name": "hk-share-award-tax-dipn38",
+  "evals": [
+    {
+      "id": 1,
+      "name": "generate_pdf_pipeline",
+      "prompt": "I'm preparing my Hong Kong salaries tax return for year of assessment 2025/26. I transferred from Acme Corp (Shanghai) Limited to Acme Corp (Hong Kong) Limited on 3 June 2024. My GSU vest data for this year is in evals/files/sample_vests.csv (3 vests, one each from a 2021 grant, a 2024 grant, and a 2025 grant). My name is JANE DOE, IRD file no 0X0-X0000000. Please compute the partial exemption under DIPN 38 and produce the supporting PDF I can attach to my BIR60 application. Save the PDF to /tmp/eval-1-output.pdf.",
+      "expected_output": "A multi-page PDF named eval-1-output.pdf with: (a) APPENDIX-EQUITY header on every page, (b) main table showing 3 vest rows with correct Net Amount and Net Assessable values, (c) totals row with HK$ integer summary, (d) DIPN 38 detail blocks for the 2 apportioned vests (2021 and 2024 grants), (e) Itinerary appendix showing employment timeline. Specifically: 2021 grant assessable = 1297-day total, 971-day outside, 326-day HK; 2024 grant total = 415, outside = 89, HK = 326; 2025 grant assessable = full amount (no apportionment).",
+      "files": ["evals/files/sample_vests.csv"],
+      "expectations": [
+        "Output PDF exists at /tmp/eval-1-output.pdf",
+        "PDF has at least 2 pages",
+        "PDF first page contains 'APPENDIX-EQUITY' and 'JANE DOE'",
+        "PDF main table shows all 3 vest events",
+        "Numerical results: 2021 grant Net Assessable = HK$ 6,326.32, 2024 grant Net Assessable = HK$ 8,898.28, 2025 grant Net Assessable = HK$ 7,526.65 (full amount, no apportionment)",
+        "PDF contains DIPN 38 detail blocks for the 2 apportioned vests but NOT for the 2025 grant",
+        "PDF contains an Itinerary appendix mentioning '3 Jun 2024' as HK employment start"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "birsp4_confusion",
+      "prompt": "I want to claim partial Hong Kong salaries tax exemption for my GSU income that was granted while I worked for my employer's Singapore office, before transferring to Hong Kong. I see there's a form called BIRSP4 on the IRD website. Should I fill out BIRSP4 to claim this exemption?",
+      "expected_output": "Response should correctly identify that BIRSP4 is NOT the right form (it's for Carried Interest concession for private equity / venture capital fund employees, under section 7-9 of Schedule 16D). The correct mechanism is BIR60 Appendix Section 4 'Application for Partial Exemption of Income' with section 8(1A)(a) as the ground, plus a detailed DIPN 38 computation as supporting document.",
+      "files": [],
+      "expectations": [
+        "Response explicitly states BIRSP4 is for Carried Interest (NOT share awards)",
+        "Response identifies the correct form/mechanism: BIR60 Appendix Section 4",
+        "Response mentions section 8(1A)(a) as the legal ground",
+        "Response references DIPN 38 (or DIPN No. 38) as the underlying interpretation"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "etax_box34_hidden",
+      "prompt": "I'm filling out my Hong Kong tax return on eTAX online (Individual Tax Portal). The guide says I should put my partial exemption amount in 'Box 34' but I can't find Box 34 anywhere in Part 4.1. I see boxes 30, 31, 32, 33 but no 34. What am I missing?",
+      "expected_output": "Response should explain that eTAX hides Box 34 by default. The user needs to go to 'Select PARTS of Return' (an item in the left navigation, typically numbered 02) and tick 'Apply for full / partial exemption of income'. Once that's enabled, Box 34 appears and the Appendix Section 4 becomes available.",
+      "files": [],
+      "expectations": [
+        "Response identifies 'Select PARTS of Return' as the navigation step",
+        "Response mentions ticking 'Apply for full / partial exemption of income' (or similar wording)",
+        "Response explains that Box 34 / Appendix Section 4 become visible after this toggle"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "single_vest_apportionment",
+      "prompt": "Quick DIPN 38 question: my GSU was conditionally granted on 6 October 2021 (when I was employed by my company's US office) and vested on 25 April 2025 (after I had transferred to Hong Kong employment, with my HK employment start date being 3 June 2024). What fraction of the vest gain is taxable in Hong Kong under section 8(1A)(a)? Give the exact day counts and the fraction.",
+      "expected_output": "The fraction is 326/1297 ≈ 25.13%. Specifically: total days in vesting period = (25 Apr 2025 - 6 Oct 2021).days = 1297 days. Outside HK days = (3 Jun 2024 - 6 Oct 2021).days = 971 days. Days in HK during vesting = 1297 - 971 = 326. So the assessable portion = 326/1297 = 25.13% of the gross gain.",
+      "files": [],
+      "expectations": [
+        "Response gives total vesting period = 1297 days (or shows the calculation arriving at this)",
+        "Response gives outside-HK days = 971",
+        "Response gives in-HK days = 326",
+        "Response gives the fraction 326/1297 (or equivalent ~25.13%, ~25.1%, 0.2513, etc.)"
+      ]
+    }
+  ]
+}

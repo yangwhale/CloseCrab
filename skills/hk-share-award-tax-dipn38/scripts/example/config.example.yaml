@@ -1,0 +1,21 @@
+# Example taxpayer config for the HK share award DIPN 38 skill.
+#
+# All fields are placeholders — replace with the actual taxpayer's details before use.
+# Dates use ISO format YYYY-MM-DD.
+
+name: "JANE DOE"
+file_no: "0X0-X0000000"        # IRD individual file number (permanent, on past returns)
+hk_employer: "Acme Corp (Hong Kong) Limited"
+prior_employer: "Acme Corp (Shanghai) Limited"  # optional, shows in Itinerary appendix
+
+# The year of assessment to compute, e.g. "2025/26".
+# HK tax year runs 1 Apr YYYY to 31 Mar YYYY+1.
+year_of_assessment: "2025/26"
+ya_start: 2025-04-01
+ya_end: 2026-03-31
+
+# First day of HK employment (i.e. first day at the HK entity).
+# Used to determine:
+#   - Which grants need DIPN 38 apportionment (grant_date < hk_employment_start)
+#   - The HK / non-HK boundary in the day count
+hk_employment_start: 2024-06-03

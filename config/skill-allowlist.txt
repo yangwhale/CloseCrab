@@ -32,6 +32,7 @@ go-eat
 weather-forecast
 google-internal-mcp
 imagen-generator
+music-generator
 internal-doc-site
 page-style
 skill-creator
@@ -39,6 +40,7 @@ vector
 ant-tpu-sync
 live-canvas
 cc-pages-backup
+wechat-reader
 
 # ── NVIDIA GPU Skills (Megatron-Core / NeMo / TileGym) ──
 # 默认不装。需要时: deploy.sh --nvidia-skills 或手动 link
@@ -52,3 +54,4 @@ cc-pages-backup
 # nemo-automodel-* (4 skills)
 # nemo-rl-* (4 skills) + launch-nemo-rl
 # tilegym-* (7 skills)
+hk-share-award-tax-dipn38
