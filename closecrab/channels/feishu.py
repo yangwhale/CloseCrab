@@ -4690,14 +4690,12 @@ class FeishuChannel(Channel):
             if open_id and self._voice_io.has_active_session(open_id):
                 await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
 
-        # ── 3. 飞书 ogg 兜底已禁用 ──
-        # 原因: Discord 已有流式 TTS + 重播按钮，不再需要额外生成一段长 ogg。
-        # 长文本 Gemini TTS 质量差 (后半段含糊)，且生成耗时阻塞。
-        # 如需恢复: 取消下面注释即可。
-        # if await self._tts_and_send_one(chat_id, text):
-        #     log.info(f"Voice summary sent to {chat_id}")
-        if streaming:
-            log.info(f"Voice summary via Discord streaming (ogg skipped) to {chat_id}")
+        # ── 3. 飞书 ogg 兜底 (任何流式 channel 在线都跳过) ──
+        if not streaming:
+            if await self._tts_and_send_one(chat_id, text):
+                log.info(f"Voice summary ogg sent to {chat_id}")
+        else:
+            log.info(f"Voice summary via streaming (ogg skipped) to {chat_id}")
 
     @staticmethod
     def _split_into_sentences(text: str) -> list[str]:

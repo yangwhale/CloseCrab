@@ -974,6 +974,13 @@ def _get_persistent_source():
         _persistent_source = None
         return None
     if _persistent_source is not None:
+        if vc.is_paused():
+            # 上一轮被暂停了，新消息到了要解除暂停并清空旧 buffer
+            vc.resume()
+            _persistent_source._consec_silence = 0
+            _persistent_source.clear()
+            log.info("持久 source 从暂停恢复 (新一轮对话开始)")
+            return _persistent_source
         if vc.is_playing():
             return _persistent_source
         # idle 停播后重新 play: 清空残留 buffer + reset idle 计数器
@@ -3004,14 +3011,30 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
         return None
     vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
-    return _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
+    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
+    if thread is not None:
+        # 后台验证：15s 后检查是否真的连上了语音频道，没连上就清除持久化标记
+        import threading as _th
 
+        def _verify():
+            import time
+            time.sleep(15)
+            if not is_voice_connected():
+                log.warning("开机自启 sidecar 15s 后仍未连上语音频道，清除持久化标记")
+                _persist_sidecar_enabled(bot_name, False)
+
+        _th.Thread(target=_verify, daemon=True, name="sidecar-boot-verify").start()
+    return thread
 
 def start_sidecar(bot_name: str) -> tuple[bool, str]:
     """【飞书线程调用】运行时连进 Discord 语音频道 + 持久化 voice_sidecar=true。"""
     if is_sidecar_running():
-        _persist_sidecar_enabled(bot_name, True)
-        return True, "Discord 已经连着 General 了。"
+        if is_voice_connected():
+            _persist_sidecar_enabled(bot_name, True)
+            return True, "Discord 已经连着 General 了。"
+        # sidecar 线程活着但语音没连上 → 杀掉重来
+        log.warning("sidecar 线程在跑但语音未连接，强制重启 sidecar")
+        stop_sidecar(bot_name)
     cfg = _load_sidecar_config(bot_name)
     if not cfg or not cfg["token"]:
         return False, "这个 bot 没配 Discord token，连不了。"

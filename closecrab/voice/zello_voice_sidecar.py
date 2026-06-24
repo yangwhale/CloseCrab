@@ -611,7 +611,7 @@ async def _funasr_recognize(pcm_16k: bytes) -> str:
 
 class ZelloPlayer:
     FRAME = 3840       # 20ms @ 48kHz stereo s16le — 同 Discord
-    INTERVAL = 0.020   # 20ms
+    INTERVAL = 0.019   # 19ms for speech frames; silence wait_for stays 20ms
     PREBUF_FRAMES = 15 # 先灌 15 帧 (300ms) 给客户端攒 jitter buffer
 
     def __init__(self):
@@ -697,7 +697,7 @@ class ZelloPlayer:
             while len(self._buf) < FRAME and not self._item_done:
                 self._data_ev.clear()
                 try:
-                    await asyncio.wait_for(self._data_ev.wait(), timeout=self.INTERVAL)
+                    await asyncio.wait_for(self._data_ev.wait(), timeout=0.020)
                 except asyncio.TimeoutError:
                     if _hls_enabled and _hls_proc and _hls_proc.stdin:
                         try:
@@ -706,7 +706,12 @@ class ZelloPlayer:
                             pass
 
             while self._paused:
-                await asyncio.sleep(0.05)
+                if _hls_enabled and _hls_proc and _hls_proc.stdin:
+                    try:
+                        _hls_proc.stdin.write(_silence)
+                    except (BrokenPipeError, OSError):
+                        pass
+                await asyncio.sleep(0.020)
 
             if len(self._buf) >= FRAME:
                 frame = bytes(self._buf[:FRAME])
