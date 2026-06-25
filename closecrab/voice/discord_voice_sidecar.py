@@ -347,8 +347,14 @@ async def _voice_heartbeat(interval: float = 30.0):
     根因：Discord gateway 与 voice 是两条独立连接。半夜 websocket 1006 断线后
     gateway 会 RESUME，但 voice 连接不会自动重建 → 飞书 voice-summary 检测到
     is_voice_connected=False 就回退飞书 ogg，Discord 静音。这个心跳就是兜底。
+
+    2026-06-25 追加: 同频道成员变动检测 + 自动重连刷新 DAVE 密钥。
+    py-cord 不转发 MLS commit/welcome 给已连接的 voice client，导致先连的 bot
+    密钥失效。心跳每 30s 检查成员列表，变了就重连。60s 冷却防级联。
     """
     global _autostart_done
+    _known_members: set = set()
+    _last_dave_reconnect: float = 0
     while True:
         try:
             await asyncio.sleep(interval)
@@ -363,9 +369,37 @@ async def _voice_heartbeat(interval: float = 30.0):
                 vc = await _ensure_connected()
                 if vc is not None:
                     log.info("voice 自动 rejoin 成功")
+                    _known_members = {str(m.id) for m in vc.channel.members} if vc.channel else set()
+                    _last_dave_reconnect = time.time()
                 else:
                     log.warning("voice 自动 rejoin 失败，下个周期再试")
                     continue
+            # ── DAVE 密钥自动刷新：检测成员变动 ──
+            if vc.channel:
+                current_members = {str(m.id) for m in vc.channel.members}
+                if _known_members and current_members != _known_members:
+                    elapsed = time.time() - _last_dave_reconnect
+                    added = current_members - _known_members
+                    removed = _known_members - current_members
+                    log.info("语音频道成员变动: +%s -%s (距上次重连 %.0fs)", added, removed, elapsed)
+                    if elapsed > 60:
+                        log.info("成员变动 → 5s 后自动重连刷新 DAVE 密钥")
+                        await asyncio.sleep(5)
+                        try:
+                            await vc.disconnect(force=True)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1)
+                        vc = await _ensure_connected()
+                        _last_dave_reconnect = time.time()
+                        if vc and vc.is_connected():
+                            log.info("DAVE 密钥自动刷新完成")
+                            current_members = {str(m.id) for m in vc.channel.members} if vc.channel else set()
+                        else:
+                            log.warning("DAVE 自动重连失败")
+                    else:
+                        log.info("成员变动检测到但冷却期内 (%.0fs < 60s)，跳过重连", elapsed)
+                _known_members = current_members
             # 连接健康 → 本进程内自动起一次录音 (重启/重连后接收自愈, 尊重之后的 /stoplisten)
             if _LISTEN_AUTOSTART and not _autostart_done and not _listen_active and not vc.is_recording():
                 ok, msg = await _activate_listen(vc)
@@ -2841,6 +2875,8 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
         但 py-cord 不会把 DAVE transition 事件转发给已连接的 bot。
         唯一可靠的修复：检测到成员变动后断开重连，触发完整 DAVE 握手。
         """
+        log.info("on_voice_state_update: member=%s before=%s after=%s self=%s",
+                 member, before.channel, after.channel, bot.user)
         if member == bot.user:
             return
         guild = bot.guilds[0] if bot.guilds else None
