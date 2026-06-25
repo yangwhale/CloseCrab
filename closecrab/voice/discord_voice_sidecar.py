@@ -2834,6 +2834,40 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             pass
 
     @bot.event
+    async def on_voice_state_update(member, before, after):
+        """同频道成员变动 → 自动重连拿新 DAVE 密钥。
+
+        当另一个 bot 重启后重新加入语音频道，Discord 会更新 MLS epoch，
+        但 py-cord 不会把 DAVE transition 事件转发给已连接的 bot。
+        唯一可靠的修复：检测到成员变动后断开重连，触发完整 DAVE 握手。
+        """
+        if member == bot.user:
+            return
+        guild = bot.guilds[0] if bot.guilds else None
+        if guild is None:
+            return
+        vc = guild.voice_client
+        if vc is None or not vc.is_connected():
+            return
+        our_channel = vc.channel
+        joined_our_channel = (
+            (before.channel != our_channel and after.channel == our_channel) or
+            (before.channel == our_channel and after.channel is None)
+        )
+        if not joined_our_channel:
+            return
+        action = "加入" if after.channel == our_channel else "离开"
+        log.info("语音频道成员变动: %s %s → 2s 后自动重连刷新 DAVE 密钥", member.display_name, action)
+        await asyncio.sleep(2)
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+        await _ensure_connected()
+        log.info("DAVE 密钥自动刷新完成 (触发: %s %s)", member.display_name, action)
+
+    @bot.event
     async def on_message(message):
         """Discord 语音房文字聊天 → BotCore → 回复发回 Discord。"""
         if message.author.bot:
