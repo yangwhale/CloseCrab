@@ -395,39 +395,6 @@ def is_voice_connected() -> bool:
     return bool(vc is not None and vc.is_connected())
 
 
-def reconnect_voice() -> bool:
-    """强制断开并重连语音频道，触发完整 DAVE 握手拿新密钥。线程安全。
-
-    用途: 同频道其他 bot 重启导致 DAVE 密钥轮换，本 bot 的旧密钥失效。
-    调这个函数比重启整个 bot 轻量得多——只重连语音，不丢 session。
-    返回 True = 重连成功，False = sidecar 未运行或重连失败。
-    """
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
-        return False
-
-    async def _do_reconnect():
-        bot = _sidecar_bot
-        if bot is None or not bot.guilds:
-            return False
-        guild = bot.guilds[0]
-        vc = guild.voice_client
-        if vc is not None:
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                pass
-            await asyncio.sleep(1)
-        new_vc = await _ensure_connected()
-        return new_vc is not None and new_vc.is_connected()
-
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_do_reconnect(), loop)
-        return fut.result(timeout=30)
-    except Exception:
-        log.exception("reconnect_voice 失败")
-        return False
-
 
 # —— 分批合成参数 (借鉴 livekit_io._batching_tts_loop, 因 jarvis 这台无
 #    livekit/blingfire 依赖, 故移植算法而非字面 import) ——
@@ -2833,18 +2800,6 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
             await ctx.respond(f"❌ 命令出错：{error}", ephemeral=True)
         except Exception:
             pass
-
-    @bot.event
-    async def on_voice_state_update(member, before, after):
-        """同频道成员变动 → 自动重连拿新 DAVE 密钥。
-
-        当另一个 bot 重启后重新加入语音频道，Discord 会更新 MLS epoch，
-        但 py-cord 不会把 DAVE transition 事件转发给已连接的 bot。
-        唯一可靠的修复：检测到成员变动后断开重连，触发完整 DAVE 握手。
-        """
-        # 仅记录日志用于诊断，不触发重连（重连会让其他 bot 密钥失效，造成级联）
-        log.info("on_voice_state_update: member=%s before_ch=%s after_ch=%s",
-                 member, before.channel, after.channel)
 
     @bot.event
     async def on_message(message):
