@@ -394,6 +394,40 @@ def is_voice_connected() -> bool:
     return bool(vc is not None and vc.is_connected())
 
 
+def reconnect_voice() -> bool:
+    """强制断开并重连语音频道，触发完整 DAVE 握手拿新密钥。线程安全。
+
+    用途: 同频道其他 bot 重启导致 DAVE 密钥轮换，本 bot 的旧密钥失效。
+    调这个函数比重启整个 bot 轻量得多——只重连语音，不丢 session。
+    返回 True = 重连成功，False = sidecar 未运行或重连失败。
+    """
+    loop = _sidecar_loop
+    if loop is None or _sidecar_bot is None:
+        return False
+
+    async def _do_reconnect():
+        bot = _sidecar_bot
+        if bot is None or not bot.guilds:
+            return False
+        guild = bot.guilds[0]
+        vc = guild.voice_client
+        if vc is not None:
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        new_vc = await _ensure_connected()
+        return new_vc is not None and new_vc.is_connected()
+
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_do_reconnect(), loop)
+        return fut.result(timeout=30)
+    except Exception:
+        log.exception("reconnect_voice 失败")
+        return False
+
+
 # —— 分批合成参数 (借鉴 livekit_io._batching_tts_loop, 因 jarvis 这台无
 #    livekit/blingfire 依赖, 故移植算法而非字面 import) ——
 #  实测 (probe): Gemini 流式 TTS 不是真 token 级流式, 它先啃完整段输入才出第一个

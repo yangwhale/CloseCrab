@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff", "/hlson", "/hlsoff"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/davereconnect", "/zelloon", "/zellooff", "/hlson", "/hlsoff"}
 
 # 语音情绪标签: Gemini TTS 用的 [casually] / [thinking] 这种，全小写、不跟 "(".
 # 用全小写排除标题里的 [External]；用 (?!\() 排除 markdown 链接 [title](url)。
@@ -4178,6 +4178,14 @@ class FeishuChannel(Channel):
             from ..voice.discord_voice_sidecar import stop_sidecar
             ok, msg = await asyncio.to_thread(stop_sidecar, self._bot_name)
             await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/davereconnect":
+            # 强制重连 Discord 语音频道，刷新 DAVE 密钥。
+            # 用途: 同频道其他 bot 重启后本 bot 密钥失效，不需要重启整个 bot。
+            from ..voice.discord_voice_sidecar import reconnect_voice
+            await self._async_send_text(chat_id, "正在重连 Discord 语音频道…")
+            ok = await asyncio.to_thread(reconnect_voice)
+            await self._async_send_text(chat_id, "Discord 语音重连成功，DAVE 密钥已刷新" if ok else "重连失败，sidecar 可能未运行")
 
         elif cmd == "/zelloon":
             from ..voice.zello_voice_sidecar import start_sidecar as zello_start

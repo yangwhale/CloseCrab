@@ -50,6 +50,10 @@ export BOT_NAME
 # bash 不加载 .zshenv，需要显式 source（内容全是 export，bash 兼容）
 [ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv"
 
+# Discord 语音 TTS 后端: 强制 Gemini 3.1 Flash TTS (走 Vertex AI, 因 GOOGLE_CLOUD_PROJECT
+# 已设)。显式 export 覆盖启动 shell 可能继承的旧值 (如手动 export 的 qwen3)。
+export DISCORD_TTS_BACKEND="gemini"
+
 # Kilo 7.x serve 强制 HTTP Basic Auth（password from $KILO_SERVER_PASSWORD）。
 # Bot 的 kilo serve 是子进程，靠继承此 env var 启动；KiloWorker 用同一个值发请求。
 # 如果已经从 .zshenv 继承（VSCode 扩展会自动设），优先用继承的；否则生成一个稳定的。
