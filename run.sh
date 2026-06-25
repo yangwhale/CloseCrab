@@ -54,6 +54,11 @@ export BOT_NAME
 # 已设)。显式 export 覆盖启动 shell 可能继承的旧值 (如手动 export 的 qwen3)。
 export DISCORD_TTS_BACKEND="gemini"
 
+# 每 bot 独立 Discord 语音角色 (Gemini TTS voice)。缺省 Orus (沉稳男声)。
+case "$BOT_NAME" in
+    bunny) export DISCORD_TTS_VOICE="Aoede" ;;   # 巴尼: 轻快女声
+esac
+
 # Kilo 7.x serve 强制 HTTP Basic Auth（password from $KILO_SERVER_PASSWORD）。
 # Bot 的 kilo serve 是子进程，靠继承此 env var 启动；KiloWorker 用同一个值发请求。
 # 如果已经从 .zshenv 继承（VSCode 扩展会自动设），优先用继承的；否则生成一个稳定的。

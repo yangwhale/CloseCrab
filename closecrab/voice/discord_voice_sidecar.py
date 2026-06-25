@@ -1166,10 +1166,11 @@ async def _speak_consumer():
         if item.is_reply:
             _flush_hints_from_queue()
         queue_wait = (_time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
-        # 丢弃过期消息 (入队超过 8 秒的 hint 或 reply 都没意义了)
-        if queue_wait > 8000:
-            log.info("TTS 丢弃过期消息 (%.0fms, %s): %s",
-                     queue_wait, "reply" if item.is_reply else "hint", item.text[:30])
+        # 丢弃过期的 hint（工具提示），但 reply（正文内容）永不丢弃。
+        # 用户暂停播放时，当前 _do_speak 会阻塞，reply 在队列中等待可能超过 8s。
+        # 如果丢弃 reply，用户恢复后就听不到正文了。
+        if queue_wait > 8000 and not item.is_reply:
+            log.info("TTS 丢弃过期 hint (%.0fms): %s", queue_wait, item.text[:30])
             continue
         if queue_wait > 50:
             log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
