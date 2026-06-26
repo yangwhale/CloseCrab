@@ -41,16 +41,50 @@ _WS_URL_WORK = "wss://zellowork.io/ws"
 
 # ── HLS 直播 ──
 _hls_proc: "subprocess.Popen | None" = None
+_hls_http_thread: "threading.Thread | None" = None
 _hls_enabled: bool = False
 _hls_current_id: str = ""
 _HLS_DIR = "/tmp/hls-live"
+_HLS_HTTP_PORT = 8766
 
+
+def _start_hls_http_server():
+    """后台线程：在 _HLS_DIR 上起 HTTP 文件服务器，供 Caddy reverse_proxy 访问。
+
+    Caddy (hk-jmp) 把 /assets/live/* 请求 strip_prefix 后转发到 10.100.0.2:8766。
+    jarvis.html 和 js 文件通过 symlink 从 GCS 挂载目录引入。
+    """
+    import http.server
+    global _hls_http_thread
+    if _hls_http_thread is not None and _hls_http_thread.is_alive():
+        return
+    # symlink 静态资源到 HLS 目录
+    _gcs_live = "/gcs/cc-pages/assets/live"
+    for fname in ("jarvis.html", "siriwave.js", "audiomotion.js"):
+        src = os.path.join(_gcs_live, fname)
+        dst = os.path.join(_HLS_DIR, fname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                os.symlink(src, dst)
+            except Exception:
+                pass
+
+    def _run():
+        handler = http.server.SimpleHTTPRequestHandler
+        httpd = http.server.HTTPServer(("0.0.0.0", _HLS_HTTP_PORT), handler)
+        log.info("HLS HTTP 文件服务器启动: port=%d dir=%s", _HLS_HTTP_PORT, _HLS_DIR)
+        os.chdir(_HLS_DIR)
+        httpd.serve_forever()
+
+    _hls_http_thread = threading.Thread(target=_run, daemon=True, name="hls-http-server")
+    _hls_http_thread.start()
 
 
 def start_hls() -> str:
     global _hls_proc, _hls_enabled
     os.makedirs(_HLS_DIR, exist_ok=True)
     if _hls_proc and _hls_proc.poll() is None:
+        _start_hls_http_server()
         return "HLS 已在运行"
     for f in _glob_mod.glob(f"{_HLS_DIR}/seg*.*") + _glob_mod.glob(f"{_HLS_DIR}/*.m3u8") + _glob_mod.glob(f"{_HLS_DIR}/init*.*"):
         try: os.unlink(f)
@@ -71,6 +105,7 @@ def start_hls() -> str:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    _start_hls_http_server()
     _hls_enabled = True
     _persist_hls_enabled(True)
     log.info("HLS 直播已启动 (真直播模式)")
