@@ -42,6 +42,7 @@ _WS_URL_WORK = "wss://zellowork.io/ws"
 # ── HLS 直播 ──
 _hls_proc: "subprocess.Popen | None" = None
 _hls_http_thread: "threading.Thread | None" = None
+_hls_httpd = None
 _hls_enabled: bool = False
 _hls_current_id: str = ""
 _HLS_DIR = "/tmp/hls-live"
@@ -79,9 +80,10 @@ def _start_hls_http_server():
         try:
             os.chdir(_HLS_DIR)
             handler = http.server.SimpleHTTPRequestHandler
-            httpd = http.server.HTTPServer(("0.0.0.0", _HLS_HTTP_PORT), handler)
+            global _hls_httpd
+            _hls_httpd = http.server.HTTPServer(("0.0.0.0", _HLS_HTTP_PORT), handler)
             log.info("HLS HTTP 文件服务器启动: port=%d dir=%s", _HLS_HTTP_PORT, _HLS_DIR)
-            httpd.serve_forever()
+            _hls_httpd.serve_forever()
         except OSError as e:
             log.warning("HLS HTTP 服务器启动失败 (port=%d): %s", _HLS_HTTP_PORT, e)
 
@@ -121,10 +123,24 @@ def start_hls() -> str:
     return "HLS 直播已开启"
 
 
+def _stop_hls_http_server():
+    """停止 8766 HTTP 文件服务器。"""
+    global _hls_http_thread, _hls_httpd
+    if _hls_httpd is not None:
+        try:
+            _hls_httpd.shutdown()
+        except Exception:
+            pass
+        _hls_httpd = None
+    _hls_http_thread = None
+    log.info("HLS HTTP 文件服务器已停止")
+
+
 def stop_hls() -> str:
     global _hls_proc, _hls_enabled
     _hls_enabled = False
     _persist_hls_enabled(False)
+    _stop_hls_http_server()
     if _hls_proc:
         try:
             _hls_proc.stdin.close()
