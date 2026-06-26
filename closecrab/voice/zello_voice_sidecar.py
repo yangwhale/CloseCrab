@@ -70,11 +70,20 @@ def _start_hls_http_server():
                 pass
 
     def _run():
-        handler = http.server.SimpleHTTPRequestHandler
-        httpd = http.server.HTTPServer(("0.0.0.0", _HLS_HTTP_PORT), handler)
-        log.info("HLS HTTP 文件服务器启动: port=%d dir=%s", _HLS_HTTP_PORT, _HLS_DIR)
-        os.chdir(_HLS_DIR)
-        httpd.serve_forever()
+        import socket
+        # 检查端口是否已被占用（比如上次手动起的残留进程）
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", _HLS_HTTP_PORT)) == 0:
+                log.info("HLS HTTP 端口 %d 已有服务，跳过启动", _HLS_HTTP_PORT)
+                return
+        try:
+            os.chdir(_HLS_DIR)
+            handler = http.server.SimpleHTTPRequestHandler
+            httpd = http.server.HTTPServer(("0.0.0.0", _HLS_HTTP_PORT), handler)
+            log.info("HLS HTTP 文件服务器启动: port=%d dir=%s", _HLS_HTTP_PORT, _HLS_DIR)
+            httpd.serve_forever()
+        except OSError as e:
+            log.warning("HLS HTTP 服务器启动失败 (port=%d): %s", _HLS_HTTP_PORT, e)
 
     _hls_http_thread = threading.Thread(target=_run, daemon=True, name="hls-http-server")
     _hls_http_thread.start()
