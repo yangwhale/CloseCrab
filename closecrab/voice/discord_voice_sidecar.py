@@ -977,11 +977,11 @@ def _get_persistent_source():
         return None
     if _persistent_source is not None:
         if vc.is_paused():
-            # 上一轮被暂停了，新消息到了要解除暂停并清空旧 buffer
-            vc.resume()
+            # 上一轮被暂停了，新消息到了要先清空旧 buffer 再 resume
             _persistent_source._consec_silence = 0
-            _persistent_source.clear()
-            log.info("持久 source 从暂停恢复 (新一轮对话开始)")
+            _persistent_source.clear()  # 必须在 resume 之前清，否则旧音频会在 resume 瞬间播出
+            vc.resume()
+            log.info("持久 source 从暂停恢复 (旧 buffer 已清, 新一轮对话开始)")
             return _persistent_source
         if vc.is_playing():
             return _persistent_source
