@@ -910,8 +910,9 @@ async def _speak_consumer():
     player = _player
     while True:
         item = await _speak_queue.get()
-        # 等上一条播完（playback_loop drain）再开始新的
-        # 不打断，不 cancel — 顺序播放
+        # 等上一个 PTT stream 关闭：stream_timeout=0.2 后 sender loop 会关麦
+        # 必须等，否则新 TTS 写入 encoder 会延续旧 PTT（服务端可能已废弃）
+        await asyncio.sleep(0.5)
         player._item_done = False
         player._paused = False
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
