@@ -480,7 +480,7 @@ class ZelloClient:
     async def _do_process_voice(self, stream, speaker, packets, dur):
         t = [time.monotonic()]  # t[0] = stream stop
 
-        # 解析 codec_header
+        # 解析 codec_header + packet_duration
         sample_rate, frame_size_ms = 16000, 60
         ch = stream.get("codec_header", "")
         if ch:
@@ -490,6 +490,11 @@ class ZelloClient:
                 frame_size_ms = hdr[3]
             except Exception:
                 pass
+        # Zello packet_duration 可能大于 codec_header 的 frame_size_ms（120 vs 60），
+        # Opus decode buffer 必须按实际 packet duration 分配，否则 OPUS_BUFFER_TOO_SMALL
+        pkt_dur = stream.get("packet_duration", frame_size_ms)
+        if pkt_dur > frame_size_ms:
+            frame_size_ms = pkt_dur
 
         # 1. Opus 解码
         pcm = await self._decode_packets(packets, sample_rate, frame_size_ms)
