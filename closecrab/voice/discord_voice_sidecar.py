@@ -977,11 +977,18 @@ def _get_persistent_source():
         return None
     if _persistent_source is not None:
         if vc.is_paused():
-            # 上一轮被暂停了，新消息到了要先清空旧 buffer 再 resume
+            # 上一轮被暂停了 — stop 彻底停掉旧音频，不 resume（用户已暂停说明不想听了）。
+            # 清空 buffer + 重新 play，让新一轮的 TTS 从头开始。
+            vc.stop()
             _persistent_source._consec_silence = 0
-            _persistent_source.clear()  # 必须在 resume 之前清，否则旧音频会在 resume 瞬间播出
-            vc.resume()
-            log.info("持久 source 从暂停恢复 (旧 buffer 已清, 新一轮对话开始)")
+            _persistent_source.clear()
+            try:
+                vc.play(_persistent_source)
+                log.info("持久 source: 旧暂停已 stop, 重新 play (新一轮对话)")
+            except Exception:
+                log.exception("持久 source stop→play 失败, 重建")
+                _persistent_source = None
+                return None
             return _persistent_source
         if vc.is_playing():
             return _persistent_source
