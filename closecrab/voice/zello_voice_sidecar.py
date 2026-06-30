@@ -909,6 +909,9 @@ async def _speak_consumer():
     player = _player
     while True:
         item = await _speak_queue.get()
+        # 强制关闭上一个 PTT stream: 设 timeout=0 让 sender loop 立刻超时关麦
+        player.stream_timeout = 0.0
+        await asyncio.sleep(0.3)  # 给 sender loop 时间执行 stop_stream
         player._buf.clear()
         player._item_done = False
         player._paused = False
