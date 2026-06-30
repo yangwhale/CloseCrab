@@ -736,7 +736,7 @@ class ZelloPlayer:
         self._buf.clear()
         self._item_done = False
         self._paused = False
-        self.stream_timeout = 30.0  # replay 进行中用大 timeout
+        self.stream_timeout = 3.0  # replay 进行中
         self._replay_task = asyncio.ensure_future(
             self._replay_from_file(fid, start_byte))
         return True
@@ -920,7 +920,7 @@ async def _speak_consumer():
             log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
             continue
         try:
-            player.stream_timeout = 30.0  # TTS 进行中：批间间隔可能数秒，给足 timeout
+            player.stream_timeout = 3.0  # TTS 进行中：批间间隔最多 ~2s，3s 够且不跨消息
             t0 = time.monotonic()
             fid = item.fid or f"{int(time.time() * 1000):x}"
             tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")
