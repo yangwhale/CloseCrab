@@ -687,6 +687,7 @@ class ZelloPlayer:
         self._replay_task: asyncio.Task | None = None
         self._encoder_proc = None
         self.stream_timeout = 0.2  # send loop 关麦超时 (speak_consumer 动态调: 生成中 30s, 播完 0.2s)
+        self._close_ptt_event = asyncio.Event()  # speak_consumer 通知 sender loop 关当前 PTT
 
     # ── 写入端 ──
 
@@ -909,9 +910,18 @@ async def _speak_consumer():
     player = _player
     while True:
         item = await _speak_queue.get()
+        # 取消进行中的 replay
+        if player._replay_task and not player._replay_task.done():
+            player._replay_task.cancel()
+            log.info("Zello: 取消进行中的 replay (新消息入队)")
+        # 通知 sender loop 立刻关当前 PTT
+        player._close_ptt_event.set()
+        # 清空 buffer + 等 sender loop 关完 PTT
         player._buf.clear()
         player._item_done = False
         player._paused = False
+        await asyncio.sleep(0.5)  # 给 sender loop 时间执行 stop_stream
+        player._close_ptt_event.clear()
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
         if queue_wait > 120000:
             log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
@@ -997,25 +1007,42 @@ async def _zello_stream_send_loop():
     stream_id = None
     packet_id = 0
 
+    async def _close_current_ptt():
+        nonlocal stream_id, packet_id
+        if stream_id is not None:
+            try:
+                seq = client._next_seq()
+                await client._ws.send(json.dumps({
+                    "command": "stop_stream", "seq": seq,
+                    "stream_id": stream_id, "channel": client.channel,
+                }))
+                log.info("Zello PTT 关麦 (stream_id=%d, %d 包)",
+                         stream_id, packet_id)
+            except Exception:
+                pass
+            stream_id = None
+            packet_id = 0
+
     while True:
-        # 读 Opus 包, 动态超时: ack 后 30s 等正文, 正文后 1s 快关
+        # 检查是否收到强制关 PTT 信号 (新消息入队)
+        if _player and _player._close_ptt_event.is_set():
+            await _close_current_ptt()
+            # 排空 encoder 残留数据 (非阻塞读完所有可用包)
+            while True:
+                try:
+                    hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=0.01)
+                    pkt_len = struct.unpack("<H", hdr)[0]
+                    await proc.stdout.readexactly(pkt_len)  # 丢弃
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                    break
+            continue
+
+        # 读 Opus 包, 动态超时: ack 后 30s 等正文, 正文后 0.2s 快关
         _timeout = _player.stream_timeout if _player else 3.0
         try:
             hdr = await asyncio.wait_for(proc.stdout.readexactly(2), timeout=_timeout)
         except asyncio.TimeoutError:
-            if stream_id is not None:
-                try:
-                    seq = client._next_seq()
-                    await client._ws.send(json.dumps({
-                        "command": "stop_stream", "seq": seq,
-                        "stream_id": stream_id, "channel": client.channel,
-                    }))
-                    log.info("Zello PTT 关麦 (stream_id=%d, %d 包, timeout=%.1fs)",
-                             stream_id, packet_id, _timeout)
-                except Exception:
-                    pass
-                stream_id = None
-                packet_id = 0
+            await _close_current_ptt()
             continue
         except (asyncio.IncompleteReadError, ConnectionError):
             break
