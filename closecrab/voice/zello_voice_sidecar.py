@@ -989,13 +989,27 @@ def _hkt_now() -> str:
 
 
 async def _zello_stream_send_loop():
-    """从 encoder stdout 读 Opus 包, 发到 Zello channel。自动管理 stream 生命周期。"""
-    proc = _player._encoder_proc if _player else None
-    if proc is None:
-        return
-    client = _zello_client
-    if client is None or not client._connected:
-        return
+    """从 encoder stdout 读 Opus 包, 发到 Zello channel。自动管理 stream 生命周期。
+
+    encoder 重启时（Zello reconnect）自动重连新 encoder 的 stdout。
+    """
+    while True:
+        proc = _player._encoder_proc if _player else None
+        if proc is None or proc.returncode is not None:
+            await asyncio.sleep(1)
+            continue
+        client = _zello_client
+        if client is None or not client._connected:
+            await asyncio.sleep(1)
+            continue
+        log.info("Zello sender loop 启动 (encoder PID=%d)", proc.pid)
+        await _zello_stream_send_inner(proc, client)
+        log.info("Zello sender loop 退出, 1s 后重连 encoder")
+        await asyncio.sleep(1)
+
+
+async def _zello_stream_send_inner(proc, client):
+    """sender loop 内层: 读一个 encoder 的生命周期。encoder 死了就 return。"""
 
     stream_id = None
     packet_id = 0
