@@ -965,6 +965,9 @@ async def _speak_consumer():
                 try: buf_f.close()
                 except Exception: pass
 
+            # 末尾加 500ms 静音，防止 Zello 客户端截掉最后几百毫秒
+            silence_pad = b"\x00" * (ZelloPlayer.FRAME * 25)  # 25 帧 = 500ms
+            player.write(silence_pad)
             player.finish()
             await player.wait_drained()
             player.stream_timeout = 0.2  # 播完：200ms 快关麦
