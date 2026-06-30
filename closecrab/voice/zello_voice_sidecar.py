@@ -910,18 +910,10 @@ async def _speak_consumer():
     player = _player
     while True:
         item = await _speak_queue.get()
-        # 取消进行中的 replay
-        if player._replay_task and not player._replay_task.done():
-            player._replay_task.cancel()
-            log.info("Zello: 取消进行中的 replay (新消息入队)")
-        # 通知 sender loop 立刻关当前 PTT
-        player._close_ptt_event.set()
-        # 清空 buffer + 等 sender loop 关完 PTT
-        player._buf.clear()
+        # 等上一条播完（playback_loop drain）再开始新的
+        # 不打断，不 cancel — 顺序播放
         player._item_done = False
         player._paused = False
-        await asyncio.sleep(0.5)  # 给 sender loop 时间执行 stop_stream
-        player._close_ptt_event.clear()
         queue_wait = (time.monotonic() - item.enqueue_time) * 1000 if item.enqueue_time else 0
         if queue_wait > 120000:
             log.info("Zello TTS 丢弃过期 (%.0fms): %s", queue_wait, item.text[:40])
@@ -1024,9 +1016,10 @@ async def _zello_stream_send_loop():
             packet_id = 0
 
     while True:
-        # 检查是否收到强制关 PTT 信号 (新消息入队)
+        # 检查是否收到强制关 PTT 信号 (用户 barge-in 打断)
         if _player and _player._close_ptt_event.is_set():
             await _close_current_ptt()
+            _player._close_ptt_event.clear()
             # 排空 encoder 残留数据 (非阻塞读完所有可用包)
             while True:
                 try:
