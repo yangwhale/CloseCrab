@@ -3892,8 +3892,9 @@ class FeishuChannel(Channel):
                 # 注: result 已 strip 掉 <voice-summary> / <voice-file> 标签
                 # (extract_* 已在上面调过), 这里拿到的是干净正文.
                 if user_key in self._text_voice_mode_users and result:
+                    # voice mode: 主回复本身就是语音输出，不再额外推 voice-summary
                     asyncio.create_task(self._send_voice_summary(chat_id, result))
-                elif voice_text:
+                elif voice_text and user_key not in self._text_voice_mode_users:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
             else:
                 # 空 result：删 progress card（无内容可保留）
