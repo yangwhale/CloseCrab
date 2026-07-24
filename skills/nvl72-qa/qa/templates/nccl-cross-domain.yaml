@@ -1,0 +1,252 @@
+# 跨域 NCCL 测试 (2 domain, 2 ComputeDomain, MNNVL=2)
+# 域内 NVSwitch + 跨域 RDMA，2 个 ReplicatedJob 各绑一个 pool + CD
+# 前置: JobSet CRD, imex-channel-init DaemonSet
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${QA_NAMESPACE}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: rdma-nics
+  namespace: ${QA_NAMESPACE}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: rdma-nics
+        exactly:
+          deviceClassName: mrdma.google.com
+          allocationMode: ExactCount
+          count: ${QA_RDMA_NICS}
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: cd-1
+  namespace: ${QA_NAMESPACE}
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: cd-1-ch
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: cd-2
+  namespace: ${QA_NAMESPACE}
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: cd-2-ch
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: nccl-cd
+  namespace: ${QA_NAMESPACE}
+spec:
+  ttlSecondsAfterFinished: 600
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+  - name: d1
+    template:
+      spec:
+        parallelism: ${QA_NCCL_NODES_1}
+        completions: ${QA_NCCL_NODES_1}
+        template:
+          spec:
+            terminationGracePeriodSeconds: 60
+            activeDeadlineSeconds: ${QA_TIMEOUT_NCCL_MULTI}
+            restartPolicy: Never
+            nodeSelector:
+              ${QA_NODE_SELECTOR_KEY}: ${QA_POOL_1}
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: present
+              effect: NoSchedule
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: ${QA_ARCH}
+              effect: NoSchedule
+            setHostnameAsFQDN: true
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: "Memory"
+                sizeLimit: ${QA_NCCL_MULTI_SHM}
+            - name: nv
+              hostPath:
+                path: ${QA_DRIVER_ROOT}
+            resourceClaims:
+            - name: cd-ch
+              resourceClaimTemplateName: cd-1-ch
+            - name: rdma
+              resourceClaimTemplateName: rdma-nics
+            containers:
+            - name: nccl
+              image: ${QA_IMAGE}
+              securityContext:
+                privileged: true
+              env:
+              - name: LD_LIBRARY_PATH
+                value: /usr/local/nvidia/lib64
+              - name: PATH
+                value: /usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+              command:
+              - bash
+              - -c
+              - |
+                /scripts/container_entry.sh install --install-nccl
+                python3 /scripts/setup_rdma_ips.py 2>/dev/null || true
+                /scripts/container_entry.sh daemon &
+                sleep 5
+
+                export NODE_RANK=$$JOB_COMPLETION_INDEX
+                > /tmp/hostfile
+                for i in $$(seq 0 $$((${QA_NCCL_NODES_1}-1))); do
+                  H=nccl-cd-d1-0-$${i}.nccl-cd
+                  until ssh -p 222 -o StrictHostKeyChecking=no $$H hostname 2>/dev/null; do echo "Waiting $$H"; sleep 5; done
+                  echo "$$H port=222 slots=${QA_GPUS_PER_NODE}" >> /tmp/hostfile
+                done
+                for i in $$(seq 0 $$((${QA_NCCL_NODES_2}-1))); do
+                  H=nccl-cd-d2-0-$${i}.nccl-cd
+                  until ssh -p 222 -o StrictHostKeyChecking=no $$H hostname 2>/dev/null; do echo "Waiting $$H"; sleep 5; done
+                  echo "$$H port=222 slots=${QA_GPUS_PER_NODE}" >> /tmp/hostfile
+                done
+                cat /tmp/hostfile
+
+                if [ "$${NODE_RANK}" -eq "0" ]; then
+                  echo "============================================"
+                  echo "  NCCL Cross-Domain: ${QA_GPU_TYPE}"
+                  echo "  Pool1: ${QA_POOL_1} (${QA_NCCL_NODES_1}), Pool2: ${QA_POOL_2} (${QA_NCCL_NODES_2})"
+                  echo "  Total: ${QA_NCCL_CROSS_NODES} nodes, $$((${QA_NCCL_CROSS_NODES} * ${QA_GPUS_PER_NODE})) GPUs"
+                  echo "  MNNVL=${QA_NCCL_MNNVL} NVLS=${QA_NCCL_NVLS} CUMEM=${QA_NCCL_CUMEM}"
+                  echo "  $$(date -u)"
+                  echo "============================================"
+
+                  MPI="--allow-run-as-root --hostfile /tmp/hostfile \
+                    -x LD_LIBRARY_PATH=/usr/local/gib/lib64:/usr/local/nvidia/lib64 \
+                    ${QA_NCCL_GIB_ENVS} \
+                    -x NCCL_MNNVL_ENABLE=${QA_NCCL_MNNVL} \
+                    -x NCCL_NVLS_ENABLE=${QA_NCCL_NVLS} \
+                    -x NCCL_CUMEM_ENABLE=${QA_NCCL_CUMEM} \
+                    -mca plm_rsh_no_tree_spawn 1 \
+                    --mca orte_keep_fqdn_hostnames 1 \
+                    --mca btl self,tcp \
+                    --mca btl_tcp_if_include eth0 \
+                    --bind-to none \
+                    --mca plm_rsh_agent 'ssh -q -o StrictHostKeyChecking=no -p 222'"
+                  BENCH="${QA_NCCL_MULTI_ARGS}"
+
+                  echo "======== warmup ========"
+                  eval mpirun $$MPI /third_party/nccl-tests/build/all_reduce_perf -b 1M -e 8M -f 2 -g 1 -w 5 -n 5 || true
+                  echo
+
+                  for t in ${QA_NCCL_COLLECTIVES}; do
+                    echo "======== $${t}_perf ========"
+                    eval mpirun $$MPI /third_party/nccl-tests/build/$${t}_perf $$BENCH || true
+                    echo
+                  done
+
+                  echo "=== DONE: $$(date -u) ==="
+                  touch /tmp/qa-done
+                  sleep infinity
+                else
+                  until ! ssh -p 222 -o StrictHostKeyChecking=no nccl-cd-d1-0-0.nccl-cd hostname 2>/dev/null; do sleep 10; done
+                fi
+                exit 0
+              readinessProbe:
+                exec:
+                  command: ["test", "-f", "/tmp/qa-done"]
+                initialDelaySeconds: 60
+                periodSeconds: 10
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: nv
+                mountPath: /usr/local/nvidia
+              resources:
+                requests:
+                  cpu: "${QA_NCCL_MULTI_CPU}"
+                  memory: ${QA_NCCL_MULTI_MEM}
+                limits:
+                  nvidia.com/gpu: ${QA_GPUS_PER_NODE}
+              claims:
+              - name: cd-ch
+              - name: rdma
+  - name: d2
+    template:
+      spec:
+        parallelism: ${QA_NCCL_NODES_2}
+        completions: ${QA_NCCL_NODES_2}
+        template:
+          spec:
+            terminationGracePeriodSeconds: 60
+            activeDeadlineSeconds: ${QA_TIMEOUT_NCCL_MULTI}
+            restartPolicy: Never
+            nodeSelector:
+              ${QA_NODE_SELECTOR_KEY}: ${QA_POOL_2}
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: present
+              effect: NoSchedule
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: ${QA_ARCH}
+              effect: NoSchedule
+            setHostnameAsFQDN: true
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: "Memory"
+                sizeLimit: ${QA_NCCL_MULTI_SHM}
+            - name: nv
+              hostPath:
+                path: ${QA_DRIVER_ROOT}
+            resourceClaims:
+            - name: cd-ch
+              resourceClaimTemplateName: cd-2-ch
+            - name: rdma
+              resourceClaimTemplateName: rdma-nics
+            containers:
+            - name: nccl
+              image: ${QA_IMAGE}
+              securityContext:
+                privileged: true
+              env:
+              - name: LD_LIBRARY_PATH
+                value: /usr/local/nvidia/lib64
+              - name: PATH
+                value: /usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+              command:
+              - bash
+              - -c
+              - |
+                /scripts/container_entry.sh install --install-nccl
+                python3 /scripts/setup_rdma_ips.py 2>/dev/null || true
+                /scripts/container_entry.sh daemon &
+                sleep 5
+                until ! ssh -p 222 -o StrictHostKeyChecking=no nccl-cd-d1-0-0.nccl-cd hostname 2>/dev/null; do sleep 10; done
+                exit 0
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: nv
+                mountPath: /usr/local/nvidia
+              resources:
+                requests:
+                  cpu: "${QA_NCCL_MULTI_CPU}"
+                  memory: ${QA_NCCL_MULTI_MEM}
+                limits:
+                  nvidia.com/gpu: ${QA_GPUS_PER_NODE}
+              claims:
+              - name: cd-ch
+              - name: rdma

@@ -1,0 +1,61 @@
+#!/bin/bash
+# GB200 GKE 质检 Profile — gpu-launchpad-playground (模板)
+# 需要根据实际环境调整
+
+# === GPU 硬件 ===
+export QA_GPU_TYPE=gb200
+export QA_GPUS_PER_NODE=4
+export QA_GPU_IDS="0 1 2 3"
+export QA_NVLINK_TYPE=NV18          # TODO: 确认 GB200 NVLink 代际
+export QA_NVLINK_PAIRS=12
+export QA_NVLINK_TOPO_COLS=5
+export QA_RDMA_NICS=4               # GB200 A4X: 4× CX-7 (非 8)
+export QA_GPU_MEM_MIN_MB=100000
+export QA_GPU_TEMP_WARN=85
+export QA_ARCH=arm64
+
+# === 容器 ===
+export QA_IMAGE="us-docker.pkg.dev/gce-ai-infra/gpudirect-gib/nccl-plugin-gib-diagnostic-arm64:v1.1.2"  # TODO: 确认镜像
+export QA_DRIVER_ROOT="/home/kubernetes/bin/nvidia"
+export QA_PRIVILEGED=true
+
+# === 集群 ===
+export QA_CLUSTER_TYPE=gke
+export QA_NAMESPACE=gpu-qa
+export QA_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
+
+# === GCP ===
+export QA_GCLOUD_CONFIG=default     # TODO: 确认 gcloud config
+export QA_PROJECT=gpu-launchpad-playground
+export QA_ZONE=us-east1-d           # TODO: 确认 zone
+export QA_RESERVATION_LABEL_KEY="cloud.google.com/reservation-subblocks"
+export QA_RESERVATION_PREFIX=""     # TODO: 填入 reservation sub-block 前缀
+export QA_POOL_FALLBACK_PREFIX="gb200-pool"
+
+# === NCCL ===
+export QA_NCCL_ARGS="-b 512M -e 16G -f 2 -g ${QA_GPUS_PER_NODE} -w 20 -n 50"
+export QA_NCCL_COLLECTIVES="all_reduce all_gather reduce_scatter alltoall"
+export QA_NCCL_MSG_SIZE=17179869184
+
+# === cuBLAS ===
+export QA_CUBLAS_BIN="cublasMatmulBench_gb2_3"
+export QA_CUBLAS_URL="https://raw.githubusercontent.com/compute-dev/ai_infra_perf_prepare/main/cublas_bench/cublasMatmulBench_gb2_3"
+export QA_CUBLAS_TESTS='FP4|-P=nvoohso -m=9728 -n=16384 -k=8192 -ta=1 -tb=0 -A=1 -B=0 -T=1000 -W=10000 -p=t -sf_p=u\nFP8|-P=qqssq -m=9728 -n=2048 -k=32768 -ta=1 -tb=0 -A=1 -B=0 -T=1000 -W=10000 -p=t\nFP16|-P=hsh -m=8192 -n=9728 -k=16384 -ta=0 -tb=1 -A=1 -B=0 -T=1000 -W=10000 -p=t\nBF16|-P=tst -m=8192 -n=9728 -k=16384 -ta=0 -tb=1 -A=1 -B=0 -T=1000 -W=10000 -p=t\nTF32|-P=sss_fast_tf32 -m=8192 -n=9728 -k=16384 -ta=0 -tb=1 -A=1 -B=0 -T=1000 -W=10000 -p=t\nFP32|-P=sss -m=8192 -n=9728 -k=16384 -ta=0 -tb=1 -A=1 -B=0 -T=1000 -W=1000 -p=t'
+
+# === 超时 (秒) ===
+export QA_TIMEOUT_HW=180
+export QA_TIMEOUT_NCCL=300
+export QA_TIMEOUT_CUBLAS=600
+
+# === 离群阈值 (%) ===
+export QA_OUTLIER_NCCL_PCT=5
+export QA_OUTLIER_CUBLAS_PCT=3
+
+# === 资源请求 ===
+export QA_HW_CPU="2"
+export QA_HW_MEM="4Gi"
+export QA_NCCL_CPU="48"
+export QA_NCCL_MEM="200Gi"
+export QA_NCCL_SHM="64Gi"
+export QA_CUBLAS_CPU="4"
+export QA_CUBLAS_MEM="16Gi"

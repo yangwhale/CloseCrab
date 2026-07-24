@@ -56,3 +56,4 @@ wechat-reader
 # tilegym-* (7 skills)
 hk-share-award-tax-dipn38
 deck-builder
+nvl72-qa

@@ -1,0 +1,94 @@
+# DCGM Diagnostics DaemonSet 模板
+# dcgmi diag -r ${QA_DCGM_LEVEL} (默认 2)
+# Level 2: PCIe 带宽/replays、GPU 显存完整性、HBM 带宽 (~2.5min)
+# Level 3: + GEMM 正确性、stress、power、nvbandwidth (~10min)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${QA_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: qa-dcgm-diag
+  namespace: ${QA_NAMESPACE}
+spec:
+  selector:
+    matchLabels:
+      app: qa-dcgm-diag
+  template:
+    metadata:
+      labels:
+        app: qa-dcgm-diag
+    spec:
+      nodeSelector:
+        ${QA_NODE_SELECTOR_KEY}: ${QA_POOL}
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: present
+        effect: NoSchedule
+      - key: kubernetes.io/arch
+        operator: Equal
+        value: ${QA_ARCH}
+        effect: NoSchedule
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: nvidia-libs
+        hostPath:
+          path: ${QA_DRIVER_ROOT}
+      containers:
+      - name: dcgm
+        image: ${QA_DCGM_IMAGE}
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$${LD_LIBRARY_PATH:-}
+          export PATH=/usr/local/nvidia/bin:$${PATH}
+
+          echo "============================================"
+          echo "  DCGM Diagnostics: $$(hostname)"
+          echo "  Level: ${QA_DCGM_LEVEL}"
+          echo "  $$(date -u)"
+          echo "============================================"
+
+          nvidia-smi -pm 1 2>&1 || echo "[WARN] persistence mode failed"
+
+          nv-hostengine 2>&1 || true
+          sleep 2
+
+          echo ""
+          echo "=== GPU Info ==="
+          dcgmi discovery -l 2>&1 || echo "[WARN] dcgmi discovery failed"
+
+          echo ""
+          echo "=== Diagnostic Level ${QA_DCGM_LEVEL} ==="
+          dcgmi diag -r ${QA_DCGM_LEVEL} 2>&1
+
+          echo ""
+          echo "=== DONE: $$(hostname) $$(date -u) ==="
+          touch /tmp/qa-done
+          sleep infinity
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: nvidia-libs
+          mountPath: /usr/local/nvidia
+        env:
+        - name: LD_LIBRARY_PATH
+          value: /usr/local/nvidia/lib64
+        - name: PATH
+          value: /usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        readinessProbe:
+          exec:
+            command: ["test", "-f", "/tmp/qa-done"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          limits:
+            nvidia.com/gpu: ${QA_GPUS_PER_NODE}
+          requests:
+            cpu: "${QA_HW_CPU}"
+            memory: ${QA_HW_MEM}
