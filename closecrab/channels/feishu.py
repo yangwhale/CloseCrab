@@ -110,7 +110,8 @@ _MODEL_ALIASES: dict[str, tuple[str, str]] = {
     # alias -> (raw_model_id, 一句话说明)
     "O46": ("claude-opus-4-6", "Opus 4.6, 稳, 1M ctx"),
     "O47": ("claude-opus-4-7", "新一代, 1M ctx (当前默认)"),
-    "O48": ("claude-opus-4-8", "最新最快, 1M ctx"),
+    "O48": ("claude-opus-4-8", "Opus 4.8, 1M ctx"),
+    "O50": ("claude-opus-5", "最新 Opus 5.0, 1M ctx (当前默认)"),
     "S45": ("claude-sonnet-4-5", "中速 Sonnet"),
     "S46": ("claude-sonnet-4-6", "中速 Sonnet, 1M ctx"),
     "H45": ("claude-haiku-4-5", "秒回 Haiku"),
@@ -288,6 +289,7 @@ def _shorten_model_name(raw: str) -> str:
         "claude-opus-4-6": "Opus 4.6",
         "claude-opus-4-7": "Opus 4.7",
         "claude-opus-4-8": "Opus 4.8",
+        "claude-opus-5": "Opus 5.0",
         "claude-sonnet-4-6": "Sonnet 4.6",
         "claude-sonnet-4-5": "Sonnet 4.5",
         "claude-haiku-4-5": "Haiku 4.5",

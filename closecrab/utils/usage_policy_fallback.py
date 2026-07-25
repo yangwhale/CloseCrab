@@ -108,6 +108,8 @@ async def _get_client():
 def _short_model_name(model_id: str) -> str:
     """``claude-opus-4-6@default`` → ``Opus 4.6``. Unknown → raw id or '?'."""
     base = (model_id or "").split("@")[0].replace("[1m]", "")
+    if base == "claude-opus-5":
+        return "Opus 5.0"
     for prefix, label in (
         ("claude-opus-", "Opus "),
         ("claude-sonnet-", "Sonnet "),
