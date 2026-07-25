@@ -49,6 +49,22 @@ export GKE_RELEASE_CHANNEL="rapid"
 export GKE_NODE_VERSION="${GKE_NODE_VERSION:-1.36.0-gke.4447000}"
 
 ###############################################################################
+# node version → COS 镜像 的实测映射（2026-07-25 从 regional instance template 读出）
+#
+#   1.36.0-gke.4447000 → gke-1360-gke4447000-cos-gb300-bm-129-19506-224-49-c-nvda
+#                        COS 19506.224.49, nvidia.ko build Jun 18  ← 好
+#   1.36.0-gke.4681000 → gke-1360-gke4681000-cos-gb300-bm-129-19506-224-80-c-nvda
+#                        COS 19506.224.80, nvidia.ko build Jun 27  ← 坏（CUDA ctx 创建全挂）
+#
+# 注意 GKE 的 instance template 是 **regional**（--region=us-central1），
+# 用 `gcloud compute instance-templates describe` 不加 --region 会报 not found。
+#
+# 建完 pool 后脚本会核对 MIG 实际引用的镜像里是否含下面这个串，不符则大声告警 ——
+# 因为 --node-version 只是"请求"，真正决定节点装什么的是 MIG instance template。
+###############################################################################
+export GKE_EXPECTED_COS="${GKE_EXPECTED_COS:-19506-224-49}"
+
+###############################################################################
 # 网络（直接复用 gb300-gke-test 已建好的 VPC + 子网 + Cloud NAT）
 # RDMA 由 --accelerator-network-profile=auto 自动创建
 ###############################################################################

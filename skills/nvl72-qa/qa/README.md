@@ -58,28 +58,30 @@ bash qa/run-checks.sh qa/profiles/gb200-gke-taiji.sh all-full 0014
 ```bash
 # 等 Cloud Logging 摄取（~2 分钟），然后从 manifest 批量收集
 bash qa/collect-logs-cloud.sh qa/profiles/gb200-gke-taiji.sh \
-  --manifest logs/qa-manifest-gb200-0014-*.txt
+  --manifest qa/logs/qa-manifest-gb200-0014-*.txt
 ```
 
 ### 5. 生成报告
 
 ```bash
 bash qa/gen-report.sh qa/profiles/gb200-gke-taiji.sh \
-  logs/qa-manifest-gb200-0014-*.txt
+  qa/logs/qa-manifest-gb200-0014-*.txt
 ```
 
-报告输出到 `docs/qa-report-gb200-YYYYMMDD.md`。
+每次生成独立报告到 `qa/docs/<gpu>-<sub>-<YYYYMMDD-HHMMSS>.md`，自动更新 `qa/docs/index.md` 索引。
+
+报告包含：结论、测试覆盖（含未执行/未完成检测）、行动建议、详细结果、nvidia-bug-report 关键发现。
 
 ### 6. 故障处理
 
 ```bash
 # 列出故障节点（dry-run，不执行 cordon）
 bash qa/cordon-faulty.sh qa/profiles/gb200-gke-taiji.sh \
-  logs/qa-hw-check-gb200-0014-*/ --dry-run
+  qa/logs/qa-hw-check-gb200-0014-*/ --dry-run
 
 # 确认后实际 cordon
 bash qa/cordon-faulty.sh qa/profiles/gb200-gke-taiji.sh \
-  logs/qa-hw-check-gb200-0014-*/ --cordon
+  qa/logs/qa-hw-check-gb200-0014-*/ --cordon
 ```
 
 ## 文件结构
@@ -92,6 +94,14 @@ qa/
 ├── analyze-logs.sh                 # 日志分析（逐节点结果 + 离群检测）
 ├── gen-report.sh                   # 报告自动生成
 ├── cordon-faulty.sh                # 故障节点 cordon + physicalHost
+├── logs/                           # 质检日志输出（.gitignore）
+│   ├── qa-manifest-*.txt           # 测试 manifest
+│   ├── qa-hw-check-<gpu>-<sub>-*/  # hw-check 日志
+│   ├── qa-bug-reports-<gpu>-<sub>-*/ # nvidia-bug-report.log.gz
+│   └── ...                         # nccl/cublas/dcgm 日志
+├── docs/
+│   ├── index.md                    # 质检报告索引（自动更新）
+│   └── <gpu>-<sub>-<ts>.md         # per-run 独立报告
 ├── profiles/
 │   ├── profile-template.sh         # 新环境 profile 模板（复制后填写）
 │   ├── gb300-gke-taiji.sh          # GB300 GKE 生产 profile
@@ -234,9 +244,9 @@ Profile 中 `QA_PREFLIGHT_STAGGER_S` 控制启动间隔（默认 2 秒 × subblo
 
 ```bash
 # 自动检测类型
-bash qa/analyze-logs.sh logs/qa-hw-check-gb200-0014-*/
-bash qa/analyze-logs.sh logs/qa-nccl-single-gb200-0014-*/
-bash qa/analyze-logs.sh logs/qa-cublas-bench-gb200-0014-*/
+bash qa/analyze-logs.sh qa/logs/qa-hw-check-gb200-0014-*/
+bash qa/analyze-logs.sh qa/logs/qa-nccl-single-gb200-0014-*/
+bash qa/analyze-logs.sh qa/logs/qa-cublas-bench-gb200-0014-*/
 ```
 
 输出逐节点 PASS/FAIL 表 + 关键指标统计（busBW / TFLOPS）+ 离群检测。

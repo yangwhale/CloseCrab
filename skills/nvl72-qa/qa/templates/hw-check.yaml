@@ -254,22 +254,27 @@ data:
     ok "Driver loaded"
 
     # 9. GPU 时钟降频检测
+    # 只有以下场景才 WARN：
+    #   (a) hw_slowdown / thermal / power_brake 任一 Active → 硬件已在压制 clock
+    #   (b) GPU 有负载 (util>20%) 且 clock<90% max → 有 workload 却跑不满
+    # idle 状态 GPU 主动 downclock 到最低档 (~120 MHz) 是正常 power-saving，静默
     echo ""; echo "--- 9. GPU Clock Throttling ---"
-    echo "  \$ nvidia-smi --query-gpu=index,clocks.current.sm,clocks.max.sm,clocks_event_reasons.hw_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_power_brake_slowdown --format=csv,noheader"
-    nvidia-smi --query-gpu=index,clocks.current.sm,clocks.max.sm,clocks_event_reasons.hw_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_power_brake_slowdown \
-      --format=csv,noheader 2>/dev/null | while IFS=',' read -r idx cur_sm max_sm hw_slow thermal_slow power_slow; do
+    echo "  \$ nvidia-smi --query-gpu=index,utilization.gpu,clocks.current.sm,clocks.max.sm,clocks_event_reasons.hw_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_power_brake_slowdown --format=csv,noheader"
+    nvidia-smi --query-gpu=index,utilization.gpu,clocks.current.sm,clocks.max.sm,clocks_event_reasons.hw_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_power_brake_slowdown \
+      --format=csv,noheader 2>/dev/null | while IFS=',' read -r idx util cur_sm max_sm hw_slow thermal_slow power_slow; do
+      util=$(echo "$util" | tr -d ' ' | grep -oE '[0-9]+')
       cur_sm=$(echo "$cur_sm" | tr -d ' ' | grep -oE '[0-9]+')
       max_sm=$(echo "$max_sm" | tr -d ' ' | grep -oE '[0-9]+')
       hw_slow=$(echo "$hw_slow" | tr -d ' ')
       thermal_slow=$(echo "$thermal_slow" | tr -d ' ')
       power_slow=$(echo "$power_slow" | tr -d ' ')
-      echo "  GPU$idx: SM ${cur_sm}/${max_sm} MHz"
+      echo "  GPU$idx: SM ${cur_sm}/${max_sm} MHz, util ${util:-?}%"
       [ "$hw_slow" = "Active" ] && warn "GPU$idx HW slowdown active"
       [ "$thermal_slow" = "Active" ] && warn "GPU$idx thermal throttling active"
       [ "$power_slow" = "Active" ] && warn "GPU$idx power brake active"
-      if [ -n "$cur_sm" ] && [ -n "$max_sm" ] && [ "$max_sm" -gt 0 ]; then
+      if [ -n "$cur_sm" ] && [ -n "$max_sm" ] && [ "$max_sm" -gt 0 ] && [ -n "$util" ] && [ "$util" -gt 20 ]; then
         RATIO=$(( cur_sm * 100 / max_sm ))
-        [ "$RATIO" -lt 90 ] && warn "GPU$idx clock throttled to ${RATIO}% (${cur_sm}/${max_sm} MHz)"
+        [ "$RATIO" -lt 90 ] && warn "GPU$idx clock throttled to ${RATIO}% (${cur_sm}/${max_sm} MHz) under ${util}% load"
       fi
     done
     ok "GPU clock check done"
@@ -384,7 +389,7 @@ data:
       echo "  \$ zcat \$OUT_HOST | grep 'kernel: NVRM:.*Xid' | sort -u"
       XID_EVENTS=$(zcat "$OUT_HOST" | grep "kernel: NVRM:.*Xid" | sed 's/.*kernel: NVRM: //' | sort -u)
       if [ -n "$XID_EVENTS" ]; then
-        fail "kernel NVRM Xid events found (Xid 143 = FSP boot fail, Xid 79 = GPU fell off bus, etc.):"
+        warn "kernel NVRM Xid events in bug-report (可能是 reset 前的历史记录，需结合时间戳判断):"
         echo "$XID_EVENTS" | sed 's/^/    /'
       else
         ok "no NVRM Xid events in kernel log"
@@ -431,22 +436,37 @@ data:
 
       # 14f. DRAM ECC correctable high count (memory chip physical defect indicator)
       echo ""
-      echo "  \$ zcat \$OUT_HOST | awk (max DRAM Correctable per-GPU, warn >1000)"
-      HIGH_ECC=$(zcat "$OUT_HOST" | awk '
-        /^GPU 0[0-9a-f]{7}:/ { gpu=$2 }
+      # ⚠️ 必须区分 Volatile 与 Aggregate：
+      #   Volatile  = 本次开机以来（可操作信号，新增错误才值得告警）
+      #   Aggregate = 该物理 GPU 出厂至今累计（服役过的卡天然非零，拿它告警会系统性误报）
+      # 2026-07-25 pool-0013 pqcm 实测：Aggregate=2586 触发告警，但 Volatile 全 0、
+      # row remap 无 pending/failure/uncorrectable —— 纯历史计数，不该报 WARN。
+      echo "  \$ zcat \$OUT_HOST | awk (Volatile vs Aggregate DRAM Correctable per-GPU; warn 仅看 Volatile >1000)"
+      ECC_OUT=$(zcat "$OUT_HOST" | awk '
+        /^GPU 0[0-9a-f]{7}:/       { gpu=$2; sect="" }
+        /^[[:space:]]*Volatile[[:space:]]*$/  { sect="V" }
+        /^[[:space:]]*Aggregate[[:space:]]*$/ { sect="A" }
         /DRAM Correctable[[:space:]]*:/ && !/DRAM Uncorrectable/ {
           n=$NF+0
-          if(n > max[gpu]) max[gpu]=n
+          if(sect=="V"){ if(n > vol[gpu]) vol[gpu]=n; seenv[gpu]=1 }
+          else if(sect=="A"){ if(n > agg[gpu]) agg[gpu]=n; seena[gpu]=1 }
         }
         END {
-          for(g in max) if(max[g] > 1000) print g": DRAM Correctable="max[g]
+          for(g in vol) if(vol[g] > 1000) print "WARN "g": volatile DRAM Correctable="vol[g]
+          for(g in agg) if(agg[g] > 0)    print "INFO "g": aggregate DRAM Correctable="agg[g]" (lifetime)"
         }
       ')
-      if [ -n "$HIGH_ECC" ]; then
-        warn "high DRAM correctable ECC count (>1000, GPU memory chip may have physical defect):"
-        echo "$HIGH_ECC" | sed 's/^/    /'
+      ECC_WARN=$(echo "$ECC_OUT" | grep '^WARN ' | sed 's/^WARN //' || true)
+      ECC_INFO=$(echo "$ECC_OUT" | grep '^INFO ' | sed 's/^INFO //' || true)
+      if [ -n "$ECC_WARN" ]; then
+        warn "high VOLATILE DRAM correctable ECC (>1000 since boot — 新增错误，需关注):"
+        echo "$ECC_WARN" | sed 's/^/    /'
       else
-        ok "DRAM ECC correctable within normal (<=1000)"
+        ok "volatile DRAM ECC correctable within normal (<=1000 since boot)"
+      fi
+      if [ -n "$ECC_INFO" ]; then
+        echo "  [INFO] aggregate (lifetime) DRAM correctable — 历史累计，仅供参考，不作判定:"
+        echo "$ECC_INFO" | sed 's/^/    /'
       fi
     else
       warn "bug-report analysis skipped (no bug-report gz available)"

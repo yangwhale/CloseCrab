@@ -22,7 +22,8 @@ CLUSTER="${QA_GKE_CLUSTER:-gb300-gke-test}"
 PROJECT="${QA_PROJECT:-tencent-gcp-taiji-poc}"
 GCONF="${QA_GCLOUD_CONFIG:-taiji-poc}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOGS_BASE="${SCRIPT_DIR}/../logs"
+LOGS_BASE="${SCRIPT_DIR}/logs"
+mkdir -p "$LOGS_BASE"
 
 log() { echo "=== [$(date +%H:%M:%S)] $* ==="; }
 
@@ -30,7 +31,11 @@ log() { echo "=== [$(date +%H:%M:%S)] $* ==="; }
 # 单项收集
 ###############################################################################
 collect_one() {
-  local NAMESPACE=$1 LABEL=$2 MARKER=${3:-} OUTDIR=${4:-} SINCE=${5:-}
+  # UNTIL（时间上界）非常重要：多节点 NCCL 的 JobSet pod 容器名同样是 `nccl`、
+  # 且与单机 NCCL 共用 namespace。只按 SINCE 过滤会把之后跑的多机日志一并卷入，
+  # 按节点名写同一文件互相覆盖（2026-07-25 pool-0013 实测：应 18 个 pod，实际匹配 54 个，
+  # 单机目录里出现 busbw=366/917 的多机数据）。
+  local NAMESPACE=$1 LABEL=$2 MARKER=${3:-} OUTDIR=${4:-} SINCE=${5:-} UNTIL=${6:-}
 
   # container_name 映射
   local CONTAINER=""
@@ -49,12 +54,13 @@ collect_one() {
   fi
   mkdir -p "$OUTDIR"
 
-  log "Cloud Logging: ns=${NAMESPACE} label=${LABEL} container=${CONTAINER}${SINCE:+ since=${SINCE}}"
+  log "Cloud Logging: ns=${NAMESPACE} label=${LABEL} container=${CONTAINER}${SINCE:+ since=${SINCE}}${UNTIL:+ until=${UNTIL}}"
 
   # 构建过滤器
   local FILTER="resource.type=\"k8s_container\" AND resource.labels.cluster_name=\"${CLUSTER}\" AND resource.labels.namespace_name=\"${NAMESPACE}\""
   [ -n "$CONTAINER" ] && FILTER="${FILTER} AND resource.labels.container_name=\"${CONTAINER}\""
   [ -n "$SINCE" ] && FILTER="${FILTER} AND timestamp>=\"${SINCE}\""
+  [ -n "$UNTIL" ] && FILTER="${FILTER} AND timestamp<=\"${UNTIL}\""
 
   # 获取 pod → node 映射
   local POD_NODE_MAP=$(gcloud --configuration="$GCONF" logging read \
@@ -136,15 +142,25 @@ if [ "${2:-}" = "--manifest" ]; then
   MANIFEST="${3:-}"
   [ -z "$MANIFEST" ] || [ ! -f "$MANIFEST" ] && echo "ERROR: manifest 文件不存在: ${MANIFEST}" && exit 1
 
-  TOTAL=$(wc -l < "$MANIFEST")
+  # 先整体读入，才能用「下一项的开始时间」当本项的时间上界，
+  # 避免后续测试（尤其是同 container 名的多节点 NCCL）的日志污染本项。
+  mapfile -t M_LINES < "$MANIFEST"
+  TOTAL=${#M_LINES[@]}
   log "批量收集 (${TOTAL} 项) from ${MANIFEST}"
   FAIL=0
-  while IFS='|' read -r M_NS M_LABEL M_MARKER M_SUB M_TS; do
+  for _i in "${!M_LINES[@]}"; do
+    IFS='|' read -r M_NS M_LABEL M_MARKER M_SUB M_TS _rest <<< "${M_LINES[$_i]}"
+    [ -z "${M_NS:-}" ] && continue
+    # 下一项的时间戳作为本项上界；最后一项无上界
+    M_UNTIL=""
+    if [ $((_i + 1)) -lt "$TOTAL" ]; then
+      IFS='|' read -r _ _ _ _ M_UNTIL _ <<< "${M_LINES[$((_i + 1))]}"
+    fi
     OUTDIR="${LOGS_BASE}/qa-${M_LABEL#qa-}-${QA_GPU_TYPE:-gb300}-${M_SUB}-$(date +%Y%m%d-%H%M%S)"
-    if ! collect_one "$M_NS" "$M_LABEL" "$M_MARKER" "$OUTDIR" "$M_TS"; then
+    if ! collect_one "$M_NS" "$M_LABEL" "$M_MARKER" "$OUTDIR" "$M_TS" "$M_UNTIL"; then
       ((FAIL++))
     fi
-  done < "$MANIFEST"
+  done
 
   if [ "$FAIL" -gt 0 ]; then
     log "WARNING: ${FAIL}/${TOTAL} 项不完整"

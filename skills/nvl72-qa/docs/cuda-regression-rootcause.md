@@ -1,29 +1,25 @@
-# CUDA regression 根因分析（pool-0013~0017 无法跑 CUDA workload）
+# CUDA regression 根因分析（GKE node image 4681000 nvidia.ko）
 
-**诊断时间**：2026-07-24（张量企鹅调研）
 **结论层次**：`libcuda ↔ NVIDIA kernel driver` 的 context-create ioctl，driver silent refuse
+**单变量已隔离**：唯一差异是 `nvidia.ko` 二进制本身（Jun 27 build vs Jun 18 build），其他所有维度已验证一致
+**修复策略**：绕开（pin node version 到 `1.36.0-gke.4447000`）+ 冻结 auto-upgrade（cluster 维护例外 `freeze-node-upgrades-ko-regression` 至 2026-10-23）
+**别再重排查**：见文末 §"已排除的退路"
 
 ---
 
 ## 现象
 
-pool-0013~0017 上任何需要创建 GPU CUDA context 的 workload 都会挂：
-- DCGM Level 2（`cudaStreamCreate` fail）
-- NCCL-tests（`cudaSetDevice` 报 `CUDA-capable device(s) is/are busy or unavailable`）
-- cuBLAS benchmark（同上，pod 直接 CrashLoopBackOff）
-- 训练脚本（Megatron / DeepSeek 等）
+GKE node image `1.36.0-gke.4681000`（COS `19506.224.80`）上的 nvidia.ko（build `Sat Jun 27`）导致 GB300 上**所有 GPU context 创建失败**：
+- `cuDevicePrimaryCtxRetain` / `cuCtxCreate_v2` → `CUDA_ERROR_INVALID_VALUE (1)`
+- `cuInit` / `cuDeviceGetCount` / `cuDeviceGetUuid` / `nvidia-smi` 全部正常（表面看节点是健康的）
+- DCGM Level 2 / NCCL-tests / cuBLAS / 训练脚本 全部挂
+- dmesg 无任何新 NVRM message（driver silent refuse）
 
-但**读 sysfs / 不真正建 context 的操作是 OK 的**：
-- `hw-check` 全部通过（nvidia-smi -q, /sys/class/infiniband/*, /proc/driver/nvidia/*）
-- `asapd-lite`（RDMA config daemon）Running
-- `dra.net`（12 devices 全部识别）
-- `nvidia-fabricmanager`（Fabric State=Completed, Status=Success）
+已知**正常**：`1.36.0-gke.4447000`（COS `19506.224.49`，nvidia.ko build `Thu Jun 18`）
 
 ## 层次隔离验证（Python ctypes 直调 libcuda）
 
 用 `probe/cuprobe.py` + `probe/cuprobe2.py`，起 privileged probe pod（`probe/probe-newold.yaml`），两台节点同 image、同 pod spec、`nvidia.com/gpu: 4`：
-- `probe-new`: pool-0013 节点，kubelet 4681000, kernel Jun 27
-- `probe-old`: pool-0002 节点，kubelet 4447000, kernel Jun 18
 
 | CUDA API | probe-new (broken) | probe-old (工作) |
 |---|---|---|
@@ -31,75 +27,83 @@ pool-0013~0017 上任何需要创建 GPU CUDA context 的 workload 都会挂：
 | `cuDeviceGetCount()` = 4 | 0 ✓ | 0 ✓ |
 | `cuDeviceGet(dev, 0)` | 0 ✓ | 0 ✓ |
 | `cuDeviceGetName` (返 "NVIDIA GB300") | 0 ✓ | 0 ✓ |
-| `cuDeviceGetAttribute` × 9 项（COMPUTE_CAPABILITY=10.3 等） | 0 ✓ 完全一致 | 0 ✓ |
+| `cuDeviceGetAttribute` × 9 项 | 0 ✓ 完全一致 | 0 ✓ |
 | `cuDevicePrimaryCtxGetState` (flags=0, active=0) | 0 ✓ | 0 ✓ |
 | `cuDevicePrimaryCtxSetFlags(0)` | 0 ✓ | 0 ✓ |
-| **`cuDevicePrimaryCtxRetain`** | **1 (INVALID_VALUE)** | 0 ✓ ctx=0xb675... |
+| **`cuDevicePrimaryCtxRetain`** | **1 (INVALID_VALUE)** | 0 ✓ |
 | **`cuCtxCreate_v2(flags=0)`** | **1 (INVALID_VALUE)** | 0 ✓ |
 
-**关键**：`cuCtxCreate_v2` 老 API 也挂 → 不是 primary ctx 特有的问题，**所有 GPU context 创建都在 driver 层被 refuse**。dmesg 中没有任何新 NVRM message（driver silent refuse，不打 log）。
+`cuCtxCreate_v2` 老 API 也挂 → 不是 primary ctx 特有，**所有 GPU context 创建都在 driver 层被 refuse**。
 
-## 已排除的其他候选（跑过 runtime 干预验证）
+## 单变量隔离（2026-07-25 完成，别重做）
 
-在 probe-new 上 cordon 后逐项试：
+跨 pool-0013/pool-0015/pool-0016（坏）与 pool-0005/pool-0007（好，当时还没释放）对照，全部一致、可排除的项：
 
-| 候选 | 干预方法 | 结果 |
-|---|---|---|
-| Persistence Mode Enabled | `nvidia-smi -pm 0` 全 4 GPU Disabled | 仍 `-> 1` ✗ |
-| nvidia-persistenced daemon | `systemctl stop nvidia-persistenced` | 仍 `-> 1` ✗ |
-| GPU busy / stale context | 检查 `nvidia-smi --query-gpu=memory.used` = 0 MiB | 排除，GPU 完全空闲 |
-| hugepages 缺失 | `kubectl get node -o jsonpath='{.status.capacity.hugepages-2Mi}'` = 8Gi | 排除，已修 |
-| Fabric State 未 Ready | `nvidia-smi -q` 显示 State=Completed, Status=Success | 排除 |
-| ipam.service 挂 | 看着 activating 但每 20s finish successfully，是 timer 正常行为 | 排除 |
-| ipvlan / dra.net 缺 device | pool-0013 12 devices（跟 pool-0002 一样） | 排除 |
+- node capacity/allocatable（含 hugepages-2Mi = 8Gi）
+- 全部 DaemonSet
+- DRA ResourceSlice
+- 容器内 `/dev/nvidia*` 与 2048 个 IMEX channel
+- 实际加载的 libcuda 路径
+- **libcuda.so.580.159.04 md5 完全相同**
+- **gsp_ga10x.bin md5 完全相同**
+- 全部 `NVreg_*` 模块参数
+- `lsmod` 已加载模块集合
+- GPU fabric / ECC / compute mode
 
-## 唯一软件层无法 runtime 修改的差异
+**唯一差异**：`nvidia.ko` 二进制本身
+- 好：`580.159.04 Release Build builder@1bd82b8cbd9c Thu Jun 18 02:49`，md5 `9442ea759c7c9a6e1c3d00fd816b3d86`
+- 坏：`580.159.04 Release Build builder@e041cd032e3a Sat Jun 27 15:18`，md5 `66ae3d557214ecef9b5ad4b50a1480cb`
 
-| 维度 | pool-0002-1zt9 (OLD, 工作) | pool-0013-0199 (NEW, 挂) |
-|---|---|---|
-| GKE kubelet | v1.36.0-gke.**4447000** | v1.36.0-gke.**4681000** |
-| COS build | 19506.**224.49** | 19506.**224.80** |
-| kernel SMP build | Thu Jun 18 02:30:11 UTC 2026 | **Sat Jun 27 14:51:37 UTC 2026** |
-| nvidia.ko build | `builder@1bd82b8cbd9c Jun 18 02:49` | **`builder@e041cd032e3a Jun 27 15:18`** |
-| nvidia driver ver | 580.159.04 | 580.159.04（同版本号，不同 build environment） |
+同版本号（580.159.04），不同 build environment。
 
-nvidia 的 open kernel module 会跟当前 kernel 一起在 GKE image 打包时重新编译，所以 kernel 换了 driver 二进制也换。**Jun 27 那次 build 引入了 GPU context-create 的 regression**。
+### strace 观察
 
-## 前面的错误归因（历史包袱，读 ops log 时会看到）
+- 两边**没有任何 ioctl 返回 -1**（driver 层不返回 syscall error）
+- 失败在 NVIDIA RM control 返回结构体内部的 `status` 字段
+- ioctl 计数：bad 401 / good 1050 —— 坏节点在 context 创建流程中途被 driver abort
 
-- **error 1**：一开始以为是"5 subblock 并行 all-full 撞 GPU"—— 后来顺序跑发现 DCGM/NCCL wrapper "pass" 但 detail log 全 CUDA busy，wrapper 假 pass
-- **error 2**：怀疑 "kernel .ko Jun 27 build regression" —— 后来查到 hugepages 缺失（linuxNodeConfig=null）能解释 asapd/DRA/nccl-multi 层，被归为 red herring
-- **error 3**：重建 pool-0013 hugepages 修好后又发现 cuBLAS 仍全 CrashLoop，重新回到 "kernel .ko regression"
+### 容易误判的陷阱（都已排除）
 
-**真相是两层根因叠加**：
-1. **hugepages 缺失**（原始 create 漏了 `--system-config-from-file`，已用固化脚本 `scripts/gke-create-nodepool.sh` 修）→ 影响 asapd-lite / DRA / gpu*ipvlan / nccl-multi
-2. **kernel .ko Jun 27 regression**（GKE 4681000 image / NVIDIA 580.159.04 open kernel module 特定 build）→ 影响所有 GPU context 创建 → DCGM Level 2 / NCCL-tests / cuBLAS / 训练
+1. **`NVRM: _gpuFabricProbeRbmSleepLinks: Error setting links to sleep on linkmask 0x0`** —— 好坏节点都有，是无害噪声，**不是根因**
+2. **`nvidia-imex` 运行状态** —— 好节点上常跑着 imex（因为有 ComputeDomain），坏节点没有，但 2×2 对照（pool-0005/0007 imex=0 仍 OK，pool-0015/0016 imex=0 FAIL）已证明 **IMEX/ComputeDomain 与此无关**
 
-hugepages 已修，剩下的第 2 层只能换 image 版本或等 NVIDIA/GKE 出 fix。
+## 已排除的退路（2026-07-25 实测，别再试）
 
-## 老 pool 为什么能用（不要被误导）
+1. **`gpu-driver-version=default` 而不是 `latest`** —— 无效。坏节点上 `/home/kubernetes/bin/nvidia/gpu_driver_versions.bin`（protobuf）明确写着 `NVIDIA_GB300: LATEST=580.159.04, DEFAULT=580.159.04`，两者同一个 broken build，节点上也只预置了这一个驱动包。改完滚一遍白滚。
+2. **在坏节点上 rmmod + modprobe nvidia** —— 无效，同一个 broken .ko 重载。且 rmmod 需要先赶走所有 GPU workload（device-plugin / DRA / asapd-lite / dcgm-exporter），破坏性大。
+3. **停 nvidia-persistenced / 关 Persistence Mode** —— 无效，独立 daemon，跟 primary ctx 无关。
+4. **手工替换 nvidia.ko（从好节点拷）** —— 未验证，理论上 vermagic 会 mismatch（kernel SMP build 时间也不同）。且 rmmod 前置条件同 #2。
+5. **cluster 切 REGULAR channel + pin 4447000** —— 之前 handoff 里写过这条路，其实**不需要**。GKE 判据是 `validNodeVersions`，不是 channel 的 `validVersions`。4447000 虽不在 RAPID validVersions 但在 validNodeVersions 里，GKE 接受。已在 2026-07-25 用 0 节点测试 pool 实测。
 
-`gcloud container node-pools list` 显示 pool-0002 的 `NODE_VERSION` 是 `4681000`（跟随 auto-upgrade），**但实际节点上跑的 kubelet 是 `4447000`**（老 image）—— 因为 pool 没被 rolling recreate 过，节点保留了初次 create 时的 image。
+## 修复策略（当前采用）
 
-判断某个 node 有没有这个 regression：
+1. **建 pool 时 pin `--node-version=1.36.0-gke.4447000`**（脚本已 hardcode 默认值到 `GKE_NODE_VERSION`）
+2. **建 pool 时加 `--no-enable-autoupgrade`**（若 GKE 拒绝会 fallback，`scripts/gke-create-nodepool.sh` 的 `do_create_pool` 函数已实现）
+3. **cluster 加维护例外 `freeze-node-upgrades-ko-regression`**
+   - `scope=NO_MINOR_OR_NODE_UPGRADES`
+   - `2026-07-25 → 2026-10-23`
+   - 挡 auto-upgrade 但**不改 pool 配置版本**
+   - 到期前需要重新评估
+4. **建 pool 后必须 `--verify-only` 核对 MIG 实际 COS 镜像**
+   - `--node-version` 只是"请求"，真正决定节点装什么的是 MIG 的 regional instance template
+   - 2026-07-19 GKE 曾给每个 pool 生成新 template 指向坏 COS，一半 MIG 被切过去 —— 必须核对
+
+真正挡不住 broken 节点重新出现的路径：**主机故障 → 实例 TERMINATE/DELETE → MIG 为维持 target size 补建 → 用当前 template**。这就是老 pool（pool-0002 的 `lcg3`、pool-0006 的 `33qv`）变坏的原因（它们是硬件故障节点，MIG 补建用了坏 template）。
+
+想根治只有：等 NVIDIA/GKE 出新 image（nvidia.ko build 修复），或者把老 pool 的 MIG template 手工指回好 image 后重建全部节点。
+
+## 你要不要自己复现
+
+**不要重复排查**。根因已定案，单变量隔离已完成。
+
+如果要 verify 现状（比如新 pool 建完想确认是好节点）：
 ```bash
-kubectl get node <NAME> -o jsonpath='{.status.nodeInfo.kubeletVersion}{"\n"}'
-# 4447000 = 老 image，CUDA 可用
-# 4681000 = 新 image，CUDA broken
-```
-
-## 你要不要自己复现？
-
-不需要。如果要 verify：
-```bash
-# 在 handoff 包目录里
+# 在 handoff 包目录里，改 probe-newold.yaml 里 probe-new 的 nodeName 到目标节点
 kubectl apply -f probe/probe-newold.yaml
-# 等 pod Ready 后
-kubectl cp probe/cuprobe.py cuda-probe/probe-new:/tmp/cuprobe.py
 kubectl -n cuda-probe exec probe-new -- python3 /tmp/cuprobe.py | grep cuDevicePrimaryCtxRetain
-# 期望看到全部 4 GPU return 1 (INVALID_VALUE)
-kubectl -n cuda-probe exec probe-old -- python3 /tmp/cuprobe.py | grep cuDevicePrimaryCtxRetain
-# 期望看到全部 4 GPU return 0
-# 清理
+# 期望：全部 4 GPU return 0（cuDevicePrimaryCtxRetain -> 0）
+# 如果 return 1，说明节点跑的还是坏 image
 kubectl delete ns cuda-probe --wait=false
 ```
+
+或者更简单，查节点 kubelet 版本 = 4447000 = 好，= 4681000 = 坏。

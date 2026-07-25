@@ -4,7 +4,7 @@
 - [gb300-deploy-key-findings](gb300_deploy_key_findings.md) — GB300 部署关键发现：mgmt 双栈子网、kubeadm IPv4 优先、Calico readiness patch、TLinux 首次 reset、metadata 不可达
 - [logs-directory-convention](logs_directory_convention.md) — 日志文件放 logs/ 目录，不放 docs/
 
-- [gb300-cluster-state](gb300_cluster_state.md) — 集群当前状态：节点分布、k8s 组件、已知问题、cordon 节点
+- [gb300-cluster-state](gb300_cluster_state.md) — 集群状态（2026-07-25 释放 7 sub-block 后仅剩 pool-0002/0006/0009）：节点分布、4 台故障节点、坏 COS 分布
 - [gb300-nccl-benchmark-status](gb300_nccl_benchmark_status.md) — ~~旧~~ NCCL/cuBLAS 测试进展（质检已迁移到 qa/，见 qa-toolkit-design）
 - [gke-kubectl-auth](gke_kubectl_auth.md) — GKE kubectl 认证：需手动设 public endpoint + ADC credential + 清 cache
 - [gke-fault-node-physicalhost](gke_fault_node_physicalhost.md) — 故障节点必须记录 physicalHost（/block/subblock/host），重建 pool 后追踪同一物理机
@@ -16,7 +16,8 @@
 - [feedback-verify-before-delete](feedback_verify_before_delete.md) — 删除 ns/pod/DS 前必须先确认日志已完整收集
 
 - [gke-imex-channel-init](gke_imex_channel_init.md) — GKE COS 上 IMEX channel 设备需手动 mknod 创建，否则 MNNVL 不工作
-- [reservation-health-query](reservation_health_query.md) — Reservation degrade / GCE 创建失败 / 质检故障的查询方法和数据来源
+- [reservation-health-query](reservation_health_query.md) — Reservation degrade 查询方法；block-0001 实为 17 sub-block；释放后 1-2h degrade 是清理窗口要忽略；d0014 长期真降级导致 pool 建不起来
+- [fake-running-zombie-workload](fake_running_zombie_workload.md) — pod 的 1/1 Running 不能判定「有负载」，需交叉验证进程表 + GPU 利用率 + 日志时间戳
 
 - [forrest-gke-jumpserver](forrest_gke_jumpserver.md) — GB300 GKE 跳板机（gx alias `gj`），gb300 通 gb200 不通、SA path、用法
 - [gcloud-adc-credential-not-sa-key](gcloud_adc_credential_not_sa_key.md) — keys/gb300-sa.json 是 ADC authorized-user 不是 SA key，用 CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE env
@@ -27,3 +28,4 @@
 - [megatron-iter-log-at-rank-last](megatron_iter_log_at_rank_last.md) — Megatron print_rank_last 默认：多机 iter timing log 在 pod-<N-1>，不是 pod-0
 - [log-pull-before-delete-gate](log_pull_before_delete_gate.md) — benchmark cleanup 前必须做 log 拉齐 gate（每 pod + rank-last iter 完整），失败 abort delete
 - [feedback-no-unverified-attribution](feedback_no_unverified_attribution.md) — 报告禁止未验证性能归因（vboost / 锁频等），差距只列事实数值
+- [gke-4681000-nvidia-ko-regression](gke_4681000_nvidia_ko_regression.md) — node image 4681000 的 nvidia.ko 让 GB300 上所有 CUDA context 创建失败；已单变量隔离，环境侧无需改

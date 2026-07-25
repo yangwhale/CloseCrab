@@ -86,12 +86,21 @@ export QA_CLOUD_LOG_FLUSH_DELAY=${QA_CLOUD_LOG_FLUSH_DELAY:-60}  # cloud-logging
 # === 超时 (秒) ===
 export QA_TIMEOUT_HW=180
 export QA_TIMEOUT_NCCL=300
-export QA_TIMEOUT_CUBLAS=900
+export QA_TIMEOUT_CUBLAS=1800
 export QA_TIMEOUT_NCCL_MULTI=1800
 
 # === 离群阈值 (%) ===
 export QA_OUTLIER_NCCL_PCT=5
 export QA_OUTLIER_CUBLAS_PCT=3
+
+# === 绝对下限 (299N/267N fleet 统计，p5 打八折) ===
+export QA_NCCL_MIN_BUSBW=650       # all_reduce; all_gather/reduce_scatter 630, alltoall 640
+export QA_CUBLAS_MIN_FP4=7500
+export QA_CUBLAS_MIN_FP8=3300
+export QA_CUBLAS_MIN_FP16=1600
+export QA_CUBLAS_MIN_BF16=1700
+export QA_CUBLAS_MIN_TF32=800
+export QA_CUBLAS_MIN_FP32=70
 
 # === 资源请求 ===
 export QA_HW_CPU="2"

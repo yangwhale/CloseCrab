@@ -14,9 +14,8 @@ CUBLAS_OUTLIER="${3:-${QA_OUTLIER_CUBLAS_PCT:-3}}"
 # fix: default 之前是 1717986（少 4 位），profile 里是 17179869184 (16 GB)。
 # 未 source profile 直接跑时会匹配 0 行 → outlier 检测空 → 假"无离群"。
 NCCL_MSG_SIZE="${QA_NCCL_MSG_SIZE:-17179869184}"
-# absolute floor（GB/s）：GB300 单节点 all_reduce baseline ~688；PCIe fallback ~85。
-# < 400 GB/s 一定是 NVLink/NVSwitch 拓扑问题，独立于 relative outlier 检测。
-NCCL_MIN_BUSBW="${QA_NCCL_MIN_BUSBW:-400}"
+# absolute floor（GB/s）：299 节点统计 p5=683，NVLink 只有通(~688)/断(~85)两态。
+NCCL_MIN_BUSBW="${QA_NCCL_MIN_BUSBW:-650}"
 
 [ -d "$LOGDIR" ] || { echo "ERROR: 目录不存在: $LOGDIR"; exit 1; }
 
@@ -25,11 +24,55 @@ detect_type() {
   [ -z "$SAMPLE" ] && { echo "unknown"; return; }
   if grep -q "HW Check:" "$SAMPLE" 2>/dev/null; then echo "hw-check"
   elif grep -q "Cross-Domain\|nccl-cd-d[12]" "$SAMPLE" 2>/dev/null; then echo "nccl-cross"
+  elif grep -q "mpirun\|hostfile\|MNNVL=" "$SAMPLE" 2>/dev/null; then echo "nccl-multi"
   elif grep -q "all_reduce_perf\|NCCL Single-Node" "$SAMPLE" 2>/dev/null; then echo "nccl-single"
   elif grep -q "cublasMatmulBench\|cuBLAS GEMM" "$SAMPLE" 2>/dev/null; then echo "cublas-bench"
   elif grep -q "DCGM Diagnostics\|dcgmi diag" "$SAMPLE" 2>/dev/null; then echo "dcgm"
   else echo "unknown"
   fi
+}
+
+###############################################################################
+# 执行状态检测 pre-pass
+# 检查每个 .log 是否真正执行了测试，而非空文件或截断
+###############################################################################
+check_execution() {
+  local CONTENT_MARKER=$1 DONE_MARKER=$2
+  local TOTAL=0 RAN=0 INCOMPLETE=0 NOTRUN=0
+  local NOTRUN_DETAIL=""
+
+  for f in "$LOGDIR"/*.log; do
+    [ ! -f "$f" ] && continue
+    ((TOTAL++)) || true
+    local NODE=$(basename "$f" .log | grep -oE '[^-]+$')
+    local SIZE=$(wc -c < "$f")
+
+    if [ "$SIZE" -le 100 ]; then
+      ((NOTRUN++)) || true
+      NOTRUN_DETAIL="${NOTRUN_DETAIL}  ${NODE}: NOT_RUN — 日志为空 (${SIZE}b, pod 未调度或 GPU 未分配)\n"
+    elif ! grep -q "$CONTENT_MARKER" "$f" 2>/dev/null; then
+      ((NOTRUN++)) || true
+      local REASON="日志无测试内容 (${SIZE}b)"
+      grep -qi "OOM\|Killed\|signal" "$f" 2>/dev/null && REASON="容器 OOM/被杀 (${SIZE}b)"
+      grep -qi "error.*nvidia\|cannot open\|No such file" "$f" 2>/dev/null && REASON="驱动/库加载失败 (${SIZE}b)"
+      NOTRUN_DETAIL="${NOTRUN_DETAIL}  ${NODE}: NOT_RUN — ${REASON}\n"
+    elif ! grep -q "$DONE_MARKER" "$f" 2>/dev/null; then
+      ((INCOMPLETE++)) || true
+      NOTRUN_DETAIL="${NOTRUN_DETAIL}  ${NODE}: INCOMPLETE — 缺完成标记 (${SIZE}b, 可能 OOM/超时/crash)\n"
+    else
+      ((RAN++)) || true
+    fi
+  done
+
+  echo ""
+  echo "=== 执行覆盖 ==="
+  echo "  总计: ${TOTAL}, 执行: ${RAN}, 未完成: ${INCOMPLETE}, 未执行: ${NOTRUN}"
+  if [ -n "$NOTRUN_DETAIL" ]; then
+    echo ""
+    echo "  未执行/未完成节点:"
+    echo -e "$NOTRUN_DETAIL"
+  fi
+  echo ""
 }
 
 TYPE=$(detect_type)
@@ -45,6 +88,7 @@ case "$TYPE" in
 ###############################################################################
 hw-check)
 ###############################################################################
+  check_execution "HW Check:" "Summary:"
   printf "%-8s  %-20s  %4s  %4s  %4s  %s\n" "NODE" "RESULT" "PASS" "FAIL" "WARN" "DETAILS"
   printf "%-8s  %-20s  %4s  %4s  %4s  %s\n" "----" "------" "----" "----" "----" "-------"
   TOTAL_FAIL=0
@@ -67,6 +111,7 @@ hw-check)
 ###############################################################################
 nccl-single)
 ###############################################################################
+  check_execution "_perf" "Done:"
   python3 -c "
 import os, re, statistics
 
@@ -147,89 +192,130 @@ for phase_name, phase_label in [('Phase 1: NVLink', 'NVLink'), ('Phase 2: PCIe (
 ###############################################################################
 cublas-bench)
 ###############################################################################
+  check_execution "Gflops" "DONE:"
   python3 -c "
-import os, re, statistics
+import os, re, glob, statistics
 threshold = ${CUBLAS_OUTLIER}
-data = {}
-for f in sorted(os.listdir('$LOGDIR')):
-    if not f.endswith('.log'): continue
-    node = f.split('-')[-1].replace('.log','')
-    data[node] = {}
-    prec = None
-    for line in open(os.path.join('$LOGDIR', f)):
-        line = line.strip()
-        if line in ('FP4','FP8','FP16','BF16','TF32','FP32'): prec = line
-        elif 'Gflops' in line and prec:
-            m = re.search(r'Gflops = ([\d.]+)', line)
-            if m: data[node].setdefault(prec, []).append(float(m.group(1))/1000)
 precs = ['FP4','FP8','FP16','BF16','TF32','FP32']
+abs_mins = dict(zip(precs, [${QA_CUBLAS_MIN_FP4:-7500},${QA_CUBLAS_MIN_FP8:-3300},${QA_CUBLAS_MIN_FP16:-1600},${QA_CUBLAS_MIN_BF16:-1700},${QA_CUBLAS_MIN_TF32:-800},${QA_CUBLAS_MIN_FP32:-70}]))
+data = {}
+for f in sorted(glob.glob(os.path.join('$LOGDIR', '*.log'))):
+    if os.path.getsize(f) < 500: continue
+    node = os.path.basename(f).split('-')[-1].replace('.log','')
+    gflops = [float(m.group(1)) for m in re.finditer(r'Gflops\s*=\s*([\d.]+)', open(f).read())]
+    if len(gflops) >= 24:
+        data[node] = {}
+        for i, p in enumerate(precs):
+            gpu_vals = [gflops[i + j * 6] / 1000 for j in range(4)]
+            data[node][p] = statistics.mean(gpu_vals)
 nodes = sorted(data.keys())
 print(f'{\"NODE\":>8}  {\"FP4\":>8}  {\"FP8\":>8}  {\"FP16\":>8}  {\"BF16\":>8}  {\"TF32\":>8}  {\"FP32\":>8}')
 print(f'{\"----\":>8}  {\"---\":>8}  {\"---\":>8}  {\"----\":>8}  {\"----\":>8}  {\"----\":>8}  {\"----\":>8}')
 for n in nodes:
-    vals = []
-    for p in precs:
-        if p in data[n] and data[n][p]: vals.append(f'{statistics.mean(data[n][p]):8.0f}')
-        else: vals.append(f'{\"—\":>8}')
-    print(f'{n:>8}  ' + '  '.join(vals))
+    print(f'{n:>8}  ' + '  '.join(f'{data[n].get(p,0):8.0f}' for p in precs))
 print(f'\n(单位: TFLOPS, 4-GPU 平均)')
 print(f'\n=== 各精度统计 ===')
-print(f'{\"PREC\":>6}  {\"MIN\":>8}  {\"AVG\":>8}  {\"MAX\":>8}  {\"SPREAD\":>8}')
-print(f'{\"----\":>6}  {\"---\":>8}  {\"---\":>8}  {\"---\":>8}  {\"------\":>8}')
+print(f'{\"PREC\":>6}  {\"MIN\":>8}  {\"AVG\":>8}  {\"MAX\":>8}  {\"SPREAD\":>8}  {\"FLOOR\":>8}')
+print(f'{\"----\":>6}  {\"---\":>8}  {\"---\":>8}  {\"---\":>8}  {\"------\":>8}  {\"-----\":>8}')
 for p in precs:
-    avgs = [statistics.mean(data[n][p]) for n in nodes if p in data[n] and data[n][p]]
-    if not avgs: continue
-    lo, hi, avg = min(avgs), max(avgs), statistics.mean(avgs)
+    vals = [data[n][p] for n in nodes if p in data[n]]
+    if not vals: continue
+    lo, hi, avg = min(vals), max(vals), statistics.mean(vals)
     spread = (hi - lo) / avg * 100 if avg else 0
-    print(f'{p:>6}  {lo:8.0f}  {avg:8.0f}  {hi:8.0f}  {spread:7.1f}%')
-print(f'\n=== 离群检测 (偏离均值 > {threshold}%) ===')
+    print(f'{p:>6}  {lo:8.0f}  {avg:8.0f}  {hi:8.0f}  {spread:7.1f}%  {abs_mins[p]:8.0f}')
+print(f'\n=== 离群检测 (相对: |dev| > {threshold}%; 绝对: 低于 floor) ===')
 outliers = []
 for n in nodes:
     for p in precs:
-        if p not in data[n] or not data[n][p]: continue
-        node_avg = statistics.mean(data[n][p])
-        all_avg = statistics.mean([statistics.mean(data[x][p]) for x in nodes if p in data[x] and data[x][p]])
-        dev = (node_avg - all_avg) / all_avg * 100
-        if abs(dev) > threshold: outliers.append((n, p, node_avg, all_avg, dev))
+        if p not in data[n]: continue
+        val = data[n][p]
+        all_avg = statistics.mean([data[x][p] for x in nodes if p in data[x]])
+        reasons = []
+        if len(nodes) >= 2:
+            dev = (val - all_avg) / all_avg * 100
+            if abs(dev) > threshold: reasons.append(f'{dev:+.1f}% vs avg {all_avg:.0f}')
+        if val < abs_mins.get(p, 0): reasons.append(f'BELOW {abs_mins[p]:.0f}')
+        if reasons: outliers.append((n, p, val, '; '.join(reasons)))
 if outliers:
-    for n, p, val, avg, dev in outliers:
-        print(f'  {n} {p}: {val:.0f} vs avg {avg:.0f} ({dev:+.1f}%)')
+    for n, p, val, reason in outliers:
+        print(f'  {n} {p}: {val:.0f} TFLOPS  [{reason}]')
 else:
     print('  无离群节点')
 " 2>/dev/null || echo "(python3 不可用)"
   ;;
 
-nccl-cross)
+nccl-cross|nccl-multi)
   LOG=$(ls "$LOGDIR"/rank0.log 2>/dev/null || ls "$LOGDIR"/*.log 2>/dev/null | head -1)
   [ -z "$LOG" ] && echo "ERROR: 无 rank0.log" && exit 1
 
-  echo "=== 跨域 NCCL 结果 ==="
-  # 提取 header 信息
-  grep -E 'Pool1:|Total:|MNNVL' "$LOG" | head -3
+  # 检测模式: MNNVL=on (NVSwitch) vs MNNVL=off (RDMA)
+  if grep -qi "MNNVL=2\|MNNVL_ENABLE=2\|NVLS=1\|mnnvl2" "$LOG" "$LOGDIR" 2>/dev/null; then
+    MODE="MNNVL"
+    # 同域 18N baseline
+    declare -A FLOOR=( [all_reduce]=850 [all_gather]=650 [reduce_scatter]=670 [alltoall]=630 )
+    declare -A BASELINE=( [all_reduce]=917 [all_gather]=688 [reduce_scatter]=708 [alltoall]=665 )
+  elif grep -qi "MNNVL=0\|MNNVL_ENABLE=0\|mnnvl0" "$LOG" "$LOGDIR" 2>/dev/null; then
+    MODE="RDMA"
+    declare -A FLOOR=( [all_reduce]=330 [all_gather]=330 [reduce_scatter]=330 [alltoall]=70 )
+    declare -A BASELINE=( [all_reduce]=368 [all_gather]=364 [reduce_scatter]=367 [alltoall]=86 )
+  else
+    MODE="unknown"
+    declare -A FLOOR=() BASELINE=()
+  fi
+
+  echo "=== 多节点 NCCL (${MODE}) ==="
+  grep -E 'Pool|Total:|MNNVL|nodes|Nodes' "$LOG" | head -5
   echo ""
 
-  echo "=== 16G message busBW (GB/s) ==="
-  printf "%-20s %12s %12s\n" "Collective" "out-of-place" "in-place"
-  printf "%-20s %12s %12s\n" "----" "----" "----"
+  # 提取最大 message size 的 busBW（兼容不同节点数导致的 size 对齐差异）
+  echo "=== 最大 message busBW (GB/s) ==="
+  printf "%-20s %12s %12s %12s %8s\n" "Collective" "out-of-place" "baseline" "floor" "判定"
+  printf "%-20s %12s %12s %12s %8s\n" "----" "----" "--------" "-----" "----"
+  FAIL_COUNT=0
   for COLL in all_reduce all_gather reduce_scatter alltoall; do
-    LINE=$(awk "/${COLL}_perf/{found=1} found && /^ *1717986/{print; exit}" "$LOG")
-    if [ -n "$LINE" ]; then
-      OOP=$(echo "$LINE" | awk '{print $8}')
-      IP=$(echo "$LINE" | awk '{print $12}')
-      printf "%-20s %12s %12s\n" "$COLL" "$OOP" "$IP"
+    # 找每个 collective 最后一段的最大 message busBW（跳过 warmup）
+    BW=$(python3 -c "
+lines = open('$LOG').readlines()
+sections = []
+in_target = False
+last = ''
+for l in lines:
+    if '${COLL}_perf' in l:
+        if in_target and last: sections.append(last)
+        in_target = True; last = ''
+    elif in_target and '_perf' in l and 'starting' not in l and 'concluded' not in l:
+        if last: sections.append(last)
+        in_target = False; last = ''
+    if in_target and l.strip() and l.strip()[0].isdigit() and 'nThread' not in l:
+        parts = l.split()
+        if len(parts) >= 8: last = parts[7]
+if in_target and last: sections.append(last)
+if sections: print(sections[-1])
+" 2>/dev/null)
+    if [ -n "$BW" ]; then
+      BL="${BASELINE[$COLL]:-—}"
+      FL="${FLOOR[$COLL]:-—}"
+      VERDICT="PASS"
+      if [ -n "${FLOOR[$COLL]:-}" ]; then
+        BELOW=$(awk "BEGIN {print ($BW < ${FLOOR[$COLL]}) ? 1 : 0}")
+        [ "$BELOW" -eq 1 ] && VERDICT="**FAIL**" && ((FAIL_COUNT++)) || true
+      fi
+      printf "%-20s %12s %12s %12s %8s\n" "$COLL" "$BW" "$BL" "$FL" "$VERDICT"
+    else
+      printf "%-20s %12s\n" "$COLL" "(无数据)"
     fi
   done
-  echo ""
 
-  # GB200 baseline 对比
-  echo "=== vs GB200 36N/144GPU baseline ==="
-  AR_BW=$(awk '/all_reduce_perf/{found=1} found && /^ *17179869184/{print $8; exit}' "$LOG")
-  if [ -n "$AR_BW" ]; then
-    echo "  all_reduce: ${AR_BW} GB/s (GB200: 754.90, diff: $(awk "BEGIN {printf \"%+.1f%%\", (${AR_BW}-754.90)/754.90*100}"))"
+  echo ""
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "结果: **${FAIL_COUNT} FAIL** — busBW 低于绝对下限"
+  else
+    echo "结果: PASS — 全部 collective 在正常范围"
   fi
   ;;
 
 dcgm)
+  check_execution "software\|memory\|pcie" "DONE:"
   echo "=== DCGM 诊断结果 ==="
   for f in "$LOGDIR"/*.log; do
     [ -f "$f" ] || continue
