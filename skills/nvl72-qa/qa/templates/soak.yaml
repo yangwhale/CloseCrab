@@ -1,0 +1,272 @@
+# 长稳压测 DaemonSet — 把短跑测不出来的问题逼出来
+#
+# 对应"证据链五角色"的第 4 层：稳定性监控。
+# 短跑（hw-check/DCGM/NCCL/cuBLAS 分钟级）测不出热飘移、供电塌陷、
+# 持续负载下的降频与 ECC 累积 —— 这些只有满载几小时才会露头。
+#
+# 做三件事：
+#   1. 压测前后快照 XID / ECC(SBE+DBE) / row remap / 时钟 → 出 diff
+#   2. 满载跑 ${QA_SOAK_DURATION} 秒
+#   3. 全程 nvidia-smi dmon 按 ${QA_SOAK_DMON_INTERVAL} 秒采样（功耗/温度/降频/利用率）
+#
+# 负载来源：默认复用本套件已在用的 cuBLAS bench 二进制循环施压（无需新依赖）。
+# 想换 gpu_burn 就改 profile 里的 QA_SOAK_LOAD_CMD。
+#
+# ⚠️ 温度阈值 QA_SOAK_TEMP_WARN 默认沿用风冷 DGX 的 86°C 经验值。
+#    GB300 NVL72 是液冷，热行为不同，正式交付前应向硬件侧确认后重新标定。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${QA_NAMESPACE}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: soak-script
+  namespace: ${QA_NAMESPACE}
+data:
+  soak.sh: |
+    #!/bin/bash
+    set -uo pipefail
+    NODE=$(hostname)
+    DURATION=${QA_SOAK_DURATION}
+    DMON_INT=${QA_SOAK_DMON_INTERVAL}
+    TEMP_WARN=${QA_SOAK_TEMP_WARN}
+    NGPU=${QA_GPUS_PER_NODE}
+    PASS=0; FAIL=0; WARN=0
+    ok()   { ((PASS++)); echo "[PASS] $*"; }
+    fail() { ((FAIL++)); echo "[FAIL] $*"; }
+    warn() { ((WARN++)); echo "[WARN] $*"; }
+
+    echo "============================================"
+    echo "  Soak Test: ${NODE}"
+    echo "  Duration: ${DURATION}s ($((DURATION/3600))h$(( (DURATION%3600)/60 ))m)"
+    echo "  dmon interval: ${DMON_INT}s | temp warn: ${TEMP_WARN}C"
+    echo "  $(date -u)"
+    echo "============================================"
+
+    # 计数器快照函数：XID / ECC / row remap
+    snapshot() {
+      local TAG=$1
+      echo "--- snapshot:${TAG} ---"
+      # XID（内核日志累计条数）
+      local XIDN
+      XIDN=$(grep -ci "xid" /host/var/log/messages 2>/dev/null \
+             || dmesg 2>/dev/null | grep -ci "xid" || echo 0)
+      echo "${TAG}_xid_count=${XIDN}"
+      # ECC：volatile + aggregate，SBE/DBE 分开
+      nvidia-smi --query-gpu=index,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.aggregate.total,ecc.errors.uncorrected.aggregate.total \
+        --format=csv,noheader,nounits 2>/dev/null | while IFS=, read -r I CV UV CA UA; do
+        echo "${TAG}_gpu${I// /}_ecc sbe_vol=${CV// /} dbe_vol=${UV// /} sbe_agg=${CA// /} dbe_agg=${UA// /}"
+      done
+      # Row remap
+      nvidia-smi --query-remapped-rows=gpu_bus_id,remapped_rows.pending,remapped_rows.failure \
+        --format=csv,noheader 2>/dev/null | while IFS=, read -r B P F; do
+        echo "${TAG}_remap ${B// /} pending=${P// /} failure=${F// /}"
+      done
+      # 时钟 / 温度基线
+      nvidia-smi --query-gpu=index,clocks.sm,temperature.gpu,power.draw \
+        --format=csv,noheader,nounits 2>/dev/null | while IFS=, read -r I C T P; do
+        echo "${TAG}_gpu${I// /}_state sm_mhz=${C// /} temp=${T// /} power=${P// /}"
+      done
+    }
+
+    echo ""; echo "=== PRE-SOAK SNAPSHOT ==="
+    snapshot pre | tee /tmp/pre.txt
+
+    # --- 启动 dmon 时序采样（后台）---
+    echo ""; echo "=== Starting dmon time-series (bg) ==="
+    echo "  \$ nvidia-smi dmon -s pucvmet -d ${DMON_INT}"
+    nvidia-smi dmon -s pucvmet -d "${DMON_INT}" > /tmp/dmon.log 2>&1 &
+    DMON_PID=$!
+
+    # --- 准备负载 ---
+    LOAD_CMD="${QA_SOAK_LOAD_CMD}"
+    if [ -z "$LOAD_CMD" ]; then
+      # 默认：复用 cuBLAS bench 二进制循环施压
+      if curl -sf -o /tmp/soakbin "${QA_CUBLAS_URL}" 2>/dev/null; then
+        chmod +x /tmp/soakbin
+        LOAD_CMD="/tmp/soakbin ${QA_SOAK_LOAD_ARGS}"
+        echo "  负载: cuBLAS bench 循环 (${QA_CUBLAS_URL})"
+      else
+        echo "  [WARN] cuBLAS 二进制下载失败，退化为 nccl-tests 循环施压"
+        LOAD_CMD="/third_party/nccl-tests/build/all_reduce_perf -b 8G -e 8G -f 1 -g ${NGPU} -n 200"
+      fi
+    else
+      echo "  负载(自定义): ${LOAD_CMD}"
+    fi
+
+    # --- 满载循环 ---
+    echo ""; echo "=== SOAK RUNNING (${DURATION}s) ==="
+    START=$(date +%s)
+    END=$((START + DURATION))
+    ITER=0
+    PEAK_TEMP=0
+    while [ "$(date +%s)" -lt "$END" ]; do
+      ITER=$((ITER+1))
+      eval "$LOAD_CMD" >/tmp/load-iter.log 2>&1 || true
+      # 每轮记录一次进度与峰值温度
+      T=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | sort -rn | head -1)
+      [ -n "$T" ] && [ "$T" -gt "$PEAK_TEMP" ] 2>/dev/null && PEAK_TEMP=$T
+      NOW=$(date +%s)
+      echo "  [iter ${ITER}] elapsed=$((NOW-START))s / ${DURATION}s  max_temp=${T}C  peak=${PEAK_TEMP}C"
+    done
+    echo "=== SOAK LOAD FINISHED (${ITER} iterations) ==="
+
+    kill "$DMON_PID" 2>/dev/null || true
+    sleep 2
+
+    echo ""; echo "=== POST-SOAK SNAPSHOT ==="
+    snapshot post | tee /tmp/post.txt
+
+    # --- 差异分析 ---
+    echo ""; echo "=== DIFF ANALYSIS ==="
+
+    PRE_XID=$(grep '^pre_xid_count=' /tmp/pre.txt | cut -d= -f2)
+    POST_XID=$(grep '^post_xid_count=' /tmp/post.txt | cut -d= -f2)
+    if [ "${POST_XID:-0}" -gt "${PRE_XID:-0}" ] 2>/dev/null; then
+      fail "新增 XID 错误: ${PRE_XID} → ${POST_XID}（压测期间产生，需查 dmesg 定位 GPU）"
+    else
+      ok "无新增 XID (${PRE_XID:-?})"
+    fi
+
+    # DBE（uncorrectable）任何增长都是硬故障
+    DBE_BAD=0
+    for G in $(seq 0 $((NGPU-1))); do
+      PRE_D=$(grep "^pre_gpu${G}_ecc " /tmp/pre.txt  | grep -o 'dbe_agg=[0-9]*' | cut -d= -f2)
+      POST_D=$(grep "^post_gpu${G}_ecc " /tmp/post.txt | grep -o 'dbe_agg=[0-9]*' | cut -d= -f2)
+      if [ -n "${PRE_D:-}" ] && [ -n "${POST_D:-}" ] && [ "$POST_D" -gt "$PRE_D" ] 2>/dev/null; then
+        fail "GPU${G} uncorrectable ECC 增长: ${PRE_D} → ${POST_D}（硬故障，cordon + RMA）"
+        DBE_BAD=1
+      fi
+    done
+    [ "$DBE_BAD" -eq 0 ] && ok "无 uncorrectable ECC 增长"
+
+    # SBE（correctable）大幅增长是预警
+    for G in $(seq 0 $((NGPU-1))); do
+      PRE_S=$(grep "^pre_gpu${G}_ecc " /tmp/pre.txt  | grep -o 'sbe_agg=[0-9]*' | cut -d= -f2)
+      POST_S=$(grep "^post_gpu${G}_ecc " /tmp/post.txt | grep -o 'sbe_agg=[0-9]*' | cut -d= -f2)
+      if [ -n "${PRE_S:-}" ] && [ -n "${POST_S:-}" ]; then
+        D=$((POST_S - PRE_S))
+        [ "$D" -gt "${QA_SOAK_SBE_WARN}" ] 2>/dev/null && \
+          warn "GPU${G} correctable ECC 增长 ${D}（>${QA_SOAK_SBE_WARN}，memory chip 可能有物理缺陷）"
+      fi
+    done
+
+    # Row remap failure
+    if grep -q 'failure=[1-9]' /tmp/post.txt 2>/dev/null; then
+      fail "row remap failure（GPU 显存不可恢复，cordon + RMA）"
+    else
+      ok "无 row remap failure"
+    fi
+
+    # 温度
+    if [ "$PEAK_TEMP" -ge "$TEMP_WARN" ] 2>/dev/null; then
+      warn "峰值温度 ${PEAK_TEMP}C >= ${TEMP_WARN}C（散热余量不足；液冷机型请按实际标定重评）"
+    else
+      ok "峰值温度 ${PEAK_TEMP}C < ${TEMP_WARN}C"
+    fi
+
+    # 降频（dmon 里 violation 列）
+    echo ""; echo "--- dmon 采样摘要 (完整时序见下方 raw) ---"
+    echo "  采样点数: $(grep -cv '^#' /tmp/dmon.log 2>/dev/null || echo 0)"
+    echo "  \$ nvidia-smi dmon -s pucvmet -d ${DMON_INT}   (p=power u=util c=clock v=violation m=mem e=ecc t=temp)"
+    head -3 /tmp/dmon.log 2>/dev/null
+    echo "  ..."
+    tail -5 /tmp/dmon.log 2>/dev/null
+
+    echo ""; echo "--- dmon raw time-series ---"
+    cat /tmp/dmon.log 2>/dev/null
+
+    echo ""
+    echo "============================================"
+    echo "  Soak Summary: PASS=${PASS} FAIL=${FAIL} WARN=${WARN}"
+    echo "  Iterations: ${ITER} | Peak temp: ${PEAK_TEMP}C"
+    RESULT=PASS
+    [ "$WARN" -gt 0 ] && RESULT="PASS (with warnings)"
+    [ "$FAIL" -gt 0 ] && RESULT=FAIL
+    echo "  Result: ${RESULT}"
+    echo "SOAK-DONE: ${NODE} ${RESULT} PASS=${PASS} FAIL=${FAIL} WARN=${WARN} peak_temp=${PEAK_TEMP}"
+    echo "============================================"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: qa-soak
+  namespace: ${QA_NAMESPACE}
+spec:
+  selector:
+    matchLabels:
+      app: qa-soak
+  template:
+    metadata:
+      labels:
+        app: qa-soak
+    spec:
+      nodeSelector:
+        ${QA_NODE_SELECTOR_KEY}: ${QA_POOL}
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: present
+        effect: NoSchedule
+      - key: kubernetes.io/arch
+        operator: Equal
+        value: ${QA_ARCH}
+        effect: NoSchedule
+      hostPID: true
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - name: nvidia-libs
+        hostPath:
+          path: ${QA_DRIVER_ROOT}
+      - name: soak-script
+        configMap:
+          name: soak-script
+          defaultMode: 0755
+      - name: host-root
+        hostPath:
+          path: /
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+      containers:
+      - name: soak
+        image: ${QA_IMAGE}
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          /scripts/container_entry.sh install 2>/dev/null
+          bash /soak/soak.sh; touch /tmp/qa-done; sleep infinity
+        volumeMounts:
+        - name: nvidia-libs
+          mountPath: /usr/local/nvidia
+        - name: soak-script
+          mountPath: /soak
+        - name: host-root
+          mountPath: /host
+        - name: shm
+          mountPath: /dev/shm
+        env:
+        - name: LD_LIBRARY_PATH
+          value: /usr/local/nvidia/lib64
+        - name: PATH
+          value: /usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        readinessProbe:
+          exec:
+            command: ["test", "-f", "/tmp/qa-done"]
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        resources:
+          limits:
+            nvidia.com/gpu: ${QA_GPUS_PER_NODE}
+          requests:
+            cpu: "${QA_HW_CPU}"
+            memory: ${QA_HW_MEM}

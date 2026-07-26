@@ -110,3 +110,35 @@ export QA_NCCL_MEM="200Gi"
 export QA_NCCL_SHM="64Gi"
 export QA_CUBLAS_CPU="4"
 export QA_CUBLAS_MEM="16Gi"
+
+###############################################################################
+# === 扩展测试（全部默认关闭，不进 all / all-full）===
+#
+# 补齐 DGX 验收惯例里的「原始采样 / 长稳 / P2P 矩阵 / RoCE 配置」四层。
+# 每项都需显式 QA_ENABLE_* = 1 才能跑，防止误触发（尤其 soak 是满载长跑）。
+# 启用方式二选一：
+#   a) 临时:  QA_ENABLE_SOAK=1 bash qa/run-checks.sh <profile> soak 0013
+#   b) 永久:  改本文件对应变量为 1
+###############################################################################
+
+# --- 资产采样（只读，无负载，安全）---
+export QA_ENABLE_ASSET=${QA_ENABLE_ASSET:-0}
+export QA_TIMEOUT_ASSET=${QA_TIMEOUT_ASSET:-300}
+
+# --- 长稳压测（满载，会占满 GPU，务必确认 pool 空闲）---
+export QA_ENABLE_SOAK=${QA_ENABLE_SOAK:-0}
+export QA_SOAK_DURATION=${QA_SOAK_DURATION:-14400}      # 默认 4h；DGX 惯例 18h=64800
+export QA_SOAK_DMON_INTERVAL=${QA_SOAK_DMON_INTERVAL:-60}
+export QA_SOAK_TEMP_WARN=${QA_SOAK_TEMP_WARN:-86}       # ⚠️ 风冷 DGX 经验值，液冷 GB300 待标定
+export QA_SOAK_SBE_WARN=${QA_SOAK_SBE_WARN:-1000}       # correctable ECC 增量告警门槛
+export QA_SOAK_LOAD_CMD=${QA_SOAK_LOAD_CMD:-}           # 空 = 用 cuBLAS bench 循环；可换 gpu_burn
+export QA_SOAK_LOAD_ARGS=${QA_SOAK_LOAD_ARGS:--P 8192 -m 8192 -n 8192 -k 8192 -T 60}
+
+# --- P2P 带宽矩阵 ---
+export QA_ENABLE_P2P=${QA_ENABLE_P2P:-0}
+export QA_TIMEOUT_P2P=${QA_TIMEOUT_P2P:-600}
+export QA_P2P_BIN_URL=${QA_P2P_BIN_URL:-}               # 空 = 不下载外部二进制，只跑 nvlink 计数器/topo
+
+# --- RoCE / RDMA 配置核查（只读）---
+export QA_ENABLE_RDMA_CONFIG=${QA_ENABLE_RDMA_CONFIG:-0}
+export QA_TIMEOUT_RDMA_CONFIG=${QA_TIMEOUT_RDMA_CONFIG:-300}

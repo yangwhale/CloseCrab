@@ -102,12 +102,50 @@ profile 里已配置，analyze-logs / gen-report 自动应用：
 
 ## 质检项目
 
+### 核心（进 `all` / `all-full`）
+
 - **hw-check**: 14 项硬件自检（GPU 可见性、NVLink topo、Fabric clique、RDMA NIC、ECC、时钟、固件）— 读 sysfs，不需 CUDA
 - **dcgm**: DCGM r2（PCIe/显存/HBM，需 DCGM 4.6.0+ for Blackwell）
 - **nccl**: 单机 4-GPU NVLink，4 collective @16GB
 - **gemm**: cuBLAS 6 精度（FP4/FP8/FP16/BF16/TF32/FP32）
 - **nccl-multi**: 单域多节点（JobSet + ComputeDomain）
 - **nccl-cross**: 跨域（2 ComputeDomain, MNNVL=2）
+
+### 扩展（⚠️ 默认关闭，不进 `all` / `all-full`）
+
+对齐 NVIDIA DGX 验收惯例的「证据链五角色」，补齐核心测试没覆盖的层。
+**每项都需 `QA_ENABLE_*=1` 显式启用**，防误触发。
+
+| action | 作用 | 负载 | 启用 |
+|---|---|---|---|
+| `asset` | 资产采样：主板/序列号/BIOS/DIMM 明细/GPU 序列号/NIC GUID/磁盘/physicalHost | 只读 | `QA_ENABLE_ASSET=1` |
+| `soak` | 长稳压测：满载 N 小时 + dmon 时序 + 前后 XID/ECC/remap diff | **满载占满 GPU** | `QA_ENABLE_SOAK=1` |
+| `p2p` | P2P 矩阵：topo 矩阵 + 每链路 NVLink 状态/错误计数 + fabric | 轻 | `QA_ENABLE_P2P=1` |
+| `rdma-config` | RoCE 配置核查：端口/MTU/RoCEv2/PFC/ECN/拥塞计数器/固件一致性 | 只读 | `QA_ENABLE_RDMA_CONFIG=1` |
+
+```bash
+# 交付签收资产清单（安全，随时可跑）
+QA_ENABLE_ASSET=1 bash qa/run-checks.sh $P asset 0013
+
+# 长稳：默认 4h，DGX 惯例 18h=64800。跑前确认 pool 无其他负载
+QA_ENABLE_SOAK=1 QA_SOAK_DURATION=64800 bash qa/run-checks.sh $P soak 0013
+
+QA_ENABLE_P2P=1 bash qa/run-checks.sh $P p2p 0013
+QA_ENABLE_RDMA_CONFIG=1 bash qa/run-checks.sh $P rdma-config 0013
+```
+
+**验证状态**：`asset` 已在 pool-0013 实跑通过（拿到 StellarisMax 主板序列号、DIMM 料号、
+4×GB300 GPU 序列号、8×CX-8 GUID、完整 physicalHost hash）。
+`soak` / `p2p` / `rdma-config` 语法与渲染已验，**尚未在真机跑完整轮次**，首次使用建议先单节点试跑
+（`... <action> <subblock> <node-suffix>`）。
+
+### 未覆盖项（已知，交付时如客户问起）
+
+- **RDMA 逐链路裸吞吐** (`ib_write_bw` / `ib_read_bw` / `ib_send_lat`)：需 server/client 两节点配对，
+  本套件用 `nccl-multi --mnnvl=off` 覆盖端到端 RDMA 路径（GB300 实测 ~370-380 GB/s）替代
+- **BMC / Redfish `ComputerSystem.Reset`**：GCP 托管环境无 BMC 访问，恢复动作走
+  `gcloud compute instances reset`（已在故障处置表里）
+- **实测 P2P 带宽数字**：需外部二进制，设 `QA_P2P_BIN_URL` 或改跑 `QA_DCGM_LEVEL=3`（含 nvbandwidth 插件）
 
 ## GKE 集群/Pool 操作
 

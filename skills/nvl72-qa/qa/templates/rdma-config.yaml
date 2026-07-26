@@ -1,0 +1,246 @@
+# RoCE / RDMA 链路层配置核查 DaemonSet
+#
+# 补现有 hw-check 的空白：hw-check 只看端口 Active + 错误计数 + 固件版本，
+# 不验"无损队列到底有没有在工作"。PFC / ECN / DCQCN 单点开关开了不代表生效。
+#
+# 关于裸吞吐 (ib_write_bw / ib_read_bw / ib_send_lat)：
+#   那套需要 server/client 两节点配对，是 JobSet 而非 DaemonSet。
+#   本套件里 RDMA 端到端路径已由 `nccl-multi --mnnvl=off` 覆盖
+#   （GB300 实测 ~370-380 GB/s），故此处只做配置核查，不重复造 perftest。
+#   若确需 perftest 逐链路数字，见 SKILL.md「未覆盖项」段。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${QA_NAMESPACE}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rdma-config-script
+  namespace: ${QA_NAMESPACE}
+data:
+  rdma.sh: |
+    #!/bin/bash
+    set -uo pipefail
+    NODE=$(hostname)
+    EXPECTED=${QA_RDMA_NICS}
+    PASS=0; FAIL=0; WARN=0
+    ok()   { ((PASS++)); echo "[PASS] $*"; }
+    fail() { ((FAIL++)); echo "[FAIL] $*"; }
+    warn() { ((WARN++)); echo "[WARN] $*"; }
+
+    echo "============================================"
+    echo "  RoCE / RDMA Config Check: ${NODE}"
+    echo "  Expected NICs: ${EXPECTED} | $(date -u)"
+    echo "============================================"
+
+    DEVS=$(ls -d /sys/class/infiniband/* 2>/dev/null)
+    NDEV=$(echo "$DEVS" | grep -c . || echo 0)
+    if [ "$NDEV" -eq "$EXPECTED" ]; then
+      ok "RDMA device count: ${NDEV}"
+    else
+      fail "RDMA device count: ${NDEV} (expected ${EXPECTED})"
+    fi
+
+    # --- 1. 端口状态 + 速率 + MTU ---
+    echo ""; echo "--- 1. Port State / Rate / MTU ---"
+    for D in $DEVS; do
+      [ -e "$D" ] || continue
+      DEV=$(basename "$D")
+      for P in "$D"/ports/*; do
+        [ -e "$P" ] || continue
+        PN=$(basename "$P")
+        ST=$(cat "$P/state" 2>/dev/null | awk '{print $NF}')
+        PH=$(cat "$P/phys_state" 2>/dev/null | awk '{print $NF}')
+        RT=$(cat "$P/rate" 2>/dev/null)
+        MTU=$(cat "$P/active_mtu" 2>/dev/null | awk '{print $NF}')
+        printf "  %-10s p%s state=%-8s phys=%-8s rate=%-18s mtu=%s\n" "$DEV" "$PN" "$ST" "$PH" "$RT" "$MTU"
+        if [ "$ST" != "ACTIVE" ]; then
+          fail "${DEV} port${PN} state=${ST} (expected ACTIVE)"
+        fi
+        # RoCE 场景 MTU 应为 4096；小于则吞吐受限
+        if [ -n "$MTU" ] && [ "$MTU" != "4096" ]; then
+          warn "${DEV} port${PN} active_mtu=${MTU} (RoCE 建议 4096，偏小会限制吞吐)"
+        fi
+      done
+    done
+
+    # --- 2. RoCE 模式 / GID ---
+    echo ""; echo "--- 2. RoCE Mode (GID table) ---"
+    echo "  期望 RoCEv2 (IPv4/IPv6 over UDP)"
+    for D in $DEVS; do
+      DEV=$(basename "$D")
+      for T in "$D"/ports/*/gid_attrs/types/*; do
+        [ -e "$T" ] || continue
+        TYPE=$(cat "$T" 2>/dev/null)
+        [ -z "$TYPE" ] && continue
+        echo "  ${DEV} gid[$(basename "$T")] type=${TYPE}"
+        break   # 每设备取首个有效 GID 即可代表模式
+      done
+    done
+    ROCE_V2=$(cat /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null | grep -c "RoCE v2" || echo 0)
+    if [ "$ROCE_V2" -gt 0 ]; then
+      ok "RoCE v2 已启用 (${ROCE_V2} GID entries)"
+    else
+      warn "未检出 RoCE v2 GID（可能是 IB 模式或 GID 表读取受限）"
+    fi
+
+    # --- 3. PFC（优先级流控）---
+    echo ""; echo "--- 3. PFC (Priority Flow Control) ---"
+    echo "  \$ ethtool -a <netdev> / mlnx_qos -i <netdev>"
+    NETDEVS=""
+    if command -v ibdev2netdev >/dev/null 2>&1; then
+      NETDEVS=$(ibdev2netdev 2>/dev/null | awk '{print $5}' | sort -u)
+    fi
+    [ -z "$NETDEVS" ] && NETDEVS=$(ls /sys/class/net 2>/dev/null | grep -E "^(gpu|eth|enp)" | head -8)
+
+    if command -v mlnx_qos >/dev/null 2>&1; then
+      for N in $NETDEVS; do
+        echo "  --- ${N} ---"
+        mlnx_qos -i "$N" 2>/dev/null | sed 's/^/    /' | head -20
+      done
+    else
+      echo "  [SKIP] mlnx_qos 不可用（需 MFT / mlnx-ofed 工具包）"
+      for N in $NETDEVS; do
+        if command -v ethtool >/dev/null 2>&1; then
+          PFCOUT=$(ethtool -a "$N" 2>/dev/null)
+          [ -n "$PFCOUT" ] && echo "  ${N}: $(echo "$PFCOUT" | tr '\n' ' ')"
+        fi
+      done
+      warn "PFC 配置未能逐项核对 — 交付前需向网络侧确认无损队列已生效"
+    fi
+
+    # --- 4. ECN / DCQCN ---
+    echo ""; echo "--- 4. ECN / DCQCN ---"
+    ECN_FOUND=0
+    for D in $DEVS; do
+      DEV=$(basename "$D")
+      ECN_DIR="/sys/class/infiniband/${DEV}/ecn/roce_np"
+      if [ -d "$ECN_DIR" ]; then
+        ECN_FOUND=1
+        EN=$(cat "$ECN_DIR"/enable/* 2>/dev/null | tr '\n' ',')
+        echo "  ${DEV} roce_np enable=[${EN}]"
+      fi
+      RP_DIR="/sys/class/infiniband/${DEV}/ecn/roce_rp"
+      if [ -d "$RP_DIR" ]; then
+        EN=$(cat "$RP_DIR"/enable/* 2>/dev/null | tr '\n' ',')
+        echo "  ${DEV} roce_rp enable=[${EN}]"
+      fi
+    done
+    if [ "$ECN_FOUND" -eq 1 ]; then
+      ok "ECN sysfs 可读（roce_np / roce_rp）"
+    else
+      warn "ECN sysfs 不存在 — 云托管环境常由平台侧统一配置，需向 GCP 侧确认 DCQCN 策略"
+    fi
+
+    # --- 5. 拥塞 / 丢包计数器 ---
+    echo ""; echo "--- 5. Congestion & Drop Counters ---"
+    echo "  非 0 表示已发生拥塞或丢包，需结合流量时段判断"
+    for D in $DEVS; do
+      DEV=$(basename "$D")
+      for C in rx_pause_duration tx_pause_duration np_cnp_sent rp_cnp_handled \
+               out_of_buffer out_of_sequence local_ack_timeout_err; do
+        for F in "$D"/ports/*/hw_counters/"$C" "$D"/hw_counters/"$C"; do
+          [ -r "$F" ] || continue
+          V=$(cat "$F" 2>/dev/null)
+          [ "${V:-0}" != "0" ] && echo "  ${DEV} ${C}=${V}"
+        done
+      done
+    done
+
+    # --- 6. 固件一致性 ---
+    echo ""; echo "--- 6. Firmware Consistency ---"
+    FWS=$(cat /sys/class/infiniband/*/fw_ver 2>/dev/null | sort -u)
+    NFW=$(echo "$FWS" | grep -c . || echo 0)
+    if [ "$NFW" -le 1 ]; then
+      ok "固件版本一致: $(echo "$FWS" | tr '\n' ' ')"
+    else
+      fail "固件版本不一致: $(echo "$FWS" | tr '\n' ' ')"
+    fi
+
+    echo ""
+    echo "============================================"
+    echo "  RDMA Config Summary: PASS=${PASS} FAIL=${FAIL} WARN=${WARN}"
+    RESULT=PASS
+    [ "$WARN" -gt 0 ] && RESULT="PASS (with warnings)"
+    [ "$FAIL" -gt 0 ] && RESULT=FAIL
+    echo "  Result: ${RESULT}"
+    echo "RDMA-CONFIG-DONE: ${NODE} ${RESULT} PASS=${PASS} FAIL=${FAIL} WARN=${WARN}"
+    echo "============================================"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: qa-rdma-config
+  namespace: ${QA_NAMESPACE}
+spec:
+  selector:
+    matchLabels:
+      app: qa-rdma-config
+  template:
+    metadata:
+      labels:
+        app: qa-rdma-config
+    spec:
+      nodeSelector:
+        ${QA_NODE_SELECTOR_KEY}: ${QA_POOL}
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: present
+        effect: NoSchedule
+      - key: kubernetes.io/arch
+        operator: Equal
+        value: ${QA_ARCH}
+        effect: NoSchedule
+      hostNetwork: true
+      hostPID: true
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: nvidia-libs
+        hostPath:
+          path: ${QA_DRIVER_ROOT}
+      - name: rdma-script
+        configMap:
+          name: rdma-config-script
+          defaultMode: 0755
+      - name: host-root
+        hostPath:
+          path: /
+      containers:
+      - name: rdma
+        image: ${QA_IMAGE}
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          /scripts/container_entry.sh install 2>/dev/null
+          bash /rdma/rdma.sh; touch /tmp/qa-done; sleep infinity
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: nvidia-libs
+          mountPath: /usr/local/nvidia
+        - name: rdma-script
+          mountPath: /rdma
+        - name: host-root
+          mountPath: /host
+        env:
+        - name: LD_LIBRARY_PATH
+          value: /usr/local/nvidia/lib64
+        - name: PATH
+          value: /usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        readinessProbe:
+          exec:
+            command: ["test", "-f", "/tmp/qa-done"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: "${QA_HW_CPU}"
+            memory: ${QA_HW_MEM}

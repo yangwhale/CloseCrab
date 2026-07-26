@@ -802,6 +802,59 @@ case "$ACTION" in
     log "全面质检完成 (manifest: ${MANIFEST_FILE})"
     ;;
 
+  # ===========================================================================
+  # 扩展测试 — 补齐 DGX 验收惯例的「原始采样 / 长稳 / P2P / RoCE 配置」四层
+  # 全部默认关闭，不进 all / all-full，需 QA_ENABLE_* = 1 显式启用
+  # ===========================================================================
+  asset|asset-inventory)
+    [ -z "$SUBBLOCK" ] && echo "用法: $0 <profile> asset <subblock> [node]" && exit 1
+    if [ "${QA_ENABLE_ASSET:-0}" != "1" ]; then
+      echo "asset 资产采样默认关闭（只读，无负载）。"
+      echo "启用: QA_ENABLE_ASSET=1 $0 $PROFILE asset $SUBBLOCK"
+      exit 1
+    fi
+    log "资产采样 (只读): ${QA_GPU_TYPE} subblock ${SUBBLOCK}"
+    run_test asset-inventory.yaml qa-asset-inventory "ASSET-DONE:" "${QA_TIMEOUT_ASSET:-300}"
+    ;;
+
+  soak)
+    [ -z "$SUBBLOCK" ] && echo "用法: $0 <profile> soak <subblock> [node]" && exit 1
+    if [ "${QA_ENABLE_SOAK:-0}" != "1" ]; then
+      echo "soak 长稳压测默认关闭 —— 会满载占用该 pool 全部 GPU。"
+      echo "启用: QA_ENABLE_SOAK=1 $0 $PROFILE soak $SUBBLOCK"
+      echo "时长: QA_SOAK_DURATION=${QA_SOAK_DURATION:-14400}s (改此变量调整; DGX 惯例 64800=18h)"
+      exit 1
+    fi
+    SOAK_DUR="${QA_SOAK_DURATION:-14400}"
+    # wrapper 靠 pod Ready 判完成，超时必须留足于压测时长之上的余量
+    SOAK_TIMEOUT=$((SOAK_DUR + 1800))
+    log "长稳压测: ${QA_GPU_TYPE} subblock ${SUBBLOCK} — ${SOAK_DUR}s ($((SOAK_DUR/3600))h)，wrapper timeout ${SOAK_TIMEOUT}s"
+    log "⚠️  该 pool 的 GPU 将被占满，确认无其他负载后再继续"
+    run_test soak.yaml qa-soak "SOAK-DONE:" "${SOAK_TIMEOUT}"
+    ;;
+
+  p2p)
+    [ -z "$SUBBLOCK" ] && echo "用法: $0 <profile> p2p <subblock> [node]" && exit 1
+    if [ "${QA_ENABLE_P2P:-0}" != "1" ]; then
+      echo "p2p 带宽/拓扑矩阵默认关闭。"
+      echo "启用: QA_ENABLE_P2P=1 $0 $PROFILE p2p $SUBBLOCK"
+      exit 1
+    fi
+    log "P2P 带宽/拓扑矩阵: ${QA_GPU_TYPE} subblock ${SUBBLOCK}"
+    run_test p2p-bandwidth.yaml qa-p2p-bandwidth "P2P-DONE:" "${QA_TIMEOUT_P2P:-600}"
+    ;;
+
+  rdma-config|roce)
+    [ -z "$SUBBLOCK" ] && echo "用法: $0 <profile> rdma-config <subblock> [node]" && exit 1
+    if [ "${QA_ENABLE_RDMA_CONFIG:-0}" != "1" ]; then
+      echo "rdma-config RoCE 配置核查默认关闭（只读）。"
+      echo "启用: QA_ENABLE_RDMA_CONFIG=1 $0 $PROFILE rdma-config $SUBBLOCK"
+      exit 1
+    fi
+    log "RoCE/RDMA 配置核查 (只读): ${QA_GPU_TYPE} subblock ${SUBBLOCK}"
+    run_test rdma-config.yaml qa-rdma-config "RDMA-CONFIG-DONE:" "${QA_TIMEOUT_RDMA_CONFIG:-300}"
+    ;;
+
   logs)
     echo "=== 当前 ${NS} pods ==="
     ktl get pods -n ${NS} -o wide --no-headers 2>/dev/null || echo "无 pods"
@@ -826,6 +879,7 @@ case "$ACTION" in
   *)
     echo "未知 action: $ACTION"
     echo "可用: hw-check | dcgm | nccl | gemm | nccl-multi | nccl-cross | all | all-full | logs | clean"
+    echo "扩展(默认关，需 QA_ENABLE_*=1): asset | soak | p2p | rdma-config"
     exit 1
     ;;
 esac
