@@ -57,4 +57,4 @@ wechat-reader
 hk-share-award-tax-dipn38
 deck-builder
 nvl72-qa
-tpu-benchmark
+tpu-v7-cluster
