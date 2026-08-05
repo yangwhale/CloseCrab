@@ -5,7 +5,7 @@ description: Generate or edit images using Gemini 3 Pro Image (Nano Banana) on V
 
 # Gemini Image Generator (Nano Banana)
 
-Generate or edit images using Gemini 3 Pro Image (gemini-3-pro-image-preview) on Vertex AI, save to CC Pages, and share.
+Generate or edit images using Gemini 3 Pro Image (gemini-3-pro-image) on Vertex AI, save to CC Pages, and share.
 
 Two modes:
 - **Text-to-image** — pure prompt, model invents from scratch
@@ -31,14 +31,14 @@ Call the generation script directly:
 # Multiple images (1-4, generated sequentially)
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "neural network visualization" --count 2
 
-# Resolution: 512, 1K (default), 2K, 4K
+# Resolution: 1K (default), 2K, 4K
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "landscape photo" --resolution 2K
 
 # Custom output filename
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "logo design" --output my-logo
 
-# Override model (default: gemini-3-pro-image-preview)
-~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "photo" --model gemini-3.1-flash-image-preview
+# Override model (default: gemini-3-pro-image)
+~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "photo" --model gemini-3.1-flash-image
 
 # Combine options
 ~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "B200 GPU rack in datacenter, photorealistic" --aspect 16:9 --resolution 2K --count 2
@@ -93,8 +93,8 @@ URL=$(~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "your prompt"
 
 ## Model
 
-- **`gemini-3-pro-image-preview`** (default) — Gemini 3 Pro Image, best quality, supports text+image generation
-- **`gemini-3.1-flash-image-preview`** — Nano Banana 2, faster, good price-performance
+- **`gemini-3-pro-image`** (default) — Gemini 3 Pro Image, best quality, supports text+image generation
+- **`gemini-3.1-flash-image`** — Nano Banana 2, faster, good price-performance
 
 ## Supported Aspect Ratios
 
@@ -102,7 +102,7 @@ URL=$(~/.claude/skills/imagen-generator/scripts/imagen-generate.sh "your prompt"
 
 ## Supported Resolutions
 
-`512`, `1K`, `2K`, `4K`
+`1K` (default), `2K`, `4K`　（`512` 不被模型支持，会返回 400）
 
 ## Prompt Tips
 

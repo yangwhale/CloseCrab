@@ -104,11 +104,11 @@ def main():
     parser.add_argument("--count", type=int, default=1,
                         help="Number of images to generate, 1-4 (default: 1)")
     parser.add_argument("--resolution", default="1K",
-                        help="Output resolution: 512, 1K, 2K, 4K (default: 1K)")
+                        help="Output resolution: 1K (default), 2K, 4K")
     parser.add_argument("--output", dest="output_name", default="",
                         help="Custom output filename (without extension)")
-    parser.add_argument("--model", default="gemini-3-pro-image-preview",
-                        help="Model ID (default: gemini-3-pro-image-preview)")
+    parser.add_argument("--model", default="gemini-3-pro-image",
+                        help="Model ID (default: gemini-3-pro-image)")
     parser.add_argument("--image", dest="image_paths", action="append", default=[],
                         help="Reference image for image-to-image editing. Repeat for multiple refs (first = primary baseline).")
     args = parser.parse_args()

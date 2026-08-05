@@ -7,9 +7,9 @@
 # Options:
 #   --aspect RATIO    Aspect ratio: 1:1 (default), 3:4, 4:3, 16:9, 9:16, 3:2, 2:3, 4:5, 5:4, 21:9, 4:1, 1:4, 8:1, 1:8
 #   --count N         Number of images to generate: 1-4 (default: 1, sequential calls)
-#   --resolution RES  Output resolution: 512, 1K (default), 2K, 4K
+#   --resolution RES  Output resolution: 1K (default), 2K, 4K
 #   --output NAME     Custom output filename (without extension)
-#   --model MODEL     Model ID (default: gemini-3-pro-image-preview)
+#   --model MODEL     Model ID (default: gemini-3-pro-image)
 #
 # Output:
 #   Prints public URL(s) of generated image(s) to stdout.
