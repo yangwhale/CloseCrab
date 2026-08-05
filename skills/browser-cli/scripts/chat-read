@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# chat-read — 读取 Google Chat 当前会话最近 N 条消息，输出 JSON 数组
+#
+# 用法: chat-read [条数]        默认 15
+# 输出: [{"id":..., "sender":"Chris Yang", "text":"..."}, ...]  按时间正序
+#
+# ★ 选择器为什么是 [jsname=bgckF]（2026-08-05 血泪）：
+#   曾用 [jsname][data-message-id] —— 那是**发送者抬头**，不是消息体。
+#   Chat 会把「同一个人连发的多条消息」折叠到一个抬头下，于是连发 8 条只看得见第 1 条。
+#   这个 bug 平时不显形，只有连发时才炸；一旦把它接到自动重试上，就会变成重复发送。
+#   [jsname=bgckF]（等价 class .Zc1Emd）才是逐条消息体，且：
+#     - 祖先 [data-topic-id] 给出每条消息稳定唯一 id
+#     - 同层 [data-name] 给出真实姓名（"Chris Yang"），不是模糊的 "You"
+#     - 正文干净，不混时间戳 / "Message viewed" 之类噪声
+#   贴图/emoji 消息 innerText 为空，需从 img[alt] 兜底取，否则会被当成空消息漏掉。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+N="${1:-15}"
+
+JS='(() => {
+  const out = [], used = {};
+  document.querySelectorAll("[jsname=bgckF]").forEach((e, idx) => {
+    const w = e.closest("[data-topic-id]");
+    let id = w ? w.getAttribute("data-topic-id") : ("idx" + idx);
+    if (used[id]) { used[id]++; id = id + "#" + used[id]; } else { used[id] = 1; }
+    const hh = w ? w.querySelector("[data-name]") : null;
+    const sender = hh ? (hh.getAttribute("data-name") || "") : "";
+    let text = (e.innerText || "").trim();
+    if (!text) {
+      const alts = [...e.querySelectorAll("img[alt]")].map(i => (i.alt || "").trim()).filter(Boolean);
+      if (alts.length) text = alts.join(" ");
+    }
+    out.push({ id: id, sender: sender, text: text });
+  });
+  return JSON.stringify(out.slice(-LIMIT));
+})()'
+
+"$SELF_DIR/ab" eval "${JS/LIMIT/$N}" 2>/dev/null | python3 -c '
+import sys, json
+raw = sys.stdin.read().strip()
+try:
+    v = json.loads(raw)          # ab 把结果包成 JSON 字符串，先解一层
+    if isinstance(v, str):
+        v = json.loads(v)
+    print(json.dumps(v, ensure_ascii=False))
+except Exception:
+    print("[]")
+'

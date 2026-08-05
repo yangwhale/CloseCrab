@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# absend — 往 Google Chat 当前会话发一条消息，并以「会话里真的出现了这条消息」为成功判据
+#
+# 用法: absend "要发的文字"
+#       absend --no-retry "要发的文字"      发一次就返回，绝不重试（写给真人时更安全）
+#
+# ─── 三条血泪教训（2026-08-05）─────────────────────────────────────────
+# 1) 每次发送后 Chat 重建 DOM，所有 ref 整体偏移（e237 -> e235）。
+#    同一条命令里连发第二条若沿用旧 ref，会静默失败。=> 每一步都重新抓 ref。
+#
+# 2) 用「发送后输入框为空」当成功判据是错的：ref 失效时读到的也是空，
+#    会误报成功（实测连丢 6 条还全部显示 ✓）。=> 必须回查会话里真的出现了。
+#
+# 3) ★ 最贵的一条：坏掉的验证器 + 自动重试 = 3 倍伤害。
+#    旧版验证器用发送者抬头做选择器，看不见「连发的第 2..N 条」，
+#    于是「发成功了 -> 验证器说没发出去 -> 自动重试」，给真人刷了 7 条重复。
+#    对策有三：(a) 验证器换成 chat-read（逐条消息体，见该脚本注释）
+#             (b) 重试前先回查一次，命中就直接返回，不再发
+#             (c) 最多重试 1 次，且提供 --no-retry
+#    宁可漏报失败让人工补发，也不能误报失败自动重发。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AB="$SELF_DIR/ab"; REF="$SELF_DIR/abref"; READ="$SELF_DIR/chat-read"
+
+MAX=2; CHECK_ONLY=0
+case "${1:-}" in
+  --no-retry) MAX=1; shift ;;
+  --check)    CHECK_ONLY=1; shift ;;   # 只查「这条是否已在会话末尾」，不发送
+esac
+MSG="${1:?用法: absend [--no-retry|--check] <消息文本>}"
+
+# 会话末尾 3 条里是否已出现本次内容（去掉所有空白后比对，或前 20 字前缀匹配）
+already_sent() {
+  "$READ" 4 2>/dev/null | MSG="$MSG" python3 -c '
+import sys, json, os, re
+msg = re.sub(r"\s|　", "", os.environ["MSG"])
+try:
+    arr = json.loads(sys.stdin.read() or "[]")
+except Exception:
+    arr = []
+for m in arr[-3:]:
+    t = re.sub(r"\s|　", "", m.get("text", ""))
+    if t and (t == msg or (len(msg) >= 20 and t.startswith(msg[:20]))):
+        sys.exit(0)
+sys.exit(1)
+'
+}
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  if already_sent; then echo "已在会话末尾: ${MSG:0:30}"; exit 0
+  else echo "会话末尾没有这条: ${MSG:0:30}" >&2; exit 1; fi
+fi
+
+for attempt in $(seq 1 $MAX); do
+  # 重试前先回查：可能上一轮其实发出去了，只是渲染慢没被看见
+  if [ "$attempt" -gt 1 ] && already_sent; then
+    echo "✓ 已送达(重试前回查命中): ${MSG:0:30}"; exit 0
+  fi
+
+  BOX=$("$REF" 'textbox "History is on"')
+  if [ -z "$BOX" ]; then sleep 2; continue; fi
+  "$AB" fill "@$BOX" "$MSG" >/dev/null 2>&1
+  sleep 1
+
+  SEND=$("$REF" 'button "Send message"')        # 发送按钮必须重新抓
+  if [ -z "$SEND" ]; then sleep 2; continue; fi
+  "$AB" click "@$SEND" >/dev/null 2>&1
+  sleep 3
+
+  if already_sent; then echo "✓ 已送达: ${MSG:0:30}"; exit 0; fi
+  echo "  第${attempt}次未确认送达" >&2
+done
+
+# 收尾宽限：渲染可能只是慢
+sleep 4
+if already_sent; then echo "✓ 已送达(宽限期确认): ${MSG:0:30}"; exit 0; fi
+
+echo "✗ 未能确认送达（请人工到 Chat 里核对后再决定是否补发，不要盲目重跑）: $MSG" >&2
+exit 1

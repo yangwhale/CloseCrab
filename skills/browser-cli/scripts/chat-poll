@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# chat-poll — 阻塞等待 Google Chat 当前会话里出现「对方」的新消息
+#
+# 用法:
+#   chat-poll last                              打印当前最后一条消息 id（用作基线）
+#   chat-poll wait <baseline_id> [超时秒] [对方显示名]
+#       轮询直到出现比 baseline 更新、且发送者匹配对方的消息。
+#       命中 -> stdout 打印 JSON {id, sender, text}，exit 0
+#       超时 -> exit 1（默认 900s，每 8s 轮询一次）
+#
+# 注意：发送者是真实姓名（"Forrest Xi"），不是 "You"。
+#       不传对方显示名时，取「不等于自己」的第一条；自己的名字由 CHAT_SELF 指定，
+#       默认 "Chris Yang"。多轮对话必须每轮更新 baseline，否则会立刻返回旧消息。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+READ="$SELF_DIR/chat-read"
+SELF_NAME="${CHAT_SELF:-Chris Yang}"
+
+case "${1:-}" in
+  last)
+    "$READ" 5 | python3 -c '
+import sys, json
+a = json.loads(sys.stdin.read() or "[]")
+print(a[-1]["id"] if a else "")
+'
+    ;;
+  wait)
+    BASE="${2:-}"; TIMEOUT="${3:-900}"; PEER="${4:-}"
+    [ -n "$BASE" ] || { echo '需要 baseline id' >&2; exit 2; }
+    START=$(date +%s)
+    while :; do
+      RES=$("$READ" 15 | BASE="$BASE" PEER="$PEER" SELF="$SELF_NAME" python3 -c '
+import sys, json, os
+base = os.environ["BASE"]; peer = os.environ.get("PEER", ""); me = os.environ["SELF"]
+a = json.loads(sys.stdin.read() or "[]")
+ids = [m["id"] for m in a]
+newer = a[ids.index(base) + 1:] if base in ids else a   # baseline 滚出视野则全算新
+for m in newer:
+    s = m.get("sender", "")
+    if not s or not m.get("text", "").strip():
+        continue
+    if peer:
+        if peer in s:
+            print(json.dumps(m, ensure_ascii=False)); break
+    elif s != me:
+        print(json.dumps(m, ensure_ascii=False)); break
+')
+      if [ -n "$RES" ]; then echo "$RES"; exit 0; fi
+      NOW=$(date +%s)
+      [ $((NOW - START)) -ge "$TIMEOUT" ] && { echo "TIMEOUT after ${TIMEOUT}s" >&2; exit 1; }
+      sleep 8
+    done
+    ;;
+  *)
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

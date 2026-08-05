@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# abref — 从 ab snapshot 里稳健提取元素 ref
+#
+# 用法: abref '<快照行里的关键字>'      例: abref 'Send message'
+#
+# 为什么不能直接 grep 'ref=eN'：快照里 ref 前面可能挂别的属性，
+# 形如 [disabled, ref=e12] / [expanded=false, ref=e12]，
+# 只匹配 "[ref=" 会漏掉，拿到空串后续操作会静默失败。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KEY="${1:?用法: abref <关键字>}"
+"$SELF_DIR/ab" snapshot -i 2>/dev/null \
+  | grep -F "$KEY" \
+  | grep -oE 'ref=e[0-9]+' \
+  | head -1 \
+  | cut -d= -f2

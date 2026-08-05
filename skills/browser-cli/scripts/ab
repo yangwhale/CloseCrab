@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ab — 驱动 cloudtop 上那个已登录公司账号的 Chrome (CDP 127.0.0.1:9222)
+#
+# 为什么这样接：agent-browser 是 CLI，但必须够得着浏览器。浏览器跑在 cloudtop 上，
+# 所以 agent-browser 也装在 cloudtop（node 24 via nvm），同机直连，不需要 SSH 隧道。
+#
+# 目标机切换（Chris 人在哪就用哪台）：
+#   ab --where            查看当前目标机
+#   ab --use bj           切到北京 glinux_bj（默认）
+#   ab --use hk           切到香港 glinux
+#   AB_HOST=glinux ab ... 单次覆盖，不改默认
+#
+# 常用：
+#   ab snapshot -i              只列可交互元素（约 300 token，MCP 版要 15K+）
+#   ab diff snapshot            只返回与上次快照的差异
+#   ab click @e5                按 ref 点击
+#   ab fill @e2 "text"          清空并填入
+#   ab open <url>               导航
+#   ab get text @e3             取文本
+#   ab eval 'document.title'    执行 JS（注意是 eval 不是 js）
+#   ab skills get core --full   官方用法速查
+#
+# ★ 多步一次做完（省 LLM 往返，这是最大的提速点）：
+#   ab batch "eval document.title" "get url" "snapshot -i"
+#   ab batch --bail "click @e5" "diff snapshot"      --bail = 任一步失败就停
+#
+# 深度调试（Lighthouse / heap snapshot / performance trace）agent-browser 不提供，
+# 那些仍用 chrome-devtools-mcp。
+set -euo pipefail
+
+CONF="$HOME/.config/ab-host"
+[ -f "$CONF" ] || { mkdir -p "$(dirname "$CONF")"; echo "glinux_bj" > "$CONF"; }
+
+case "${1:-}" in
+  --where)
+    echo "当前目标机: $(cat "$CONF")"
+    exit 0 ;;
+  --use)
+    case "${2:-}" in
+      bj) echo glinux_bj > "$CONF" ;;
+      hk) echo glinux    > "$CONF" ;;
+      "") echo "用法: ab --use bj|hk" >&2; exit 2 ;;
+      *)  echo "${2}" > "$CONF" ;;
+    esac
+    echo "已切到: $(cat "$CONF")"
+    exit 0 ;;
+esac
+
+HOST="${AB_HOST:-$(cat "$CONF")}"
+
+args=""
+for a in "$@"; do args="$args $(printf '%q' "$a")"; done
+
+exec ssh -o LogLevel=ERROR "$HOST" "export NVM_DIR=\"\$HOME/.nvm\"; \
+. \"\$NVM_DIR/nvm.sh\" >/dev/null 2>&1; \
+nvm use 24 >/dev/null 2>&1; \
+agent-browser --cdp 9222$args"

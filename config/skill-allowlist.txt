@@ -21,6 +21,7 @@ wiki
 
 # === B 档: 周/月使用 (15) ===
 bot-config
+browser-cli
 chrome-browser
 code-wiki-recon
 customer-qa-tracker
