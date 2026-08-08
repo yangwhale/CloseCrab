@@ -1,7 +1,7 @@
 # Task Scheduler — 时间驱动的任务系统
 
 > 设计：2026-08-08
-> 状态：**设计定稿；P0 已实现并上线（2026-08-08）。下一步 P1（Task 对象）。**
+> 状态：**P0 + P1 已实现并上线（2026-08-08）。P1 以 `watch_tasks` 落地，未新建 `tasks` 集合——见 §9 简化决定。**
 > 作者：Chris × bunny 协同设计
 > 调研输入：OpenClaw（本机源码）、Claude Code（官方文档）、Goose、OpenHarness、Crush、OpenCode
 
@@ -436,6 +436,25 @@ agent 在 run 内本来就能自己发消息。要防止「agent 自己发了 + 
 
 ## 9. 数据结构
 
+> **2026-08-08 简化决定（Chris：「架构不要搞太复杂，大道至简」）**
+>
+> 本节原本规划了一个新的 `tasks` 集合和 `tasks/{id}/runs/{id}` 执行历史子集合。
+> **两个都取消。**
+>
+> 实现 P1 时才看清：`watch_tasks`（`scripts/watch-task.py` 建的那个）**已经就是**
+> §4 说的 Task 对象——有目标（prompt）、有状态机（active/done/cancelled/expired）、
+> 有进度累积（last_report）、有触发时机（next_fire_at + interval_sec）。再造一个
+> `tasks` 就是第三套重叠模型：`scheduled_jobs` 管定时消息、`watch_tasks` 管盯任务、
+> `tasks` 管……什么？说不清楚的那一层就是不该存在的那一层。
+>
+> `runs` 子集合同样取消：`last_report` + `fire_count` + `consecutive_skips` 已经
+> 覆盖当前所有实际用途，而 Firestore 子集合不随父文档删除、要写递归清理。
+> 等真的有人问「这个任务历次跑得怎么样」再加，加法是纯增量的。
+>
+> **下面的 schema 保留作为参考**，不作为实施目标。
+
+### 9.0 参考 schema（不实施）
+
 > 字段名仍可调整，但**取值语义已随 §11 的 Q2/Q3/Q4/Q6/Q7 定稿**。
 
 ### 9.1 `tasks` 集合（新增）
@@ -605,9 +624,10 @@ tasks/{task_id}/runs/{run_id}
 - G1 job_id 进 instruction，agent 可自终止
 - 这两条做完，US-1 和 US-2 **今天的架构就能跑**，只是没有 Task 对象
 
-**P1 — Task 对象**
-- `tasks` 集合 + `task-tool.py`
-- 进度累积、状态机、notify 分档
+**P1 — Task 对象** ✅ **2026-08-08 以 `watch_tasks` 形式完成，未新建 `tasks` 集合**
+- `scripts/watch-task.py` + `watch_tasks` 集合
+- 三步协议 SKIP / REPORT / DONE，DONE 走 inbox 交接主进程
+- 状态机、进度游标、停滞检测、自终止、事务抢占
 
 **P2 — 执行隔离**
 - isolated session（修 G3）
