@@ -73,11 +73,28 @@
 - **Read / Grep 前先 `wc -l` 或 `ls -lh`** 看文件大小, 大于 50KB 提前规划 limit。
 - **少切 model** — 跨 model switch (4.6 ↔ 4.7) 会让 Anthropic 端 cache key 重置, 长 session 累积的 cache_read 直接归零, 重新 ramp up 到 200K+ 要好几个 turn。能不切别切。
 
+### 10. 通知 vs 触发事件 —— 汇报前先分清走哪条路
+
+**判据只有一句：这条消息读完之后，需不需要有人／有 agent 去做点什么？**
+
+| | 通知（让你看一眼） | 触发事件（需要接着处理） |
+|---|---|---|
+| 工具 | `feishu-notify.py` | `inbox-send.py` |
+| 后果 | 消息进聊天窗口，**零 turn 零 token** | **触发主进程一次完整 LLM turn**，占 per-user lock |
+| 例子 | 「跑到第 2 步了」「查了没有，继续等」 | 「跑完了，该你接手」「资源到位，可以开工」 |
+
+代价不对称，两个方向都要避免：
+
+- **该通知却走 inbox** → 每次播报烧一个完整 turn，还会打断你正在跑的对话。一个每分钟播报一次的 20 分钟任务 = 20 个无谓 turn。
+- **该触发却走通知** → 消息躺在聊天窗口里没人接，任务链断掉。
+
+所以长任务的中途播报**一律用 `feishu-notify.py`**；只有「需要对方据此做下一步」时才写 inbox。`watch-task.py` 的三步协议（SKIP / REPORT / DONE）就是把这条规则固化进了工具：REPORT 走通知，DONE 才走 inbox。
+
 ---
 
 ## 通用工具脚本（worker-agnostic）
 
-以下 4 个脚本任何 worker 都能用 `bash` 调用：
+以下脚本任何 worker 都能用 `bash` 调用：
 
 ```bash
 # 真并行 N 个 LLM sub-agent（每个独立推理 + bash + read 工具）
@@ -86,9 +103,21 @@ python3 ~/CloseCrab/scripts/subagent-parallel.py --inline '{"tasks":[{"label":"A
 # 定时提醒 / cron（精度 30s，daemon 自动跑）
 BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py add \
   --target $BOT_NAME --in 10m --message "..."
-# 也支持 --at <ISO UTC> 或 --cron "0 9 * * MON-FRI"
-BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py list
+# --cron 与裸 --at 均按 **HKT** 解释（--tz 只接受 Asia/Hong_Kong 或 UTC，传别的会报错）
+#   "每天早 8 点" 就直接写 --cron "0 8 * * *"，不要自己换算成 UTC
+BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py list      # 时间以 HKT 展示
 BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py remove <job_id>
+# 周期任务触发时，指令正文会带上自己的 job_id 和 remove 命令 —— 目标达成后
+# 自己 remove 掉，不要让它一直空转。
+
+# 只发通知，**不触发任何 LLM turn**（见下方「通知 vs 触发事件」）
+python3 ~/CloseCrab/scripts/feishu-notify.py "跑到第 2 步了"
+
+# 盯一个长跑任务（训练/压测/编译），有进展播报、跑完了交接主进程
+python3 ~/CloseCrab/scripts/watch-task.py create --name t80 --interval 120 \
+  --notify-bot $BOT_NAME \
+  --prompt "读 /tmp/t80.log 判断进度。出现 TRAINING COMPLETE 或 Error 时用 DONE。"
+python3 ~/CloseCrab/scripts/watch-task.py list|stop <name>
 
 # 自查状态（model / cost / token / 历史 turns）
 python3 ~/CloseCrab/scripts/session-status.py $BOT_NAME [--days N]
@@ -101,4 +130,4 @@ OGG=$(~/CloseCrab/skills/tts-generator/scripts/tts-generate.py "[casually] hello
 echo "<voice-file>$OGG</voice-file>"   # 飞书 channel 会自动上传为语音消息
 ```
 
-用户说"用什么模型 / 今天花了多少" 走 session-status；说"10 分钟后提醒我" 走 cron；说"画一张图" 走 imagen；说"读出来 / /tts" 走 tts。
+用户说"用什么模型 / 今天花了多少" 走 session-status；说"10 分钟后提醒我" 走 cron；说"盯着这个训练 / 有进展告诉我" 走 watch-task；说"画一张图" 走 imagen；说"读出来 / /tts" 走 tts。
