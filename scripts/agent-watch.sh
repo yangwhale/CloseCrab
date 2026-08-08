@@ -45,5 +45,8 @@ $PREV
 [ -z "$OUT" ] && exit 0
 echo "$OUT" | head -1 | grep -qE '^\s*SKIP' && exit 0
 echo "$OUT" > "$LAST"
-python3 /home/chrisya/CloseCrab/scripts/feishu-notify.py "🤖 [$NAME] $(date '+%H:%M')
+# --bot 必须显式传：本脚本常挂系统 crontab，那里没有 BOT_NAME，
+# 而 feishu-notify 用的是该 bot 的飞书 app 凭证，缺省会以别人的身份发出。
+python3 /home/chrisya/CloseCrab/scripts/feishu-notify.py \
+  --bot "${BOT_NAME:-jarvis}" "🤖 [$NAME] $(date '+%H:%M')
 $OUT" >/dev/null 2>&1

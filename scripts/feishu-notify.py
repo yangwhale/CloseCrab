@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
-DEFAULT_BOT = "jarvis"
+# 默认取调用方自己的身份，**不要硬编码某个 bot**。
+# _load_cfg 拿的是该 bot 的飞书 app 凭证，所以填错等于用别人的身份发消息——
+# 2026-08-08 实际发生过：tiemu 跑本脚本没带 --bot，通知以 jarvis 的名义出现在
+# 聊天窗口，jarvis 根本没参与那件事。BOT_NAME 由 bot.py 注入子进程环境。
+DEFAULT_BOT = os.environ.get("BOT_NAME") or "jarvis"
 
 
 def _load_cfg(bot: str) -> dict:

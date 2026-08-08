@@ -111,6 +111,7 @@ BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py remove <job_id>
 # 自己 remove 掉，不要让它一直空转。
 
 # 只发通知，**不触发任何 LLM turn**（见下方「通知 vs 触发事件」）
+# 默认以 $BOT_NAME 的身份发；跨 bot 代发才需要显式 --bot。
 python3 ~/CloseCrab/scripts/feishu-notify.py "跑到第 2 步了"
 
 # 盯一个长跑任务（训练/压测/编译），有进展播报、跑完了交接主进程

@@ -20,5 +20,7 @@ SEEN=$(cat "$STATE" 2>/dev/null || echo 0)
 
 NEWLINES=$(grep -E "$PAT" "$LOG" | tail -n $((NOW - SEEN)))
 echo "$NOW" > "$STATE"
-python3 /home/chrisya/CloseCrab/scripts/feishu-notify.py "[$PREFIX] $(date '+%H:%M')
+# 同 agent-watch.sh：显式传身份，别用默认值冒名。
+python3 /home/chrisya/CloseCrab/scripts/feishu-notify.py \
+  --bot "${BOT_NAME:-jarvis}" "[$PREFIX] $(date '+%H:%M')
 $NEWLINES" >/dev/null 2>&1
