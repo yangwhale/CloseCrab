@@ -123,21 +123,23 @@
 # 真并行 N 个 LLM sub-agent（每个独立推理 + bash + read 工具）
 python3 ~/CloseCrab/scripts/subagent-parallel.py --inline '{"tasks":[{"label":"A","prompt":"..."}]}'
 
-# 定时提醒 / cron（精度 30s，daemon 自动跑）
+# ── 定时任务：先分清是「叫醒别人」还是「自己去看一眼」────────────────
+#   到点转达一句话，让某个 bot 用它自己的脑子处理  → cron-tool  (下面 A)
+#   每隔几分钟自己去判断一次，多数时候不出声        → watch-task (下面 B)
+
+# A) 定时提醒 —— daemon 不推理，到点往目标 bot 的收件箱写一句话
 BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py add \
   --target $BOT_NAME --in 10m --message "..."
 # --cron 与裸 --at 均按 **HKT** 解释（--tz 只接受 Asia/Hong_Kong 或 UTC，传别的会报错）
 #   "每天早 8 点" 就直接写 --cron "0 8 * * *"，不要自己换算成 UTC
-BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py list      # 时间以 HKT 展示
+BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py list        # 只列自己派的
+BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py list --all  # 列全部
 BOT_NAME=$BOT_NAME python3 ~/CloseCrab/scripts/cron-tool.py remove <job_id>
 # 周期任务触发时，指令正文会带上自己的 job_id 和 remove 命令 —— 目标达成后
 # 自己 remove 掉，不要让它一直空转。
 
-# 只发通知，**不触发任何 LLM turn**（见下方「通知 vs 触发事件」）
-# 默认以 $BOT_NAME 的身份发；跨 bot 代发才需要显式 --bot。
-python3 ~/CloseCrab/scripts/feishu-notify.py "跑到第 2 步了"
-
-# 盯一个长跑任务（训练/压测/编译），有进展播报、跑完了交接主进程
+# B) 盯长跑任务（训练/压测/编译）—— daemon 每隔 N 秒起一个小 agent 自己判断
+#    三步协议：SKIP 静默 / REPORT 贴飞书(零 turn) / DONE 贴结论 + inbox 交接主进程
 python3 ~/CloseCrab/scripts/watch-task.py create --name t80 --interval 120 \
   --notify-bot $BOT_NAME \
   --prompt "读 /tmp/t80.log 判断进度。出现 TRAINING COMPLETE 或 Error 时用 DONE。"
@@ -145,7 +147,15 @@ python3 ~/CloseCrab/scripts/watch-task.py create --name t80 --interval 120 \
 #   haiku  看日志有没有变、进程在不在、文件出现没有      ← 默认，够用
 #   sonnet 要读懂内容再判断：报错致命还是可忽略、指标达标没
 #   opus   要做真判断和取舍：该不该动手、几个方案挑哪个
+# **必须在被盯对象所在的那台机器上创建** —— 探针读的是本机文件，任务会钉死
+# 在创建它的 host 上。远程机器上的任务要 ssh 过去建。
 python3 ~/CloseCrab/scripts/watch-task.py list|stop <name>
+# prompt 里要写清三件事：看哪里、什么算「有进展」、什么算「结束」。
+# 还要交代「没进展就什么都别说」，否则用户会被几十条「还在跑」刷屏。
+
+# 只发通知，**不触发任何 LLM turn**（见上面 §11「通知 vs 触发事件」）
+# 默认以 $BOT_NAME 的身份发；跨 bot 代发才需要显式 --bot。
+python3 ~/CloseCrab/scripts/feishu-notify.py "跑到第 2 步了"
 
 # 自查状态（model / cost / token / 历史 turns）
 python3 ~/CloseCrab/scripts/session-status.py $BOT_NAME [--days N]

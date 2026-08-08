@@ -183,20 +183,20 @@ def next_cron_fire(expr: str, after: datetime, tz: str = DEFAULT_TZ) -> datetime
     then converted back to the UTC instant the scheduler compares against.
     Evaluating directly in UTC — what this did before — makes "0 8 * * *"
     fire at 16:00 HKT with no error anywhere.
+
+    One implementation on purpose. This used to prefer croniter and fall back
+    to _basic_cron on ImportError. But croniter is not a declared dependency,
+    so *which branch runs depended on whether the package happened to be
+    installed on that host* — and the daemon runs on three of them. All three
+    are croniter-free today, so the fallback is what has always executed; that
+    consistency was luck, not design. The day one host picks croniter up as a
+    transitive dependency, it starts computing different fire times than its
+    peers, silently. _basic_cron is covered by the L1 suite (T101-T108: leap
+    day, cross-year, MON-FRI, month-start, steps), so the optional branch
+    bought nothing and risked divergence.
     """
     zone = ZoneInfo(validate_tz(tz))
-    local_after = after.astimezone(zone)
-    try:
-        from croniter import croniter
-
-        local_next = croniter(expr, local_after).get_next(datetime)
-    except ImportError:
-        # croniter is not installed on our hosts today, so this fallback is
-        # the path that actually runs. Keep both branches tz-correct.
-        return _basic_cron(expr, local_after, zone)
-    if local_next.tzinfo is None:
-        local_next = local_next.replace(tzinfo=zone)
-    return local_next.astimezone(timezone.utc)
+    return _basic_cron(expr, after.astimezone(zone), zone)
 
 
 _DOW = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4, "FRI": 5, "SAT": 6}

@@ -1441,5 +1441,48 @@ install_gbrain_monitor() {
 
 install_gbrain_monitor
 
+# ====================================================================
+# install_timeline — 定时任务 timeline 的开机自启 (idempotent)
+# ====================================================================
+# 这台机器上的「一条 timeline」由 cron-daemon.py 承载（30s 心跳，驱动
+# cron-tool 与 watch-task 两个调度器）。平时它由 launcher.sh 启 bot 时
+# 顺带拉起，但**机器重启后没人管** —— 定时任务会静默停摆。
+#
+# boot-autostart.sh 是幂等的：已经在跑的一律跳过，所以装完可以立刻手动
+# 执行一次来验证，不必真去重启一台在服役的机器。
+install_timeline() {
+    local boot="$SCRIPT_DIR/scripts/boot-autostart.sh"
+    local marker="boot-autostart.sh"
+
+    echo ""
+    echo "[Timeline] 装定时任务 timeline 的开机自启..."
+
+    if [[ ! -f "$boot" ]]; then
+        echo "  WARN: $boot 不存在, 跳过"
+        return 0
+    fi
+    chmod +x "$boot"
+
+    if crontab -l 2>/dev/null | grep -q "$marker"; then
+        echo "  已存在 @reboot 条目, 跳过"
+    else
+        (crontab -l 2>/dev/null; \
+         echo "@reboot $boot >> /tmp/boot-autostart.log 2>&1") | crontab -
+        echo "  已加 crontab: @reboot 拉起 bot + cron-daemon + Gateway"
+    fi
+
+    # @reboot 只在 cron 服务本身开机自启时才执行 —— 不查这条的话，
+    # 上面那行看着装好了，其实永远不会跑。
+    if ! systemctl is-enabled cron >/dev/null 2>&1; then
+        echo "  WARN: cron 服务未 enabled, @reboot 不会执行。"
+        echo "        跑: sudo systemctl enable --now cron"
+    fi
+
+    echo "  自检 (幂等, 已在跑的会跳过):"
+    "$boot" --check 2>&1 | sed 's/^/    /' | head -5
+}
+
+install_timeline
+
 echo ""
 echo "=== 部署完成 ==="
