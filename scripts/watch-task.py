@@ -126,9 +126,14 @@ def notify_chat(name: str, text: str, bot: str | None = None) -> None:
 
 
 def notify_inbox(task: dict, text: str) -> None:
-    """inbox 通道：触发主进程一次完整 turn，让它接着往下做。"""
+    """inbox 通道：触发主进程一次完整 turn，让它接着往下做。
+
+    `from` 必须是**真实存在的 bot 名**。第一版写成 `watch:<name>`，结果收件方
+    回执时把它当收件人，那个 bot 不存在，回执就永久卡在 pending —— 每跑一个
+    watch 任务漏一条。watch 的身份信息放在 instruction 正文里已经够了。
+    """
     db().collection("messages").add({
-        "from": f"watch:{task['name']}",
+        "from": task.get("sender") or task.get("notify_bot") or "cron",
         "to": task["notify_bot"],
         "instruction": (
             f"[✅ 后台任务完成 · {task['name']}]\n{text}\n\n"
@@ -151,6 +156,7 @@ def cmd_create(args):
         "prompt": args.prompt,
         "interval_sec": args.interval,
         "notify_bot": args.notify_bot or os.environ.get("BOT_NAME", "jarvis"),
+        "sender": os.environ.get("BOT_NAME") or args.notify_bot or "jarvis",
         "status": "active",
         # anchor=complete：下一次从**跑完**算起，不是从触发算起。探针本身
         # 要十几秒，用 fire 锚点会让间隔越漂越前，长任务上尤其明显。

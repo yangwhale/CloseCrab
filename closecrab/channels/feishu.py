@@ -764,7 +764,20 @@ class FeishuChannel(Channel):
             return
 
         log.info(f"INBOX DEBOUNCE flush: merging {len(items)} independent tasks into one turn")
-        # 前 N-1 条各自的 inbox 记录要单独结掉，否则会一直挂在 pending。
+        n = len(items)
+        parts = [f"[本轮有 {n} 件任务同时到期，合并在一次处理]"]
+        for i, it in enumerate(items, 1):
+            parts.append(f"\n【{i}/{n} · 来自 {it.get('from_bot','?')}】\n{it.get('instruction','')}")
+        merged = {**items[-1], "instruction": "\n".join(parts)}
+
+        # 先执行再结记录，跟 _execute_task 自己的顺序一致（handle_message 完成
+        # 后才 mark_done）。反过来写会在崩溃时留下「已完成，merged into X」的
+        # 不实记录，而 X 其实从没跑过。
+        #
+        # 不必担心这期间被重复投递：firestore_inbox 在派发前就把消息置成
+        # processing 了（firestore_inbox.py:231），而重订阅只查 pending。
+        await self._on_inbox_message_impl(**merged)
+
         loop = asyncio.get_running_loop()
         for it in items[:-1]:
             if self._inbox and it.get("record_id"):
@@ -775,13 +788,6 @@ class FeishuChannel(Channel):
                     )
                 except Exception as e:
                     log.warning(f"inbox merge mark_done failed: {e}")
-
-        n = len(items)
-        parts = [f"[本轮有 {n} 件任务同时到期，合并在一次处理]"]
-        for i, it in enumerate(items, 1):
-            parts.append(f"\n【{i}/{n} · 来自 {it.get('from_bot','?')}】\n{it.get('instruction','')}")
-        merged = {**items[-1], "instruction": "\n".join(parts)}
-        await self._on_inbox_message_impl(**merged)
 
     def _make_input_callback(self, chat_id: str, user_key: str, is_inbox: bool = False):
         """为 inbox/飞书 task 消息创建 on_input_needed 回调。

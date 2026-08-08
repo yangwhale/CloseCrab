@@ -615,6 +615,20 @@ def cmd_tick(args):
         out["dry_run"] = True
     if swept:
         out["swept"] = swept
+
+    # messages 集合的 GC 挂在这个心跳上：它是全局唯一的 housekeeping 时机，
+    # 而每个 bot 各扫一遍同一张表纯属浪费。函数内部自带 1 小时节流。
+    if not dry:
+        try:
+            from closecrab.utils.firestore_inbox import sweep_messages
+
+            ms = sweep_messages(d)
+            if ms and not ms.get("skipped") and any(
+                ms.get(k) for k in ("done", "dead_letter", "orphan_processing")
+            ):
+                out["messages_swept"] = ms
+        except Exception as e:
+            out["messages_sweep_error"] = str(e)[:120]
     if skipped_test:
         out["skipped_test_fixtures"] = skipped_test
     if lost:

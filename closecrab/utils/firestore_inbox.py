@@ -318,3 +318,80 @@ class FirestoreInbox:
             })
         except Exception as e:
             log.error(f"Inbox mark_done failed: {e}")
+
+# ── 集合 GC ────────────────────────────────────────────────────────────────
+# 2026-08-08：实查发现 messages 从来没有清理逻辑，累积到 3857 条，其中
+#   pending    212 条 —— **全部发给已不存在的 bot**（g35f-tester / benchmark /
+#              fake-* 等测试残留，以及 controlboard vs control-board 这种拼写
+#              不一致），最老 132 天。收件人不存在就永远没人消费。
+#   processing  30 条 —— bot 在 handler 跑到一半时挂掉留下的孤儿。派发前已置
+#              processing，而重订阅只查 pending，所以它们既不会被重投递也不会
+#              被处理，永久滞留。
+# scheduled_jobs 早有 7 天 sweep，messages 这边一直是空白。
+
+SWEEP_DONE_DAYS = 14        # done 是历史记录，留两周够回溯了
+SWEEP_STUCK_HOURS = 24      # 卡这么久的 pending/processing 视为死信
+_SWEEP_MIN_INTERVAL = 3600  # 集合有几千条，别每次 tick 都全扫
+
+
+def sweep_messages(db_client, now=None, force: bool = False) -> dict:
+    """清理 messages 集合里的历史与死信。返回统计。
+
+    只由调度心跳调用（cron-tool tick），bot 进程不碰——多个 bot 同时扫同一张
+    表纯属浪费，而心跳本来就是全局唯一的housekeeping 时机。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = now or datetime.now(timezone.utc)
+    meta = db_client.collection("config").document("inbox_sweep")
+    if not force:
+        snap = meta.get()
+        last = (snap.to_dict() or {}).get("last_swept_at") if snap.exists else None
+        if last and (now - last).total_seconds() < _SWEEP_MIN_INTERVAL:
+            return {"skipped": "too soon"}
+
+    live_bots = {d.id for d in db_client.collection("bots").stream()}
+    done_before = now - timedelta(days=SWEEP_DONE_DAYS)
+    stuck_before = now - timedelta(hours=SWEEP_STUCK_HOURS)
+    stats = {"done": 0, "dead_letter": 0, "orphan_processing": 0, "kept": 0}
+
+    # 先把全量读完再动手。边 stream 边 delete 同一个 query，Firestore 的分页
+    # 游标会因为文档消失而错位，每轮漏扫一批 —— 第一次跑就撞上了：统计说删了
+    # 2527 条，集合实际少了 3726 条，两个数都不可信。
+    plan_delete, plan_orphan = [], []
+    for snap in list(db_client.collection("messages").stream()):
+        x = snap.to_dict() or {}
+        created = x.get("created_at")
+        if not created:
+            stats["kept"] += 1
+            continue
+        status, to = x.get("status"), x.get("to")
+
+        if status == "done" and created < done_before:
+            plan_delete.append(snap.reference); stats["done"] += 1
+        elif status == "pending" and to not in live_bots and created < stuck_before:
+            # 收件人不存在 → 不可能有人消费，删了不会丢真实工作
+            plan_delete.append(snap.reference); stats["dead_letter"] += 1
+        elif status == "processing" and created < stuck_before:
+            # 派发出去但没人结掉的孤儿。**标 error 而不是删** —— 它代表一次
+            # 真实的、可能只做了一半的工作，删掉就查不出来了。
+            plan_orphan.append(snap.reference); stats["orphan_processing"] += 1
+        else:
+            stats["kept"] += 1
+
+    for ref in plan_delete:
+        try:
+            ref.delete()
+        except Exception as e:
+            log.warning(f"sweep delete failed {ref.id}: {e}")
+    for ref in plan_orphan:
+        try:
+            ref.update({
+                "status": "error",
+                "result": f"orphaned in processing >{SWEEP_STUCK_HOURS}h (bot died mid-turn?)",
+            })
+        except Exception as e:
+            log.warning(f"sweep orphan-mark failed {ref.id}: {e}")
+
+    meta.set({"last_swept_at": now, "stats": stats}, merge=True)
+    return stats
