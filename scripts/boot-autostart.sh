@@ -57,7 +57,36 @@ wait_for_network() {
     return 1
 }
 
-# ── 3. OpenClaw Gateway ──────────────────────────────────────
+# ── 3. gcsfuse ───────────────────────────────────────────────
+# 只在显式设了 CC_PAGES_GCS_BUCKET_NAME 的机器上挂 —— 这是 run.sh 一直在用的
+# 那个开关。gLinux 没有 fstab 权限，重启后挂载必丢；cc-tw 走 fstab 的 /gcs，
+# 不设这个变量就自动跳过（它的 ~/gcs-mount 是本地目录，盖上去会遮住内容）。
+ensure_gcsfuse() {
+    local mnt="${CC_PAGES_GCS_MOUNT:-$HOME/gcs-mount}"
+    local bucket="${CC_PAGES_GCS_BUCKET_NAME:-}"
+    if [[ -z "$bucket" ]]; then
+        log "SKIP  gcsfuse (未设 CC_PAGES_GCS_BUCKET_NAME)"
+        return 0
+    fi
+    if mountpoint -q "$mnt" 2>/dev/null; then
+        log "SKIP  gcsfuse ($mnt 已挂载)"
+        return 0
+    fi
+    command -v gcsfuse >/dev/null 2>&1 || { log "SKIP  gcsfuse (未安装)"; return 0; }
+    if (( CHECK_ONLY )); then
+        log "WOULD MOUNT  gcsfuse $bucket -> $mnt"
+        return 0
+    fi
+    mkdir -p "$mnt"
+    log "MOUNT gcsfuse $bucket -> $mnt"
+    if gcsfuse --implicit-dirs "$bucket" "$mnt" 2>&1 | sed 's/^/      /'; then
+        log "OK    gcsfuse 已挂载"
+    else
+        log "FAIL  gcsfuse 挂载失败（发布会退回 gsutil，不致命）"
+    fi
+}
+
+# ── 4. OpenClaw Gateway ──────────────────────────────────────
 # openclaw worker 的 ACP 进程连 ws://127.0.0.1:18789，Gateway 不在就直接退出。
 # 它自己没有 watchdog，也不归任何 bot 管，所以必须在这里显式拉起。
 gateway_up() { ss -tlnp 2>/dev/null | grep -q ":18789 "; }
@@ -86,7 +115,7 @@ ensure_gateway() {
     return 1
 }
 
-# ── 4. Bots + cron-daemon ────────────────────────────────────
+# ── 5. Bots + cron-daemon ────────────────────────────────────
 # launcher.sh start all 会：按 registry 里的 hostname 挑出本机的 bot，
 # 逐个 _local_start（已在跑的自己跳过），并 _ensure_cron_daemon。
 # 定时任务的那条 timeline 就挂在 cron-daemon 上，所以这一步也是它的自启。
@@ -103,6 +132,7 @@ ensure_bots() {
 # ── main ─────────────────────────────────────────────────────
 log "=== boot-autostart 开始 (host=$(hostname -s), check_only=$CHECK_ONLY) ==="
 (( CHECK_ONLY )) || wait_for_network
+ensure_gcsfuse
 ensure_gateway
 ensure_bots
 log "=== boot-autostart 结束 ==="
