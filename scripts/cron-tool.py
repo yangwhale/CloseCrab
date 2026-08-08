@@ -454,6 +454,65 @@ def cmd_migrate_tz(args):
     print(json.dumps({"jobs": report, "count": len(report)}, ensure_ascii=False, default=str))
 
 
+def compute_fire_update(job: dict, now: datetime) -> tuple[dict, str | None]:
+    """State transition for one fired job. Pure — no I/O, so it's unit-testable.
+
+    Returns (update_dict, error). Recurring jobs get a recomputed fire_at;
+    one-shots are marked done.
+    """
+    upd = {"last_fired_at": now, "fire_count": (job.get("fire_count") or 0) + 1}
+    if job.get("kind") == "recurring" and job.get("cron"):
+        tz = job.get("tz") or LEGACY_TZ
+        try:
+            nxt = next_cron_fire(job["cron"], now, tz)
+        except Exception as e:
+            return {**upd, "status": "error"}, str(e)
+        if not nxt:
+            return {**upd, "status": "error"}, "cron produced no next fire time"
+        upd["fire_at"] = nxt
+    else:
+        upd["status"] = "done"
+    return upd, None
+
+
+def claim_job(db_client, job_id: str, cutoff: datetime, now: datetime):
+    """Atomically claim one due job. Returns the job dict if we won, else None.
+
+    Why a transaction: cron-daemon runs on several hosts against one shared
+    Firestore collection, with no leader election. The old read-then-write
+    let two daemons that ticked within the same second both see the same
+    fire_at, both dispatch, and both advance it — one due job, two LLM turns.
+    We got lucky (118 historical messages, no observed duplicate) because the
+    race window is ~1s out of a 30s period, but luck is not a design.
+
+    Reading fire_at and advancing it inside one transaction makes the claim
+    the serialization point: the loser re-reads the already-advanced fire_at
+    and skips. Multiple daemons then become a redundancy feature instead of a
+    hazard — no host is special, and losing one doesn't stop the schedule.
+    """
+    ref = db_client.collection(COLL).document(job_id)
+    transaction = db_client.transaction()
+
+    @firestore.transactional
+    def _claim(tx):
+        snap = ref.get(transaction=tx)
+        if not snap.exists:
+            return None
+        x = snap.to_dict() or {}
+        # Re-check every precondition inside the transaction; the state may
+        # have moved between the outer query and here.
+        if x.get("status") != "scheduled":
+            return None
+        fa = x.get("fire_at")
+        if not fa or fa > cutoff:
+            return None
+        upd, _err = compute_fire_update(x, now)
+        tx.update(ref, upd)
+        return x
+
+    return _claim(transaction)
+
+
 def build_instruction(job: dict) -> str:
     """Render the inbox instruction for one fired job.
 
@@ -477,7 +536,7 @@ def build_instruction(job: dict) -> str:
 def cmd_tick(args):
     """Run by daemon. Fire all due scheduled jobs and garbage-collect old done."""
     dry = getattr(args, "dry_run", False)
-    fired, skipped_test = [], 0
+    fired, skipped_test, lost = [], 0, 0
     d = db()
     cutoff = NOW()
     swept = 0
@@ -515,23 +574,15 @@ def cmd_tick(args):
         # the sign flipped. Legacy jobs keep UTC semantics until `migrate-tz`
         # rewrites expression and tz together.
         tz = x.get("tz") or LEGACY_TZ
-        try:
-            nxt = (
-                next_cron_fire(x["cron"], NOW(), tz)
-                if x.get("kind") == "recurring" and x.get("cron")
-                else None
-            )
-            err = None
-        except Exception as e:
-            nxt, err = None, str(e)
 
         if dry:
+            upd, err = compute_fire_update(x, NOW())
             fired.append(
                 {
                     "job_id": x["job_id"],
                     "target": x["target"],
                     "due_hkt": _hkt(fa),
-                    "next_hkt": _hkt(nxt),
+                    "next_hkt": _hkt(upd.get("fire_at")),
                     "tz": tz,
                     "error": err,
                     "instruction_preview": build_instruction(x)[:160],
@@ -539,27 +590,25 @@ def cmd_tick(args):
             )
             continue
 
+        # Claim before dispatching. If another daemon got here first this
+        # returns None and we move on without sending anything.
+        won = claim_job(d, x["job_id"], cutoff, NOW())
+        if won is None:
+            lost += 1
+            continue
+
         d.collection("messages").add(
             {
-                "from": x.get("sender", "cron"),
-                "to": x["target"],
-                "instruction": build_instruction(x),
-                "task_id": f"cron-{x['job_id']}",
+                "from": won.get("sender", "cron"),
+                "to": won["target"],
+                "instruction": build_instruction(won),
+                "task_id": f"cron-{won['job_id']}",
                 "status": "pending",
                 "result": "",
                 "created_at": NOW(),
             }
         )
-        upd = {"last_fired_at": NOW(), "fire_count": (x.get("fire_count") or 0) + 1}
-        if x.get("kind") == "recurring" and x.get("cron"):
-            if err or not nxt:
-                upd["status"] = "error"
-            else:
-                upd["fire_at"] = nxt
-        else:
-            upd["status"] = "done"
-        snap.reference.update(upd)
-        fired.append(x["job_id"])
+        fired.append(won["job_id"])
 
     out = {"fired": fired, "count": len(fired)}
     if dry:
@@ -568,6 +617,9 @@ def cmd_tick(args):
         out["swept"] = swept
     if skipped_test:
         out["skipped_test_fixtures"] = skipped_test
+    if lost:
+        # Another daemon claimed these first — expected, not an error.
+        out["lost_race"] = lost
     print(json.dumps(out, ensure_ascii=False, default=str))
 
 

@@ -196,6 +196,47 @@ def test_legacy_job_without_tz_keeps_utc_semantics():
     assert legacy == migrated == U(2026, 8, 10, 0, 13)
 
 
+# ── D3. State transition on fire (pure half of the claim) ───────────────────
+
+def test_recurring_advances_fire_at():
+    now = U(2026, 8, 7, 20, 0)
+    job = {"kind": "recurring", "cron": "0 8 * * *", "tz": HK, "fire_count": 4}
+    upd, err = cron_tool.compute_fire_update(job, now)
+    assert err is None
+    assert upd["fire_at"] == U(2026, 8, 8, 0, 0)
+    assert upd["fire_count"] == 5
+    assert "status" not in upd  # stays scheduled
+
+
+def test_oneshot_is_marked_done():
+    upd, err = cron_tool.compute_fire_update(
+        {"kind": "oneshot", "fire_count": 0}, U(2026, 8, 7, 20, 0)
+    )
+    assert err is None and upd["status"] == "done"
+
+
+def test_recurring_with_broken_cron_goes_to_error_not_silent_stall():
+    """A job whose expression stopped parsing must surface as `error`.
+
+    Leaving it `scheduled` with an unchanged fire_at would make it re-fire on
+    every single tick — a 30-second spam loop.
+    """
+    upd, err = cron_tool.compute_fire_update(
+        {"kind": "recurring", "cron": "0 25 * * *", "tz": HK, "fire_count": 0},
+        U(2026, 8, 7, 20, 0),
+    )
+    assert err and upd["status"] == "error"
+
+
+def test_legacy_recurring_job_advances_using_utc():
+    """No tz field → keep UTC semantics (the deploy-safety invariant)."""
+    now = U(2026, 8, 7, 20, 0)
+    upd, err = cron_tool.compute_fire_update(
+        {"kind": "recurring", "cron": "13 0 * * 1", "fire_count": 1}, now
+    )
+    assert err is None and upd["fire_at"] == U(2026, 8, 10, 0, 13)
+
+
 # ── E. T201 — job_id must reach the agent (G1) ──────────────────────────────
 
 def test_T201_recurring_instruction_carries_job_id():
