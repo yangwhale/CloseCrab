@@ -11,6 +11,9 @@
 # 例:
 #   * * * * * .../log-watch-notify.sh /tmp/isl.log '^ISL=' /tmp/.isl.seen 'ISL扫描'
 set -o pipefail
+# 身份必须由调用处给定。挂 crontab 时在那一行前面写 BOT_NAME=xxx。
+# 不给兜底默认值：缺省会以别人的飞书 app 身份发出（见 feishu-notify.py）。
+[ -z "$BOT_NAME" ] && { echo "$(basename "$0"): BOT_NAME not set" >&2; exit 2; }
 LOG=$1; PAT=$2; STATE=${3:-/tmp/.logwatch.seen}; PREFIX=${4:-进度}
 [ -f "$LOG" ] || exit 0
 
@@ -22,5 +25,5 @@ NEWLINES=$(grep -E "$PAT" "$LOG" | tail -n $((NOW - SEEN)))
 echo "$NOW" > "$STATE"
 # 同 agent-watch.sh：显式传身份，别用默认值冒名。
 python3 /home/chrisya/CloseCrab/scripts/feishu-notify.py \
-  --bot "${BOT_NAME:-jarvis}" "[$PREFIX] $(date '+%H:%M')
+  --bot "$BOT_NAME" "[$PREFIX] $(date '+%H:%M')
 $NEWLINES" >/dev/null 2>&1

@@ -20,6 +20,9 @@
 #   - agent 认为没进展就回 SKIP，脚本静默退出，不刷屏
 #   - 用 haiku（快 + 便宜，单次约 10s）
 set -o pipefail
+# 身份必须由调用处给定。挂 crontab 时在那一行前面写 BOT_NAME=xxx。
+# 不给兜底默认值：缺省会以别人的飞书 app 身份发出（见 feishu-notify.py）。
+[ -z "$BOT_NAME" ] && { echo "$(basename "$0"): BOT_NAME not set" >&2; exit 2; }
 NAME=$1; shift
 PROMPT="$*"
 [ -z "$NAME" ] && { echo "usage: agent-watch.sh <name> <prompt>"; exit 1; }
@@ -48,5 +51,5 @@ echo "$OUT" > "$LAST"
 # --bot 必须显式传：本脚本常挂系统 crontab，那里没有 BOT_NAME，
 # 而 feishu-notify 用的是该 bot 的飞书 app 凭证，缺省会以别人的身份发出。
 python3 /home/chrisya/CloseCrab/scripts/feishu-notify.py \
-  --bot "${BOT_NAME:-jarvis}" "🤖 [$NAME] $(date '+%H:%M')
+  --bot "$BOT_NAME" "🤖 [$NAME] $(date '+%H:%M')
 $OUT" >/dev/null 2>&1

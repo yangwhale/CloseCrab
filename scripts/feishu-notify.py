@@ -21,11 +21,17 @@ import json
 import os
 import sys
 
-# 默认取调用方自己的身份，**不要硬编码某个 bot**。
-# _load_cfg 拿的是该 bot 的飞书 app 凭证，所以填错等于用别人的身份发消息——
-# 2026-08-08 实际发生过：tiemu 跑本脚本没带 --bot，通知以 jarvis 的名义出现在
-# 聊天窗口，jarvis 根本没参与那件事。BOT_NAME 由 bot.py 注入子进程环境。
-DEFAULT_BOT = os.environ.get("BOT_NAME") or "jarvis"
+# 身份只能来自 BOT_NAME 或显式 --bot，**没有兜底默认值**。
+#
+# _load_cfg 拿的是该 bot 的飞书 app 凭证，所以填错不是"发给别人"，是"以别人
+# 的身份发出"。2026-08-08 实际发生过：tiemu 跑本脚本，BOT_NAME 没传进子进程，
+# 旧代码退回硬编码的 jarvis，于是借了 jarvis 的凭证和收件人把消息发了出去，
+# jarvis 根本没参与那件事。
+#
+# 第一版修复改成 `os.environ.get("BOT_NAME") or "jarvis"`，只堵了一半——
+# 静默退回 jarvis 的路径还在。tiemu 复核时指出这点，接受：
+# **发不出去是可见的（非零退出 + 明确报错），冒名是不可见的。** 宁可失败。
+DEFAULT_BOT = os.environ.get("BOT_NAME") or ""
 
 
 def _load_cfg(bot: str) -> dict:
@@ -50,6 +56,12 @@ def main() -> None:
     if not text:
         return
 
+    if not args.bot:
+        sys.exit(
+            "refusing to send: no --bot and no BOT_NAME in env.\n"
+            "身份必须显式确定——缺省会以别人的飞书 app 身份发出（冒名）。\n"
+            "请传 --bot <name>，或在调用处设置 BOT_NAME。"
+        )
     cfg = _load_cfg(args.bot)
     target = args.to
     if not target:
