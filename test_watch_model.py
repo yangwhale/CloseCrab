@@ -201,3 +201,58 @@ def test_probe_timeout_degrades_to_skip():
 
     with mock.patch.object(wt.subprocess, "run", boom):
         assert wt.run_probe("p", "", 0, "haiku") == ("SKIP", "")
+
+
+# ── host 钉死（三台 daemon 抢同一张表时，执行必须落在对的机器）─────────────
+
+def test_task_pinned_to_creating_host():
+    doc = _create([])
+    assert doc["host"] == wt.this_host(), "创建时必须记下是哪台机器"
+
+
+def test_foreign_host_task_skipped():
+    assert wt._is_mine({"host": "some-other-box.example.com"}) is False
+
+
+def test_own_host_task_claimed():
+    assert wt._is_mine({"host": wt.this_host()}) is True
+
+
+def test_legacy_task_without_host_still_runs():
+    """老任务没有 host 字段 → 不限机器，保持旧行为，不要突然停摆。"""
+    assert wt._is_mine({}) is True
+
+
+def test_host_filter_runs_before_claim():
+    """别台机器的任务：既不能跑探针，**也不能被 claim**。
+
+    先 claim 再跳过的话 next_fire_at 已被推到下一周期，真正该跑的那台
+    这一轮就被饿死 —— 而且静默无感。
+    """
+    claimed, probed = [], []
+    task = _base_task(host="some-other-box.example.com")
+
+    class _Ref:
+        def update(self, upd):
+            pass
+
+    class _Q:
+        def stream(self):
+            return [types.SimpleNamespace(to_dict=lambda: task)]
+
+    class _C:
+        def where(self, *a):
+            return _Q()
+
+        def document(self, _n):
+            return _Ref()
+
+    d = types.SimpleNamespace(collection=lambda _c: _C())
+
+    with mock.patch.object(wt, "db", lambda: d), \
+         mock.patch.object(wt, "_claim", lambda *a: claimed.append(1) or task), \
+         mock.patch.object(wt, "run_probe", lambda *a: probed.append(1) or ("SKIP", "")):
+        wt.cmd_tick(argparse.Namespace(dry_run=False))
+
+    assert probed == [], "不该在别台机器的任务上起探针"
+    assert claimed == [], "更不该 claim 它 —— 会把 next_fire_at 推走饿死正主"

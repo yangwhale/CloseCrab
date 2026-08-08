@@ -43,6 +43,7 @@ import argparse
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -94,6 +95,28 @@ DONE    任务已结束（成功或失败）。第一行写 DONE，之后 2-4 �
 
 def db():
     return cron_tool.db()
+
+
+def this_host() -> str:
+    return socket.gethostname()
+
+
+def _is_mine(task: dict) -> bool:
+    """这条任务该不该由本机跑。
+
+    watch 任务跟 cron 提醒有个本质区别：cron 到期只是**往 Firestore 写一条
+    inbox**，目标 bot 在哪台机器都自己收得到，所以哪台 daemon 干结果一样，
+    共享那张表反而是冗余优势（挂一台不影响排期）。
+
+    watch 到期是**在本机起 agent 跑 shell、读本机文件**。三台 daemon 抢同一
+    条任务时，赢的那台可能根本没有那个日志文件 —— 探针会对着不存在的路径
+    永远返回 SKIP，看起来一切正常，实际那个任务再也不会被真正盯到。抢占是
+    原子的、不会重复执行，但**执行在了错的机器上**，这不是锁能解决的问题。
+
+    所以按 host 钉死。没有 host 字段的老任务视为不限机器（保持旧行为）。
+    """
+    h = task.get("host")
+    return (not h) or h == this_host()
 
 
 def _model_tier(v: str) -> str:
@@ -187,6 +210,8 @@ def cmd_create(args):
         "prompt": args.prompt,
         "interval_sec": args.interval,
         "model": args.model,
+        # 钉在创建它的这台机器上：探针读的是本机文件，换台机器跑就是错的
+        "host": this_host(),
         "notify_bot": args.notify_bot or os.environ.get("BOT_NAME", "jarvis"),
         "sender": os.environ.get("BOT_NAME") or args.notify_bot or "jarvis",
         "status": "active",
@@ -204,7 +229,7 @@ def cmd_create(args):
     db().collection(COLL).document(args.name).set(doc)
     print(json.dumps({
         "name": args.name, "interval_sec": args.interval,
-        "model": args.model,
+        "model": args.model, "host": doc["host"],
         "first_fire_hkt": _hkt(doc["next_fire_at"]),
         "notify_bot": doc["notify_bot"],
     }, ensure_ascii=False))
@@ -220,6 +245,7 @@ def cmd_list(args):
             "name": x.get("name"), "status": x.get("status"),
             "interval_sec": x.get("interval_sec"),
             "model": x.get("model") or DEFAULT_MODEL,
+            "host": x.get("host") or "(不限)",
             "next_fire_hkt": _hkt(x.get("next_fire_at")),
             "fire_count": x.get("fire_count"),
             "consecutive_skips": x.get("consecutive_skips"),
@@ -278,6 +304,11 @@ def cmd_tick(args):
             continue
         nf = x.get("next_fire_at")
         if not nf or nf > cutoff:
+            continue
+
+        # **必须在抢占之前判**：先 claim 再发现不是自己的，next_fire_at 已经被
+        # 推到下一个周期了，真正该跑的那台机器这一轮就被饿死 —— 而且是静默的。
+        if not _is_mine(x):
             continue
 
         if args.dry_run:
