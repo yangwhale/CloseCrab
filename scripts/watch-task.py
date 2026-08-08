@@ -180,7 +180,10 @@ def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) ->
             capture_output=True, text=True, timeout=PROBE_TIMEOUT, cwd="/tmp", env=env,
         ).stdout.strip()
     except subprocess.TimeoutExpired:
-        return "SKIP", ""
+        # 跟「没进展」区分开。两者都不该播报，但一个是任务在正常跑，另一个是
+        # 探针自己就没跑完 —— 全都记成 SKIP 的话，一个每轮都超时的探针会一路
+        # 静默到 max_age，看起来跟「任务还在跑」一模一样。
+        return "TIMEOUT", ""
     if not out:
         return "SKIP", ""
     head, _, rest = out.partition("\n")
@@ -214,14 +217,14 @@ def notify_chat(name: str, text: str, bot: str | None = None) -> None:
         print(json.dumps({"warn": f"notify_chat failed for {name}: {e}"}), file=sys.stderr)
 
 
-def notify_inbox(task: dict, text: str) -> None:
-    """inbox 通道：触发主进程一次完整 turn，让它接着往下做。
+def _inbox_payload(task: dict, text: str) -> dict:
+    """inbox 通道的消息体：触发主进程一次完整 turn，让它接着往下做。
 
     `from` 必须是**真实存在的 bot 名**。第一版写成 `watch:<name>`，结果收件方
     回执时把它当收件人，那个 bot 不存在，回执就永久卡在 pending —— 每跑一个
     watch 任务漏一条。watch 的身份信息放在 instruction 正文里已经够了。
     """
-    db().collection("messages").add({
+    return {
         "from": task.get("sender") or task.get("notify_bot") or "cron",
         "to": task["notify_bot"],
         "instruction": (
@@ -233,7 +236,39 @@ def notify_inbox(task: dict, text: str) -> None:
         "status": "pending",
         "result": "",
         "created_at": NOW(),
-    })
+    }
+
+
+def notify_inbox(task: dict, text: str) -> None:
+    """非事务版本，留给外部调用方；收尾路径走 _finalize_done。"""
+    db().collection("messages").add(_inbox_payload(task, text))
+
+
+def _finalize_done(d, name: str, task: dict, body: str) -> bool:
+    """收尾：把 status 翻成 done 和写 inbox 放进同一个事务。
+
+    返回 True 表示这一方赢得了收尾权（inbox 已写）；False 表示别人已经收过尾，
+    什么都不该再做。两个写都在 Firestore，所以原子性是免费的 —— 没有理由让
+    「交接了但没标记」或「标记了但没交接」这两种半截状态存在。
+    """
+    ref = d.collection(COLL).document(name)
+    msg_ref = d.collection("messages").document()
+    tx = d.transaction()
+
+    @firestore.transactional
+    def _run(t):
+        snap = ref.get(transaction=t)
+        if not snap.exists or (snap.to_dict() or {}).get("status") != "active":
+            return False
+        t.set(msg_ref, _inbox_payload(task, body))
+        t.update(ref, {
+            "status": "done",
+            "last_report": body,
+            "done_at": NOW(),
+        })
+        return True
+
+    return _run(tx)
 
 
 # ── 命令 ────────────────────────────────────────────────────────────────────
@@ -263,7 +298,24 @@ def cmd_create(args):
     }
     if args.test_run_id:
         doc["test_run_id"] = args.test_run_id
-    db().collection(COLL).document(args.name).set(doc)
+    ref = db().collection(COLL).document(args.name)
+    # 名字直接当文档 ID，所以重名是覆盖而不是新建。原来这里是裸 set()：
+    # 第二个任务顶掉第一个，第一个从此再没有人盯，而且两边都不报错 ——
+    # 提交的人以为在跑，被顶掉的那个悄无声息。
+    prev = ref.get()
+    if prev.exists and (prev.to_dict() or {}).get("status") == "active" and not args.force:
+        old = prev.to_dict() or {}
+        print(json.dumps({
+            "error": f"watch 任务 {args.name!r} 已存在且在运行中，拒绝覆盖",
+            "existing": {
+                "host": old.get("host"), "fire_count": old.get("fire_count"),
+                "next_fire_hkt": _hkt(old.get("next_fire_at")),
+                "prompt": (old.get("prompt") or "")[:80],
+            },
+            "hint": f"换个名字，或先 `watch-task.py stop {args.name}`，或加 --force 覆盖",
+        }, ensure_ascii=False))
+        sys.exit(2)
+    ref.set(doc)
     print(json.dumps({
         "name": args.name, "interval_sec": args.interval,
         "model": args.model, "host": doc["host"],
@@ -434,19 +486,33 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
     upd = {"next_fire_at": NOW() + timedelta(seconds=task.get("interval_sec", 120))}
 
     if verdict == "DONE":
-        # 顺序有讲究：**先交接、后播报**。inbox 是这个脚本存在的理由，
-        # chat 只是让你看一眼。反过来的话，chat 发完而 inbox 失败，用户
-        # 已经看到「跑完了」，任务却没标 done —— 下一轮重跑再播一次，
-        # 同一条结论收两遍。先做要紧的那件，失败就整条重来，干净。
-        notify_inbox(task, body)
-        notify_chat(name, body, task.get("notify_bot"))
-        upd.update({"status": "done", "last_report": body})
+        # inbox 交接和「标记 done」必须一起成功或一起失败，否则两种坏结局二选一：
+        # 先发 inbox 再标记，标记失败 → 下一轮重判 DONE，同一条结论再交接一次
+        # （每轮烧主进程一个完整 turn）；先标记再发 inbox，inbox 失败 → 任务链
+        # 静默断掉。两者写的都是 Firestore，放进一个事务就都不用选。
+        # 只有把 status 从 active 翻成 done 的那一方才写 inbox。
+        if _finalize_done(d, name, task, body):
+            notify_chat(name, body, task.get("notify_bot"))
+        return {"name": name, "verdict": verdict}
     elif verdict == "REPORT":
         notify_chat(name, body, task.get("notify_bot"))
         upd.update({"last_report": body, "consecutive_skips": 0, "stall_notified": False})
+    elif verdict == "TIMEOUT":
+        # 探针没跑完。不播报（跟 SKIP 一样安静），但单独计数：连续超时说明
+        # prompt 太重或者机器扛不住，跟「任务还在跑」是两回事。
+        touts = (task.get("consecutive_timeouts") or 0) + 1
+        upd["consecutive_timeouts"] = touts
+        skips += 1
+        upd["consecutive_skips"] = skips
+        if touts == 3:
+            notify_chat(name,
+                        f"⚠️ 探针连续 {touts} 轮超时（每轮上限 {PROBE_TIMEOUT}s），"
+                        f"这不代表任务卡住，是判断本身没跑完 —— prompt 可能太重。",
+                        task.get("notify_bot"))
     else:
         skips += 1
         upd["consecutive_skips"] = skips
+        upd["consecutive_timeouts"] = 0
         # 停滞检测：「还在跑」和「卡死了」在 SKIP 层面长得一样，
         # 只能靠连续多少轮没动静来区分。只播一次，不刷屏。
         if skips >= (task.get("stall_after") or DEFAULT_STALL_AFTER) and not task.get("stall_notified"):
@@ -476,6 +542,8 @@ def main():
                    help=f"连续多少轮无进展算疑似卡住，默认 {DEFAULT_STALL_AFTER}")
     c.add_argument("--max-age", type=int, default=6 * 3600, help="秒，超时自动收，默认 6 小时")
     c.add_argument("--test-run-id", help="打上就只在 --dry-run 里出现，绝不真跑（测试夹具专用）")
+    c.add_argument("--force", action="store_true",
+                   help="同名任务已在运行时覆盖它（默认拒绝，避免顶掉别人的任务）")
     c.set_defaults(fn=cmd_create)
 
     l = sub.add_parser("list")

@@ -247,7 +247,11 @@ def _basic_cron(expr: str, after: datetime, zone: ZoneInfo | None = None) -> dat
     hrs = _expand(parts[1], 0, 23)
     doms = _expand(parts[2], 1, 31)
     months = _expand(parts[3], 1, 12)
-    dows = _expand(parts[4], 0, 6, _DOW)
+    # Standard cron accepts BOTH 0 and 7 for Sunday. Rejecting 7 turned a
+    # perfectly ordinary "0 8 * * 7" into a hard error at creation time —
+    # correct-looking input, loud failure, no hint that 0 was the spelling
+    # this parser wanted. Accept it and fold onto 0.
+    dows = {0 if d == 7 else d for d in _expand(parts[4], 0, 7, _DOW)}
     if zone is not None:
         after = after.astimezone(zone)
     # Two-level scan: skip a whole day at a time when the *date* can't match,
@@ -519,7 +523,13 @@ def claim_job(db_client, job_id: str, cutoff: datetime, now: datetime):
         fa = x.get("fire_at")
         if not fa or fa > cutoff:
             return None
-        upd, _err = compute_fire_update(x, now)
+        upd, err = compute_fire_update(x, now)
+        # Record WHY a job died. Without this the row just flips to
+        # status='error' with no reason anywhere, and the next person to look
+        # has a dead recurring job and nothing to go on.
+        if err:
+            upd["last_error"] = err[:300]
+            upd["last_error_at"] = now
         tx.update(ref, upd)
         return x
 
