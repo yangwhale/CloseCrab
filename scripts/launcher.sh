@@ -202,38 +202,13 @@ _local_start() {
 
     echo -e "${CYAN}Starting bot '$bot_name'...${NC}"
 
+    # 直接交给 run.sh，不要自己再抄一份重启循环。
+    # 以前这里内联了一份 run.sh 的循环副本，但**漏掉了 run.sh 开头那整段环境
+    # 设置** —— .zshenv、nvm/npm-global 的 PATH、KILO_SERVER_PASSWORD、TTS 后端。
+    # 于是 kilo worker 的 bot（hulk / tommy）从 launcher 起来就连不上自己的
+    # kilo serve。两份循环还会各自漂移（run.sh 处理 exit 0 和 143，副本不处理）。
     cd "$PROJECT_DIR"
-    nohup bash -c '
-        FAIL_COUNT=0
-        while true; do
-            python3 -m closecrab --bot "'"$bot_name"'" "$@"
-            EXIT_CODE=$?
-            case $EXIT_CODE in
-                42)
-                    echo "[$(date)] Restart requested (/restart), restarting in 2s..."
-                    FAIL_COUNT=0
-                    sleep 2
-                    ;;
-                130|137)
-                    echo "[$(date)] Stopped by signal (exit $EXIT_CODE), not restarting."
-                    break
-                    ;;
-                1)
-                    echo "[$(date)] Config error (exit 1), not restarting."
-                    break
-                    ;;
-                *)
-                    echo "[$(date)] Exited (code $EXIT_CODE), restarting in 5s..."
-                    FAIL_COUNT=$((FAIL_COUNT + 1))
-                    sleep 5
-                    ;;
-            esac
-            if [ $FAIL_COUNT -ge 10 ]; then
-                echo "[$(date)] Too many failures ($FAIL_COUNT), stopping."
-                break
-            fi
-        done
-    ' >> "$state_dir/nohup.out" 2>&1 &
+    setsid nohup ./run.sh "$bot_name" >> "$state_dir/nohup.out" 2>&1 < /dev/null &
     local pid=$!
     echo "$pid" > "$state_dir/bot.pid"
 
