@@ -141,6 +141,10 @@ python3 ~/CloseCrab/scripts/feishu-notify.py "跑到第 2 步了"
 python3 ~/CloseCrab/scripts/watch-task.py create --name t80 --interval 120 \
   --notify-bot $BOT_NAME \
   --prompt "读 /tmp/t80.log 判断进度。出现 TRAINING COMPLETE 或 Error 时用 DONE。"
+# --model 挑档位（默认 haiku）。你最清楚这活儿难不难，别让所有任务陪着最贵的跑：
+#   haiku  看日志有没有变、进程在不在、文件出现没有      ← 默认，够用
+#   sonnet 要读懂内容再判断：报错致命还是可忽略、指标达标没
+#   opus   要做真判断和取舍：该不该动手、几个方案挑哪个
 python3 ~/CloseCrab/scripts/watch-task.py list|stop <name>
 
 # 自查状态（model / cost / token / 历史 turns）

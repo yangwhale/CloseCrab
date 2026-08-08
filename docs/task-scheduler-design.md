@@ -5,6 +5,10 @@
 > 作者：Chris × bunny 协同设计
 > 调研输入：OpenClaw（本机源码）、Claude Code（官方文档）、Goose、OpenHarness、Crush、OpenCode
 
+**一句话架构**（2026-08-08 Chris 定调，展开见 §6.0）：
+**每台机器一个 daemon 就是整个 runtime。** 它读 Firestore 上的任务清单，到期的拿去跑，
+没有就待着。bot 只管往清单里写、改、删，**不关心谁执行、怎么执行**。
+
 ---
 
 ## 1. 问题
@@ -280,6 +284,61 @@ Calendar 存 `RRULE` + `DTSTART` + `TZID` 然后物化实例，这个**两层思
 
 ## 6. 执行模型
 
+### 6.0 运行时就是一个 daemon
+
+> **2026-08-08 Chris 定调**：「这个 runtime 就是一个 daemon。你在这台机上起一个 daemon，
+> 它就负责去读那个 task list，从 Firestore，有什么它就去处理，没有它就搁那待着。
+> 它是一个活着的 daemon，这样它不就解耦了吗？然后每一个 bot 就负责自己那点事，
+> 往 task list 写东西、删东西、改它，它也甭管它是怎么处理的，因为 daemon 管。」
+
+这句话是整个设计的地基，前面几节都是它的展开。写清楚免得后面又长出第二套东西。
+
+```
+        ┌───────── bot A ─────────┐   ┌───────── bot B ─────────┐
+        │  只做 CRUD：写/改/删任务  │   │  只做 CRUD               │
+        └────────────┬────────────┘   └────────────┬────────────┘
+                     │                             │
+                     └──────────► Firestore ◄──────┘
+                                  任务清单（唯一真相）
+                                       ▲
+                                       │ 每 30s 读一次
+                     ┌─────────────────┴─────────────────┐
+                     │   daemon（每台机器一个，唯一 runtime）│
+                     │   到期的 → 起 agent 跑              │
+                     │   没到期 → 什么都不做               │
+                     └─────────────────┬─────────────────┘
+                                       │
+                            结果按 §8.1 选通道回流
+                            chat（看一眼） / inbox（要接着做）
+```
+
+**解耦换来的四件事，每件都是实打实的：**
+
+1. **写任务的和执行任务的可以不是同一个进程。** bot 崩了、重启了、换 model 了，
+   在跑的任务不受影响 —— 状态全在 Firestore，不在任何一个 bot 的内存里。
+2. **一个 bot 能给另一个 bot 排活。** 因为清单是全局的，不是谁私有的。
+   跨 bot 协作不需要新协议，写一条任务就是了。
+3. **daemon 自己也是可替换的。** 三台机器各跑一个，靠事务抢占（§6.4）保证
+   同一条任务只有一个赢家。挂一台不影响排期 —— 多 daemon 是冗余，不是冲突。
+4. **bot 不需要知道执行细节。** 用哪个模型、跑多久、失败重试几次，都是 daemon
+   的事。bot 唯一能表达的偏好是「这活儿有多难」（§6.5 的模型分档）。
+
+**为什么不让每个 bot 自己起定时器**（这是最容易走错的一步）：
+
+- bot 是会重启的，内存里的定时器一重启就没了；Firestore 上的任务不会
+- N 个 bot 各起一套，就有 N 套不同的实现在各自漂移
+- 「现在系统里到底有多少定时任务在跑」会变成一个查不清楚的问题 ——
+  这正是 [`feedback_one-timeline-no-rogue-cron`] 记的那次教训：一条野生
+  crontab 空转 13 天没人发现，就因为它不在任何一张能列出来的清单上
+
+**同一条原则也管系统 crontab**：`@reboot` 拉常驻进程、rsync、日志轮转这类
+纯确定性管道可以留在 crontab；**任何会起 LLM 的东西必须走这条 timeline**。
+分界线见 `closecrab/prompts/universal-worker-rules.md` §10。
+
+**当前实现对照**：daemon = `scripts/cron-daemon.py`（30s 心跳），它驱动两个
+调度器 —— `cron-tool.py tick`（定时消息）和 `watch-task.py tick`（盯长跑任务）。
+两者共用一个心跳、一套抢占逻辑、一张 Firestore。**不要再起第三个 daemon。**
+
 ### 6.1 isolated session
 
 定时任务触发的 turn 走独立 session（沿用 OpenClaw 的命名习惯：`sched:<task_id>`），不进主对话。
@@ -325,10 +384,63 @@ Calendar 存 `RRULE` + `DTSTART` + `TZID` 然后物化实例，这个**两层思
 
 实测：8 线程并发 claim 同一条 job，恰好 1 个赢家，`fire_count == 1`。
 
-### 6.3 不采用的方案
+### 6.5 模型分档：写任务的人说这活儿有多难
+
+> **2026-08-08 Chris 提出**：「这个 bot 写进去的时候，它知道自己这个任务到底是复杂的
+> 还是简单的，它可以指定一下它这个被 trigger 的时候用什么模型，可以分三档。」
+
+这是 §6.0 解耦之后**唯一需要留给写方的旋钮**。daemon 不知道这活儿难不难 ——
+「看日志里有没有出现 done」和「看资源池够不够，判断能不能开训」都是一句
+自然语言 prompt，从字面上分不出档次。但**写任务的那个 bot 当时就知道**。
+
+**三档 + 一个不推理的直投：**
+
+| `model` | 谁来跑 | 适合什么 | 相对成本 |
+|---|---|---|---|
+| `none` | daemon 不推理，把消息直接投给目标 bot | 纯定时提醒（现有 cron job 全是这类） | daemon 侧为 0 |
+| `haiku` | daemon 起 haiku agent | **默认**。看日志有没有变、进程还在不在、文件出现没有 | 最低 |
+| `sonnet` | daemon 起 sonnet agent | 要读懂内容再判断：报错是致命还是可忽略、指标是否达标 | 中 |
+| `opus` | daemon 起 opus agent | 要做真判断和取舍：该不该动手、几个方案挑哪个 | 最高 |
+
+**为什么默认 haiku**：这条路是**高频**的 —— 一个 2 分钟间隔的 watch 任务跑 20 分钟
+就是 10 次。绝大多数轮次的结论是「没变化，继续等」，那不需要主力模型。
+真需要判断力的那一档由写方显式抬上去，而不是所有人陪着最贵的跑。
+
+**`none` 不是「更低的档」，是换了个执行者。** 它就是现在 `cron-tool.py` 的行为 ——
+到点写一条 inbox，由目标 bot 用**它自己的模型**接。需要 bot 的身份、会话上下文、
+完整工具链时，就得回到 bot 自己的 turn 里去，那不是 daemon 起个 agent 能替代的。
+
+**落地上它今天是另一张表**：`none` = 建一条 `scheduled_jobs`（`cron-tool.py add`），
+三档 = 建一条 `watch_tasks`（`watch-task.py create --model`）。
+所以 `watch-task.py --model` **只收三档，不收 `none`** —— 在 watch 任务里
+每轮直投 inbox 是个退化形态，那就是 cron job，不该有两种写法。
+
+把 `none` 写进这张表，是为了让写方在**同一个心智里**做完「谁来跑」这个决定，
+也是为了标出将来两张表若要合并时，`model` 就是区分它们的那个字段。
+
+**取值直接用 CLI 的裸别名**（`haiku` / `sonnet` / `opus`），不维护一张
+`{档位 → 具体 model ID}` 的映射表。理由：那张表会过期（`claude-opus-4-8`
+今天对，下个月就换代了），而裸别名由 CLI 负责解析到当代模型。
+2026-08-08 实测七个写法（三个裸别名 + 四个 pinned ID）全部可用。
+
+**一个必须记住的坑**：跑探针前要**剥掉 `ANTHROPIC_BETAS`**。
+本机 `settings.json` 里设了 `ANTHROPIC_BETAS=context-1m-2025-08-07` 解锁 1M
+context，但 **haiku 不支持这个 beta**，带着它调会直接 `400 Unexpected value(s)`。
+`run_probe` 里已经有这行剥离，加档位时**不要把它删掉**：
+
+```python
+env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BETAS"}
+```
+
+这个坑很阴：opus 和 sonnet 带着这个头都正常，只有 haiku 挂 —— 也就是说
+**只有把默认档位调到最便宜的那一档才会暴露**。
+
+### 6.6 不采用的方案
 
 - **`maxRuns` / `until` 声明式终止**：表达不了「查到票」这种语义条件。可作为**兜底**保留（防跑飞），但不作为主要终止手段。
 - **事件驱动 armTimer**：OpenClaw 的做法更省，但我们 30s 轮询已在跑且够用，换过去的收益不抵改造成本和新引入的 bug 面。**明确不做。**
+- **daemon 自己判断该用哪个模型**：等于让 daemon 先推理一次「这活儿难不难」，
+  为了省钱先花一次钱，而且它掌握的信息还不如写方多。**交给写方声明。**
 
 ---
 
@@ -530,6 +642,39 @@ tasks/{task_id}/runs/{run_id}
 
 **代价（要记住）**：Firestore 子集合**不会随父文档自动删除**。Task 删除时必须显式递归清理 runs，否则会留下永久孤儿数据。这条要写进实现清单。
 
+### 9.4 `watch_tasks` 集合（**实际在用的那个**）
+
+上面 9.1–9.3 是参考 schema、不实施。真正落地的是这张表（`scripts/watch-task.py`）：
+
+```
+watch_tasks/{name}
+  # ── 定义（写方给的） ──
+  name              str    同时是 doc id，天然防重名
+  prompt            str    给探针 agent 的指令，必须自包含（见 §6.1 代价）
+  interval_sec      int    轮询间隔，默认 120
+  model             str    none | haiku | sonnet | opus，默认 haiku   ← §6.5
+  notify_bot        str    DONE 时把 inbox 交接给谁
+  sender            str    创建者 bot 名。**必须是真实存在的 bot**，见下
+  stall_after       int    连续多少轮无进展算疑似卡住，默认 15
+  max_age_sec       int    兜底硬上限，默认 6 小时，超时自动收
+
+  # ── 运行时状态（daemon 写） ──
+  status            str    active | done | cancelled | expired
+  next_fire_at      ts     daemon 唯一读的字段
+  fire_count        int
+  last_report       str    上次播报内容，下一轮当作「上次说到哪」喂回给探针
+  consecutive_skips int    连续无进展轮数，驱动停滞检测
+  stall_notified    bool   卡住只播一次，不刷屏
+  created_at        ts
+```
+
+**`sender` 必须是真实 bot 名**：第一版写成 `watch:<name>`，收件方回执时把它当
+收件人，那个 bot 不存在，回执就永久卡在 `pending` —— 每跑一个 watch 任务漏一条。
+watch 的身份信息放在 instruction 正文里已经够了。
+
+**没有 `runs` 子集合**：`last_report` + `fire_count` + `consecutive_skips` 已经覆盖
+当前全部实际用途。理由见 §9 开头的简化决定。
+
 ---
 
 ## 10. 与现有代码的关系
@@ -537,7 +682,8 @@ tasks/{task_id}/runs/{run_id}
 | 文件 | 改动 |
 |---|---|
 | `scripts/cron-tool.py` | 加 `kind=every`、`tz`、`anchor`、`max_lateness`；`tick` 里 job_id 拼进 instruction（修 G1）；cron 求值改用 tz（修 G4） |
-| `scripts/cron-daemon.py` | 基本不动。30s tick 保留 |
+| `scripts/cron-daemon.py` | **就是 §6.0 说的那个 daemon**。30s tick 保留，驱动 cron-tool 与 watch-task 两个调度器。不要再起第三个 |
+| `scripts/watch-task.py` | `create --model` 存档位；`run_probe` 按任务的档位选模型（§6.5），保留 `ANTHROPIC_BETAS` 剥离 |
 | `closecrab/core/bot.py` | inbox 消息按 `sched:` 前缀走 isolated session，绕开 `_user_task_locks`（修 G3） |
 | `closecrab/utils/firestore_inbox.py` | 透传新的 task 字段 |
 | 新增 `scripts/task-tool.py` | Task 的 CRUD，给 agent 在 bash 里调 |
@@ -562,6 +708,7 @@ tasks/{task_id}/runs/{run_id}
 | Q5 | 时区迁移 | 已查清，2 条 job，表达式与 tz 原子同改，T401 验等价 |
 | Q6 | 多 Job | 保持 0..1 |
 | Q7 | 时区范围 | 仅 `Asia/Hong_Kong` + `UTC`，其他值创建时报错 |
+| Q8 | 谁决定用哪个模型 | 写任务的 bot 声明 `model` 档位，默认 `haiku`；取值用 CLI 裸别名 |
 
 ### 明细
 
@@ -613,6 +760,23 @@ tasks/{task_id}/runs/{run_id}
 >
 > 若采纳，T121-T123 降级为单条「传入带 DST 的 tz 必须显式报错」的测试。
 
+**Q8 — 谁决定用哪个模型**（§6.5）
+
+> **决定：写任务的 bot 在创建时声明 `model` 档位，默认 `haiku`。**
+>
+> 理由：daemon 手上只有一句自然语言 prompt，从字面分不出「看日志有没有 done」
+> 和「判断能不能开训」的难度差；而写方在写的那一刻是知道的。让 daemon 自己
+> 先推理一次「这活儿难不难」，等于为了省钱先花一次钱，信息还更少。
+>
+> **默认取最便宜的那一档**，因为这条路是高频的（2 分钟间隔跑 20 分钟 = 10 次），
+> 且多数轮次的结论就是「没变化」。要判断力的显式抬档，而不是所有人陪着最贵的跑。
+>
+> **取值用 CLI 裸别名不用 pinned ID**：`{档位 → model ID}` 那张映射表会随模型
+> 换代过期，裸别名交给 CLI 解析。实测七个写法全通。
+>
+> 反对意见欢迎：如果将来发现写方总是懒得填、默认档位老是不够用，那说明这个
+> 旋钮放错了位置，应该退回「按任务类型定档」而不是「按任务定档」。
+
 ---
 
 ## 12. 分阶段实施建议
@@ -628,6 +792,12 @@ tasks/{task_id}/runs/{run_id}
 - `scripts/watch-task.py` + `watch_tasks` 集合
 - 三步协议 SKIP / REPORT / DONE，DONE 走 inbox 交接主进程
 - 状态机、进度游标、停滞检测、自终止、事务抢占
+
+**P1.5 — 模型分档**（§6.5）
+- `watch-task.py create --model {none|haiku|sonnet|opus}`，默认 `haiku`
+- `run_probe` 按任务档位选模型；`ANTHROPIC_BETAS` 剥离必须保留
+- 非法档位在创建时报错，不落库（跟 §5.5① 的 tz 同样理由：宁可立刻看到
+  「不支持」，也不要静默退回默认档跑出一个你以为是 opus 其实是 haiku 的结论）
 
 **P2 — 执行隔离**
 - isolated session（修 G3）
@@ -755,6 +925,21 @@ def next_fire(job: dict, now: datetime) -> datetime | None: ...
 | T208 | 连续失败 5 次 | Task → `failed`，job 停排，发一条告警 | §7.3 |
 | T209 | 失败 4 次后成功 | `consecutive_errors` 归零 | §7.3 |
 | T210 | 带 `test_run_id` 的 job | 生产 tick **不触发它** | §14.0 隔离 |
+
+#### 模型分档（§6.5）
+
+| ID | 场景 | 期望 | 说明 |
+|---|---|---|---|
+| T241 | `create` 不带 `--model` | 落库 `model: "haiku"` | 默认取最便宜档 |
+| T242 | `create --model sonnet` | 落库 `sonnet`；探针命令行里 `--model sonnet` | 档位真的传下去了 |
+| T243 | `create --model gpt-4` | **创建时报错，不落库** | 非法档位不静默退回默认 |
+| T244 | 任意档位跑探针 | 子进程 env 里**没有** `ANTHROPIC_BETAS` | 剥离没被改掉；漏了只有 haiku 会挂 |
+| T245 | 老任务（库里无 `model` 字段） | 按 `haiku` 跑，不报错 | 向后兼容，不需要数据迁移 |
+| T246 | `watch-task create --model none` | **报错**：none 请用 `cron-tool.py add` | watch 里每轮直投就是 cron job，不该有两种写法 |
+
+> T244 是这组里唯一会**静默**出错的：带着 beta 头调 opus / sonnet 都正常，
+> 只有 haiku 报 400。也就是说这条断言只在默认档位上才有防护价值，
+> 而默认档位恰恰是跑得最多的那个。
 
 #### 削权自终止（含必需的负例）
 

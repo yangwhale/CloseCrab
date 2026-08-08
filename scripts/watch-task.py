@@ -24,9 +24,15 @@
   REPORT  有实质进展                  → 飞书贴一条，更新游标
   DONE    跑完了/失败了，该主进程接手  → 飞书贴结论 + inbox 交接 + 本任务终止
 
+模型分档（--model，默认 haiku）：写任务的人最清楚这活儿难不难。
+  haiku   看日志有没有变、进程还在不在、文件出现没有   ← 默认，这条路是高频的
+  sonnet  要读懂内容再判断：报错致命还是可忽略、指标达标没
+  opus    要做真判断和取舍：该不该动手、几个方案挑哪个
+
 用法:
   watch-task.py create --name t80 --interval 120 --notify-bot jarvis \\
       --prompt "读 /tmp/t80.log 尾部，判断训练进度。跑完或失败时用 DONE。"
+  watch-task.py create --name pool --interval 300 --model sonnet --prompt "..."
   watch-task.py list
   watch-task.py tick            # cron-daemon 调，不用手动跑
   watch-task.py stop <name>
@@ -57,7 +63,14 @@ COLL = "watch_tasks"
 NOW = cron_tool.NOW
 _hkt = cron_tool._hkt
 
-PROBE_MODEL = "claude-haiku-4-5-20251001"
+# 模型分档（docs/task-scheduler-design.md §6.5）。写任务的 bot 最清楚这活儿
+# 难不难 —— daemon 手上只有一句 prompt，从字面分不出「看日志有没有 done」和
+# 「判断能不能开训」的难度差。
+#
+# 取值直接用 CLI 的裸别名，不维护 {档位 → model ID} 映射表：那张表会随模型
+# 换代过期，裸别名由 CLI 负责解析到当代模型。
+MODEL_TIERS = ("haiku", "sonnet", "opus")
+DEFAULT_MODEL = "haiku"
 PROBE_TIMEOUT = 240
 # 连续这么多轮没有实质进展就播报一次「疑似卡住」。只播一次，不重复刷。
 DEFAULT_STALL_AFTER = 15
@@ -83,19 +96,37 @@ def db():
     return cron_tool.db()
 
 
+def _model_tier(v: str) -> str:
+    """档位校验。非法值必须报错，不能静默退回默认 —— 否则你以为在跑 opus，
+    实际跑的是 haiku，而结论看起来一样是一段中文，根本发现不了。"""
+    v = v.strip().lower()
+    if v in MODEL_TIERS:
+        return v
+    if v == "none":
+        raise argparse.ArgumentTypeError(
+            "none 档不是 watch 任务 —— 每轮直投 inbox 就是一条 cron job，"
+            "请改用 `cron-tool.py add`（见 design §6.5）")
+    raise argparse.ArgumentTypeError(
+        f"不支持的档位 {v!r}，只能是 {' / '.join(MODEL_TIERS)}")
+
+
 # ── 探针 ────────────────────────────────────────────────────────────────────
 
-def run_probe(prompt: str, prev: str, skips: int) -> tuple[str, str]:
+def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) -> tuple[str, str]:
     """跑一次 headless sub-agent。返回 (verdict, body)。
 
-    用 haiku：这条路每 1-2 分钟就走一次，20 分钟的训练要走十几次，
-    用主力模型是纯浪费——判断「日志有没有新东西」不需要那个档次的推理。
+    默认 haiku：这条路每 1-2 分钟就走一次，20 分钟的训练要走十几次，多数轮次
+    的结论就是「没变化」。要判断力的任务由写方显式抬档（--model sonnet/opus），
+    而不是所有人陪着最贵的跑。
     """
     full = prompt + _CONTRACT.format(prev=prev or "（还没报过）", skips=skips)
     try:
+        # 必须剥掉 ANTHROPIC_BETAS：本机设了 context-1m-2025-08-07 解锁 1M context，
+        # 但 **haiku 不支持这个 beta**，带着它调直接 400。坑在于 opus/sonnet 带着
+        # 都正常，只有最便宜、也就是默认的那一档会挂。
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BETAS"}
         out = subprocess.run(
-            ["claude", "-p", full, "--model", PROBE_MODEL, "--dangerously-skip-permissions"],
+            ["claude", "-p", full, "--model", model, "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=PROBE_TIMEOUT, cwd="/tmp", env=env,
         ).stdout.strip()
     except subprocess.TimeoutExpired:
@@ -155,6 +186,7 @@ def cmd_create(args):
         "name": args.name,
         "prompt": args.prompt,
         "interval_sec": args.interval,
+        "model": args.model,
         "notify_bot": args.notify_bot or os.environ.get("BOT_NAME", "jarvis"),
         "sender": os.environ.get("BOT_NAME") or args.notify_bot or "jarvis",
         "status": "active",
@@ -172,6 +204,7 @@ def cmd_create(args):
     db().collection(COLL).document(args.name).set(doc)
     print(json.dumps({
         "name": args.name, "interval_sec": args.interval,
+        "model": args.model,
         "first_fire_hkt": _hkt(doc["next_fire_at"]),
         "notify_bot": doc["notify_bot"],
     }, ensure_ascii=False))
@@ -186,6 +219,7 @@ def cmd_list(args):
         out.append({
             "name": x.get("name"), "status": x.get("status"),
             "interval_sec": x.get("interval_sec"),
+            "model": x.get("model") or DEFAULT_MODEL,
             "next_fire_hkt": _hkt(x.get("next_fire_at")),
             "fire_count": x.get("fire_count"),
             "consecutive_skips": x.get("consecutive_skips"),
@@ -265,7 +299,9 @@ def cmd_tick(args):
             continue
 
         skips = task.get("consecutive_skips") or 0
-        verdict, body = run_probe(task["prompt"], task.get("last_report", ""), skips)
+        # 老任务库里没有 model 字段，按默认档跑，不需要数据迁移
+        verdict, body = run_probe(task["prompt"], task.get("last_report", ""), skips,
+                                  task.get("model") or DEFAULT_MODEL)
         upd = {"next_fire_at": NOW() + timedelta(seconds=task.get("interval_sec", 120))}
 
         if verdict == "DONE":
@@ -303,6 +339,10 @@ def main():
     c.add_argument("--name", required=True)
     c.add_argument("--prompt", required=True, help="给探针 agent 的指令，讲清楚看哪里、怎么算跑完")
     c.add_argument("--interval", type=int, default=120, help="秒，默认 120")
+    c.add_argument("--model", type=_model_tier, default=DEFAULT_MODEL,
+                   help=f"探针档位 {'|'.join(MODEL_TIERS)}，默认 {DEFAULT_MODEL}。"
+                        "看日志有没有变用 haiku；要读懂内容再判断用 sonnet；"
+                        "要做真取舍用 opus")
     c.add_argument("--notify-bot", help="DONE 时把 inbox 交接给谁，默认 $BOT_NAME")
     c.add_argument("--stall-after", type=int, default=DEFAULT_STALL_AFTER,
                    help=f"连续多少轮无进展算疑似卡住，默认 {DEFAULT_STALL_AFTER}")
