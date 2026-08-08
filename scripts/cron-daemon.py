@@ -11,8 +11,15 @@ import os, sys, time, signal, subprocess
 from pathlib import Path
 
 PID = Path("/tmp/closecrab-cron-daemon.pid")
-SCRIPT = Path(__file__).resolve().parent / "cron-tool.py"
+_HERE = Path(__file__).resolve().parent
+# 两个调度器共用一个心跳，不各起一份 daemon：省一个进程，也保证两者的
+# tick 节奏一致。cron-tool 管定时提醒，watch-task 管盯长跑任务。
+SCRIPTS = [_HERE / "cron-tool.py", _HERE / "watch-task.py"]
+SCRIPT = SCRIPTS[0]  # 兼容旧引用
 INTERVAL = 30
+# watch-task 的探针要跑 sub-agent（十几秒到数分钟），不能跟 cron tick
+# 共用 60s 超时，否则会被腰斩在半路。
+TIMEOUTS = {"cron-tool.py": 60, "watch-task.py": 600}
 LOG = Path.home() / ".claude" / "closecrab" / "cron-daemon.log"
 
 
@@ -59,19 +66,25 @@ def cmd_start():
     try:
         while True:
             t0 = time.time()
-            try:
-                r = subprocess.run(
-                    ["python3", str(SCRIPT), "tick"],
-                    capture_output=True, text=True, timeout=60,
-                )
-                if r.stdout.strip() and r.stdout.strip() != '{"fired": [], "count": 0}':
-                    log.write(f"[{time.strftime('%F %T')}] {r.stdout.strip()}\n")
-                if r.returncode != 0 and r.stderr:
-                    log.write(f"[{time.strftime('%F %T')}] STDERR: {r.stderr[:200]}\n")
-            except subprocess.TimeoutExpired:
-                log.write(f"[{time.strftime('%F %T')}] tick timeout\n")
-            except Exception as e:
-                log.write(f"[{time.strftime('%F %T')}] tick error: {e}\n")
+            for script in SCRIPTS:
+                if not script.exists():
+                    continue  # 部署未同步的机器上跳过，不要整个 tick 崩掉
+                name = script.name
+                try:
+                    r = subprocess.run(
+                        ["python3", str(script), "tick"],
+                        capture_output=True, text=True, timeout=TIMEOUTS.get(name, 60),
+                    )
+                    out = r.stdout.strip()
+                    # 空转是常态（多数 tick 什么都不到期），只记有内容的
+                    if out and '"count": 0' not in out:
+                        log.write(f"[{time.strftime('%F %T')}] {name}: {out}\n")
+                    if r.returncode != 0 and r.stderr:
+                        log.write(f"[{time.strftime('%F %T')}] {name} STDERR: {r.stderr[:200]}\n")
+                except subprocess.TimeoutExpired:
+                    log.write(f"[{time.strftime('%F %T')}] {name} tick timeout\n")
+                except Exception as e:
+                    log.write(f"[{time.strftime('%F %T')}] {name} tick error: {e}\n")
             time.sleep(max(0, INTERVAL - (time.time() - t0)))
     finally:
         log.write(f"=== cron-daemon stopped at {time.strftime('%F %T')} ===\n")
