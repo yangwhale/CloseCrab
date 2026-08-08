@@ -710,6 +710,66 @@ class FeishuChannel(Channel):
             on_flush=self._on_debounced_flush,
         )
 
+        # 同一次 cron tick 里到期的多条任务会在几十毫秒内连续落进 inbox。
+        # 不合并就是 N 个完整 turn，还被 per-user lock 串成一列挨个跑。
+        # 窗口比用户消息那条长：Firestore on_snapshot 的投递可能批到一起也
+        # 可能拆开，0.8s 抓不全。
+        self._inbox_debouncer = InboundDebouncer(
+            debounce_s=1.5,
+            build_key=lambda it: "inbox",
+            should_debounce=self._should_debounce_inbox,
+            on_flush=self._on_inbox_debounced_flush,
+        )
+
+    @staticmethod
+    def _should_debounce_inbox(item: dict) -> bool:
+        """只合并「无 phase 的独立任务」。
+
+        V1 多阶段协议的 kickoff / progress / done 带顺序语义，揉进一个 turn 会
+        破坏它；系统命令和回执各有短路分支，合并了会走错路。这些一律零延迟直通。
+        """
+        if item.get("phase"):
+            return False
+        ins = item.get("instruction") or ""
+        if ins.startswith("[system:restart]") or ins.startswith("✅ 任务完成:"):
+            return False
+        # 真人经 inbox 说话走的是聊天路径，合并会打乱对话节奏
+        if (item.get("from_bot") or "").lower() in {"chris", "chrisya"}:
+            return False
+        return True
+
+    async def _on_inbox_debounced_flush(self, items: list) -> None:
+        """把窗口内累积的独立任务合成一次 turn。
+
+        合并后 agent 一次看到全部，可以自己排优先级、共用一次 cold start；
+        原来是 N 次 turn 且被 per-user lock 串行。
+        """
+        if not items:
+            return
+        if len(items) == 1:
+            await self._on_inbox_message_impl(**items[0])
+            return
+
+        log.info(f"INBOX DEBOUNCE flush: merging {len(items)} independent tasks into one turn")
+        # 前 N-1 条各自的 inbox 记录要单独结掉，否则会一直挂在 pending。
+        loop = asyncio.get_running_loop()
+        for it in items[:-1]:
+            if self._inbox and it.get("record_id"):
+                try:
+                    await loop.run_in_executor(
+                        None, self._inbox.mark_done, it["record_id"],
+                        f"merged into {items[-1].get('record_id')}",
+                    )
+                except Exception as e:
+                    log.warning(f"inbox merge mark_done failed: {e}")
+
+        n = len(items)
+        parts = [f"[本轮有 {n} 件任务同时到期，合并在一次处理]"]
+        for i, it in enumerate(items, 1):
+            parts.append(f"\n【{i}/{n} · 来自 {it.get('from_bot','?')}】\n{it.get('instruction','')}")
+        merged = {**items[-1], "instruction": "\n".join(parts)}
+        await self._on_inbox_message_impl(**merged)
+
     def _make_input_callback(self, chat_id: str, user_key: str, is_inbox: bool = False):
         """为 inbox/飞书 task 消息创建 on_input_needed 回调。
 
@@ -2355,6 +2415,30 @@ class FeishuChannel(Channel):
         log.info(f"Task {task_id[:8]} completed: {summary[:60]}")
 
     async def _on_inbox_message(
+        self,
+        from_bot: str,
+        instruction: str,
+        record_id: str,
+        task_id: str = "",
+        task_name: str = "",
+        phase: str = "",
+        phase_seq: int = 0,
+        phase_label: str = "",
+        parent_task_id: str = "",
+    ):
+        """Inbox 入口：独立任务先过防抖合并，其余直通。
+
+        真正的处理逻辑在 `_on_inbox_message_impl`。这层只负责判断该不该攒一下。
+        """
+        item = {
+            "from_bot": from_bot, "instruction": instruction, "record_id": record_id,
+            "task_id": task_id, "task_name": task_name, "phase": phase,
+            "phase_seq": phase_seq, "phase_label": phase_label,
+            "parent_task_id": parent_task_id,
+        }
+        await self._inbox_debouncer.enqueue(item)
+
+    async def _on_inbox_message_impl(
         self,
         from_bot: str,
         instruction: str,
@@ -5571,10 +5655,14 @@ class FeishuChannel(Channel):
     async def stop(self):
         """停止飞书 bot。"""
         log.info("Stopping Feishu channel...")
-        try:
-            await self._inbound_debouncer.close()
-        except Exception as e:
-            log.debug(f"inbound_debouncer.close error (ignored): {e}")
+        for _name, _d in (
+            ("inbound_debouncer", self._inbound_debouncer),
+            ("inbox_debouncer", self._inbox_debouncer),
+        ):
+            try:
+                await _d.close()
+            except Exception as e:
+                log.debug(f"{_name}.close error (ignored): {e}")
 
     async def send_message(self, target: str, text: str):
         """发送消息到指定 chat。"""
