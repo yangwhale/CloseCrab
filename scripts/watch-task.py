@@ -75,6 +75,11 @@ DEFAULT_MODEL = "haiku"
 PROBE_TIMEOUT = 240
 # 连续这么多轮没有实质进展就播报一次「疑似卡住」。只播一次，不重复刷。
 DEFAULT_STALL_AFTER = 15
+# 终态任务保留多久。R4 审计发现这张表**一个 GC 都没有** —— done / cancelled /
+# expired 会一直躺着。今天表是空的所以看不出来，但这正是 messages 集合当初
+# 涨到 3857 条的走法：没人回收的东西不会报错，只会慢慢变多。
+SWEEP_TERMINAL_DAYS = 14
+_SWEEP_MIN_INTERVAL = 3600   # 别每次 tick 都全扫
 
 _CONTRACT = """
 
@@ -323,10 +328,44 @@ def _claim(d, name: str, cutoff: datetime):
     return _run(tx)
 
 
+def _sweep(d, now) -> int:
+    """删掉过期的终态任务。跟 cron-tool 的 sweep 同一个理由和同一个节奏。"""
+    meta = d.collection("config").document("watch_sweep")
+    snap = meta.get()
+    last = (snap.to_dict() or {}).get("last_swept_at") if snap.exists else None
+    if last and (now - last).total_seconds() < _SWEEP_MIN_INTERVAL:
+        return 0
+    before = now - timedelta(days=SWEEP_TERMINAL_DAYS)
+    # 先收集再删：边 stream 边 delete 会让 Firestore 的分页游标错位漏扫，
+    # messages 那次 sweep 就是这么把统计数字跑飞的。
+    doomed = []
+    for s_ in d.collection(COLL).stream():
+        x = s_.to_dict() or {}
+        if x.get("status") not in ("done", "cancelled", "expired"):
+            continue
+        ts = x.get("created_at")
+        # 没时间戳的终态任务永远算不出年龄，也就永远扫不掉 —— 直接收
+        if ts is None or ts < before:
+            doomed.append(s_.reference)
+    for ref in doomed:
+        try:
+            ref.delete()
+        except Exception as e:
+            print(json.dumps({"warn": f"sweep {ref.id}: {e}"}), file=sys.stderr)
+    meta.set({"last_swept_at": now}, merge=True)
+    return len(doomed)
+
+
 def cmd_tick(args):
     d = db()
     cutoff = NOW()
     acted = []
+    swept = 0
+    if not args.dry_run:
+        try:
+            swept = _sweep(d, cutoff)
+        except Exception as e:
+            print(json.dumps({"warn": f"sweep failed: {e}"}), file=sys.stderr)
     for s in d.collection(COLL).where("status", "==", "active").stream():
         x = s.to_dict() or {}
         name = x.get("name")
@@ -360,6 +399,8 @@ def cmd_tick(args):
             acted.append({"name": name, "verdict": "ERROR", "error": str(e)[:200]})
 
     out = {"acted": acted, "count": len(acted)}
+    if swept:
+        out["swept"] = swept
     if args.dry_run:
         out["dry_run"] = True
     print(json.dumps(out, ensure_ascii=False, default=str))

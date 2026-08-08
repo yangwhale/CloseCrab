@@ -330,6 +330,10 @@ class FirestoreInbox:
 # scheduled_jobs 早有 7 天 sweep，messages 这边一直是空白。
 
 SWEEP_DONE_DAYS = 14        # done 是历史记录，留两周够回溯了
+# error 留久一点 —— 它代表一次真实的失败，排查价值比 done 高。但**必须有上限**：
+# 这个 sweep 自己会把孤儿 processing 标成 error，不清理的话就是自我喂养的泄漏。
+# R4 审计时实测到 30 条 error 躺了 70-92 天，全是历次 sweep 自己造出来的。
+SWEEP_ERROR_DAYS = 30
 SWEEP_STUCK_HOURS = 24      # 卡这么久的 pending/processing 视为死信
 _SWEEP_MIN_INTERVAL = 3600  # 集合有几千条，别每次 tick 都全扫
 
@@ -353,7 +357,9 @@ def sweep_messages(db_client, now=None, force: bool = False) -> dict:
     live_bots = {d.id for d in db_client.collection("bots").stream()}
     done_before = now - timedelta(days=SWEEP_DONE_DAYS)
     stuck_before = now - timedelta(hours=SWEEP_STUCK_HOURS)
-    stats = {"done": 0, "dead_letter": 0, "orphan_processing": 0, "kept": 0}
+    error_before = now - timedelta(days=SWEEP_ERROR_DAYS)
+    stats = {"done": 0, "error": 0, "undated": 0, "dead_letter": 0,
+             "orphan_processing": 0, "kept": 0}
 
     # 先把全量读完再动手。边 stream 边 delete 同一个 query，Firestore 的分页
     # 游标会因为文档消失而错位，每轮漏扫一批 —— 第一次跑就撞上了：统计说删了
@@ -361,14 +367,21 @@ def sweep_messages(db_client, now=None, force: bool = False) -> dict:
     plan_delete, plan_orphan = [], []
     for snap in list(db_client.collection("messages").stream()):
         x = snap.to_dict() or {}
+        status, to = x.get("status"), x.get("to")
         created = x.get("created_at")
         if not created:
-            stats["kept"] += 1
+            # 没有时间戳就永远算不出年龄，也就永远扫不掉。终态的直接删 ——
+            # 它已经不会再变了，留着只是垃圾；非终态的保守留下（可能正在写）。
+            if status in ("done", "error"):
+                plan_delete.append(snap.reference); stats["undated"] += 1
+            else:
+                stats["kept"] += 1
             continue
-        status, to = x.get("status"), x.get("to")
 
         if status == "done" and created < done_before:
             plan_delete.append(snap.reference); stats["done"] += 1
+        elif status == "error" and created < error_before:
+            plan_delete.append(snap.reference); stats["error"] += 1
         elif status == "pending" and to not in live_bots and created < stuck_before:
             # 收件人不存在 → 不可能有人消费，删了不会丢真实工作
             plan_delete.append(snap.reference); stats["dead_letter"] += 1
