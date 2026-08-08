@@ -276,3 +276,99 @@ def test_valid_task_name_accepted(ok):
 def test_task_name_too_long_rejected():
     with pytest.raises(argparse.ArgumentTypeError, match="1500"):
         wt._task_name("x" * 1501)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R3 审计：失败模式。问题不是「会不会失败」，是「失败一半会留下什么」
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _tick_failure(task, probe=("DONE", "跑完了"), chat_raises=False, inbox_raises=False):
+    ev = {"chat": 0, "inbox": 0, "update": None, "raised": None}
+
+    class _Ref:
+        def update(self, u):
+            ev["update"] = u
+
+    class _Q:
+        def stream(self):
+            return [types.SimpleNamespace(to_dict=lambda: task)]
+
+    class _C:
+        def where(self, *a):
+            return _Q()
+
+        def document(self, _n):
+            return _Ref()
+
+    d = types.SimpleNamespace(collection=lambda _c: _C())
+
+    def chat(*a, **k):
+        ev["chat"] += 1
+        if chat_raises:
+            raise RuntimeError("feishu 挂了")
+
+    def inbox(*a, **k):
+        ev["inbox"] += 1
+        if inbox_raises:
+            raise RuntimeError("firestore 写失败")
+
+    with mock.patch.object(wt, "db", lambda: d), \
+         mock.patch.object(wt, "_claim", lambda *a: task), \
+         mock.patch.object(wt, "run_probe", lambda *a: probe), \
+         mock.patch.object(wt, "notify_chat", chat), \
+         mock.patch.object(wt, "notify_inbox", inbox):
+        try:
+            wt.cmd_tick(argparse.Namespace(dry_run=False))
+        except Exception as e:
+            ev["raised"] = repr(e)
+    return ev
+
+
+def test_r3_done_does_handoff_before_chat():
+    """先交接、后播报。反过来的话 chat 成功而 inbox 失败，用户已经看到
+    「跑完了」但任务没标 done，下一轮重跑会把同一条结论再播一遍。"""
+    ev = _tick_failure(_base_task())
+    assert ev["inbox"] == 1 and ev["chat"] == 1
+    assert ev["update"]["status"] == "done"
+
+    # inbox 失败时，chat 一次都不该发出去
+    ev = _tick_failure(_base_task(), inbox_raises=True)
+    assert ev["inbox"] == 1 and ev["chat"] == 0, "inbox 没成，不该先告诉用户跑完了"
+    assert ev["update"] is None, "更不该标 done —— 交接就永久丢了"
+
+
+def test_r3_probe_crash_does_not_kill_the_round():
+    """一条任务的异常不能冒出 cmd_tick。持续坏掉的那条会永久饿死其它所有任务。"""
+    def boom(*a):
+        raise RuntimeError("claude CLI 不见了")
+
+    class _Ref:
+        def update(self, u):
+            pass
+
+    class _Q:
+        def stream(self):
+            return [types.SimpleNamespace(to_dict=lambda: _base_task())]
+
+    class _C:
+        def where(self, *a):
+            return _Q()
+
+        def document(self, _n):
+            return _Ref()
+
+    d = types.SimpleNamespace(collection=lambda _c: _C())
+    with mock.patch.object(wt, "db", lambda: d), \
+         mock.patch.object(wt, "_claim", lambda *a: _base_task()), \
+         mock.patch.object(wt, "run_probe", boom), \
+         mock.patch.object(wt, "notify_chat", lambda *a, **k: None):
+        wt.cmd_tick(argparse.Namespace(dry_run=False))   # 不许抛
+
+
+def test_r3_notify_chat_swallows_its_own_failure():
+    """chat 是旁路播报，不该有能力打断主链路 —— 测真函数不是 mock。"""
+    def boom(*a, **k):
+        raise RuntimeError("feishu-notify 起不来")
+
+    with mock.patch.object(wt.subprocess, "run", boom):
+        wt.notify_chat("t", "body", "jarvis")   # 不许抛

@@ -549,7 +549,7 @@ def build_instruction(job: dict) -> str:
 def cmd_tick(args):
     """Run by daemon. Fire all due scheduled jobs and garbage-collect old done."""
     dry = getattr(args, "dry_run", False)
-    fired, skipped_test, lost = [], 0, 0
+    fired, skipped_test, lost, failed = [], 0, 0, []
     d = db()
     cutoff = NOW()
     swept = 0
@@ -610,20 +610,33 @@ def cmd_tick(args):
             lost += 1
             continue
 
-        d.collection("messages").add(
-            {
-                "from": won.get("sender", "cron"),
-                "to": won["target"],
-                "instruction": build_instruction(won),
-                "task_id": f"cron-{won['job_id']}",
-                "status": "pending",
-                "result": "",
-                "created_at": NOW(),
-            }
-        )
-        fired.append(won["job_id"])
+        # One job's failure must not kill the round. Without this, a single
+        # bad job (unserialisable field, transient Firestore error) raises out
+        # of cmd_tick and **every job queued behind it silently misses this
+        # tick** — and if the fault is persistent, forever. Note the job was
+        # already claimed, so it has consumed its slot either way; recording
+        # the error is the only way that fact becomes visible.
+        try:
+            d.collection("messages").add(
+                {
+                    "from": won.get("sender", "cron"),
+                    "to": won["target"],
+                    "instruction": build_instruction(won),
+                    "task_id": f"cron-{won['job_id']}",
+                    "status": "pending",
+                    "result": "",
+                    "created_at": NOW(),
+                }
+            )
+            fired.append(won["job_id"])
+        except Exception as e:
+            print(json.dumps({"error": f"dispatch {won['job_id']}: {e}"},
+                             ensure_ascii=False), file=sys.stderr)
+            failed.append({"job_id": won["job_id"], "error": str(e)[:200]})
 
     out = {"fired": fired, "count": len(fired)}
+    if failed:
+        out["failed"] = failed
     if dry:
         out["dry_run"] = True
     if swept:

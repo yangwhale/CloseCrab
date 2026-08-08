@@ -193,12 +193,20 @@ def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) ->
 # ── 出口 ────────────────────────────────────────────────────────────────────
 
 def notify_chat(name: str, text: str, bot: str | None = None) -> None:
-    """chat 通道：直发飞书，**不产生任何 turn**。"""
+    """chat 通道：直发飞书，**不产生任何 turn**。
+
+    best-effort：飞书挂了不该有能力打断主链路。R3 审计发现，这里一抛异常，
+    后面的 inbox 交接就不走了，整轮 tick 也跟着崩 —— 一个旁路播报通道把
+    真正要紧的那件事拖下了水。
+    """
     cmd = [sys.executable, str(_ROOT / "scripts" / "feishu-notify.py"),
            f"🤖 [{name}] {datetime.now(cron_tool.ZoneInfo('Asia/Hong_Kong')).strftime('%H:%M')}\n{text}"]
     if bot:
         cmd += ["--bot", bot]
-    subprocess.run(cmd, capture_output=True, timeout=60)
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=60)
+    except Exception as e:
+        print(json.dumps({"warn": f"notify_chat failed for {name}: {e}"}), file=sys.stderr)
 
 
 def notify_inbox(task: dict, text: str) -> None:
@@ -341,47 +349,63 @@ def cmd_tick(args):
         if task is None:
             continue
 
-        ref = d.collection(COLL).document(name)
-
-        # 兜底：跑太久了也要收，免得任务泄漏成永久后台负担
-        age = (cutoff - task["created_at"]).total_seconds()
-        if task.get("max_age_sec") and age > task["max_age_sec"]:
-            notify_chat(name, f"⏱ 已盯了 {int(age/60)} 分钟仍未结束，自动停止本 watch。", task.get("notify_bot"))
-            ref.update({"status": "expired"})
-            acted.append({"name": name, "verdict": "EXPIRED"})
-            continue
-
-        skips = task.get("consecutive_skips") or 0
-        # 老任务库里没有 model 字段，按默认档跑，不需要数据迁移
-        verdict, body = run_probe(task["prompt"], task.get("last_report", ""), skips,
-                                  task.get("model") or DEFAULT_MODEL)
-        upd = {"next_fire_at": NOW() + timedelta(seconds=task.get("interval_sec", 120))}
-
-        if verdict == "DONE":
-            notify_chat(name, body, task.get("notify_bot"))
-            notify_inbox(task, body)          # ← 交接主进程，本脚本存在的理由
-            upd.update({"status": "done", "last_report": body})
-        elif verdict == "REPORT":
-            notify_chat(name, body, task.get("notify_bot"))
-            upd.update({"last_report": body, "consecutive_skips": 0, "stall_notified": False})
-        else:
-            skips += 1
-            upd["consecutive_skips"] = skips
-            # 停滞检测：「还在跑」和「卡死了」在 SKIP 层面长得一样，
-            # 只能靠连续多少轮没动静来区分。只播一次，不刷屏。
-            if skips >= (task.get("stall_after") or DEFAULT_STALL_AFTER) and not task.get("stall_notified"):
-                mins = skips * task.get("interval_sec", 120) / 60
-                notify_chat(name, f"⚠️ 已连续 {skips} 轮（约 {mins:.0f} 分钟）无实质进展，可能卡住了。",
-                            task.get("notify_bot"))
-                upd["stall_notified"] = True
-
-        ref.update(upd)
-        acted.append({"name": name, "verdict": verdict})
+        try:
+            acted.append(_run_one(d, name, task, cutoff))
+        except Exception as e:
+            # 一条任务出错不能拖垮整轮。R3 审计发现：探针崩了 / 飞书挂了 /
+            # Firestore 写失败，异常都会一路冒出 cmd_tick，**后面排队的任务
+            # 这一轮全都不跑**。一条持续坏掉的任务足以永久饿死其它所有任务，
+            # 而且从外面看只是「怎么没动静」。
+            print(json.dumps({"error": f"{name}: {e}"}, ensure_ascii=False), file=sys.stderr)
+            acted.append({"name": name, "verdict": "ERROR", "error": str(e)[:200]})
 
     out = {"acted": acted, "count": len(acted)}
     if args.dry_run:
         out["dry_run"] = True
     print(json.dumps(out, ensure_ascii=False, default=str))
+
+
+def _run_one(d, name: str, task: dict, cutoff) -> dict:
+    """跑一条已经抢到手的任务。抽出来是为了让上面那个 try 的边界清清楚楚。"""
+    ref = d.collection(COLL).document(name)
+
+    # 兜底：跑太久了也要收，免得任务泄漏成永久后台负担
+    age = (cutoff - task["created_at"]).total_seconds()
+    if task.get("max_age_sec") and age > task["max_age_sec"]:
+        notify_chat(name, f"⏱ 已盯了 {int(age/60)} 分钟仍未结束，自动停止本 watch。", task.get("notify_bot"))
+        ref.update({"status": "expired"})
+        return {"name": name, "verdict": "EXPIRED"}
+
+    skips = task.get("consecutive_skips") or 0
+    # 老任务库里没有 model 字段，按默认档跑，不需要数据迁移
+    verdict, body = run_probe(task["prompt"], task.get("last_report", ""), skips,
+                              task.get("model") or DEFAULT_MODEL)
+    upd = {"next_fire_at": NOW() + timedelta(seconds=task.get("interval_sec", 120))}
+
+    if verdict == "DONE":
+        # 顺序有讲究：**先交接、后播报**。inbox 是这个脚本存在的理由，
+        # chat 只是让你看一眼。反过来的话，chat 发完而 inbox 失败，用户
+        # 已经看到「跑完了」，任务却没标 done —— 下一轮重跑再播一次，
+        # 同一条结论收两遍。先做要紧的那件，失败就整条重来，干净。
+        notify_inbox(task, body)
+        notify_chat(name, body, task.get("notify_bot"))
+        upd.update({"status": "done", "last_report": body})
+    elif verdict == "REPORT":
+        notify_chat(name, body, task.get("notify_bot"))
+        upd.update({"last_report": body, "consecutive_skips": 0, "stall_notified": False})
+    else:
+        skips += 1
+        upd["consecutive_skips"] = skips
+        # 停滞检测：「还在跑」和「卡死了」在 SKIP 层面长得一样，
+        # 只能靠连续多少轮没动静来区分。只播一次，不刷屏。
+        if skips >= (task.get("stall_after") or DEFAULT_STALL_AFTER) and not task.get("stall_notified"):
+            mins = skips * task.get("interval_sec", 120) / 60
+            notify_chat(name, f"⚠️ 已连续 {skips} 轮（约 {mins:.0f} 分钟）无实质进展，可能卡住了。",
+                        task.get("notify_bot"))
+            upd["stall_notified"] = True
+
+    ref.update(upd)
+    return {"name": name, "verdict": verdict}
 
 
 def main():
