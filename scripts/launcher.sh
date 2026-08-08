@@ -59,14 +59,29 @@ _pidfile() {
 }
 
 _is_running() {
-    local pidfile="$(_pidfile "$1")"
+    local bot_name="$1"
+    local pidfile="$(_pidfile "$bot_name")"
     if [[ -f "$pidfile" ]]; then
-        local pid=$(cat "$pidfile")
-        if kill -0 "$pid" 2>/dev/null; then
+        local pid=$(cat "$pidfile" 2>/dev/null)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             return 0
         fi
     fi
-    return 1
+
+    # 兜底：pidfile 会过期 —— bot 用 run.sh 直接起的时候根本不写 pidfile，
+    # 机器重启后旧 PID 还可能被别的进程复用。只认 pidfile 会把活着的 bot
+    # 判成「没在跑」，@reboot 一执行就起出第二个实例，同一条消息处理两遍。
+    local live
+    live=$(pgrep -x -f "python3 -m closecrab --bot $bot_name" 2>/dev/null | head -1)
+    [[ -n "$live" ]] || return 1
+
+    # 顺手把 pidfile 修回来，记的是**监管进程**（run.sh / 重启循环）而不是
+    # python 本身 —— 只杀 python 的话监管进程 5 秒后又会把它拉起来。
+    local sup
+    sup=$(ps -o ppid= -p "$live" 2>/dev/null | tr -d ' ')
+    [[ -n "$sup" && "$sup" != "1" ]] || sup="$live"
+    echo "$sup" > "$pidfile" 2>/dev/null || true
+    return 0
 }
 
 _local_stop() {
@@ -171,6 +186,11 @@ _ensure_cron_daemon() {
 _local_start() {
     local bot_name="$1"
 
+    # 放在「已在跑就早退」之前：cron-daemon 和 bot 是各自独立死活的。
+    # 放在后面的话，只要 bot 还活着就永远走不到这里 —— daemon 死了没人管，
+    # 整条定时任务 timeline 静默停摆。
+    _ensure_cron_daemon
+
     if _is_running "$bot_name"; then
         local pid=$(cat "$(_pidfile "$bot_name")")
         echo -e "${YELLOW}Bot '$bot_name' is already running (PID: $pid)${NC}"
@@ -179,8 +199,6 @@ _local_start() {
 
     local state_dir="$STATE_BASE/$bot_name"
     mkdir -p "$state_dir"
-
-    _ensure_cron_daemon
 
     echo -e "${CYAN}Starting bot '$bot_name'...${NC}"
 
