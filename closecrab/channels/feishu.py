@@ -561,6 +561,10 @@ class _LogBuffer:
 # 多阶段任务协议 (V1) — 详见 docs/inbox-task-protocol.md
 # =====================================================================
 _TASK_GC_DELAY_SEC = 1800  # done 后保留 30 min 供 UI 引用, 然后清
+# 永远等不到 done 的 task 的硬上限。超过就停止跟踪 —— 这不是判它失败，是承认
+# 已经跟丢了。没有这条，一个漏发 done 的 task 会在 registry 里活到进程重启，
+# 每次「有别的流量 → 又静默十分钟」就重报一次警，永不停止。
+_TASK_MAX_AGE_SEC = 6 * 3600
 # V22: 全局 watchdog — 把 fleet 当一个 bot. 只要任何 bot 还在发 inbox 消息
 # (progress/done/任何 from_bot), 全局 activity 就被刷新. 全 fleet 静默 N 分钟
 # 且 _task_registry 还有 active task → 报警让 jarvis 自查 (找静默 task).
@@ -582,6 +586,8 @@ class _TaskState:
     # progress_buffer: [{seq:int, label:str, content:str, ts:datetime}, ...]
     progress_buffer: list = field(default_factory=list)
     status: str = "active"    # "active" | "done" | "timeout"
+    # 上次为这条 task 报过警的时刻。报过就不再重复报，除非之后又收到新进展。
+    alerted_at: Optional[datetime] = None
 
 
 class FeishuChannel(Channel):
@@ -696,8 +702,6 @@ class FeishuChannel(Channel):
         # V22: 全局 last inbox activity 时间. 任何 inbox 消息 (kickoff/progress/
         # done/老 fallback receipt) 来都更新. _global_watchdog_ticker 看这个.
         self._last_inbox_activity_at: Optional[datetime] = None
-        # V22: 上次 watchdog fire 时刻. 防止 fire 后 60s 又 fire (一直静默时).
-        self._last_watchdog_fired_at: Optional[datetime] = None
 
         # P3-3: 入站防抖（合并 1 秒内连续短消息为 1 次 worker turn）
         # 镜像 OpenClaw extensions/feishu/src/auto-reply/inbound-debounce.ts
@@ -2927,6 +2931,37 @@ class FeishuChannel(Channel):
         except asyncio.CancelledError:
             pass
 
+    def _watchdog_select(self, now: datetime) -> list["_TaskState"]:
+        """挑出这一轮该报警的 task（顺带把超龄的停掉）。
+
+        抽成独立方法是为了能直接测：ticker 本体是个带 sleep 的无限循环，测试里
+        跑不了，而**判定规则**恰恰是这里最容易写错的部分。测试照抄一份判定
+        等于测了个不存在的系统。
+
+        防 spam 按 **task** 计，不按 fire 时刻计。老逻辑用一个全局
+        `_last_watchdog_fired_at`，要求「上次 fire 之后又有新 inbox activity」
+        才允许再 fire —— 但那个 activity 可以来自**完全无关的**消息。
+        2026-08-08 实测：10:41 报了一次 7205ecb3，10:59 一条发给别人的 cron
+        回执刷新了时钟，11:10 同一条 task 又报一次，内容一字不差。只要 fleet
+        偶尔有点流量，一条漏发 done 的 task 就能永远报下去。
+
+        报警的价值在于「告诉你一件你还不知道的事」。同一条 task 没有新进展
+        就没有新信息，报第二次纯属噪音。
+        """
+        for t in self._task_registry.values():
+            if (t.status == "active"
+                    and (now - t.kickoff_at).total_seconds() > _TASK_MAX_AGE_SEC):
+                t.status = "timeout"
+                log.warning(
+                    f"Task tracking abandoned (no done in {_TASK_MAX_AGE_SEC}s): "
+                    f"id={t.task_id} name={t.task_name!r} worker={t.worker_bot}"
+                )
+        return [
+            t for t in self._task_registry.values()
+            if t.status == "active"
+            and (t.alerted_at is None or t.last_update_at > t.alerted_at)
+        ]
+
     async def _global_watchdog_ticker(self) -> None:
         """V22: 全局看门狗 — 把整个 fleet 当一个 bot 处理.
 
@@ -2937,7 +2972,11 @@ class FeishuChannel(Channel):
         条件 fire:
           1. _task_registry 还有 status='active' 的 task (有派出去的活)
           2. (now - _last_inbox_activity_at) > _GLOBAL_INBOX_SILENCE_TIMEOUT_SEC
-          3. 自上次 fire 后又静默满 N min (防 spam)
+          3. 这些 task 里**至少有一条还没被报过**, 或报过之后又收到了新进展
+             (防 spam 按 task 计, 不按 fire 时刻计 —— 理由见下面代码里的注释)
+
+        另有硬上限 _TASK_MAX_AGE_SEC: 超时的 task 标 timeout 停止跟踪, 免得
+        一条漏发 done 的 task 在 registry 里活到进程重启。
 
         Fire 行为:
           - 不撤主卡 (让 jarvis 自己看 active task 清单当诊断 anchor)
@@ -2961,39 +3000,30 @@ class FeishuChannel(Channel):
                 return
 
             try:
-                active_tasks = [
-                    t for t in self._task_registry.values()
-                    if t.status == "active"
-                ]
-                if not active_tasks:
-                    continue  # 没活的任务 → 无需 watchdog
+                now = datetime.now(timezone.utc)
+
+                fresh = self._watchdog_select(now)
+                if not fresh:
+                    continue
 
                 if not self._last_inbox_activity_at:
                     continue  # 没收过 inbox 消息
 
-                now = datetime.now(timezone.utc)
                 silent_for = (now - self._last_inbox_activity_at).total_seconds()
                 if silent_for < _GLOBAL_INBOX_SILENCE_TIMEOUT_SEC:
                     continue
 
-                # 防 spam: fire 后只在"有新 inbox activity 之后再静默"时才再 fire.
-                # (持续静默不 spam — 一次 alert 就够, jarvis 会去诊断处理.
-                #  bot 修复后会发消息 → activity 刷新 → 下次再静默时才再 fire.)
-                if (self._last_watchdog_fired_at
-                        and self._last_inbox_activity_at
-                        and self._last_watchdog_fired_at >= self._last_inbox_activity_at):
-                    continue
-
                 log.warning(
                     f"Global watchdog fire: fleet silent {silent_for:.0f}s, "
-                    f"{len(active_tasks)} active task(s): "
-                    f"{[t.task_id for t in active_tasks]}"
+                    f"{len(fresh)} unreported task(s): "
+                    f"{[t.task_id for t in fresh]}"
                 )
-                self._last_watchdog_fired_at = now
+                for t in fresh:
+                    t.alerted_at = now
 
                 # 按 chat_id 分组 (不同 chat 不合并 self-diagnose turn)
                 by_chat: dict[str, list[_TaskState]] = {}
-                for t in active_tasks:
+                for t in fresh:
                     chat = t.chat_id or self._resolve_task_chat(t.worker_bot)
                     if chat:
                         by_chat.setdefault(chat, []).append(t)
