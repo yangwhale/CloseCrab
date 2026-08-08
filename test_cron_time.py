@@ -257,3 +257,71 @@ def test_oneshot_instruction_stays_minimal():
     job = {"job_id": "x1", "kind": "oneshot", "message": "记得开会"}
     text = build_instruction(job)
     assert text == "[⏰ 定时提醒] 记得开会"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R1 审计：「永远不会发生」必须抛，不能变成 None 往下流
+# ═══════════════════════════════════════════════════════════════════════════
+
+_R1_NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("expr", [
+    "0 8 31 2 *",   # 2 月 31 号
+    "0 8 30 2 *",   # 2 月 30 号
+])
+def test_impossible_date_raises_not_none(expr):
+    """每个字段都在合法范围内，但日期组合永远不存在。
+
+    以前返回 None，而 None 一路往下流会被当成「没事」：tz 迁移把
+    fire_at=None 写进 Firestore，claim 那里 `if not fa` 永远跳过它，
+    既不触发也不报错 —— 一个静默死掉的 job。
+    """
+    with pytest.raises(ValueError, match="never fires"):
+        cron_tool.next_cron_fire(expr, _R1_NOW, "Asia/Hong_Kong")
+
+
+def test_zero_step_gives_readable_error():
+    """`*/0` 以前漏出 range() 的内部报错，看不出是表达式的问题。"""
+    with pytest.raises(ValueError, match="step must be positive"):
+        cron_tool.next_cron_fire("*/0 * * * *", _R1_NOW, "Asia/Hong_Kong")
+
+
+def test_equivalence_refuses_when_either_side_cannot_be_evaluated():
+    """两条永不触发的表达式过去双双得到 None，None == None 判成「等价」。
+
+    这是最阴的一条 —— 迁移的黄金判据会给一条死表达式盖章放行。
+    """
+    ok, detail = cron_tool._exprs_equivalent("0 8 31 2 *", "0 8 31 2 *")
+    assert ok is False
+    assert "cannot evaluate" in detail
+
+
+def test_equivalence_still_accepts_the_real_migration():
+    """防过度收紧：真实的那两条生产迁移必须仍判等价。"""
+    for old, new in [("13 0 * * 1", "13 8 * * 1"), ("7 0 * * 1", "7 8 * * 1")]:
+        ok, detail = cron_tool._exprs_equivalent(old, new)
+        assert ok, f"{old} -> {new} 被误判为不等价: {detail}"
+
+
+def test_next_cron_fire_never_returns_none():
+    """签名上已经没有 None 了，用一批合法表达式确认行为一致。"""
+    for expr in ["0 8 * * *", "0 8 * * MON-FRI", "*/7 * * * *", "0 8 29 2 *",
+                 "0 8 1 * *", "13 8 * * 1"]:
+        got = cron_tool.next_cron_fire(expr, _R1_NOW, "Asia/Hong_Kong")
+        assert got is not None and got > _R1_NOW, expr
+
+
+@pytest.mark.parametrize("bad", [
+    "0 8 * *",        # 4 字段
+    "0 8 * * * *",    # 6 字段
+    "@daily",         # 别名语法不支持
+    "",
+    "60 8 * * *",     # 分钟越界
+    "0 8 0 * *",      # 日 0
+    "0 8 * 13 *",     # 月 13
+    "0 8 * * 7",      # 周 7（我们只收 0-6，宁可报错也别猜）
+])
+def test_malformed_expressions_are_loud(bad):
+    with pytest.raises(ValueError):
+        cron_tool.next_cron_fire(bad, _R1_NOW, "Asia/Hong_Kong")

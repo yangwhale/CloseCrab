@@ -173,7 +173,7 @@ def parse_at(s: str, tz: str = DEFAULT_TZ) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def next_cron_fire(expr: str, after: datetime, tz: str = DEFAULT_TZ) -> datetime | None:
+def next_cron_fire(expr: str, after: datetime, tz: str = DEFAULT_TZ) -> datetime:
     """Next fire time for a cron expr, evaluated against wall-clock in `tz`.
 
     Returns an aware UTC datetime.
@@ -208,6 +208,8 @@ def _expand(field, lo, hi, aliases=None):
         if "/" in part:
             base, step = part.split("/")
             step = int(step)
+            if step <= 0:
+                raise ValueError(f"step must be positive in {part!r}")
         else:
             base, step = part, 1
         if base == "*":
@@ -236,7 +238,7 @@ def _expand(field, lo, hi, aliases=None):
     return out
 
 
-def _basic_cron(expr: str, after: datetime, zone: ZoneInfo | None = None) -> datetime | None:
+def _basic_cron(expr: str, after: datetime, zone: ZoneInfo | None = None) -> datetime:
     """Minute-scan cron evaluator. `after` must already be in the target zone."""
     parts = expr.split()
     if len(parts) != 5:
@@ -264,7 +266,13 @@ def _basic_cron(expr: str, after: datetime, zone: ZoneInfo | None = None) -> dat
         t += timedelta(minutes=1)
         if t.hour == 0 and t.minute == 0:
             continue  # rolled into a new day; re-check the date predicate
-    return None
+    # Scanning four years without a hit means the expression can never fire —
+    # "0 8 31 2 *" (February 31st) passes every per-field range check and then
+    # matches no date, ever. Returning None made that a *silent* dead job:
+    # cmd_add happened to check, but the tz migration wrote `fire_at: None`
+    # straight to Firestore and claim_job then skipped it forever with no
+    # error status. Raise instead, so every call site has to face it.
+    raise ValueError(f"cron expr never fires within 4 years: {expr!r}")
 
 
 def cmd_add(args):
@@ -287,9 +295,6 @@ def cmd_add(args):
         else:
             fire_at = next_cron_fire(args.cron, NOW(), tz)
             kind, cron_expr = "recurring", args.cron
-            if not fire_at:
-                print(json.dumps({"error": f"bad cron: {args.cron}"}))
-                sys.exit(2)
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
         sys.exit(2)
@@ -408,8 +413,14 @@ def _exprs_equivalent(old_expr: str, new_expr: str, samples: int = 60) -> tuple[
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for i in range(samples):
         now = base + timedelta(days=7 * i, hours=(i * 7) % 24, minutes=(i * 13) % 60)
-        old = next_cron_fire(old_expr, now, "UTC")
-        new = next_cron_fire(new_expr, now, "Asia/Hong_Kong")
+        try:
+            old = next_cron_fire(old_expr, now, "UTC")
+            new = next_cron_fire(new_expr, now, "Asia/Hong_Kong")
+        except ValueError as e:
+            # 算不出来就不能声称等价。这以前是最阴的一条：两条永不触发的表达式
+            # 双双得到 None，None == None 判成「等价」，迁移照做，然后往库里写
+            # 一个 fire_at=None 的死 job。
+            return False, f"cannot evaluate at now={now.isoformat()}: {e}"
         if old != new:
             return False, (
                 f"mismatch at now={now.isoformat()}: "
@@ -440,12 +451,16 @@ def cmd_migrate_tz(args):
         elif args.apply:
             # Atomic: expression and tz move together. Writing tz alone would
             # reinterpret "0" as 0am HKT and shift the job by 8 hours.
+            try:
+                nxt = next_cron_fire(new_expr, NOW(), "Asia/Hong_Kong")
+            except ValueError as e:
+                # 一条 job 算不出来不该打断整批迁移，也绝不能写进去 —— 写了就是
+                # 一个 fire_at 不可用的死 job，claim 会永远跳过它且不报错。
+                entry["action"] = f"FAILED: {e}"
+                report.append(entry)
+                continue
             snap.reference.update(
-                {
-                    "cron": new_expr,
-                    "tz": "Asia/Hong_Kong",
-                    "fire_at": next_cron_fire(new_expr, NOW(), "Asia/Hong_Kong"),
-                }
+                {"cron": new_expr, "tz": "Asia/Hong_Kong", "fire_at": nxt}
             )
             entry["action"] = "MIGRATED"
         else:
@@ -467,8 +482,6 @@ def compute_fire_update(job: dict, now: datetime) -> tuple[dict, str | None]:
             nxt = next_cron_fire(job["cron"], now, tz)
         except Exception as e:
             return {**upd, "status": "error"}, str(e)
-        if not nxt:
-            return {**upd, "status": "error"}, "cron produced no next fire time"
         upd["fire_at"] = nxt
     else:
         upd["status"] = "done"
