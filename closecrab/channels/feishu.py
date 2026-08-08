@@ -716,10 +716,23 @@ class FeishuChannel(Channel):
         # 可能拆开，0.8s 抓不全。
         self._inbox_debouncer = InboundDebouncer(
             debounce_s=1.5,
-            build_key=lambda it: "inbox",
-            should_debounce=self._should_debounce_inbox,
+            build_key=self._inbox_debounce_key,
             on_flush=self._on_inbox_debounced_flush,
         )
+
+    @staticmethod
+    def _inbox_debounce_key(item: dict) -> Optional[str]:
+        """待合并的归到同一个 buffer；直通的返回 None。
+
+        **必须用 build_key 而不是 should_debounce 来区分。** InboundDebouncer 的
+        直通分支会先 `self._buffers.pop(key)`，把同 key 下已攒的东西拖出来跟自己
+        拼成一批再 flush。对用户消息路径这是对的（都是同类文本，控制指令理应把
+        前面攒的一起冲掉）；对 inbox 是错的——一条 phase 消息会把正在攒的独立
+        任务卷走合并，V1 协议的顺序语义当场破坏。
+
+        返回 None 走的是另一条路：单条立即 flush，完全不碰 buffer。
+        """
+        return "inbox" if FeishuChannel._should_debounce_inbox(item) else None
 
     @staticmethod
     def _should_debounce_inbox(item: dict) -> bool:
