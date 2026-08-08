@@ -641,7 +641,7 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    a = sub.add_parser("add")
+    a = sub.add_parser("add", aliases=["create"])
     a.add_argument("--target", required=True, help="target bot name")
     a.add_argument("--in", dest="in_", help="relative delay: 10m/2h/90s/3d")
     a.add_argument(
@@ -664,7 +664,7 @@ def main():
     l.add_argument("--all", action="store_true", help="show all senders (not just current bot)")
     l.set_defaults(fn=cmd_list)
 
-    r = sub.add_parser("remove")
+    r = sub.add_parser("remove", aliases=["stop", "rm"])
     r.add_argument("job_id")
     r.set_defaults(fn=cmd_remove)
 

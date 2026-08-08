@@ -366,7 +366,7 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    c = sub.add_parser("create")
+    c = sub.add_parser("create", aliases=["add"])
     c.add_argument("--name", required=True)
     c.add_argument("--prompt", required=True, help="给探针 agent 的指令，讲清楚看哪里、怎么算跑完")
     c.add_argument("--interval", type=int, default=120, help="秒，默认 120")
@@ -384,7 +384,7 @@ def main():
     l.add_argument("--all", action="store_true")
     l.set_defaults(fn=cmd_list)
 
-    s_ = sub.add_parser("stop")
+    s_ = sub.add_parser("stop", aliases=["remove", "rm"])
     s_.add_argument("name")
     s_.set_defaults(fn=cmd_stop)
 
