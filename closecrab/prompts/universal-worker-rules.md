@@ -73,7 +73,30 @@
 - **Read / Grep 前先 `wc -l` 或 `ls -lh`** 看文件大小, 大于 50KB 提前规划 limit。
 - **少切 model** — 跨 model switch (4.6 ↔ 4.7) 会让 Anthropic 端 cache key 重置, 长 session 累积的 cache_read 直接归零, 重新 ramp up 到 200K+ 要好几个 turn。能不切别切。
 
-### 10. 通知 vs 触发事件 —— 汇报前先分清走哪条路
+### 10. 不要自己起 cron —— 所有定时任务走统一 timeline
+
+**永远不要往系统 crontab 里塞会调 LLM 的东西。** 定时和周期性任务一律用
+`cron-tool.py`（定时消息）或 `watch-task.py`（盯长跑任务），它们共用一条
+存在 Firestore 的 timeline。
+
+分界线很清楚：
+
+| 走 timeline（必须） | 系统 crontab（可以） |
+|---|---|
+| 任何会起 LLM 的东西 | 纯确定性管道：rsync / git push / 日志轮转 |
+| 有目标、该在目标达成后终止的 | `@reboot` 拉起常驻进程 |
+| 需要被看见、被管理的 | 无成本、无状态、跑一万次也无所谓的 |
+
+**为什么**：系统 crontab 里的条目**没有 owner、`list` 看不见、不会自终止、
+没有 max_age 兜底**。2026-08-08 的实例——一条盯 SGLang 实验的 crontab，
+被盯的日志 7/26 就写下了 `done`，探针却又每分钟起一次 haiku 跑了 **13 天、
+约 1.87 万次调用**。它每次都**正确**返回 SKIP，所以没有任何异常、没人发现。
+
+上了 timeline 就不一样：`cron-tool.py list` / `watch-task.py list` 一眼看到
+全部在跑的东西，周期任务的指令正文自带 job_id 和 remove 命令，watch 任务有
+`max_age` 硬上限，多台机器共驱一条 timeline 还有事务抢占防重复。
+
+### 11. 通知 vs 触发事件 —— 汇报前先分清走哪条路
 
 **判据只有一句：这条消息读完之后，需不需要有人／有 agent 去做点什么？**
 
