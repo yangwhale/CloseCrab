@@ -362,16 +362,56 @@ tick 到期时先跑一个 haiku 级的轻量判断（或者干脆一条确定�
 
 ## 8. 结果回流
 
-现有链路已经能用：inbox turn 的 reply 走 channel 落到聊天窗口。需要补的是**分档**（借鉴 OpenClaw 的 `announce` / `webhook` / `none`）：
+### 8.1 两个正交维度：报多勤 × 走哪条路
+
+> **2026-08-08 Chris 修正**：初稿只有「档位」一个维度，把**通道**漏掉了。这是个实质缺陷——档位管的是「多久报一次」，通道管的是「这条消息要不要惊动主进程」，两者语义完全不同，光靠调频率救不回来。
+
+**通道（decides whether anything wakes up）**
+
+| 通道 | 机制 | 后果 | 语义 |
+|---|---|---|---|
+| `chat` | `scripts/feishu-notify.py` 直调飞书 `im.v1.message.create` | 消息进聊天窗口，**不触发任何 turn**，零 token | 「让你看一眼」 |
+| `inbox` | 写 `messages` 集合 → BotCore 当成用户输入 | **触发主进程一次完整 LLM turn**，占 per-user lock | 「需要接着处理」 |
+
+判据只有一句话：**这条消息读完之后，需不需要有人／有 agent 去做点什么？**
+
+- 「查了资源池，还是没有，继续等」 → `chat`。纯播报，没有任何后续动作。
+- 「资源有了，可以开始测试了」 → `inbox`。它要触发下一步。
+
+走错方向的代价不对称：
+- 该 `chat` 却走了 `inbox` → 每次轮询都烧一个完整 turn，还会打断你正在跑的对话（抢 `_user_task_locks`）。US-1 每 30 分钟一次 = 一天 48 个无谓 turn。
+- 该 `inbox` 却走了 `chat` → 消息躺在聊天窗口里没人接，任务实际停摆。
+
+**档位（decides how often）**
 
 | 档位 | 行为 | 适用 |
 |---|---|---|
-| `always` | 每次触发都汇报 | 调试期 |
-| `on_change` | 只有产生新进展才发 | **默认**，US-1 用这个 |
-| `on_done` | 只在任务终止时发一次 | 长周期后台任务 |
-| `none` | 不发，只写执行历史 | 纯采集类 |
+| `always` | 每次触发都报 | 调试期 |
+| `on_change` | 只有产生新进展才报 | **默认** |
+| `on_done` | 只在任务终止时报一次 | 长周期后台任务 |
+| `none` | 不报，只写执行历史 | 纯采集类 |
 
-**注意**：agent 在 run 内本来就可以自己发消息。要防止「agent 自己发了 + 系统 fallback 又发一次」的重复——OpenClaw 的做法是有 route 时 runner 跳过 fallback announce。我们需要同样的去重。
+### 8.2 US-1 的完整配置长什么样
+
+```
+notify_progress: none          轮询没结果 → 什么都不发
+notify_done:     inbox         查到机器 → 触发 turn，因为后面要接着干活
+```
+
+如果想中途也能看见心跳，把 `notify_progress` 调成 `chat` —— **仍然不产生 turn**。这就是两个维度分开的价值：可观测性和成本不再互相绑架。
+
+### 8.3 现成的东西
+
+`scripts/feishu-notify.py`（2026-07-26 已存在）就是 `chat` 通道的实现。它的 docstring 已经把这件事讲清楚了：
+
+> `cron-tool.py` → 写 Firestore inbox → BotCore 当成一次用户输入 → 触发完整 LLM turn → 占住 per-user lock、打断在跑的命令、后续任务堆积
+> 本脚本 → 直接调飞书 im.v1.message.create → 消息进聊天窗口，**没有 turn**
+
+也就是说这条路早就有了，本设计要做的只是**把它接进调度器的 notify 配置**，并在 system prompt 里把「什么时候用哪条」讲明白——现在全靠 agent 自觉。
+
+### 8.4 去重
+
+agent 在 run 内本来就能自己发消息。要防止「agent 自己发了 + 系统 fallback 又发一次」。OpenClaw 的做法是有 route 时 runner 跳过 fallback announce，我们照做，并在 `runs/{run_id}.notified` 里留痕便于审计。
 
 ---
 
@@ -390,7 +430,11 @@ tasks/{task_id}
   state          str          pending | active | blocked | done | failed
   progress       [ {ts, summary} ]    进度累积
   job_id         str | null   挂载的 Job
-  notify         str          always | on_change | on_done | none
+  # notify 拆成两个正交维度，见 §8.1。档位管频率，通道管要不要惊动主进程。
+  notify_progress      str    档位: always | on_change | none
+  notify_progress_via  str    通道: chat | inbox    （默认 chat）
+  notify_done          str    档位: on_done | none
+  notify_done_via      str    通道: chat | inbox    （默认 inbox）
   session_mode   str          reuse | fresh；由 job.kind 推导（every→reuse，
                               cron/at→fresh），允许显式覆盖。见 §6.1
   session_turns  int          复用模式下的累计轮数，达 20 强制新开
