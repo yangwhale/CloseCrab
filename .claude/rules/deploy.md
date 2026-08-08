@@ -14,6 +14,21 @@ globs: deploy.sh, run.sh, scripts/*.sh, scripts/*.py
 - 自动重启 wrapper，检测退出码决定是否重启
 - 连续崩溃 >10 次自动停止（dirty restart 保护）
 - 不要改退出码约定（42=restart, 130/137/143=不重启, 1=不重启）
+- **启动 bot 的唯一入口**：run.sh 开头那段环境设置（source `.zshenv`、nvm/npm-global 的
+  PATH、`KILO_SERVER_PASSWORD`、TTS 后端）是 bot 能正常工作的前提。`launcher.sh` 现在
+  直接调它，**不要再另抄一份重启循环** —— 抄漏环境平时看不出来（交互 shell 会继承），
+  只在 cron 空环境下发作，正好就是 @reboot 那一刻，而 kilo worker 会直接坏掉
+
+## boot-autostart.sh
+- 开机自启入口，三台机器的 `@reboot` 都调它。顺序：补 cron 最小环境 → 等 DNS →
+  gcsfuse → OpenClaw Gateway → `launcher.sh start all`（顺带 cron-daemon）
+- **幂等**：已在跑的一律跳过，所以随时可以手动执行验证，不必真重启在服役的机器
+- 改完必须用 cron 的最小环境实测，别只看那行写对了没有：
+  ```
+  env -i HOME=$HOME LOGNAME=$USER USER=$USER SHELL=/bin/sh PATH=/usr/bin:/bin \
+    $HOME/CloseCrab/scripts/boot-autostart.sh
+  ```
+  跑完要**数进程**（每个 bot 仍是 1 个），确认没起出重复实例
 
 ## scripts/ 目录
 - `config-manage.py` — Bot CRUD（Firestore），修改时注意向后兼容 Firestore schema

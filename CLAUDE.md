@@ -47,6 +47,7 @@ python3 scripts/cron-tool.py list|remove <id>|tick      # cron-daemon 由 launch
 python3 scripts/session-status.py <bot> [--days N]
 
 # 运维 / 健康检查
+scripts/boot-autostart.sh [--check]          # 开机自启（三台机器的 @reboot 都调它）；幂等，随时可手动跑验证
 scripts/dispatch-bot.sh deploy|recall|move|check
 scripts/sync-memory.sh --push|--pull
 scripts/send-to-discord.sh --channel <id> "<msg>"
