@@ -1,7 +1,7 @@
 # Task Scheduler — 时间驱动的任务系统
 
 > 设计：2026-08-08
-> 状态：**PRD 草案，待打磨。未开始实现。**
+> 状态：**设计定稿（2026-08-08，7 项待定全部拍板）。未开始实现，P0 可启动。**
 > 作者：Chris × bunny 协同设计
 > 调研输入：OpenClaw（本机源码）、Claude Code（官方文档）、Goose、OpenHarness、Crush、OpenCode
 
@@ -225,10 +225,14 @@ Calendar 存 `RRULE` + `DTSTART` + `TZID` 然后物化实例，这个**两层思
 
 **结论**：借鉴 Calendar 的两层结构，但规则层必须比 RRULE 多一种 `every`。
 
-### 5.5 三个必须拍板的时间细节
+### 5.5 三个时间细节（均已定稿）
 
 **① 时区**
 `cron` kind 必须存 `tz` 字段，默认 `Asia/Hong_Kong`。`every` 和 `at` 不需要（`at` 存 UTC 绝对值，输入时按 HKT 解析）。
+
+**2026-08-08 已定（Q7）**：`tz` 的取值**只允许 `Asia/Hong_Kong` 和 `UTC`**，传其他值在创建时直接报错，不落库。
+
+理由：任意 IANA 时区就要处理 DST 的两个恶心 case（春季不存在的挂钟时刻、秋季重复出现的挂钟时刻）。为一个当前不存在的跨时区需求承担这个复杂度不值。**关键是报错而不是静默接受**——将来有人传 `America/New_York`，宁可他立刻看到「不支持」，也不要得到一个悄悄算错 1 小时的调度。
 
 → 这同时是 G4 的修复。**已有数据的迁移必须逐条人工做，绝不能批量加默认值。**
 
@@ -251,7 +255,9 @@ Calendar 存 `RRULE` + `DTSTART` + `TZID` 然后物化实例，这个**两层思
 - 轮询类建议锚在**完成**——避免上一轮没跑完就叠下一轮
 - 严格节拍类锚在**触发**
 
-建议做成字段 `anchor: "fire" | "complete"`，默认 `complete`，而不是全局约定。
+**2026-08-08 已定（Q3）**：做成字段 `anchor: "fire" | "complete"`，**默认 `complete`**。
+
+理由：默认值应该服务主流用例。轮询是 `every` 的主要形态，不重叠比严格节拍重要——一个查询跑 40 秒、间隔 60 秒的任务，用 `fire` 锚点迟早会因为某次变慢而叠起来。要严格节拍的显式写 `anchor: fire`。
 
 **③ 补跑策略**
 机器停 2 小时，30 分钟的任务错过 4 次。
@@ -276,8 +282,16 @@ Calendar 存 `RRULE` + `DTSTART` + `TZID` 然后物化实例，这个**两层思
 **代价（必须写清楚）**：
 - 独立 session **没有主对话的上下文**。任务描述必须自包含。
 - 每次触发都是 cold start，token 成本更高（见 §7）
-- 需要决定：同一个 Task 的多次触发是**复用同一个 session**（有连续性，能看到上次查的结果，但 context 会累积膨胀），还是**每次全新**（干净，但每次从零）。
-  → **待拍板**。倾向：`every` 类复用（需要「上次查到什么」的连续性），`cron` 类每次全新。
+**session 复用策略（2026-08-08 已定，Q2）**：
+
+| kind | 策略 | 理由 |
+|---|---|---|
+| `every` | **复用**同一 session | 轮询需要「上次查到什么」的连续性。第 3 轮的 agent 知道前两轮都是 BUSY，才谈得上判断「情况没变」，也才谈得上将来的退避 |
+| `cron` / `at` | **每次全新** | 定点检查各次之间通常独立，全新 session 更干净、context 更小 |
+
+**复用必须配的护栏**：context 会无限累积。达到 **20 轮** 或 **200K token**（取先到者）强制新开 session，并把旧 session 的摘要注入新 session。否则一个跑一个月的轮询任务会把 context 撑爆。
+
+> 这个护栏不是可选项。没有它，`every` 复用就是一颗定时炸弹——前两周一切正常，第三周开始每次触发都在烧几十万 token，而且没有任何报错。
 
 ### 6.2 削权自终止
 
@@ -336,7 +350,7 @@ tick 到期时先跑一个 haiku 级的轻量判断（或者干脆一条确定�
 - 优点：实现简单，纯改 `next_fire_at`，§5.2 的越权通道天然支持
 - 缺点：降低时效性——真出票了可能晚 30 分钟才发现
 
-**倾向 A，但需要 Chris 拍板**，因为它直接影响架构（要不要引入第二个执行路径）。
+**当初倾向 A。2026-08-08 Chris 决定本期都不做** —— 见本节开头的决策框。方案 B（退避）因为只改 `next_fire_at`，将来要加是纯增量；方案 A 是第二条执行路径，届时需要重新评估。
 
 也可以两者叠加：探针降单次成本，退避降频次。
 
@@ -361,9 +375,9 @@ tick 到期时先跑一个 haiku 级的轻量判断（或者干脆一条确定�
 
 ---
 
-## 9. 数据结构（草案）
+## 9. 数据结构
 
-> 以下 schema 是**讨论用草案**，字段名和取值待定。
+> 字段名仍可调整，但**取值语义已随 §11 的 Q2/Q3/Q4/Q6/Q7 定稿**。
 
 ### 9.1 `tasks` 集合（新增）
 
@@ -377,7 +391,10 @@ tasks/{task_id}
   progress       [ {ts, summary} ]    进度累积
   job_id         str | null   挂载的 Job
   notify         str          always | on_change | on_done | none
-  session_mode   str          reuse | fresh        （见 §6.1 待拍板）
+  session_mode   str          reuse | fresh；由 job.kind 推导（every→reuse，
+                              cron/at→fresh），允许显式覆盖。见 §6.1
+  session_turns  int          复用模式下的累计轮数，达 20 强制新开
+  session_tokens int          复用模式下的累计 token，达 200K 强制新开
   created_at     ts
   updated_at     ts
 ```
@@ -389,7 +406,8 @@ scheduled_jobs/{job_id}
   # ── 规则层（定义，人可读可改） ──
   kind           str          at | cron | every
   cron           str | null   kind=cron 时的表达式
-  tz             str          kind=cron 时必填，默认 Asia/Hong_Kong   ← 修 G4
+  tz             str          kind=cron 时必填，枚举仅 {Asia/Hong_Kong, UTC}
+                              默认 Asia/Hong_Kong，其他值创建时报错  ← 修 G4
   interval_sec   int | null   kind=every 时的间隔
   anchor         str          fire | complete，默认 complete          ← §5.5②
   max_lateness_sec int        默认 3600，超时跳过                      ← §5.5③
@@ -412,7 +430,23 @@ scheduled_jobs/{job_id}
 
 ### 9.3 执行历史
 
-建议 `tasks/{task_id}/runs/{run_id}` 子集合，或复用现有 `bots/{name}/logs`。**待定** —— 前者查询方便，后者不引入新结构。
+**2026-08-08 已定（Q4）**：新建子集合 `tasks/{task_id}/runs/{run_id}`。
+
+```
+tasks/{task_id}/runs/{run_id}
+  run_id         str
+  fired_at       ts
+  finished_at    ts
+  status         str      ok | error | skipped_stale | timeout
+  session_key    str      sched:<task_id>
+  summary        str      本轮 agent 的结论（写进 Task.progress 的那条）
+  notified       bool     是否发到了聊天窗口（配合 notify 分档做去重审计）
+  usage          map      token 用量，供 T505 报表聚合
+```
+
+理由：`bots/{name}/logs` 是按 bot 切分的对话日志，要回答「这个任务历次跑得怎么样」得全表扫加过滤。子集合天然按任务聚合，一次查询搞定。
+
+**代价（要记住）**：Firestore 子集合**不会随父文档自动删除**。Task 删除时必须显式递归清理 runs，否则会留下永久孤儿数据。这条要写进实现清单。
 
 ---
 
@@ -431,21 +465,31 @@ scheduled_jobs/{job_id}
 
 ---
 
-## 11. 待拍板问题
+## 11. 设计决策记录
 
-每条都给出**推荐答案 + 理由**，Chris 确认或反驳即可，不必从零思考。
+**2026-08-08：全部 7 项已定，设计进入可实现状态。** 以下保留每条的理由，供实现时对照，也供将来推翻时知道当初为什么这么选。
 
-### 已定
+### 汇总
 
-**Q1 — 成本方案** ✅ **2026-08-08 定：本期不做。** 边界见 §7 开头的决策框。
+| | 议题 | 决定 |
+|---|---|---|
+| Q1 | 成本方案 | 本期不做；保留 `next_fire_at` 越权通道作为将来的岔路口 |
+| Q2 | session 复用 | 按 kind：`every` 复用（配 20 轮 / 200K token 护栏），`cron`/`at` 每次全新 |
+| Q3 | `every` 锚点 | 默认 `complete` |
+| Q4 | 执行历史 | 新建 `tasks/{task_id}/runs/{run_id}` 子集合 |
+| Q5 | 时区迁移 | 已查清，2 条 job，表达式与 tz 原子同改，T401 验等价 |
+| Q6 | 多 Job | 保持 0..1 |
+| Q7 | 时区范围 | 仅 `Asia/Hong_Kong` + `UTC`，其他值创建时报错 |
+
+### 明细
+
+**Q1 — 成本方案** ✅ **本期不做。** 边界见 §7 开头的决策框：不建第二条执行路径，但保留岔路口。
 
 **Q5 — 现存 cron job 的时区迁移** ✅ **已查清，不构成阻塞。** 只有 2 条在跑，当前语义正确；迁移时表达式与 `tz` 字段原子同改，用 T401 验证等价性。
 
-### 待确认（附推荐答案）
-
 **Q2 — session 复用策略**（§6.1）
 
-> **推荐：按 kind 区分。`every` 复用同一 session，`cron` 每次全新。**
+> **决定：按 kind 区分。`every` 复用同一 session，`cron` 每次全新。**
 >
 > 理由：轮询类天然需要「上次查到什么」的连续性——第 3 轮的 agent 知道前两轮都是 BUSY，才可能做出「情况没变」的判断，也才谈得上退避。定点类（每天 8 点查票）各次之间通常独立，全新 session 更干净、上下文更小。
 >
@@ -455,7 +499,7 @@ scheduled_jobs/{job_id}
 
 **Q3 — `every` 默认锚点**（§5.5②）
 
-> **推荐：默认 `complete`。**
+> **决定：默认 `complete`。**
 >
 > 理由：轮询是 `every` 的主要用例，**不重叠**比严格节拍重要得多。一个查询跑 40 秒、间隔 60 秒的任务，用 `fire` 锚点迟早会因为某次变慢而叠起来。想要严格节拍的场景显式写 `anchor: fire` 即可。
 >
@@ -463,7 +507,7 @@ scheduled_jobs/{job_id}
 
 **Q4 — 执行历史存哪**（§9.3）
 
-> **推荐：新建子集合 `tasks/{task_id}/runs/{run_id}`。**
+> **决定：新建子集合 `tasks/{task_id}/runs/{run_id}`。**
 >
 > 理由：`bots/{name}/logs` 是**按 bot 切分的对话日志**，要回答「这个任务历次跑得怎么样」得全表扫加过滤。子集合天然按任务聚合，一次查询搞定，而且 Task 删除时能级联清理。
 >
@@ -471,7 +515,7 @@ scheduled_jobs/{job_id}
 
 **Q6 — Task 能不能挂多个 Job**
 
-> **推荐：保持 0..1，不做多 Job。**
+> **决定：保持 0..1，不做多 Job。**
 >
 > 理由：目前想不出真实场景。「工作日早 8 点 + 每 30 分钟」这种双触发确实无法用单个 cron 表达，但也可以建两个 Task 指向同一个目标描述。为一个假想需求引入一对多关系，会让终止语义变复杂（删哪个 job 算任务结束？）。
 >
@@ -479,7 +523,7 @@ scheduled_jobs/{job_id}
 
 **Q7 — 时区支持范围**（写 §14.1-B 测试用例时发现的）
 
-> **推荐：只支持 `Asia/Hong_Kong` + `UTC`，传其他值在创建时直接报错。**
+> **决定：只支持 `Asia/Hong_Kong` + `UTC`，传其他值在创建时直接报错。**
 >
 > 理由：任意 IANA 时区就得处理 DST 的两个恶心 case（春季不存在的挂钟时刻、秋季重复出现的挂钟时刻，见 T121/T122）。为一个当前不存在的跨时区需求承担这个复杂度不值。
 >
@@ -572,7 +616,13 @@ def next_fire(job: dict, now: datetime) -> datetime | None: ...
 | T122 | `30 1 * * *` | America/New_York | 秋季回拨那天 1:30 出现两次 | **只触发一次** | 重复的挂钟时刻 |
 | T123 | `0 8 * * *` | Europe/London | 跨 BST 切换前后各一天 | 两天的 UTC 时刻相差 1 小时 | UTC 偏移随日期变 |
 
-> 若最终决定「只支持 Asia/Hong_Kong 和 UTC」，T121-T123 可降级为「传入带 DST 的 tz 必须显式报错」的单条测试。**这是个待拍板项**——见 §11 新增第 7 条。
+> **2026-08-08 已定（Q7）**：只支持 `Asia/Hong_Kong` + `UTC`。因此 **T121-T123 降级**为下面这一条：
+>
+> | ID | 输入 | 期望 |
+> |---|---|---|
+> | T124 | tz = `America/New_York` / `Europe/London` 等任何带 DST 的时区 | **创建时报错**，不落库；错误信息要说明「当前仅支持 Asia/Hong_Kong 与 UTC」 |
+>
+> T121-T123 保留在文档里作为**将来开放任意时区时的现成用例**，届时直接启用。
 
 #### C. `every` kind + 锚点
 
