@@ -256,3 +256,23 @@ def test_host_filter_runs_before_claim():
 
     assert probed == [], "不该在别台机器的任务上起探针"
     assert claimed == [], "更不该 claim 它 —— 会把 next_fire_at 推走饿死正主"
+
+
+# ── R2 审计：--name 直接当 Firestore 文档 ID，必须守它的规矩 ───────────────
+
+@pytest.mark.parametrize("bad", ["a/b", "__x__", ".", "..", "", "   "])
+def test_invalid_task_name_rejected(bad):
+    """不校验的话会在 set() 那一刻甩一整页 gRPC 堆栈，看不出是名字起错了。"""
+    with pytest.raises(argparse.ArgumentTypeError):
+        wt._task_name(bad)
+
+
+@pytest.mark.parametrize("ok", ["t80", "pool-check", "训练_1", "a__b", "__x", "x__"])
+def test_valid_task_name_accepted(ok):
+    """防过度收紧：只有首尾都是双下划线才是保留形式。"""
+    assert wt._task_name(ok) == ok
+
+
+def test_task_name_too_long_rejected():
+    with pytest.raises(argparse.ArgumentTypeError, match="1500"):
+        wt._task_name("x" * 1501)

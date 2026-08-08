@@ -119,6 +119,28 @@ def _is_mine(task: dict) -> bool:
     return (not h) or h == this_host()
 
 
+def _task_name(v: str) -> str:
+    """任务名直接当 Firestore 文档 ID 用，所以得守它的规矩。
+
+    不校验的话，`--name a/b` 或 `--name __x__` 会在 set() 那一刻甩出一整页
+    gRPC 堆栈（"Resource id ... is invalid because it is reserved"），
+    看不出是自己名字起错了。R2 审计时是被这个真绊了一下才发现的。
+    """
+    v = v.strip()
+    if not v:
+        raise argparse.ArgumentTypeError("--name 不能为空")
+    if "/" in v:
+        raise argparse.ArgumentTypeError(f"--name 不能含 '/'（要当文档 ID 用）: {v!r}")
+    if v in (".", ".."):
+        raise argparse.ArgumentTypeError(f"--name 不能是 {v!r}")
+    if v.startswith("__") and v.endswith("__"):
+        raise argparse.ArgumentTypeError(
+            f"--name 不能是 __xxx__ 形式（Firestore 保留 ID）: {v!r}")
+    if len(v.encode()) > 1500:
+        raise argparse.ArgumentTypeError("--name 超过 1500 字节")
+    return v
+
+
 def _model_tier(v: str) -> str:
     """档位校验。非法值必须报错，不能静默退回默认 —— 否则你以为在跑 opus，
     实际跑的是 haiku，而结论看起来一样是一段中文，根本发现不了。"""
@@ -367,7 +389,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("create", aliases=["add"])
-    c.add_argument("--name", required=True)
+    c.add_argument("--name", required=True, type=_task_name)
     c.add_argument("--prompt", required=True, help="给探针 agent 的指令，讲清楚看哪里、怎么算跑完")
     c.add_argument("--interval", type=int, default=120, help="秒，默认 120")
     c.add_argument("--model", type=_model_tier, default=DEFAULT_MODEL,
