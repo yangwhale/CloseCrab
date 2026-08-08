@@ -16,9 +16,10 @@ Usage:
 import argparse, json, os, sys, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-KEY = os.environ.get("JINA_API_KEY") or (
-    "jina_35cda26e034c43a0a8b5d6bf2a09f788EQgf2q-ne4-uQZZG1-INrOlwhWQd"
-)
+KEY = os.environ.get("JINA_API_KEY", "")
+if not KEY:
+    sys.exit("JINA_API_KEY 未设置。别把 key 写死在这里 —— 本仓库是公开的，"
+             "2026-08-08 就是这么被 GitGuardian 抓到的。")
 
 
 def _get(url, accept="application/json", timeout=60, extra=None):
