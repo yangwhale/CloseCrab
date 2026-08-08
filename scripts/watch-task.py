@@ -261,6 +261,8 @@ def cmd_create(args):
         "stall_notified": False,
         "max_age_sec": args.max_age,
     }
+    if args.test_run_id:
+        doc["test_run_id"] = args.test_run_id
     db().collection(COLL).document(args.name).set(doc)
     print(json.dumps({
         "name": args.name, "interval_sec": args.interval,
@@ -371,6 +373,14 @@ def cmd_tick(args):
         name = x.get("name")
         if not name:
             continue
+        # 测试夹具不许在真实循环里跑。跟 cron-tool 同一条规矩、同一个字段名。
+        # 之前这里是空的，于是 R5 的端到端夹具真的把一条 inbox 交接推给了活的
+        # bot，烧掉一个完整 turn —— 那条「训练完成、建议收集权重」的消息里
+        # 说的是一个我自己刚写又刚删的假日志。--dry-run 仍然展示它们：
+        # dry-run 什么都不写，看夹具正是它的用途。
+        if x.get("test_run_id") and not args.dry_run:
+            continue
+
         nf = x.get("next_fire_at")
         if not nf or nf > cutoff:
             continue
@@ -465,6 +475,7 @@ def main():
     c.add_argument("--stall-after", type=int, default=DEFAULT_STALL_AFTER,
                    help=f"连续多少轮无进展算疑似卡住，默认 {DEFAULT_STALL_AFTER}")
     c.add_argument("--max-age", type=int, default=6 * 3600, help="秒，超时自动收，默认 6 小时")
+    c.add_argument("--test-run-id", help="打上就只在 --dry-run 里出现，绝不真跑（测试夹具专用）")
     c.set_defaults(fn=cmd_create)
 
     l = sub.add_parser("list")

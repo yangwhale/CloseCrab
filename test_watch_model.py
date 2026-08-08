@@ -372,3 +372,51 @@ def test_r3_notify_chat_swallows_its_own_failure():
 
     with mock.patch.object(wt.subprocess, "run", boom):
         wt.notify_chat("t", "body", "jarvis")   # 不许抛
+
+
+def test_test_fixtures_never_fire_for_real():
+    """R5 自己撞出来的：端到端夹具真的把一条 inbox 交接推给了活的 bot，
+    烧掉一个完整 turn，内容还是一个假日志。cron-tool 早有这条守卫，
+    watch-task 一直没有。"""
+    probed = []
+
+    class _Ref:
+        def update(self, u):
+            pass
+
+    class _Q:
+        def stream(self):
+            return [types.SimpleNamespace(to_dict=lambda: _base_task(test_run_id="t1"))]
+
+    class _C:
+        def where(self, *a):
+            return _Q()
+
+        def document(self, _n):
+            return _Ref()
+
+    d = types.SimpleNamespace(collection=lambda _c: _C())
+    with mock.patch.object(wt, "db", lambda: d), \
+         mock.patch.object(wt, "_sweep", lambda *a: 0), \
+         mock.patch.object(wt, "_claim", lambda *a: probed.append("claim") or None), \
+         mock.patch.object(wt, "run_probe", lambda *a: probed.append("probe") or ("SKIP", "")):
+        wt.cmd_tick(argparse.Namespace(dry_run=False))
+    assert probed == [], "夹具既不该被 claim 也不该起探针"
+
+
+def test_test_fixtures_still_visible_in_dry_run():
+    """dry-run 什么都不写，看夹具正是它的用途 —— 别把排障工具也堵死。"""
+    class _Q:
+        def stream(self):
+            return [types.SimpleNamespace(to_dict=lambda: _base_task(test_run_id="t1"))]
+
+    class _C:
+        def where(self, *a):
+            return _Q()
+
+    d = types.SimpleNamespace(collection=lambda _c: _C())
+    import io, contextlib
+    buf = io.StringIO()
+    with mock.patch.object(wt, "db", lambda: d), contextlib.redirect_stdout(buf):
+        wt.cmd_tick(argparse.Namespace(dry_run=True))
+    assert '"would_probe": true' in buf.getvalue().lower()
