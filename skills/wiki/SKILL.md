@@ -86,6 +86,11 @@ $WIKI_REPO/
 └── quartz.layout.ts            # Quartz 布局
 ```
 
+> 上面这份脚本清单是**某一个** wiki 仓库的样子，不是契约。不同 wiki 仓库的
+> 脚本集会有出入（实例：Study Wiki 没有 `gen-moc.py` / `benchmark.py`，
+> 却多一个 `graph.py`）。**动手前以 `ls $WIKI_REPO/scripts` 为准**，
+> 别照着这里的清单去调一个本地没有的脚本。
+
 ## Markdown 页面模板
 
 ```markdown
