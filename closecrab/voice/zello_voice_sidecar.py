@@ -279,12 +279,15 @@ class ZelloClient:
     """
 
     def __init__(self, *, username: str, password: str, channel: str,
-                 auth_token: str = "", network: str = ""):
+                 auth_token: str = "", network: str = "",
+                 issuer: str = "", private_key_path: str = ""):
         self.username = username
         self.password = password
         self.channel = channel
         self.auth_token = auth_token
         self.network = network
+        self.issuer = issuer
+        self.private_key_path = private_key_path
         self._ws = None
         self._seq = 0
         self._connected = False
@@ -314,6 +317,23 @@ class ZelloClient:
         self._connected = True
         log.info("Zello 已连接并登录")
 
+    def _mint_token(self) -> str:
+        """现签 dev token。写死的 token 会过期（2026-07-10 那次哑了一个月没人发现），
+        且 recv_loop 断线重连也要拿新的，所以每次 logon 都签。"""
+        if not (self.issuer and self.private_key_path):
+            return self.auth_token
+        try:
+            import jwt
+            with open(self.private_key_path) as f:
+                key = f.read()
+            return jwt.encode(
+                {"iss": self.issuer, "exp": int(time.time()) + 3600, "azp": "dev"},
+                key, algorithm="RS256",
+            )
+        except Exception as e:
+            log.warning("Zello token 签发失败 (%s), 回落静态 token", e)
+            return self.auth_token
+
     async def _logon(self):
         seq = self._next_seq()
         cmd: dict = {
@@ -324,8 +344,9 @@ class ZelloClient:
             "channels": [self.channel],
             "features": {"transcriptions": True},
         }
-        if self.auth_token:
-            cmd["auth_token"] = self.auth_token
+        token = self._mint_token()
+        if token:
+            cmd["auth_token"] = token
         await self._ws.send(json.dumps(cmd))
         resp = json.loads(await self._ws.recv())
         if not resp.get("success"):
@@ -1242,6 +1263,21 @@ def _load_hls_enabled() -> bool:
         return False
 
 
+def _load_dev_secrets() -> dict:
+    """开发者级凭据，全 bot 共用: issuer + 私钥路径。per-bot 身份一律走 Firestore。"""
+    try:
+        with open(os.path.expanduser("~/.closecrab/zello/config.json")) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        log.warning("读取 Zello 开发者凭据失败: %s", e)
+        return {}
+    _display_names.update(cfg.get("display_names", {}))
+    return {
+        "issuer": cfg.get("issuer", ""),
+        "private_key_path": cfg.get("private_key_path", ""),
+    }
+
+
 def _load_config(bot_name: str) -> dict | None:
     """从 Firestore bots/{name} 读 Zello 配置。"""
     try:
@@ -1255,13 +1291,15 @@ def _load_config(bot_name: str) -> dict | None:
         zello_cfg = (data.get("channels") or {}).get("zello") or {}
         if not zello_cfg.get("enabled"):
             return None
-        return {
+        cfg = {
             "username": zello_cfg.get("username", ""),
             "password": zello_cfg.get("password", ""),
             "channel": zello_cfg.get("channel", ""),
             "auth_token": zello_cfg.get("auth_token", ""),
             "network": zello_cfg.get("network", ""),
         }
+        cfg.update(_load_dev_secrets())
+        return cfg
     except Exception as e:
         log.warning("读取 Zello 配置失败: %s", e)
         return None
@@ -1284,6 +1322,8 @@ async def _run(config: dict):
         channel=config["channel"],
         auth_token=config.get("auth_token", ""),
         network=config.get("network", ""),
+        issuer=config.get("issuer", ""),
+        private_key_path=config.get("private_key_path", ""),
     )
     _zello_client = client
 
@@ -1327,24 +1367,6 @@ def start(bot_name: str, config: dict | None = None):
 
     if config is None:
         config = _load_config(bot_name)
-        # Firestore 没配置 → 回落本地配置文件
-        if config is None:
-            local_cfg = os.path.expanduser("~/.closecrab/zello/config.json")
-            if os.path.exists(local_cfg):
-                try:
-                    with open(local_cfg) as f:
-                        cfg = json.load(f)
-                    config = {
-                        "username": cfg.get("username", ""),
-                        "password": cfg.get("password", ""),
-                        "channel": cfg.get("channel", ""),
-                        "auth_token": cfg.get("dev_token", ""),
-                        "network": cfg.get("network", ""),
-                    }
-                    _display_names.update(cfg.get("display_names", {}))
-                    log.info("Zello 配置从本地文件加载: %s (display_names=%d)", local_cfg, len(_display_names))
-                except Exception as e:
-                    log.warning("读取本地 Zello 配置失败: %s", e)
         if config is None:
             log.info("Zello sidecar 未配置 (bot=%s)", bot_name)
             return False
