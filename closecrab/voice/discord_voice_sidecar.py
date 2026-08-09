@@ -558,7 +558,7 @@ async def _gemini_tts_stream(text: str):
     if not cleaned.strip():
         return
     model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
-    voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
+    voice = tts_voice()
     loop_id = id(asyncio.get_running_loop())
     client = _tts_client_per_loop.get(loop_id)
     if client is None:
@@ -2160,7 +2160,7 @@ async def _start_agent_session(channel_id: int):
         try:
             from .livekit_io import CloseCrabLLM
             from .gemini_tts import GeminiTTS
-            voice = os.environ.get("DISCORD_TTS_VOICE", "Orus")
+            voice = tts_voice()
             model = os.environ.get("TTS_MODEL", "gemini-3.1-flash-tts-preview")
             llm = CloseCrabLLM(_feishu_ref, _feishu_loop, _feishu_open_id)
             tts = GeminiTTS(model=model, voice=voice)
@@ -3037,29 +3037,48 @@ def is_sidecar_running() -> bool:
     )
 
 
+_tts_voice: str = ""
+_tts_voice_bot: str = ""
+
+
+def apply_tts_voice(bot_name: str) -> str:
+    """从 Firestore 读音色到进程内。返回读到的值，没配返回空串。
+
+    音色是 **bot 级** 设置 —— Discord 和 Zello 共用同一套 TTS —— 所以在 bot
+    启动时读一次，而不是挂在 Discord sidecar 的启动流程里。挂上去的话
+    /discordoff 之后再重启就静默失效，2026-08-09 小爱就是这么用上了别人的声音。
+    """
+    global _tts_voice, _tts_voice_bot
+    _tts_voice_bot = bot_name
+    cfg = _load_sidecar_config(bot_name) or {}
+    _tts_voice = str(cfg.get("tts_voice") or "")
+    if _tts_voice:
+        log.info("TTS 音色: %s (bot=%s)", _tts_voice, bot_name)
+    else:
+        log.error("bots/%s.channels.discord.tts_voice 没配，任何 TTS 调用都会直接报错",
+                  bot_name)
+    return _tts_voice
+
+
+def tts_voice() -> str:
+    """当前音色。没配就抛 —— 宁可响亮地失败，也不要悄悄用一个谁也说不清来源的值。"""
+    if not _tts_voice:
+        raise RuntimeError(
+            f"TTS 音色未配置: 请设 bots/{_tts_voice_bot or '<bot>'}"
+            ".channels.discord.tts_voice"
+        )
+    return _tts_voice
+
+
 def _spawn_sidecar_thread(
     bot_name: str, token: str, guild_id: str, voice_channel_id: str,
-    tts_voice: str = ""
 ):
     """拉起 sidecar daemon 线程 (独立 loop 跑 discord.Bot)。返回 thread 或 None。
 
     开机自启 (maybe_start_discord_voice_sidecar) 和命令强制启动 (start_sidecar)
     共用这段。调用方负责校验 token / enabled。
     """
-    # **无条件赋值**，不是 setdefault —— 这一行的全部意义就是让父环境里那个可能
-    # 残留的旧值永远赢不了。Firestore 是唯一真源，没配就落 Orus。
-    #
-    # 这行日志是必需的：值是**进程启动之后**才写进 os.environ 的，
-    # `/proc/<pid>/environ` 是 exec 时刻的快照，**看不到它**。没有这行，
-    # 「现在到底在用哪个音色」就只能靠耳朵 —— 今天那个 bug 正是这么发现的。
-    _inherited = os.environ.get("DISCORD_TTS_VOICE")
-    _final = tts_voice or "Orus"
-    os.environ["DISCORD_TTS_VOICE"] = _final
-    log.info(
-        "TTS 音色: %s (来源=%s)%s", _final,
-        "Firestore" if tts_voice else "代码默认",
-        f"，已覆盖继承来的 {_inherited}" if _inherited and _inherited != _final else "",
-    )
+    apply_tts_voice(bot_name)
 
     try:
         import discord  # noqa: F401
@@ -3139,8 +3158,7 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
         return None
     vch = cfg.get("voice_channel_id", "")
-    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch,
-                                   cfg.get("tts_voice", ""))
+    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
     if thread is not None:
         # 后台验证：15s 后检查是否真的连上了语音频道，没连上就清除持久化标记
         import threading as _th
@@ -3168,8 +3186,7 @@ def start_sidecar(bot_name: str) -> tuple[bool, str]:
     if not cfg or not cfg["token"]:
         return False, "这个 bot 没配 Discord token，连不了。"
     vch = cfg.get("voice_channel_id", "")
-    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch,
-                                   cfg.get("tts_voice", ""))
+    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
     if thread is None:
         return False, "启动失败 (py-cord 未装？看 bot.log)。"
     import time
