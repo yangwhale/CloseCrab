@@ -6,7 +6,7 @@ Lets Gemini CLI talk to Claude models on Vertex AI by translating
 Gemini API requests (including tool use) to Anthropic Messages API format.
 
 Env vars:
-    VERTEX_PROJECT   GCP project (default: chris-pgp-host)
+    VERTEX_PROJECT   GCP project (REQUIRED — no default, exits if unset)
     VERTEX_LOCATION  Vertex AI location (default: global)
     PROXY_PORT       Listen port (default: 8888)
 
@@ -24,7 +24,12 @@ import signal, time, threading, traceback, logging
 import google.auth
 import google.auth.transport.requests
 
-PROJECT = os.environ.get("VERTEX_PROJECT", "chris-pgp-host")
+# 没有默认值是故意的：默认成某个具体项目，在别人机器上就是拿着一个访问不了的
+# project 去调 Vertex，报的是 403/404 而不是「你没配」——排查方向直接被带偏。
+# 宁可启动就停。
+PROJECT = os.environ.get("VERTEX_PROJECT") or sys.exit(
+    "VERTEX_PROJECT 未设置。用法：VERTEX_PROJECT=<your-gcp-project> python3 "
+    f"{os.path.basename(__file__)}")
 LOCATION = os.environ.get("VERTEX_LOCATION", "global")
 PORT = int(os.environ.get("PROXY_PORT", "8888"))
 

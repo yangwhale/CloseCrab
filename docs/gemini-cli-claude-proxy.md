@@ -90,6 +90,7 @@ Proxy on :8888 (YOUR_PROJECT/global)
 ## 已知限制
 
 - 不支持图片/多模态输入（只转发文本）
-- 不支持 function calling / tool use 转换
+- ~~不支持 function calling / tool use 转换~~ —— **已支持**，见 `convert_tools()`
+  （`gemini-claude-proxy.py:87`，:209 挂到请求体的 `tools` 字段）
 - Claude 不接受 `temperature` + `top_p` 同时设置，proxy 自动丢弃 `top_p`
 - 非真正流式：proxy 等 Claude 完整回复后一次性返回（Gemini CLI 感知不到区别）

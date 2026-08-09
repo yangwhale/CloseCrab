@@ -136,10 +136,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=chrisya
-Environment="GBRAIN_HOME=/home/chrisya/.gbrain-mybot"
+User=<your-user>
+Environment="GBRAIN_HOME=/home/<your-user>/.gbrain-mybot"
 Environment="GOOGLE_GENERATIVE_AI_API_KEY=your-key-here"
-ExecStart=/home/chrisya/.bun/bin/gbrain serve --http --port 3132 --bind 127.0.0.1
+ExecStart=/home/<your-user>/.bun/bin/gbrain serve --http --port 3132 --bind 127.0.0.1
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -189,10 +189,10 @@ gbrain stats                    # 查 page/chunk 计数
 |---|---|---|
 | `gbrain: command not found` | bun bin 不在 PATH | `export PATH=$HOME/.bun/bin:$PATH` |
 | Bot 启动后 GBrain MCP 工具不出现 | 凭据文件名/perm 错 | 确认 `cc-tw-{bot}-creds.json` 存在且 600，client_id/client_secret 不空 |
-| `register-client` 成功但 `auth list-clients` 空 | PGLite 持锁导致 CLI 写库 silent fail | 必须走 `/register` HTTP DCR，不要用 `gbrain auth register-client`（详见 [feedback_gbrain-pglite-cli-write-silent-fail](https://github.com/yangwhale/CloseCrab/blob/main/.claude/memory/feedback_gbrain-pglite-cli-write-silent-fail.md)） |
-| Claude Code 看到 401 触发 OAuth helper 工具 | Claude Code 直连 HTTP MCP 会覆盖静态 Authorization header | 必须用 `mcp-proxy-launcher.py` stdio 封装（CloseCrab 默认行为，详见 [feedback_gbrain-claude-stdio-proxy](https://github.com/yangwhale/CloseCrab/blob/main/.claude/memory/feedback_gbrain-claude-stdio-proxy.md)） |
-| Bot 重启后 GBrain 数据丢失 | `kill -9` 强杀，PGLite WAL 未 checkpoint | 永远用 SIGTERM；抢救走 WAL replay（详见 [feedback_pglite-sigkill-loses-embeddings](https://github.com/yangwhale/CloseCrab/blob/main/.claude/memory/feedback_pglite-sigkill-loses-embeddings.md)） |
-| Embedding 全部失败 | env var 错叫 `GEMINI_API_KEY` | 必须是 `GOOGLE_GENERATIVE_AI_API_KEY`（详见 [feedback_gbrain-embedding-setup](https://github.com/yangwhale/CloseCrab/blob/main/.claude/memory/feedback_gbrain-embedding-setup.md)） |
+| `register-client` 成功但 `auth list-clients` 空 | PGLite 持锁导致 CLI 写库 silent fail | 必须走 `/register` HTTP DCR，不要用 `gbrain auth register-client` |
+| Claude Code 看到 401 触发 OAuth helper 工具 | Claude Code 直连 HTTP MCP 会覆盖静态 Authorization header | 必须用 `~/.gbrain/mcp-proxy-launcher.py` stdio 封装（CloseCrab 默认行为） |
+| Bot 重启后 GBrain 数据丢失 | `kill -9` 强杀，PGLite WAL 未 checkpoint | 永远用 SIGTERM；抢救走 WAL replay |
+| Embedding 全部失败 | env var 错叫 `GEMINI_API_KEY` | 必须是 `GOOGLE_GENERATIVE_AI_API_KEY` |
 | Bot session 启动后没有 GBrain tools | brain serve 还没起就启了 launcher | 启 bot 前确认 `curl localhost:3132/.well-known/oauth-authorization-server` 200（CloseCrab 已加 `wait_for_brain_serve` retry） |
 | 端口被占 | 多 bot 同 port | 重新分配 port，更新对应 systemd unit + bot 重启 |
 
@@ -210,4 +210,4 @@ gbrain stats                    # 查 page/chunk 计数
 - **GBrain Topologies**: <https://github.com/garrytan/gbrain/blob/main/docs/architecture/topologies.md>
 - **CloseCrab GBrain client 实现**: `closecrab/utils/gbrain_index.py`
 - **CloseCrab GBrain monitor**: `scripts/gbrain-usage-monitor.py`
-- **CloseCrab MCP launcher**: `scripts/mcp-proxy-launcher.py`
+- **MCP launcher**: `~/.gbrain/mcp-proxy-launcher.py`（**不在本仓库**，由 GBrain 侧维护）

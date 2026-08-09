@@ -78,7 +78,12 @@ Kilo worker 的 prompt 没说过，所以她不主动用。
 
 第一版 cron-daemon 是手工 `setsid` 跑的，机器重启或误杀就废了。
 
-→ 修：`launcher.sh` 加 `_ensure_cron_daemon` idempotent 启动逻辑（commit `e430b0b`）。
+→ 修：加 `_ensure_cron_daemon` idempotent 启动逻辑（commit `e430b0b`）。
+
+> **已过时（2026-08-09）**：这段逻辑当时放在 `launcher.sh`，后来搬到了 `run.sh:94-111`，
+> 在重启循环**内部**调用。原因是 launcher 只在开机时跑一次，而 cron-daemon 该跟着
+> bot 的生命周期走 —— 单例判断放在每次启动时做，才能在 daemon 被误杀后自愈。
+> 现在的归属是「第一个起来的 bot 的 run.sh 拉起它」，`launcher.sh` 里已无相关代码。
 
 ---
 
