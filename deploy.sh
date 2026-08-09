@@ -954,17 +954,35 @@ if 'chrome-devtools-mcp' not in cfg['mcpServers']:
 else:
     print('  [gemini] chrome-devtools-mcp 已存在, 跳过')
 # wiki MCP
-wiki_dir = os.path.expanduser('~/my-wiki-v2')
-if 'wiki' not in cfg['mcpServers'] and os.path.isdir(wiki_dir):
+# 目录和脚本名都**探测**，不写死：不同机器管的 wiki 不是同一个
+# (2026-08-09 实测：写死 ~/my-wiki-v2/mcp-server/wiki_mcp.py 这条路径根本不存在，
+#  注入进去是一条死配置，而且不报错 —— 只有 Study Wiki 的机器更是永远注入不上)
+wiki_dir = os.environ.get('WIKI_REPO') or ''
+if not wiki_dir:
+    for cand in ('~/my-wiki-v2', '~/my-wiki', '~/my-wiki-study'):
+        if os.path.isdir(os.path.expanduser(cand)):
+            wiki_dir = cand
+            break
+wiki_dir = os.path.expanduser(wiki_dir) if wiki_dir else ''
+wiki_script = ''
+for rel in ('scripts/wiki-mcp-server.py', 'mcp-server/wiki_mcp.py', 'scripts/wiki_mcp.py'):
+    if wiki_dir and os.path.isfile(os.path.join(wiki_dir, rel)):
+        wiki_script = os.path.join(wiki_dir, rel)
+        break
+if 'wiki' not in cfg['mcpServers'] and wiki_script:
     cfg['mcpServers']['wiki'] = {
         'command': 'python3',
-        'args': [os.path.join(wiki_dir, 'mcp-server', 'wiki_mcp.py')],
+        'args': [wiki_script],
         'env': {}
     }
-    print('  [gemini] wiki MCP 已注入')
+    print(f'  [gemini] wiki MCP 已注入 ({wiki_script})')
     changed = True
 elif 'wiki' in cfg['mcpServers']:
     print('  [gemini] wiki MCP 已存在, 跳过')
+elif wiki_dir:
+    print(f'  [gemini] 找到 wiki 目录 {wiki_dir} 但没找到 MCP server 脚本, 跳过')
+else:
+    print('  [gemini] 未检测到 wiki 仓库 (可设 WIKI_REPO 指定), 跳过')
 # Migrate URL-based MCPs: add type=sse if missing (Gemini CLI defaults to http which fails with SSE proxies)
 for name, mcfg in cfg['mcpServers'].items():
     if 'url' in mcfg and 'type' not in mcfg:
