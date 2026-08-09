@@ -1278,7 +1278,25 @@ def _load_dev_secrets() -> dict:
     }
 
 
-def _load_config(bot_name: str) -> dict | None:
+def _persist_zello_enabled(bot_name: str, enabled: bool) -> None:
+    """把长期开关写回 Firestore channels.zello.enabled，跨重启保持。
+
+    /zelloon → True, /zellooff → False。main.py 开机自启读这个字段决定连不连。
+    持久化失败只警告，不阻断连/断动作。
+    """
+    try:
+        from google.cloud import firestore
+        from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
+        db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        db.collection("bots").document(bot_name).set(
+            {"channels": {"zello": {"enabled": enabled}}}, merge=True
+        )
+        log.info("zello.enabled 持久化为 %s (bot=%s)", enabled, bot_name)
+    except Exception as e:
+        log.warning("持久化 zello.enabled 失败 (non-fatal): %s", e)
+
+
+def _load_config(bot_name: str, *, require_enabled: bool = True) -> dict | None:
     """从 Firestore bots/{name} 读 Zello 配置。"""
     try:
         from google.cloud import firestore
@@ -1289,7 +1307,7 @@ def _load_config(bot_name: str) -> dict | None:
             return None
         data = doc.to_dict() or {}
         zello_cfg = (data.get("channels") or {}).get("zello") or {}
-        if not zello_cfg.get("enabled"):
+        if require_enabled and not zello_cfg.get("enabled"):
             return None
         cfg = {
             "username": zello_cfg.get("username", ""),
@@ -1418,26 +1436,35 @@ def stop():
 
 
 def start_sidecar(bot_name: str) -> tuple[bool, str]:
-    """【飞书 /zelloon 调用】运行时启动 Zello sidecar。"""
+    """【飞书 /zelloon 调用】运行时启动 Zello sidecar + 持久化 enabled=true。"""
     if is_connected():
+        _persist_zello_enabled(bot_name, True)
         return True, "Zello 已经连着 closecrab 频道了。"
-    ok = start(bot_name)
-    if not ok:
-        return False, "Zello 启动失败 (缺配置？看 bot.log)。"
+    # 先确认这个 bot 有 Zello 身份再开闸: 全网只有一个账号, 给没身份的 bot 置
+    # enabled=true 只会留下一个连不上的开启态; 而两个 bot 共用一个账号会互踢
+    # (2026-06 那次两周踢了 5.9 万次)。身份是 per-bot 的, 这本身就是防撞护栏。
+    cfg = _load_config(bot_name, require_enabled=False)
+    if not cfg or not cfg.get("username") or not cfg.get("channel"):
+        return False, "这个 bot 没配 Zello 账号 (username/channel)，开不了。"
+    _persist_zello_enabled(bot_name, True)
+    if not start(bot_name, config=cfg):
+        _persist_zello_enabled(bot_name, False)
+        return False, "Zello 启动失败 (看 bot.log)。"
     import time as _t
     for _ in range(30):
         if is_connected():
-            return True, "✅ Zello 已连进 closecrab 频道，开始语音收发。"
+            return True, "✅ Zello 已连进 closecrab 频道，开始语音收发 (重启后保持)。"
         _t.sleep(0.3)
-    return True, "⚠️ Zello 已启动但还没连上频道，稍等看 bot.log。"
+    return True, "⚠️ Zello 已启动但还没连上频道，稍等看 bot.log (已设为开)。"
 
 
 def stop_sidecar(bot_name: str) -> tuple[bool, str]:
-    """【飞书 /zellooff 调用】运行时停止 Zello sidecar。"""
+    """【飞书 /zellooff 调用】运行时停止 Zello sidecar + 持久化 enabled=false。"""
+    _persist_zello_enabled(bot_name, False)
     if not is_connected() and _sidecar_loop is None:
-        return True, "Zello 本来就没连。"
+        return True, "Zello 本来就没连 (已确保关闭态)。"
     stop()
-    return True, "✅ Zello 已断开。"
+    return True, "✅ Zello 已断开 (重启后也不连)。"
 
 
 # ═══════════════════════════════════════════════════════════════════════
