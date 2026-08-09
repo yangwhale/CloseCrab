@@ -3031,7 +3031,18 @@ def _spawn_sidecar_thread(
     """
     # **无条件赋值**，不是 setdefault —— 这一行的全部意义就是让父环境里那个可能
     # 残留的旧值永远赢不了。Firestore 是唯一真源，没配就落 Orus。
-    os.environ["DISCORD_TTS_VOICE"] = tts_voice or "Orus"
+    #
+    # 这行日志是必需的：值是**进程启动之后**才写进 os.environ 的，
+    # `/proc/<pid>/environ` 是 exec 时刻的快照，**看不到它**。没有这行，
+    # 「现在到底在用哪个音色」就只能靠耳朵 —— 今天那个 bug 正是这么发现的。
+    _inherited = os.environ.get("DISCORD_TTS_VOICE")
+    _final = tts_voice or "Orus"
+    os.environ["DISCORD_TTS_VOICE"] = _final
+    log.info(
+        "TTS 音色: %s (来源=%s)%s", _final,
+        "Firestore" if tts_voice else "代码默认",
+        f"，已覆盖继承来的 {_inherited}" if _inherited and _inherited != _final else "",
+    )
 
     try:
         import discord  # noqa: F401
