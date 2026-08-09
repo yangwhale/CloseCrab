@@ -55,7 +55,18 @@ wechat-reader
 # nemo-automodel-* (4 skills)
 # nemo-rl-* (4 skills) + launch-nemo-rl
 # tilegym-* (7 skills)
+# === C 档: 后续追加 ===
+# 这几条原本直接跟在上面 NVIDIA 注释块后面，容易被误读成"也是注释掉的"，
+# 2026-08-09 起单独立一节。
 hk-share-award-tax-dipn38
 deck-builder
 nvl72-qa
 tpu-v7-cluster
+
+# === 2026-08-09 补：使用频次不低但一直没进 allowlist（等于用得着却没装）===
+hk-bus
+memory-gc
+memory-lint
+multimodal-explainer
+feishu-user-msg
+

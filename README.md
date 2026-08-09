@@ -20,7 +20,7 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 
 ## 能力矩阵一览
 
-**4 个 Agent Runtime · 3 个聊天平台 · 48 个内置 Skill · 3 条语音通道 · 1 套统一身份和记忆。**
+**4 个 Agent Runtime · 3 个聊天平台 · 48 个内置 Skill（默认部署 39 个，其余按需 allowlist 放行）· 3 条语音通道 · 1 套统一身份和记忆。**
 
 | 维度 | 能力 |
 |---|---|
@@ -172,7 +172,7 @@ python3 scripts/watch-task.py list|stop <name>
 
 ## 48 个内置 Skill
 
-每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`，deploy.sh 按 allowlist symlink 到 `~/.claude/skills/{name}`。新建 skill 用 `skill-creator` 自举。
+每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`。**deploy.sh 只 link `config/skill-allowlist.txt` 里放行的**（当前 39 个）——源码全留在仓库，临时要用某个就在 allowlist 加一行再跑 deploy。新建 skill 用 `skill-creator` 自举。
 
 | 分类 | Skills |
 |---|---|
