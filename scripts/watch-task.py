@@ -120,10 +120,13 @@ def _is_mine(task: dict) -> bool:
     永远返回 SKIP，看起来一切正常，实际那个任务再也不会被真正盯到。抢占是
     原子的、不会重复执行，但**执行在了错的机器上**，这不是锁能解决的问题。
 
-    所以按 host 钉死。没有 host 字段的老任务视为不限机器（保持旧行为）。
+    所以按 host 钉死，而且是**硬隔离**：这张表的效果等同于每台机器一张独立的表，
+    机器之间不发生任何关系。某台的 daemon 死了就是那台死了，它的任务留在它自己的
+    队列里躺着 —— 别的机器不该伸手，也不需要伸手。
+
+    没有 host 的文档是脏数据，在 cmd_tick 里就被删掉了，走不到这儿。
     """
-    h = task.get("host")
-    return (not h) or h == this_host()
+    return task.get("host") == this_host()
 
 
 def _task_name(v: str) -> str:
@@ -490,14 +493,6 @@ def _claim(d, name: str, cutoff: datetime):
             "next_fire_at": cutoff + timedelta(seconds=x.get("interval_sec", 120)),
             "fire_count": (x.get("fire_count") or 0) + 1,
         }
-        # 没有 host 的任务（只可能是老文档）第一次被抢到就**认领归属**，此后只有
-        # 这台跑。不认领的话 `_is_mine` 对所有机器都放行，同一条任务会被不同机器
-        # 轮流执行 —— 实测三台各跑过一次同一批任务。后果有两层：探针在没有那个
-        # 日志文件的机器上会瞎判，而且现在出错就终止，**一台环境不对的机器足以
-        # 掐死一条在别处跑得好好的任务**。认领之后各机器之间才真的互不相干。
-        if not x.get("host"):
-            upd["host"] = this_host()
-            x = {**x, "host": upd["host"]}
         t.update(ref, upd)
         return x
 
@@ -567,38 +562,6 @@ def _finalize_error(d, name: str, task: dict, reason: str) -> bool:
     return True
 
 
-def _expire_if_stale(d, name: str, task: dict, cutoff) -> bool:
-    """超龄就收，**任何一台机器都能收**。返回 True 表示这一方收的。
-
-    过期判断是纯时间判断，不需要读本机文件，所以不该锁在 host 后面。以前它在
-    `_run_one` 里，而 `_run_one` 只有本机任务才走得到 —— 于是任务被钉死在一台
-    永久下线的机器上时：没人 claim（不是自己的）、没人过期（跑不到那行）、
-    sweep 也不收（sweep 只管终态）。任务永远 active 躺在 list 里，看着像有人在盯，
-    实际什么都没在盯。
-    """
-    ts = task.get("created_at")
-    ma = task.get("max_age_sec")
-    if not ma or ts is None or (cutoff - ts).total_seconds() <= ma:
-        return False
-    ref = d.collection(COLL).document(name)
-    tx = d.transaction()
-
-    @firestore.transactional
-    def _run(t):
-        snap = ref.get(transaction=t)
-        if not snap.exists or (snap.to_dict() or {}).get("status") != "active":
-            return False
-        t.update(ref, {"status": "expired", "expired_at": NOW()})
-        return True
-
-    if not _run(tx):
-        return False
-    mins = int((cutoff - ts).total_seconds() / 60)
-    notify_chat(name, f"⏱ 已盯了 {mins} 分钟仍未结束，自动停止本 watch。",
-                task.get("notify_bot"))
-    return True
-
-
 def _sweep(d, now) -> int:
     """删掉过期的终态任务。跟 cron-tool 的 sweep 同一个理由和同一个节奏。"""
     meta = d.collection("config").document("watch_sweep")
@@ -654,14 +617,14 @@ def cmd_tick(args):
         if not nf or nf > cutoff:
             continue
 
-        # 超龄先收，且放在 host 判定之前 —— 否则钉在下线机器上的任务永远没人收。
-        if args.dry_run:
-            ts, ma = x.get("created_at"), x.get("max_age_sec")
-            if ma and ts is not None and (cutoff - ts).total_seconds() > ma:
-                acted.append({"name": name, "would_expire": True})
-                continue
-        elif _expire_if_stale(d, name, x, cutoff):
-            acted.append({"name": name, "verdict": "EXPIRED"})
+        # 每条任务必须有归属。没有 host 的只可能是脏数据 —— 它会让 `_is_mine`
+        # 对所有机器放行，同一条任务被不同机器轮流执行（实测三台各跑过一次）。
+        # 删掉，不认领：认领等于让机器之间产生关系，而这张表的设计就是
+        # 「按机器名第一层切开，彼此不相干」。delete 天然幂等，三台一起删也没事。
+        if not x.get("host"):
+            if not args.dry_run:
+                s.reference.delete()
+            acted.append({"name": name, "verdict": "DELETED_NO_HOST"})
             continue
 
         # **必须在抢占之前判**：先 claim 再发现不是自己的，next_fire_at 已经被
@@ -709,7 +672,17 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
     """跑一条已经抢到手的任务。抽出来是为了让上面那个 try 的边界清清楚楚。"""
     ref = d.collection(COLL).document(name)
 
-    # 超龄兜底已经上移到 cmd_tick（在 host 判定之前），这里不再重复判。
+    # 超龄兜底：只有归属机器会走到这儿，所以不需要事务防重复。机器死了这条任务
+    # 就在它自己的队列里躺着 —— 那是那台机器的事，别的机器不该伸手。
+    ts = task.get("created_at")
+    if task.get("max_age_sec") and ts is not None:
+        age = (cutoff - ts).total_seconds()
+        if age > task["max_age_sec"]:
+            notify_chat(name, f"⏱ 已盯了 {int(age/60)} 分钟仍未结束，自动停止本 watch。",
+                        task.get("notify_bot"))
+            ref.update({"status": "expired", "expired_at": NOW()})
+            return {"name": name, "verdict": "EXPIRED"}
+
     skips = task.get("consecutive_skips") or 0
     # 老任务库里没有 model 字段，按默认档跑，不需要数据迁移
     verdict, body = run_probe(task["prompt"], task.get("last_report", ""), skips,
