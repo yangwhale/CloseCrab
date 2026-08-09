@@ -5846,6 +5846,15 @@ class FeishuChannel(Channel):
             loop.run_forever()
         except KeyboardInterrupt:
             log.info("Feishu channel stopped by KeyboardInterrupt")
+            # 必须重新抛出。吞掉它 → run() 正常返回 → main.py 的 exit_code 停在 0
+            # → run.sh 把 0 判成「异常退出」，于是每次 `launcher.sh stop`（它发的是
+            # SIGINT）都会：打一个假的 .dirty_restart 崩溃标记、把 FAIL_COUNT +1、
+            # 而且**不退出反而 5 秒后重启**。那个假标记会给下一条用户消息前面插一句
+            # 「本 bot 因崩溃重启，忽略之前的 teammate 消息」—— 一句不实的指令。
+            # FAIL_COUNT 攒到 10 还会让 run.sh 彻底罢工。
+            # 抛出去 main.py 就能判成 130，run.sh 认「信号停止，不重启」。
+            # finally 里的清理在异常传播前照常执行。
+            raise
         except SystemExit as e:
             if e.code == 42:
                 log.info("Restart requested")
