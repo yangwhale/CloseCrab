@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 <p align="center">
-  <img src="crab-with-claude-code-inside.png" alt="CloseCrab" width="600"/>
+  <img src="../crab-with-claude-code-inside.png" alt="CloseCrab" width="600"/>
 </p>
 
 > 把 Claude Code / Gemini CLI / OpenClaw 的全部能力接入 Discord / 飞书 / Lark / 钉钉，打造你的 24/7 AI 助手团队。
@@ -19,7 +19,7 @@ CloseCrab 不重新造轮子——它直接驱动 Claude Code / Gemini CLI 进�
 ## 架构
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="CloseCrab Architecture" width="800"/>
+  <img src="../assets/architecture.svg" alt="CloseCrab Architecture" width="800"/>
 </p>
 
 消息从用户到 AI，经过四层处理：
@@ -28,36 +28,37 @@ CloseCrab 不重新造轮子——它直接驱动 Claude Code / Gemini CLI 进�
 User → Channel Adapter → BotCore → Worker → AI CLI
                                       ├── ClaudeCodeWorker → Claude Code CLI (socketpair IPC)
                                       ├── GeminiACPWorker  → Gemini CLI (ACP JSON-RPC)
-                                      └── OpenClawWorker   → OpenClaw CLI (ACP JSON-RPC) → Gateway
+                                      ├── OpenClawWorker   → OpenClaw CLI (ACP JSON-RPC) → Gateway
+                                      └── KiloWorker       → Kilo Code (HTTP SSE)
 ```
 
 <p align="center">
-  <img src="assets/message-flow.svg" alt="Message Processing Flow" width="800"/>
+  <img src="../assets/message-flow.svg" alt="Message Processing Flow" width="800"/>
 </p>
 
 - **Channel Adapter** — 将各平台消息统一为 `UnifiedMessage`，处理语音转文字、进度反馈、消息分片
 - **BotCore** — 消息路由、会话管理、白名单鉴权、实时 Firestore 日志、急刹车中断
-- **Worker** — 与 AI CLI 进程通信的抽象层，支持三种实现：
+- **Worker** — 与 AI CLI 进程通信的抽象层，支持四种实现：
   - `ClaudeCodeWorker` — 通过 Unix socketpair 双向 IPC 与 Claude Code CLI 通信，流式解析 stream-JSON 事件
   - `GeminiACPWorker` — 通过 ACP 协议（JSON-RPC 2.0 / NDJSON）与持久 Gemini CLI 进程通信，自动注入 MCP Server
   - `OpenClawWorker` — 通过 ACP 协议与 OpenClaw CLI 通信，由外部 Gateway 管理模型调用和 MCP 插件
+  - `KiloWorker` — 通过 HTTP SSE 与 Kilo Code 通信，启动最快（~3s），真流式 `part.delta`
 - **AI CLI** — 真正执行任务的引擎，拥有 Read/Edit/Bash/Grep 等工具和所有 MCP Server
 
 ### 多 Worker 架构
 
 每个 bot 通过 Firestore 配置的 `worker_type` 字段选择 Worker 实现（默认 `claude`）：
 
-| | ClaudeCodeWorker | GeminiACPWorker | OpenClawWorker |
-|---|---|---|---|
-| **CLI** | Claude Code (`claude`) | Gemini CLI (`gemini`) | OpenClaw CLI (`openclaw`) |
-| **通信协议** | Unix socketpair IPC | ACP (JSON-RPC 2.0 / NDJSON) | ACP (JSON-RPC 2.0 / NDJSON) |
-| **进程模型** | 持久子进程 | 持久子进程 | 持久子进程 + 外部 Gateway |
-| **MCP 加载** | 自动读取 `~/.claude.json` | 需在 `session/new` 显式传入 | Gateway 管理（传空数组） |
-| **System Prompt** | `--system-prompt` flag | `~/GEMINI.md` | `AGENTS.md` |
-| **内置搜索** | WebSearch (Brave) | Google Search (Grounding) | Gateway 配置 |
-| **Google 内部工具** | — | Extensions (Workspace/CodeSearch/...) | — |
-| **Context 压缩** | Claude 内置 | — | 自定义 Compaction |
-| **配置切换** | `set-worker-type <bot> claude` | `set-worker-type <bot> gemini` | `set-worker-type <bot> openclaw` |
+| | ClaudeCodeWorker | GeminiACPWorker | OpenClawWorker | KiloWorker |
+|---|---|---|---|---|
+| **CLI** | Claude Code (`claude`) | Gemini CLI (`gemini`) | OpenClaw CLI (`openclaw`) | Kilo Code |
+| **通信协议** | Unix socketpair IPC | ACP (JSON-RPC 2.0 / NDJSON) | ACP (JSON-RPC 2.0 / NDJSON) | HTTP SSE |
+| **进程模型** | 持久子进程 | 持久子进程 | 持久子进程 + 外部 Gateway | 外部 server |
+| **MCP 加载** | 自动读取 `~/.claude.json` | 需在 `session/new` 显式传入 | Gateway 管理（传空数组） | `~/.config/kilo/kilo.json` |
+| **System Prompt** | `--system-prompt` flag | `~/GEMINI.md` | `AGENTS.md` | 请求参数 |
+| **内置搜索** | WebSearch | Google Search (Grounding) | Gateway 配置 | Cloud 侧 |
+| **Context 压缩** | Claude 内置 | — | 自定义 Compaction | Cloud 侧 |
+| **配置切换** | `set-worker-type <bot> claude` | `... gemini` | `... openclaw` | `... kilo` |
 
 **ClaudeCodeWorker** — Bot 端通过 socketpair `fd[0]` 发送 JSON 消息，接收 stream-json 事件流。CLI 端将 `fd[1]` 映射为 stdin/stdout。1 秒间隔的 Buffer Poller 通过 `FIONREAD` ioctl + `MSG_PEEK` 非阻塞监测数据。
 
@@ -65,7 +66,7 @@ User → Channel Adapter → BotCore → Worker → AI CLI
 
 三种 Worker 均支持交互式流程：`ExitPlanMode`（Plan 审批）、`AskUserQuestion`（多选项回复）。
 
-> **OpenClaw Worker** 需要额外运行 OpenClaw Gateway 服务。详见 [OpenClaw Worker 部署指南](docs/openclaw-deploy-quickstart.md) 和 [设计文档](docs/openclaw-worker-design.md)。
+> **OpenClaw Worker** 需要额外运行 OpenClaw Gateway 服务。详见 [OpenClaw Worker 部署指南](openclaw-deploy-quickstart.md) 和 [设计文档](openclaw-worker-design.md)。
 
 ## 💡 推荐安装方式
 
@@ -140,9 +141,9 @@ gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT_ID
 > **GCE VM 用户**：如果 VM 的 Service Account 有 `cloud-platform` scope，不需要手动 `gcloud auth login` 和 `gcloud auth application-default login`，ADC 通过 metadata server 自动提供。
 
 **启用 Claude 模型**：进入 [Vertex AI Model Garden](https://console.cloud.google.com/vertex-ai/model-garden)，搜索 `Claude`，点击 `Enable`。需要启用的模型：
-- `claude-opus-4-7`（默认，最强推理能力）
-- `claude-sonnet-4-6`（可选，速度更快）
-- `claude-haiku-4-5`（可选，用作 fast model）
+- `claude-opus-5`（默认，最强推理能力）
+- `claude-sonnet-5`（可选，速度更快）
+- `claude-haiku-4-5`（可选，用作 fast model / watch-task 探针默认档）
 
 > 首次启用需要接受 Anthropic 的服务条款。启用后等待几分钟生效。
 
@@ -333,6 +334,30 @@ Discord User ID 获取方式：开启开发者模式（设置 → 高级 → 开
 | `/restart` | 重启 bot（exit code 42 触发自动重启） |
 | `/docs` | 打开 CC Pages 知识库 |
 
+### 飞书命令（23 个，发消息或点 bot 菜单都行）
+
+| 分组 | 命令 |
+|---|---|
+| 会话 | `/status` `/end` `/restart` `/stop` `/context` `/sessions` `/docs` |
+| 模型与推理档位 | `/model` `/low` `/medium` `/high` `/xhigh` `/think` `/mode` `/mcp` |
+| 上下文压缩 | `/cmp`（透传 Claude Code 的 compact） |
+| 语音 | `/voice` · `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/hlson` `/hlsoff` |
+
+> bot 菜单项的 `event_key` 填命令名即可（带不带 `/` 都行）。
+
+### 退出码约定（run.sh 行为）
+
+| 码 | 含义 | 重启 |
+|----|------|------|
+| `42` | `/restart` 或 `scripts/self-restart.py` | 立即重启 |
+| `130` / `137` / `143` | SIGINT / SIGKILL / SIGTERM | 不重启 |
+| `1` | 配置错误 | 不重启 |
+| 其他非零 | 崩溃 | 重启（连续 >10 次停止） |
+
+> Agent **不能 kill 自己的父进程**（会 exit 137，run.sh 拒绝重启，bot 就死了）。
+> 要重启自己用 `BOT_NAME=<bot> python3 scripts/self-restart.py --note "..."`，
+> 它写一个 marker，回复发出后 channel 走干净的 exit-42。
+
 ### 急刹车
 
 在任何平台发送以下关键词立即中断执行：
@@ -387,7 +412,7 @@ FIRESTORE_DATABASE=closecrab
 ```json
 {
   "active_channel": "discord",
-  "model": "claude-opus-4-7@default",
+  "model": "claude-opus-5@default",
   "worker_type": "claude",
   "claude_bin": "~/.local/bin/claude",
   "work_dir": "~/",
@@ -438,8 +463,8 @@ FIRESTORE_DATABASE=closecrab
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `active_channel` | ✅ | `discord` / `feishu` / `lark` / `dingtalk` |
-| `model` | — | Claude 模型，默认 `claude-opus-4-7@default` |
-| `worker_type` | — | Worker 类型：`claude`（默认）、`gemini` 或 `openclaw` |
+| `model` | — | 模型，如 `claude-opus-5@default`；切 worker 时会自动做命名空间翻译 |
+| `worker_type` | — | Worker 类型：`claude`（默认）/ `gemini` / `openclaw` / `kilo` |
 | `claude_bin` | — | Claude CLI 路径，默认自动检测（`which claude`） |
 | `work_dir` | — | 工作目录，默认 `~/` |
 | `timeout` | — | 单次对话超时（秒），默认 600 |
@@ -474,7 +499,7 @@ python3 scripts/config-manage.py set-worker-type mybot gemini
 # 在聊天里发 /restart，或手动 kill run.sh 让它自动重启
 ```
 
-> **注意**：`worker_type` 只接受 `claude` 或 `gemini`。如果拼写错误（如 `geminii`），会静默回退到 Claude Worker，不会报错。
+> **注意**：`worker_type` 接受 `claude` / `gemini` / `openclaw` / `kilo` 四个值。拼写错误（如 `geminii`）会**静默回退**到 Claude Worker，不报错 —— 切换后记得看日志确认 `worker_type:` 那一行。
 
 <details>
 <summary><b>手动安装 Gemini CLI（未用 deploy.sh 的情况）</b></summary>
@@ -571,7 +596,7 @@ python3 scripts/config-manage.py set-worker-type mybot openclaw
 # 4. 重启 bot（聊天里发 /restart）
 ```
 
-> 详细部署步骤和故障排查见 [OpenClaw Worker 部署指南](docs/openclaw-deploy-quickstart.md)，架构设计见 [设计文档](docs/openclaw-worker-design.md)。
+> 详细部署步骤和故障排查见 [OpenClaw Worker 部署指南](openclaw-deploy-quickstart.md)，架构设计见 [设计文档](openclaw-worker-design.md)。
 
 ### settings.json（Claude Code 配置）
 
@@ -652,7 +677,7 @@ Jina AI MCP Server 提供网页内容提取、事实核查等能力。
 一个 bot 进程同时服务多个用户，每个用户获得完全隔离的 Claude Code 环境。
 
 <p align="center">
-  <img src="assets/multi-user.svg" alt="Multi-User Architecture" width="900"/>
+  <img src="../assets/multi-user.svg" alt="Multi-User Architecture" width="900"/>
 </p>
 
 ### 工作原理
@@ -701,7 +726,7 @@ Carol (Discord)  ──→  BotCore._workers["carol"]  ──→  claude 进程 
 ### 架构总览
 
 <p align="center">
-  <img src="assets/bot-team-arch.svg" alt="Bot Team Architecture" width="900"/>
+  <img src="../assets/bot-team-arch.svg" alt="Bot Team Architecture" width="900"/>
 </p>
 
 ### 角色
@@ -717,7 +742,7 @@ Carol (Discord)  ──→  BotCore._workers["carol"]  ──→  claude 进程 
 Bot 间通过 **Firestore Inbox** 实时通信。每个 bot 启动时注册 `on_snapshot` 监听器，新消息在毫秒级推送到目标 bot，无需轮询。
 
 <p align="center">
-  <img src="assets/bot-team-flow.svg" alt="Task Dispatch Flow" width="850"/>
+  <img src="../assets/bot-team-flow.svg" alt="Task Dispatch Flow" width="850"/>
 </p>
 
 **三种通信通道**：
@@ -789,6 +814,62 @@ gs://YOUR_BUCKET/
 | **弹性扩缩** | 新机器 `git clone` + `deploy.sh` 即可加入团队 |
 | **知识共享** | 公共 memory 自动同步，团队知识不断积累 |
 
+## Timeline —— 定时任务与长跑盯梢
+
+一条时间线，一个 daemon（`scripts/cron-daemon.py`，30 秒 tick）。
+**由第一个 bot 的 `run.sh` 以单例方式拉起** —— 不在 boot-autostart / launcher 里起，
+因为那两处各有一份自己的环境，daemon 拿到的 PATH 会跟 bot 分叉。机器上没 bot 就不该有 daemon。
+
+| 用法 | 工具 | daemon 行为 |
+|---|---|---|
+| 到点叫醒某个 bot | `scripts/cron-tool.py` | 不推理，到点往目标 bot 的 inbox 写一句话 |
+| 盯长跑任务 | `scripts/watch-task.py` | 每隔 N 秒起一个小 agent 自己判断，三态 SKIP / REPORT / DONE |
+
+```bash
+python3 scripts/cron-tool.py add --target <bot> --in 10m --message "..."
+python3 scripts/cron-tool.py add --target <bot> --cron "0 9 * * MON-FRI" --message "..."
+python3 scripts/cron-tool.py list|remove <job_id>
+
+python3 scripts/watch-task.py create --name t80 --interval 120 --model sonnet \
+    --notify-bot <bot> --max-age 7200 \
+    --prompt "读 /tmp/t80.log 判断进度；出现 TRAINING COMPLETE 或 Error 用 DONE；没变化就 SKIP。"
+python3 scripts/watch-task.py list|stop <name>
+```
+
+- **通知与触发事件走不同通道**：REPORT 用 `scripts/feishu-notify.py` 直接贴消息（**零 turn 零 token**）；
+  DONE 写 inbox，触发主进程一次完整 turn 接手。别让「看一眼就行」的播报去烧 turn。
+- **探针档位**：`haiku`（看日志变没变，默认）/ `sonnet`（要读懂内容）/ `opus`（要做取舍）。
+- **任务钉在创建它的机器上**：每条记录带 host 归属，多机共驱一条时间线靠 Firestore 事务抢占；
+  没有 host 归属的记录会被直接删除。**必须在被盯对象所在的机器上创建**。
+- **硬上限**：`--max-age` 默认 6 小时自动收，`--stall-after` 连续无进展判疑似卡住。
+- **不要往系统 crontab 里塞会调 LLM 的东西** —— 那种条目没有 owner、`list` 看不见、不会自终止。
+
+设计细节见 [task-scheduler-design.md](task-scheduler-design.md)。
+
+## 语音通道
+
+三条独立通道，可同时开：
+
+| 通道 | 触发 | 链路 |
+|---|---|---|
+| 语音消息 | 用户发语音 | Channel 层 STT（Gemini→Chirp2→Whisper）→ BotCore → 回复 + TTS ogg |
+| Discord 常驻语音频道 | `/discordon` | 边生成边推流（首帧 ~0.9s），DAVE E2EE，暂停/继续/重播 |
+| Zello PTT 对讲 | `/zelloon` | Zello Channel API：Opus 解码 → STT → 飞书消息通道；回复反向推 PTT 流 |
+
+**音色是 bot 级配置**，存 `bots/{name}.channels.discord.tts_voice`（Gemini TTS 15 个 voice）。
+流式与 ogg 两条路**共用同一个来源** `closecrab/voice/tts_config.py`，没配就直接抛错 ——
+不做静默兜底，否则「改了配置不生效」这类问题查起来极其费劲。
+
+**开关落盘**：`/discordon` `/discordoff` `/zelloon` `/zellooff` 都写回 Firestore，跨重启保持。
+Zello 全网只有一个账号，`/zelloon` 会先检查有没有别的 bot 占着（同账号双登会互踢）。
+Zello 的开发者 token 由本地私钥**每次登录现签**，不写死（写死的会过期）。
+
+> **Python 3.13+ 注意**：`audioop` 已被 PEP 594 移除，`discord_voice_sidecar` 在新系统上
+> import 不了，需要先装 `audioop-lts`。`tts_config.py` 刻意做成零重依赖，不受影响。
+>
+> LiveKit 浏览器通话的房间与网页前端已停用，但 `voice/livekit_io.py` 仍然承重 ——
+> Discord 语音**接收**方向依赖它的 agents SDK，别按文件名误删。
+
 ## 实时日志
 
 对话开始即创建 Firestore log doc，每个 step 实时推送到 Control Board：
@@ -800,55 +881,21 @@ gs://YOUR_BUCKET/
 
 ## Skills
 
-23 个 Skill 通过拷贝部署到 `~/.claude/skills/`（另有 private skills 通过 `install-private-skills.sh` 从 [ClosedCrab](https://github.com/yangwhale/ClosedCrab) 安装）：
+Skill 源码在 `skills/`（public，48 个）和 [ClosedCrab](https://github.com/yangwhale/ClosedCrab)（private）。
+**deploy.sh 只部署 `config/skill-allowlist.txt` 里放行的那些**（当前 28 项）——其余源码留在仓库、默认不装，
+需要时在 allowlist 加一行再跑 deploy 即可恢复。
 
-### 知识管理
+分类清单见 [README 的 Skill 章节](../README.md#默认部署的-skill24-个)，这里只讲机制：
 
-| Skill | 用途 |
-|-------|------|
-| **wiki** | **个人知识 Wiki**（Karpathy LLM Wiki 实现）— 录入/查询/Lint/MCP Server |
+| 机制 | 说明 |
+|---|---|
+| **放行** | `config/skill-allowlist.txt`，一行一个 kebab-case 名字，`#` 开头是注释 |
+| **部署** | deploy.sh symlink 到 `~/.claude/skills/{name}`；Gemini CLI 走 `gemini skills link` |
+| **结构** | `skills/{name}/SKILL.md`（必需，含 frontmatter）+ 可选 `scripts/` `references/` |
+| **新建** | 用 `skill-creator` 自举，不要手写目录 |
+| **私有** | `install-private-skills.sh` 从 ClosedCrab 拉，同样受 allowlist 约束 |
 
-### 通用
-
-| Skill | 用途 |
-|-------|------|
-| chat-style | 聊天平台消息格式适配 |
-| page-style | HTML 页面风格规范 |
-| notify | 多平台通知（Discord/飞书/微信） |
-| bot-config | Firestore bot 配置管理 |
-| skill-creator | Skill 开发指南 |
-| issue-handler | GitHub Issue 处理 |
-| agent-teams | Agent Teams 管理 |
-| chrome-browser | Chrome 浏览器自动化 |
-| go-eat | 随机选餐厅 |
-
-### 媒体生成
-
-| Skill | 用途 |
-|-------|------|
-| imagen-generator | Google Imagen 4 图片生成 |
-| veo-generator | Google Veo 3.1 视频生成 |
-| tts-generator | Edge TTS 语音合成 |
-| frontend-slides | HTML 演示文稿生成 |
-| paper-explainer | 论文大白话解读 |
-
-### 飞书套件
-
-| Skill | 用途 |
-|-------|------|
-| feishu-mail | 企业邮件收发回复 + 公共邮箱管理 |
-| feishu-doc | 飞书文档创建 |
-| feishu-sheet | 飞书电子表格 |
-| feishu-bitable | 飞书多维表格 |
-
-### 基础设施
-
-| Skill | 用途 |
-|-------|------|
-| tmux-installer | tmux + Oh My Tmux 配置 |
-| tmux-orchestrator | tmux 多进程编排 |
-| zsh-installer | Zsh + Oh My Zsh 配置 |
-| gemini-ui-reviewer | Gemini 驱动的 UI 审查 |
+> **别在 skill 里硬编码机器地址或凭据**，脚本要幂等（重复执行不出错）。
 
 ## CC Wiki — 个人知识 Wiki
 
@@ -868,7 +915,7 @@ gs://YOUR_BUCKET/
 ### 三层架构
 
 ```
-~/my-wiki/
+~/my-wiki-v2/
 ├── raw/          # 原始资料（人策展，不可变）
 │   ├── articles/     PDF / 网页 / 转录稿
 │   ├── papers/
@@ -1041,7 +1088,7 @@ python3 skills/feishu-mail/setup_mailbox.py delete --mailbox-id "MAILBOX_ID"
 ### 两层架构
 
 <p align="center">
-  <img src="assets/auto-memory.svg" alt="Auto Memory Architecture" width="900"/>
+  <img src="../assets/auto-memory.svg" alt="Auto Memory Architecture" width="900"/>
 </p>
 
 | 层 | 文件 | 范围 | 注入方式 |
@@ -1195,7 +1242,7 @@ Bot 生成的 HTML 报告、数据分析、Benchmark 结果通过域名发布。
 ### 架构
 
 <p align="center">
-  <img src="assets/cc-pages-arch.svg" alt="CC Pages Architecture" width="800"/>
+  <img src="../assets/cc-pages-arch.svg" alt="CC Pages Architecture" width="800"/>
 </p>
 
 ### 部署步骤
@@ -1422,14 +1469,22 @@ CloseCrab/
 │   │   ├── base.py             # Worker 抽象基类
 │   │   ├── claude_code.py      # ClaudeCodeWorker: socketpair IPC + stream-json + context 追踪
 │   │   ├── gemini_acp.py       # GeminiACPWorker: ACP JSON-RPC + MCP 注入 + 事件映射
-│   │   └── openclaw_acp.py     # OpenClawWorker: ACP JSON-RPC + Gateway + context compaction
+│   │   ├── openclaw_acp.py     # OpenClawWorker: ACP JSON-RPC + Gateway + context compaction
+│   │   └── kilo.py             # KiloWorker: HTTP SSE + part.delta 流式
+│   ├── voice/
+│   │   ├── discord_voice_sidecar.py  # Discord 常驻语音频道推流 + DAVE E2EE
+│   │   ├── zello_voice_sidecar.py    # Zello PTT 对讲（Channel API + Opus）
+│   │   ├── tts_config.py             # TTS 音色单一来源（零重依赖，3.13+ 也能 import）
+│   │   ├── gemini_tts.py             # Gemini TTS
+│   │   ├── gemini_stt.py / chirp_stt.py / funasr_stt.py
+│   │   └── livekit_io.py             # agents SDK（Discord 语音接收方向仍依赖）
 │   └── utils/
 │       ├── config_store.py     # Firestore 配置加载
 │       ├── firestore_inbox.py  # Bot 间实时通信（on_snapshot）
 │       ├── registry.py         # 自注册（硬件 + context 上报）
 │       └── stt.py              # 语音转文字（Gemini / Chirp2 / Whisper）
-├── skills/                     # 23 个 Skills（deploy.sh 拷贝到 ~/.claude/skills/）
-│   └── wiki/                   # CC Wiki（Karpathy LLM Wiki 实现，含 36 个脚本）
+├── skills/                     # 48 个 Skills（deploy.sh 按 allowlist symlink 到 ~/.claude/skills/）
+│   └── wiki/                   # CC Wiki（Karpathy LLM Wiki 实现）
 ├── scripts/
 │   ├── launcher.sh             # 本地 bot 管理（start/stop/restart/status/logs）
 │   ├── dispatch-bot.sh         # 远程 bot 部署 / 召回 / 迁移
@@ -1438,9 +1493,16 @@ CloseCrab/
 │   ├── inbox-send.py           # Bot Inbox 发消息
 │   ├── send-to-discord.sh      # 外部脚本发 Discord 消息
 │   ├── sync-memory.sh          # Auto Memory 同步 + 备份
-│   └── notify-on-complete.sh   # 后台任务完成通知
+│   ├── cron-daemon.py          # Timeline 单例 daemon（30s tick，由 run.sh 拉起）
+│   ├── cron-tool.py            # 定时提醒（到点写 inbox）
+│   ├── watch-task.py           # 长跑盯梢（SKIP / REPORT / DONE 三态）
+│   ├── feishu-notify.py        # 只发通知，零 turn 零 token
+│   ├── self-restart.py         # 安全自重启（写 marker → exit 42）
+│   ├── boot-autostart.sh       # 开机自启入口（@reboot 调它，幂等）
+│   └── closecrab-smoke-test.sh # 部署后健康检查
 ├── config/
 │   ├── settings.json           # Claude Code settings 模板
+│   ├── skill-allowlist.txt     # 决定 deploy 装哪些 skill
 │   └── env.sh                  # 环境变量声明
 ├── infra/
 │   └── cc-pages/               # CC Pages 基础设施（setup + nginx 配置）
@@ -1455,10 +1517,10 @@ CloseCrab/
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines. By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
 
 ## License
 
 Copyright 2025-2026 Chris Yang (yangwhale)
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+Licensed under the Apache License, Version 2.0. See [LICENSE](../LICENSE) for the full text.
