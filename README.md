@@ -10,7 +10,7 @@
   <img src="crab-with-claude-code-inside.png" alt="CloseCrab — AI Agent Bot 框架" width="600"/>
 </p>
 
-> **把 Claude Code、OpenClaw、Kilo Code、Gemini CLI 变成 24/7 在线的聊天 Bot——跑在飞书、Discord、钉钉上，支持共享记忆、bot 间协作、运行时热切换、浏览器语音通话。**
+> **把 Claude Code、OpenClaw、Kilo Code、Gemini CLI 变成 24/7 在线的聊天 Bot——跑在飞书、Discord、钉钉上，支持共享记忆、bot 间协作、运行时热切换、实时语音。**
 
 CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实现 agent 能力——直接驱动 CLI 进程，所以**上游生态里的每一个 Skill、Plugin、MCP Server 都能即装即用，零适配成本**。
 
@@ -20,18 +20,18 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 
 ## 能力矩阵一览
 
-**4 个 Agent Runtime · 3 个聊天平台 · 33 个内置 Skill · 1 套统一身份和记忆。**
+**4 个 Agent Runtime · 3 个聊天平台 · 48 个内置 Skill · 3 条语音通道 · 1 套统一身份和记忆。**
 
 | 维度 | 能力 |
 |---|---|
 | 💬 **平台（3 个，飞书为主）** | 飞书 / Lark（一等公民）· Discord · 钉钉 |
 | 🔄 **Runtime（4 个，热切换）** | Claude Code · OpenClaw · Kilo Code · Gemini CLI——任意 bot 15 秒切换 |
-| 🎙️ **语音 I/O** | 飞书语音消息 STT + TTS 回传 · `/voice` 唤起浏览器 LiveKit 通话 |
+| 🎙️ **语音（3 条通道）** | 语音消息 STT+TTS · Discord 常驻语音频道**实时直播流** · Zello PTT 对讲 |
 | 🧠 **共享记忆** | MEMORY.md + 100+ topic 文件 + GCS 同步 + OpenClaw sqlite 向量索引 |
+| ⏰ **Timeline（定时 + 盯梢）** | `cron-tool` 到点叫醒 · `watch-task` 起小 agent 自己判断进度，SKIP/REPORT/DONE 三态 |
 | 🤝 **Bot 团队** | 多 bot 跨机器协作 · `#team-ops` 频道派活 · Firestore inbox 实时推送 |
-| 🔧 **33 个内置 Skill** | Wiki · Imagen/Veo/TTS 生成 · 飞书四件套（邮件/文档/表格/多维表格）· Chrome 自动化 · skill-creator 自举 |
+| 🔧 **48 个内置 Skill** | Wiki · Imagen/Veo/TTS/音乐生成 · 飞书四件套 · 浏览器自动化 · GPU 集群验收 · skill-creator 自举 |
 | 📄 **CC Pages** | bot 生成 HTML 报告，一条命令发布到 GCS + 自定义域名 |
-| 🛠️ **跨 worker 通用脚本** | `cron-tool` 定时 · `subagent-parallel` 真并行 · `session-status` 自查 model/cost |
 | 🔌 **完整上游生态** | Claude Code skills · MCP servers · Gemini extensions · OpenClaw plugins |
 
 ---
@@ -46,13 +46,14 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 
 | 层 | 路径 | 实现 |
 |---|---|---|
-| **入口** | `closecrab/main.py` | CLI 解析、配置加载、system prompt 构造、信号处理 |
+| **入口** | `closecrab/main.py` | CLI 解析、配置加载、system prompt 构造、TTS 音色加载、信号处理 |
 | **核心** | `closecrab/core/bot.py` | BotCore：消息路由、per-user worker、Firestore 日志、急刹车 |
 | **Channels (3+1)** | `closecrab/channels/` | `feishu.py` · `feishu_streaming_card.py` · `discord.py` · `dingtalk.py` |
 | **Workers (4 active)** | `closecrab/workers/` | `claude_code.py` · `openclaw_acp.py` · `kilo.py` · `gemini_acp.py` |
+| **Voice** | `closecrab/voice/` | `discord_voice_sidecar.py`（直播流 + DAVE E2EE）· `zello_voice_sidecar.py`（PTT）· `tts_config.py`（音色单一来源）· `gemini_tts.py` · `gemini_stt.py` / `chirp_stt.py` / `funasr_stt.py` · `livekit_io.py` |
 | **STT** | `closecrab/utils/stt.py` | Gemini → Chirp2 → Whisper fallback 链 |
 | **Inbox** | `closecrab/utils/firestore_inbox.py` | Bot 间实时消息（Firestore `on_snapshot`） |
-| **Voice** | `scripts/install-livekit.sh` | LiveKit server + frontend + Caddy + systemd 一键装 |
+| **Timeline** | `scripts/cron-daemon.py` · `cron-tool.py` · `watch-task.py` | 单例 daemon 30s tick，定时任务与长跑盯梢共用一条时间线 |
 
 ---
 
@@ -89,7 +90,7 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 |---|---|---|
 | **① MEMORY.md** | bot 身份 + 用户偏好 + topic 索引（~200 行硬上限） | 每次对话自动注入 system prompt |
 | **② memory/*.md** | 100+ topic 文件：`feedback_*` 经验 · `project_*` 项目 · `user_*` 偏好 · `reference_*` 参考 | 按需 Read |
-| **③ shared/*.md** | 团队基础设施文档，gcsfuse 挂载 `gs://chris-pgp-host-asia/memory/shared/` | 多 bot 实时共享 |
+| **③ shared/*.md** | 团队基础设施文档，gcsfuse 挂载 GCS 桶 | 多 bot 实时共享 |
 | **④ OpenClaw sqlite 向量索引** | 启动时扫描所有 `.md`，提供 `memory_search` MCP tool | OpenClaw runtime 加成（其他 worker 用 Read+Grep） |
 
 **自动写入**：agent 在对话中发现 user / feedback / project / reference 级别的信息时主动落盘——参考 [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 理念，**知识编译而非检索**。
@@ -114,39 +115,75 @@ python3 scripts/inbox-send.py bunny "在 B200 上跑 Llama 4 benchmark，写到 
 
 **Team 角色配置**存 Firestore `bots/{name}.team`，`build_system_prompt()` 根据角色动态注入协调规则，所以 Leader 看到的 system prompt 跟 Teammate 不一样。
 
+多阶段任务走 **Inbox 协议 V1**：`kickoff` / `progress` / `done` 三种 phase 用同一个 `task_id` 串起来。progress **不触发**对端 LLM turn（只给人看），只有 done 触发一次，把全部 progress 打包进 prompt。详见 [docs/inbox-task-protocol.md](docs/inbox-task-protocol.md)。
+
 ---
 
 ## 语音 I/O
 
-两种语音入口：
+三条独立的语音通道，可以同时开：
 
-| 入口 | 触发 | 链路 |
+| 通道 | 触发 | 链路 |
 |---|---|---|
-| **语音消息** | 用户在飞书 / Discord 发语音消息 | Channel 层 STT (Gemini→Chirp2→Whisper) → BotCore → bot 回复 + TTS 语音摘要 |
-| **浏览器通话** | 飞书发 `/voice` 命令 | bot 返回 LiveKit URL → 用户浏览器打开 → 实时 STT/TTS 双向 |
+| **语音消息** | 用户在飞书 / Discord 发语音 | Channel 层 STT（Gemini→Chirp2→Whisper）→ BotCore → 回复 + TTS ogg 语音摘要 |
+| **Discord 常驻语音频道** | `/discordon` | bot 常驻语音频道，回复**边生成边推流**（首帧 ~0.9s），支持 DAVE E2EE、暂停/继续/重播 |
+| **Zello PTT 对讲** | `/zelloon` | Zello Channel API：对讲机按住说话 → Opus 解码 → STT → 走飞书消息通道；回复反向推成 PTT 流 |
 
-LiveKit 通话栈（`scripts/install-livekit.sh` 一键装）：
-- **livekit-server** + **livekit-frontend**（fork 自 `agent-starter-react`）+ **Caddy** 自动 LE 证书 + **systemd unit**
-- 多 bot 共享一台机器一份 LiveKit infra，靠 URL `?bot=` 参数路由 + per-bot HMAC key 验签
-- STT/TTS 走 Vertex AI 的 Gemini，需要 `roles/aiplatform.user`
+**音色是 bot 级配置**，存 Firestore `bots/{name}.channels.discord.tts_voice`（Gemini TTS 的 15 个 voice 任选）。流式直播和 ogg 语音消息**共用同一个来源**，没配就直接报错——不做静默兜底，避免"改了配置不生效"这类问题。
 
-部署详见 [docs/voice-deploy-quickstart.md](docs/voice-deploy-quickstart.md)。
+**开关都会落盘**：`/discordon` `/discordoff` `/zelloon` `/zellooff` 写回 Firestore，跨重启保持。Zello 全网只有一个账号，`/zelloon` 会先检查是否已被别的 bot 占用（同账号双登会互踢）。
+
+> LiveKit（`/voice` 浏览器通话）的房间与网页前端已停用；`closecrab/voice/livekit_io.py` 仍然承重 —— Discord 语音**接收**方向依赖它的 agents SDK，别按文件名误删。
 
 ---
 
-## 33 个内置 Skill
+## Timeline —— 定时任务与长跑盯梢
 
-每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`，deploy.sh 自动 symlink 到 `~/.claude/skills/{name}`。新建 skill 用 `skill-creator` 自举。
+一条时间线，一个 daemon，两种用法。**由第一个 bot 的 `run.sh` 以单例方式拉起**，所以 daemon 跟 bot 同环境；机器上没 bot 就不会有 daemon。
+
+| 用法 | 工具 | daemon 行为 |
+|---|---|---|
+| **到点叫醒某个 bot** | `cron-tool.py` | 不推理，到点往目标 bot 的 inbox 写一句话 |
+| **盯长跑任务** | `watch-task.py` | 每隔 N 秒起一个小 agent 自己判断，三态：**SKIP** 静默 / **REPORT** 贴飞书（零 turn）/ **DONE** 写 inbox 交接并自行终止 |
+
+```bash
+# 定时提醒（--cron 与 --at 按 HKT 解释）
+python3 scripts/cron-tool.py add --target <bot> --in 10m --message "..."
+python3 scripts/cron-tool.py add --target <bot> --cron "0 9 * * MON-FRI" --message "..."
+python3 scripts/cron-tool.py list|remove <job_id>
+
+# 盯一个训练/压测，有进展才出声
+python3 scripts/watch-task.py create --name t80 --interval 120 --model sonnet \
+    --notify-bot <bot> --max-age 7200 \
+    --prompt "读 /tmp/t80.log 判断进度。出现 TRAINING COMPLETE 或 Error 时用 DONE。没变化就 SKIP。"
+python3 scripts/watch-task.py list|stop <name>
+```
+
+**设计要点**：
+
+- **通知与触发事件走不同通道**。REPORT 用 `feishu-notify.py` 直接贴消息，**零 turn 零 token**；DONE 写 inbox，触发主进程一次完整 turn 来接手。别让"看一眼就行"的播报去烧 turn。
+- **探针档位自选**：`--model haiku`（看日志变没变，默认）/ `sonnet`（要读懂内容再判断）/ `opus`（要做真取舍）。
+- **任务钉在创建它的机器上**。每条记录带 host 归属，多机共驱一条时间线靠 Firestore 事务抢占；没有 host 归属的记录会被直接删除。
+- **有硬上限**：`--max-age` 默认 6 小时自动收，`--stall-after` 连续无进展算疑似卡住。**不要往系统 crontab 里塞会调 LLM 的东西**——那种条目没有 owner、`list` 看不见、不会自终止。
+
+设计细节见 [docs/task-scheduler-design.md](docs/task-scheduler-design.md)。
+
+---
+
+## 48 个内置 Skill
+
+每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`，deploy.sh 按 allowlist symlink 到 `~/.claude/skills/{name}`。新建 skill 用 `skill-creator` 自举。
 
 | 分类 | Skills |
 |---|---|
-| **企业办公（飞书）** | `feishu-mail` · `feishu-doc` · `feishu-sheet` · `feishu-bitable`（多维表格） |
-| **知识管理** | `wiki`（180+ 页面 Quartz Wiki，9 个 MCP tools）· `code-wiki-recon`（陌生仓库架构速读）· `paper-explainer` · `fireworks-tech-graph` |
-| **多媒体生成** | `imagen-generator`（Imagen 4）· `veo-generator`（Veo 3.1）· `tts-generator`（Gemini TTS，15 voice + 情绪标签）· `frontend-slides`（HTML 幻灯片）· `math-video-tutor` |
-| **浏览器 / 微信** | `chrome-browser`（Chrome MCP 兜底）· `wechat-reader` |
-| **基础设施** | `tmux-installer` · `tmux-orchestrator` · `zsh-installer` · `lustre-mounter` · `lssd-mounter` · `bwrap-bypass`（绕过 Claude Code sandbox）· `vscode-reference` |
-| **AI 训练 / 推理** | `maxdiffusion-trainer` |
-| **元能力** | `skill-creator`（自举）· `agent-teams`（团队协调）· `bot-config` · `chat-style` · `page-style` · `notify` · `issue-handler` · `session-handoff` · `gemini-ui-reviewer`（UI 审稿）· `go-eat`（食堂菜单） |
+| **企业办公（飞书）** | `feishu-mail` · `feishu-doc` · `feishu-sheet` · `feishu-bitable` · `feishu-user-msg` |
+| **知识管理** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `code-wiki-recon` · `paper-explainer` · `fireworks-tech-graph` · `memory-gc` · `memory-lint` |
+| **多媒体生成** | `imagen-generator` · `veo-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `frontend-slides` · `deck-builder` · `math-video-tutor` · `multimodal-explainer` · `live-canvas` |
+| **浏览器 / 阅读** | `browser-cli`（CDP 直连，比 MCP 省 40 倍 token）· `wechat-reader` · `docx-form-filler` |
+| **GPU 集群** | `nvl72-qa`（GB200/GB300 验收：DCGM 诊断 · NCCL 带宽 · 跨域多节点 · 故障节点处理）· `lustre-mounter` |
+| **系统 / 环境** | `tmux-installer` · `tmux-orchestrator` · `zsh-installer` · `bwrap-bypass` · `vscode-reference` · `smoke-test` · `cc-pages-backup` |
+| **学习 / 生活** | `chinese-dictation`（听写练习页）· `lesson-read-aloud`（课文朗读）· `study-material` · `weather-forecast` · `hk-bus` · `hk-share-award-tax-dipn38` |
+| **元能力** | `skill-creator`（自举）· `agent-teams` · `evolution`（三方互评优化 worker）· `bot-config` · `chat-style` · `page-style` · `notify` · `issue-handler` · `session-handoff` · `gemini-ui-reviewer` |
 
 ---
 
@@ -158,19 +195,22 @@ LiveKit 通话栈（`scripts/install-livekit.sh` 一键装）：
 # 真并行多个 LLM sub-agent（每个独立推理 + bash + read）
 python3 scripts/subagent-parallel.py --inline '{"tasks":[{"label":"A","prompt":"..."}]}'
 
-# 定时提醒 / cron（精度 30s，daemon 自动跑）
-python3 scripts/cron-tool.py add --target <bot> --in 10m --message "..."
-python3 scripts/cron-tool.py add --target <bot> --cron "0 9 * * MON-FRI" --message "..."
-python3 scripts/cron-tool.py list|remove <id>
+# 定时 / 盯梢（见上面 Timeline 章节）
+python3 scripts/cron-tool.py   add|list|remove ...
+python3 scripts/watch-task.py  create|list|stop ...
+
+# 只发通知，零 turn 零 token（跟"写 inbox 触发 turn"是两回事）
+python3 scripts/feishu-notify.py "跑到第 2 步了"
 
 # 自查 model / cost / token / 历史 turns
 python3 scripts/session-status.py <bot> [--days N]
 
-# 图片生成（Gemini 3 Pro Image）
-~/CloseCrab/skills/imagen-generator/scripts/imagen-generate.sh "prompt" --aspect 16:9
+# 安全自重启（agent 不能 kill 自己的父进程，用这个写 marker 走 exit-42）
+BOT_NAME=<bot> python3 scripts/self-restart.py --note "重启后要做的事"
 
-# 语音生成（Gemini TTS，15 voice + 情绪标签）
-~/CloseCrab/skills/tts-generator/scripts/tts-generate.py "[casually] hello"
+# 图片 / 语音生成
+skills/imagen-generator/scripts/imagen-generate.sh "prompt" --aspect 16:9
+skills/tts-generator/scripts/tts-generate.py "[casually] hello"
 ```
 
 ---
@@ -191,65 +231,63 @@ cp .env.example .env && vim .env
 python3 scripts/config-manage.py create mybot --channel feishu \
     --app-id "cli_xxxxxxx" --app-secret "xxxxxxxxxxxx"
 
-# 5. 启动（run.sh 是带自动重启的 wrapper）
+# 5. 启动（run.sh 是带自动重启的 wrapper，同时负责单例拉起 cron-daemon）
 nohup ./run.sh mybot > /tmp/mybot.log 2>&1 &
 ```
 
 > **Pro tip**：已经装了 Claude Code？在这个目录跑 `claude`，然后说"按照 README 帮我部署成飞书 bot"——它会读这份文档帮你搞定全程。
 
-### 增量装语音通话
+### 开机自启
 
 ```bash
-# 已有 bot 增量加 voice infra
-./deploy.sh --voice \
-    --voice-frontend-domain  live.example.com \
-    --voice-signaling-domain livekit.example.com \
-    --voice-email            you@example.com
-
-# 给某个 bot 配 voice 凭据（auto-detect 从本机读）
-python3 scripts/config-manage.py set-livekit <bot> --auto-detect \
-    --frontend-url https://live.example.com --enable
+# 三台机器的 @reboot 都调它；幂等，随时可手动跑验证
+scripts/boot-autostart.sh [--check]
 ```
+
+顺序：补 cron 最小环境 → 等 DNS → gcsfuse → OpenClaw Gateway → `launcher.sh start all`。**cron-daemon 不在这里起**，由第一个 bot 的 run.sh 拉起，这样它跟 bot 拿到同一份 PATH。
 
 ---
 
 ## ⚠️ Claude Code CLI 升级注意事项
 
-> **别随便升级**。CC 没有 auto-upgrade，所有升级都是手动 `claude install <version>`。已知 **2.1.144+ 存在 900K 上下文 regression**，下次升级前**必须**先按下面流程验证「上下文有没有被卡死在 200K」。
+> **别随便升级**。CC 没有 auto-upgrade，所有升级都是手动 `claude install <version>`。历史上 **2.1.144 / 2.1.145 出现过 900K 上下文 regression**，所以每次升级前**必须**先验证「上下文有没有被卡死在 200K」。
 
-### 已知 regression（2026-05-21 二分法实测）
+### 历史 regression（2026-05-21 二分法实测）
 
 | 版本 | 状态 | 行为 |
 |------|------|------|
-| **2.1.143** | ✅ **当前已知良品** | autoCompactWindow=900000 生效，peak cache_read 369K 无 compact |
-| 2.1.144 | ❌ Compact thrashing | 5 分钟内 3 次 compact：1st@371K，2nd@167K（-204K），3rd@174K；post-compact 仅 20K 可用预算 |
-| 2.1.145 | ❌ Cap 钳死 ~200K | 干净 cap 到 ~200K，不 thrash 但完全锁死 900K 配置；16 次 compact 全部 ~167-171K |
+| 2.1.143 | ✅ 当时的良品 | autoCompactWindow=900000 生效，peak cache_read 369K 无 compact |
+| 2.1.144 | ❌ Compact thrashing | 5 分钟内 3 次 compact；post-compact 仅 20K 可用预算 |
+| 2.1.145 | ❌ Cap 钳死 ~200K | 不 thrash 但完全锁死 900K 配置 |
+| **2.1.226** | ✅ **当前主力** | 2026-08-09 实测：peak cache_read **805K**，新增 compact **0** |
 
-根因（反编译验证）：`Math.min(jL() cap, autoCompactWindow) - min(CqH(H), 20000)`，144 改了 compact decision function 让 `autoCompactWindow` 失效。详见 [memory](https://github.com/yangwhale/CloseCrab/wiki) 的 `cc-version-matters-for-jl.md`。
+根因（反编译验证）：`Math.min(jL() cap, autoCompactWindow) - min(CqH(H), 20000)`，144 改了 compact decision function 让 `autoCompactWindow` 失效。
 
-### 升级前必检清单（Pre-upgrade Stress Test）
+### 升级前必检清单
 
 ```bash
-# Step 1: 备份当前 binary（symlink 固化在 2.1.143）
-cp -a ~/.local/share/claude/versions/2.1.143 /tmp/claude-2.1.143.backup
+# Step 1: 记下当前良品版本（旧版本留在 versions/ 目录里当回滚点）
+readlink ~/.local/bin/claude
 
-# Step 2: 在测试 bot 上装目标版本（不要拿主力 bot 测）
-claude install <target-version>
+# Step 2: 装目标版本（原生 installer 只换 symlink）
+~/.local/bin/claude install <target-version>
 
-# Step 3: 压力测试 —— 让测试 bot 连续 read 5+ 个大文件 (>50K tokens each)
-#         触发 cache_read 增长，观察是否在 200K 卡住
+# Step 3: 拿一个非主力 bot 做压力测试，让它连读 5 个大文件
+python3 scripts/inbox-send.py <test-bot> "请依次 Read 这 5 个大文件不要停 ..."
 
 # Step 4: 验收标准（两项都要满足才算 PASS）
-#   ✅ peak_cache_read > 250K
-#   ✅ 0 个新增 compact 事件（grep ~/.claude/projects/-home-chrisya/*.jsonl）
+#   ✅ peak cache_read > 250K        （证明 cap 没被钳到 200K）
+#   ✅ 本次新增 compact 事件 = 0      （证明没 thrash）
 
 # Step 5: 失败 → 立即回滚
-ln -sfn ~/.local/share/claude/versions/2.1.143/cli.js ~/.local/bin/claude
+~/.local/bin/claude install <known-good-version>
 
-# Step 6: PASS 才升主力 bot（jarvis/bunny/hulk/tiemu...）
+# Step 6: PASS 才推全 fleet
 ```
 
-**Memory 索引**：`feedback_cc-upgrade-checklist.md` + `feedback_cc-version-matters-for-jl.md`。
+> **两个测量陷阱**：
+> 1. `claude --version` 查的是 **PATH 上**那个（可能是 npm 装的），**不是 bot 实际调用的**。要问就问代码：`_resolve_config(bot)["claude_bin"]` 再对它 `--version`。
+> 2. 别把 `claude_bin` 写成 `versions/2.1.156` 这种**绝对版本路径**——那会让该 bot 永远停在那个版本，`claude install` 换的是 symlink，绕不过绝对路径。统一指向 `~/.local/bin/claude`。
 
 ---
 
@@ -291,9 +329,9 @@ ln -sfn ~/.local/share/claude/versions/2.1.143/cli.js ~/.local/bin/claude
 | **`im:resource`** | `im:resource` | 下载语音 / 图片附件 |
 | **`contact:user.base:readonly`**（可选）| | 拿到用户名做日志展示 |
 
-#### Step 4 — 机器人菜单配置（对应斜杠命令）
+#### Step 4 — 机器人菜单配置
 
-进 **机器人能力 → 自定义菜单**，添加以下 8 个菜单项，`event_key` 填命令名（带不带 `/` 都行，bot 会自动规范化）：
+进 **机器人能力 → 自定义菜单**，`event_key` 填命令名（带不带 `/` 都行，bot 会自动规范化）。推荐配这 8 个：
 
 | 显示名 | event_key | 作用 |
 |---|---|---|
@@ -304,9 +342,16 @@ ln -sfn ~/.local/share/claude/versions/2.1.143/cli.js ~/.local/bin/claude
 | 📋 Session 列表 | `sessions` | 用卡片+下拉切换历史 session |
 | 📈 Context | `context` | 展示当前 context window 使用率 |
 | 📚 文档 | `docs` | 飞书内显示 CloseCrab 文档链接 |
-| 🎙️ Voice | `voice` | 唤起 LiveKit 浏览器通话（需先装 voice infra） |
+| 🎙️ Discord 语音 | `discordon` | 让 bot 连进 Discord 常驻语音频道 |
 
-> 用户点菜单 → 飞书发 `application.bot.menu_v6` → bot 把 `event_key` 映射成 `/restart` 这样的命令执行。
+**完整命令集（23 个，直接发消息也能用）**：
+
+| 分组 | 命令 |
+|---|---|
+| 会话 | `/status` `/end` `/restart` `/stop` `/context` `/sessions` `/docs` |
+| 模型与推理档位 | `/model` `/low` `/medium` `/high` `/xhigh` `/think` `/mode` `/mcp` |
+| 上下文压缩 | `/cmp`（透传 Claude Code 的 compact） |
+| 语音 | `/voice` · `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/hlson` `/hlsoff`（HLS 直播） |
 
 #### Step 5 — Reaction 快捷指令（点赞语义）
 
@@ -351,7 +396,7 @@ python3 scripts/config-manage.py set-feishu mybot \
 
 #### Step 9 — 选填：飞书企业邮件
 
-每个 bot 可独立配置 `@higcp.com` 风格的企业邮件，详见 [docs/full-reference.md#飞书企业邮箱](docs/full-reference.md#飞书企业邮箱)。
+每个 bot 可独立配置企业邮件，详见 [docs/full-reference.md](docs/full-reference.md)。
 
 ---
 
@@ -369,6 +414,8 @@ python3 scripts/config-manage.py set-discord mybot --allowed-user-ids "123,456"
 ```
 
 Discord 自带 7 个 slash command（`/status` `/end` `/restart` `/stop` `/docs` `/context` `/sessions`），bot 启动时自动注册到 Server。
+
+**常驻语音频道**（可选）：active channel 是飞书时，也能让 bot 额外连一条只做语音输出的 Discord 连接。配 `channels.discord.voice_sidecar=true` + `voice_channel_id` + `tts_voice`，或运行时发 `/discordon`（会落盘，跨重启保持）。
 
 ---
 
@@ -400,7 +447,9 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 |---|---|
 | **GCS 桶** | CC Pages（Web 报告）+ 跨机器共享 memory（gcsfuse 挂载） |
 | **MCP API keys** | GitHub · Context7 · Jina——各解锁一个 MCP server |
-| **LiveKit 域名** | `/voice` 浏览器通话需要 2 个域名（frontend + signaling） |
+| **Zello 账号** | PTT 对讲通道（开发者 token 由本地私钥每次登录现签） |
+
+> **Python 3.13+ 注意**：`audioop` 已被 PEP 594 移除，Discord 语音 sidecar 在新系统上需要先装 `audioop-lts`。音色配置模块 `voice/tts_config.py` 已刻意做成零重依赖，不受影响。
 
 ---
 
@@ -410,11 +459,12 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 |---|---|---|---|
 | 文字消息 | ✅ | ✅ | ✅ |
 | 语音输入 STT | ✅ 语音消息 | ✅ 语音频道 | — |
-| 语音摘要 TTS | ✅ | ✅ | — |
-| 浏览器通话 | ✅ `/voice` (LiveKit) | — | — |
+| 语音摘要 TTS（ogg） | ✅ | ✅ | — |
+| 常驻语音频道实时推流 | — | ✅ `/discordon`（DAVE E2EE） | — |
+| Zello PTT 对讲 | ✅ 消息回灌飞书 | — | — |
 | 交互卡片 | ✅ animated card · streaming card · 卡片按钮回调 | edit + emoji | — |
 | 点赞 → 快捷指令 | ✅ 7 种 emoji 语义 | — | — |
-| Bot 菜单 / Slash 命令 | ✅ 8 个菜单项 | ✅ 7 个 slash command | — |
+| 命令 | ✅ 23 个 | ✅ 7 个 slash command | — |
 | 消息引用 | ✅ | ✅ | — |
 | 连接方式 | WebSocket (lark_ws 长连接) | Discord Gateway | Stream |
 
@@ -433,8 +483,14 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 ## 运维工具
 
 ```bash
-# 本地 bot 管理
+# 本地 bot 管理（内部直接调 run.sh，不另抄重启循环）
 scripts/launcher.sh start|stop|restart|status|logs <bot>
+
+# 开机自启（幂等）
+scripts/boot-autostart.sh [--check]
+
+# 健康检查（进程 / Firestore / worker secrets / 日志活性 / 近期错误）
+scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 
 # 远程部署（多 bot 调度）
 scripts/dispatch-bot.sh deploy|recall|move|check <bot> <host>
@@ -447,10 +503,16 @@ scripts/inbox-send.py <target> "<msg>"
 
 # 记忆同步备份（GCS + private repo）
 scripts/sync-memory.sh --push|--pull
-
-# 直接发到指定 Discord 频道（异步通知用）
-scripts/send-to-discord.sh --channel <id> "<msg>"
 ```
+
+### 退出码约定（run.sh 行为）
+
+| 码 | 含义 | 重启 |
+|----|------|------|
+| `42` | `/restart` 或 `self-restart.py` | 立即重启 |
+| `130` / `137` / `143` | SIGINT / SIGKILL / SIGTERM | 不重启 |
+| `1` | 配置错误 | 不重启 |
+| 其他非零 | 崩溃 | 重启（连续 >10 次停止） |
 
 ---
 
@@ -459,11 +521,11 @@ scripts/send-to-discord.sh --channel <id> "<msg>"
 | 文档 | 内容 |
 |---|---|
 | [完整参考](docs/full-reference.md) | 详细部署指南、配置参考、故障排查 |
+| [Timeline 设计](docs/task-scheduler-design.md) | cron-daemon 单例、watch-task 三态协议、多机事务抢占 |
+| [Inbox 任务协议 V1](docs/inbox-task-protocol.md) | kickoff / progress / done 三阶段，progress 旁路省 turn |
 | [OpenClaw 部署指南](docs/openclaw-deploy-quickstart.md) | OpenClaw Gateway + agent.json 配置 |
 | [OpenClaw Worker 设计](docs/openclaw-worker-design.md) | ACP 协议、per-bot session 路由、context 压缩 |
 | [Kilo Worker 设计](docs/kilo-worker-design.md) | HTTP SSE、part.delta + emitted_len 不变量 |
-| [Kilo 优化记录](docs/kilo-worker-optimization.md) | streaming 切片阈值、partial flush 调优 |
-| [Voice 部署指南](docs/voice-deploy-quickstart.md) | LiveKit + Caddy + Gemini STT/TTS 一键装 |
 | [GBrain 集成指南](docs/gbrain-integration.md) | PGLite memory bank + OAuth MCP + per-bot 独立部署（可选） |
 | [博客: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | 4 个 runtime 互相吸收能力的设计哲学 |
 
