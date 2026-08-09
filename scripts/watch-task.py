@@ -22,7 +22,7 @@
 三步协议（喂给 sub-agent 的输出契约）：
   SKIP    还在跑，没什么可说的        → 静默退出
   REPORT  有实质进展                  → 飞书贴一条，更新游标
-  DONE    跑完了/失败了，该主进程接手  → 飞书贴结论 + inbox 交接 + 本任务终止
+  DONE    跑完了/失败了，该主进程接手  → inbox 交接 + 本任务终止 (不推通知，主进程回复即结论)
 
 模型分档（--model，默认 haiku）：写任务的人最清楚这活儿难不难。
   haiku   看日志有没有变、进程还在不在、文件出现没有   ← 默认，这条路是高频的
@@ -570,12 +570,8 @@ def _finalize_error(d, name: str, task: dict, reason: str) -> bool:
         t.update(ref, {"status": "failed", "last_error": reason[:300], "failed_at": NOW()})
         return True
 
-    if not _run(tx):
-        return False
-    notify_chat(name, f"❌ 出错自行终止：{reason[:150]}", task.get("notify_bot"))
-    notify_voice(name, f"后台任务 {name} 出错了，已自行终止。{reason[:120]}",
-                 task.get("notify_bot") or "jarvis", brief=False)
-    return True
+    # 跟 DONE 同理：这条也写了 inbox，是触发事件不是通知，不再另推一份。
+    return _run(tx)
 
 
 def _sweep(d, now) -> int:
@@ -711,9 +707,11 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
         # （每轮烧主进程一个完整 turn）；先标记再发 inbox，inbox 失败 → 任务链
         # 静默断掉。两者写的都是 Firestore，放进一个事务就都不用选。
         # 只有把 status 从 active 翻成 done 的那一方才写 inbox。
-        if _finalize_done(d, name, task, body):
-            notify_chat(name, body, task.get("notify_bot"))
-            notify_voice(name, body, task.get("notify_bot") or "jarvis", brief=False)
+        # 只写 inbox，不推通知。DONE 是**触发事件**不是通知 (§11)：主进程消化完
+        # 自然会说话，而且比探针的原始输出更准 (实测探针把「373 台主机」写成
+        # 「373 块 GPU」)。以前两条都发，一次 DONE 要渲染四遍同一件事 ——
+        # 文字通知 + 语音 + 主进程回复 + 回执卡片。
+        _finalize_done(d, name, task, body)
         return {"name": name, "verdict": verdict}
     elif verdict in ("REPORT", "MALFORMED"):
         # MALFORMED 连续 3 轮 = 探针没在参与协议（实测：bj 上的模型把我们的输出

@@ -777,14 +777,17 @@ class DiscordChannel(Channel):
 
         if self._inbox:
             self._inbox.mark_done(doc_id, result_summary)
-            # Send receipt back to sender
-            import asyncio
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, self._inbox.send_to, from_bot,
-                f"✅ 任务完成: {instruction[:100]}\n结果: {result_summary}",
-                f"{task_id}-receipt" if task_id else "",
-            )
+            # 自己给自己发的 inbox（watch-task 的 notify_bot 就是本 bot）不写回执：
+            # 回执绕一圈落回自己的收件箱，被渲染成「XXX 回报」卡片，把原文和刚
+            # 发出去的回复又贴一遍。发送者就是自己时没有第二个人需要被通知。
+            if from_bot != self._bot_name:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, self._inbox.send_to, from_bot,
+                    f"✅ 任务完成: {instruction[:100]}\n结果: {result_summary}",
+                    f"{task_id}-receipt" if task_id else "",
+                )
 
         log.info(f"Inbox task completed: {instruction[:60]}")
         self._inbox_processing.discard(doc_id)

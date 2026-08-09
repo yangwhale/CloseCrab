@@ -2428,12 +2428,15 @@ class FeishuChannel(Channel):
             await loop.run_in_executor(
                 None, self._inbox.mark_done, inbox_record_id, result_summary
             )
-            # 往发送者的 inbox 写回执
-            await loop.run_in_executor(
-                None, self._inbox.send_to, inbox_from,
-                f"✅ 任务完成: {summary}\n结果: {result_summary}",
-                f"{task_id}-receipt" if task_id else "",
-            )
+            # 自己给自己发的 inbox（watch-task 的 notify_bot 就是本 bot）不写回执：
+            # 回执绕一圈落回自己的收件箱，被渲染成「XXX 回报」卡片，把原文和刚
+            # 发出去的回复又贴一遍。发送者就是自己时没有第二个人需要被通知。
+            if inbox_from != self._bot_name:
+                await loop.run_in_executor(
+                    None, self._inbox.send_to, inbox_from,
+                    f"✅ 任务完成: {summary}\n结果: {result_summary}",
+                    f"{task_id}-receipt" if task_id else "",
+                )
 
         log.info(f"Task {task_id[:8]} completed: {summary[:60]}")
 
