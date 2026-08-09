@@ -1287,7 +1287,7 @@ class DiscordChannel(Channel):
             # 音色走 Firestore，跟流式 TTS 同一个来源。以前这里写死 "orus"，
             # 结果 Chloe 那台机器只能手改代码才能让 athena 用女声，改动挂在
             # 本地未提交，git pull 必冲突。
-            from ..voice.discord_voice_sidecar import tts_voice
+            from ..voice.tts_config import tts_voice
             send_script = os.path.expanduser("~/.claude/scripts/send-to-discord.sh")
 
             # 生成 ogg 文件

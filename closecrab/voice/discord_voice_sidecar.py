@@ -3037,37 +3037,7 @@ def is_sidecar_running() -> bool:
     )
 
 
-_tts_voice: str = ""
-_tts_voice_bot: str = ""
-
-
-def apply_tts_voice(bot_name: str) -> str:
-    """从 Firestore 读音色到进程内。返回读到的值，没配返回空串。
-
-    音色是 **bot 级** 设置 —— Discord 和 Zello 共用同一套 TTS —— 所以在 bot
-    启动时读一次，而不是挂在 Discord sidecar 的启动流程里。挂上去的话
-    /discordoff 之后再重启就静默失效，2026-08-09 小爱就是这么用上了别人的声音。
-    """
-    global _tts_voice, _tts_voice_bot
-    _tts_voice_bot = bot_name
-    cfg = _load_sidecar_config(bot_name) or {}
-    _tts_voice = str(cfg.get("tts_voice") or "")
-    if _tts_voice:
-        log.info("TTS 音色: %s (bot=%s)", _tts_voice, bot_name)
-    else:
-        log.error("bots/%s.channels.discord.tts_voice 没配，任何 TTS 调用都会直接报错",
-                  bot_name)
-    return _tts_voice
-
-
-def tts_voice() -> str:
-    """当前音色。没配就抛 —— 宁可响亮地失败，也不要悄悄用一个谁也说不清来源的值。"""
-    if not _tts_voice:
-        raise RuntimeError(
-            f"TTS 音色未配置: 请设 bots/{_tts_voice_bot or '<bot>'}"
-            ".channels.discord.tts_voice"
-        )
-    return _tts_voice
+from .tts_config import apply_tts_voice, tts_voice  # noqa: F401  (对外保持原有导入路径)
 
 
 def _spawn_sidecar_thread(

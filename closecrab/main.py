@@ -783,7 +783,7 @@ def main():
     # 且不受 voice_sidecar 开关影响 —— 挂在 Discord 启动流程里的话,
     # /discordoff 之后重启就没人读它了。
     try:
-        from .voice.discord_voice_sidecar import apply_tts_voice
+        from .voice.tts_config import apply_tts_voice
         apply_tts_voice(bot_name)
     except Exception as e:
         log.warning(f"读取 TTS 音色失败 (non-fatal): {e}")
