@@ -4657,10 +4657,14 @@ class FeishuChannel(Channel):
         ogg_path = None
         try:
             tts_script = os.path.expanduser("~/.claude/skills/tts-generator/scripts/tts-generate.py")
+            # 音色走 Firestore，跟流式 TTS 同一个来源。以前这里写死 "orus"，
+            # 结果 Chloe 那台机器只能手改代码才能让 athena 用女声，改动挂在
+            # 本地未提交，git pull 必冲突。
+            from ..voice.discord_voice_sidecar import tts_voice
 
             # 生成 ogg opus 文件
             proc = await asyncio.create_subprocess_exec(
-                "python3", tts_script, text, "--voice", "orus",
+                "python3", tts_script, text, "--voice", tts_voice(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
