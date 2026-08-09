@@ -1298,20 +1298,25 @@ def _persist_zello_enabled(bot_name: str, enabled: bool) -> None:
         log.warning("持久化 zello.enabled 失败 (non-fatal): %s", e)
 
 
-def _zello_holder(exclude: str = "") -> str:
-    """当前把 zello.enabled 置为 true 的 bot；没有则空串。
+_ZELLO_ACCOUNT_FIELDS = ("username", "password", "channel", "auth_token", "network")
 
-    全网只有一个 Zello 账号，两个 bot 同时登会互踢 (2026-06 两周踢了 5.9 万次)，
-    所以开之前得知道有没有别人占着。
+
+def _zello_holder(exclude: str, username: str) -> str:
+    """当前开着、且用同一个 Zello 账号的另一个 bot；没有则空串。
+
+    同一个号被两个 bot 同时登会互踢 (2026-06 两周踢了 5.9 万次)。按 username
+    比而不是一律拒绝，是为了留出各自配号各连各的可能。
     """
     try:
         from google.cloud import firestore
         from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
         db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        shared = db.collection("config").document("zello").get().to_dict() or {}
         for doc in db.collection("bots").stream():
             if doc.id == exclude:
                 continue
-            if (((doc.to_dict() or {}).get("channels") or {}).get("zello") or {}).get("enabled"):
+            z = ((doc.to_dict() or {}).get("channels") or {}).get("zello") or {}
+            if z.get("enabled") and (z.get("username") or shared.get("username", "")) == username:
                 return doc.id
     except Exception as e:
         log.warning("查 Zello 占用者失败: %s", e)
@@ -1319,7 +1324,7 @@ def _zello_holder(exclude: str = "") -> str:
 
 
 def _load_config(bot_name: str, *, require_enabled: bool = True) -> dict | None:
-    """读 Zello 配置：账号在 config/zello 全 bot 共享，开关在 bots/{name} 各管各的。"""
+    """读 Zello 配置：bots/{name} 优先，缺什么从 config/zello 兜底。"""
     try:
         from google.cloud import firestore
         from ..constants import FIRESTORE_PROJECT, FIRESTORE_DATABASE
@@ -1330,14 +1335,8 @@ def _load_config(bot_name: str, *, require_enabled: bool = True) -> dict | None:
         zello_cfg = ((doc.to_dict() or {}).get("channels") or {}).get("zello") or {}
         if require_enabled and not zello_cfg.get("enabled"):
             return None
-        shared = (db.collection("config").document("zello").get().to_dict() or {})
-        cfg = {
-            "username": shared.get("username", ""),
-            "password": shared.get("password", ""),
-            "channel": shared.get("channel", ""),
-            "auth_token": shared.get("auth_token", ""),
-            "network": shared.get("network", ""),
-        }
+        shared = db.collection("config").document("zello").get().to_dict() or {}
+        cfg = {k: (zello_cfg.get(k) or shared.get(k, "")) for k in _ZELLO_ACCOUNT_FIELDS}
         cfg.update(_load_dev_secrets())
         return cfg
     except Exception as e:
@@ -1496,10 +1495,10 @@ def start_sidecar(bot_name: str) -> tuple[bool, str]:
         return True, "Zello 已经连着 closecrab 频道了。"
     cfg = _load_config(bot_name, require_enabled=False)
     if not cfg or not cfg.get("username") or not cfg.get("channel"):
-        return False, "Zello 共享账号没配 (config/zello 缺 username/channel)。"
-    holder = _zello_holder(exclude=bot_name)
+        return False, "Zello 账号没配 (bots/{name} 和 config/zello 都缺 username/channel)。"
+    holder = _zello_holder(bot_name, cfg["username"])
     if holder:
-        return False, f"Zello 账号正被 {holder} 占着。先给它发 /zellooff，再来开我。"
+        return False, f"Zello 账号 {cfg['username']} 正被 {holder} 占着。先给它发 /zellooff，再来开我。"
     # 先落盘再启动, 且启动失败不回滚: 用户的意图就是「开」, 上一个线程没退干净
     # 只是时序问题, 重启一次就会按这个意图连上。回滚成 false 反而把意图丢了。
     _persist_zello_enabled(bot_name, True)
