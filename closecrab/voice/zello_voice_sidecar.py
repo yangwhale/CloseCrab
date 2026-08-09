@@ -26,6 +26,7 @@ import ctypes.util
 import json
 import logging
 import os
+import signal
 import struct
 import glob as _glob_mod
 import subprocess
@@ -1415,11 +1416,24 @@ def start(bot_name: str, config: dict | None = None):
 
 
 def stop():
-    """停止 Zello sidecar。"""
-    global _sidecar_loop, _zello_client
+    """停止 Zello sidecar。
+
+    先杀 encoder 再停 loop: sender loop 挂在 encoder stdout 上, encoder 不死
+    线程要很久才肯退, 而 start() 看 is_alive() 会一直报「已在运行」。
+    """
+    global _sidecar_loop, _zello_client, _sidecar_thread
     loop = _sidecar_loop
     if loop is None:
         return
+
+    proc = getattr(_player, "_encoder_proc", None) if _player else None
+    if proc is not None and proc.returncode is None:
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+            log.info("Zello opus encoder 已杀 (PID=%d)", proc.pid)
+        except (ProcessLookupError, PermissionError) as e:
+            log.warning("杀 encoder 失败: %s", e)
+
     client = _zello_client
     if client:
         try:
@@ -1432,6 +1446,14 @@ def stop():
         pass
     _zello_client = None
     _sidecar_loop = None
+
+    th = _sidecar_thread
+    if th is not None:
+        th.join(timeout=8)
+        if th.is_alive():
+            log.warning("Zello sidecar 线程 8s 内未退出，/zelloon 会要求 /restart")
+        else:
+            _sidecar_thread = None
     log.info("Zello sidecar 已停止")
 
 
@@ -1446,10 +1468,11 @@ def start_sidecar(bot_name: str) -> tuple[bool, str]:
     cfg = _load_config(bot_name, require_enabled=False)
     if not cfg or not cfg.get("username") or not cfg.get("channel"):
         return False, "这个 bot 没配 Zello 账号 (username/channel)，开不了。"
+    # 先落盘再启动, 且启动失败不回滚: 用户的意图就是「开」, 上一个线程没退干净
+    # 只是时序问题, 重启一次就会按这个意图连上。回滚成 false 反而把意图丢了。
     _persist_zello_enabled(bot_name, True)
     if not start(bot_name, config=cfg):
-        _persist_zello_enabled(bot_name, False)
-        return False, "Zello 启动失败 (看 bot.log)。"
+        return False, "上一个 Zello 线程还没退干净，启动不了。已记为「开」，发 /restart 就会连上。"
     import time as _t
     for _ in range(30):
         if is_connected():
