@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """wiki-query.py — Query the Wiki knowledge base using BM25 + graph augmentation.
 
+⚠️ 无调用方（2026-08-09 核实）。全仓 grep 只有 docstring 和注释提到本文件，
+   没有任何代码 import 或 exec 它；skills/wiki/scripts/wiki-mcp-server.py 里那份
+   "same as wiki-query.py" 的内联 BM25 同样没有注册路径会用到。
+   v2 请用 $WIKI_REPO/scripts/query.py 或 skills/wiki/scripts-v2/query.py
+   （带相关性闸门、繁简互查、--check）。
+
+   保留不删：v1 那套 rebuild-* / fix-backlinks / build-search-index 仍有机器在用，
+   本文件与它们共享 search-chunks.json 索引格式，日后可能仍需要一个命令行查询入口。
+
 Usage:
   python3 wiki-query.py "TPU v7 和 B200 谁更适合 MoE？"
   python3 wiki-query.py "MFU 怎么算" --top-k 3
@@ -23,46 +32,6 @@ WIKI_URL = os.environ.get("CC_PAGES_URL_PREFIX", "") + "/wiki"
 
 
 # ── Tokenizer (no external dependencies) ──
-
-# CJK function characters. They carry no retrieval meaning but poison bigrams:
-# "如何用微波炉烤惠灵顿牛排" degenerates into 如何/何用/用微/微波/... and a page can
-# score a "hit" purely on 用 or 配, which is how unrelated pages surface for a
-# question the wiki never covered. Used to split a query into content-word runs.
-STOP_CHARS = set("的了是在有和与也就都很会要能可以对把被将从到而及其之你我他她它"
-                 "吗呢吧啊呀哦怎么什麼甚如何为请问一下这那些个")
-
-# A page must match at least this fraction of the query's content terms to count
-# as a real hit. Ratio (not absolute BM25 score) on purpose: scores drift with
-# query length and corpus size, coverage does not.
-MIN_COVERAGE = 0.34
-
-
-def key_terms(text):
-    """Extract the terms that actually carry meaning in a query.
-
-    Splits CJK runs on function characters, then takes bigrams *within* each
-    content-word run, so 虚词 never enter the denominator.
-    """
-    text = (text or "").lower()
-    terms = set(t for t in re.findall(r'[a-z][a-z0-9_-]{1,}', text))
-    terms.update(re.findall(r'\d+', text))
-    for seg in re.findall(r'[一-鿿]+', text):
-        splitter = ''.join(STOP_CHARS & set(seg)) or '　'
-        for piece in re.split(f"[{splitter}]", seg):
-            if len(piece) >= 2:
-                terms.update(piece[i:i + 2] for i in range(len(piece) - 1))
-            elif len(piece) == 1:
-                terms.add(piece)
-    return terms
-
-
-def coverage(q_terms, doc_tokens):
-    """Fraction of the query's content terms present in a document."""
-    if not q_terms:
-        return 0.0, set()
-    hit = q_terms & doc_tokens
-    return len(hit) / len(q_terms), hit
-
 
 def tokenize(text):
     """Simple mixed Chinese/English tokenizer.
@@ -193,7 +162,7 @@ def get_graph_neighbors(graph, slug, depth=1):
     return visited
 
 
-def query(question, top_k=5, save=False, min_coverage=MIN_COVERAGE):
+def query(question, top_k=5, save=False):
     """Execute a query against the wiki search index."""
     index = load_search_index()
     graph = load_graph()
@@ -205,7 +174,6 @@ def query(question, top_k=5, save=False, min_coverage=MIN_COVERAGE):
     # Build BM25 corpus from chunks
     corpus = []
     chunk_map = {}
-    page_tokens = defaultdict(set)      # page_id -> all tokens, for coverage
     for chunk in chunks:
         chunk_id = chunk["id"]
         # Include title, tags, and text in tokenization for better matching
@@ -213,7 +181,6 @@ def query(question, top_k=5, save=False, min_coverage=MIN_COVERAGE):
         tokens = tokenize(combined)
         corpus.append((chunk_id, tokens))
         chunk_map[chunk_id] = chunk
-        page_tokens[chunk["page_id"]].update(tokens)
 
     bm25 = BM25(corpus)
     query_tokens = tokenize(question)
@@ -242,25 +209,34 @@ def query(question, top_k=5, save=False, min_coverage=MIN_COVERAGE):
                 "tags": chunk["tags"],
             }
 
-    # Relevance gate: drop pages that only brushed a stray character.
-    # Without this a query the wiki never covered still returns a full page of
-    # results — every one of them matching on a single CJK function character.
-    # Graph neighbours are deliberately NOT injected into page_scores anymore:
-    # they have near-zero coverage by construction and would all be filtered
-    # right back out. They still surface per-result via "related_pages" below.
-    q_terms = key_terms(question)
-    scored, weak = [], []
-    for page_id, score in page_scores.items():
-        cov, hit = coverage(q_terms, page_tokens.get(page_id, set()))
-        entry = (page_id, score, cov, sorted(hit))
-        (scored if cov >= min_coverage else weak).append(entry)
+    # Graph augmentation: boost pages that are neighbors of top results
+    top_pages = sorted(page_scores.items(), key=lambda x: -x[1])[:3]
+    neighbor_boost = set()
+    for page_id, _ in top_pages:
+        neighbors = get_graph_neighbors(graph, page_id, depth=1)
+        neighbor_boost.update(neighbors)
 
-    scored.sort(key=lambda x: -x[1])
-    weak.sort(key=lambda x: -x[1])
-    sorted_pages = scored[:top_k]
+    for page_id in neighbor_boost:
+        if page_id not in page_scores:
+            # Check if this page exists in chunks
+            for chunk in chunks:
+                if chunk["page_id"] == page_id:
+                    # Add with small base score
+                    page_scores[page_id] = 0.1
+                    if page_id not in page_info:
+                        page_info[page_id] = {
+                            "title": chunk["page_title"],
+                            "type": chunk["page_type"],
+                            "path": chunk["path"],
+                            "tags": chunk["tags"],
+                        }
+                    break
+
+    # Sort and format results
+    sorted_pages = sorted(page_scores.items(), key=lambda x: -x[1])[:top_k]
 
     results = []
-    for page_id, score, cov, matched in sorted_pages:
+    for page_id, score in sorted_pages:
         info = page_info.get(page_id, {})
         result = {
             "page_id": page_id,
@@ -270,8 +246,6 @@ def query(question, top_k=5, save=False, min_coverage=MIN_COVERAGE):
             "url": f"{WIKI_URL}/{info.get('path', '')}",
             "tags": info.get("tags", []),
             "relevance_score": round(score, 4),
-            "coverage": round(cov, 2),
-            "matched_terms": matched[:12],
             "matched_chunks": page_chunks.get(page_id, [])[:3],
         }
 
@@ -286,14 +260,6 @@ def query(question, top_k=5, save=False, min_coverage=MIN_COVERAGE):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "result_count": len(results),
         "results": results,
-        "found": bool(results),
-        # Pages that scored but failed the relevance gate. Kept visible so a
-        # near-miss is debuggable instead of silently vanishing.
-        "weak_matches": [
-            {"page_id": pid, "relevance_score": round(sc, 4),
-             "coverage": round(cv, 2), "matched_terms": mt[:6]}
-            for pid, sc, cv, mt in weak[:5]
-        ],
     }
 
     # Save query to log if --save
@@ -348,34 +314,15 @@ def main():
     parser.add_argument("--top-k", type=int, default=5, help="Number of results (default: 5)")
     parser.add_argument("--save", action="store_true", help="Save query to query-log.json")
     parser.add_argument("--format", choices=["json", "text"], default="text", help="Output format")
-    parser.add_argument("--min-coverage", type=float, default=MIN_COVERAGE,
-                        help=f"Fraction of query content terms a page must match "
-                             f"(default: {MIN_COVERAGE}; use 0 for pre-gate behaviour)")
-    parser.add_argument("--check", action="store_true",
-                        help="Only answer whether the wiki covers this at all "
-                             "(exit 0 = covered, 1 = not covered)")
     args = parser.parse_args()
 
-    result = query(args.question, top_k=args.top_k, save=args.save,
-                   min_coverage=args.min_coverage)
+    result = query(args.question, top_k=args.top_k, save=args.save)
 
     if args.format == "json":
         print(json.dumps(result, ensure_ascii=False, indent=2))
-    elif args.check:
-        if result["found"]:
-            print(f"COVERED: {args.question} — {result['result_count']} page(s)")
-            for r in result["results"]:
-                print(f"  · {r['title']} ({int(r['coverage']*100)}% of query terms)  {r['url']}")
-        else:
-            print(f"NOT COVERED: {args.question}")
-            for w in result["weak_matches"]:
-                got = '/'.join(w["matched_terms"][:3]) or "no content term"
-                print(f"  · {w['page_id']} — only matched {got}, ignored")
     else:
         print(format_text(result))
 
-    return 0 if result["found"] else 1
-
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
