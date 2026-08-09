@@ -176,7 +176,7 @@ python3 scripts/watch-task.py list|stop <name>
 
 | 分类 | Skills |
 |---|---|
-| **知识与记忆** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `session-handoff`（会话崩了写交接） |
+| **知识与记忆** | `wiki`（Quartz Wiki + 7 个 MCP tools）· `session-handoff`（会话崩了写交接） |
 | **多媒体生成** | `imagen-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `deck-builder`（PPT / Google Docs）· `live-canvas`（实时白板讲解） |
 | **浏览器 / 阅读** | `browser-cli`（CDP 直连，比 MCP 省 40 倍 token）· `wechat-reader`（公众号文章，绕验证码） |
 | **飞书** | `feishu-mail`（企业邮箱收发）· `feishu-user-msg` |
@@ -412,7 +412,7 @@ python3 scripts/config-manage.py create mybot --channel discord --token "DISCORD
 python3 scripts/config-manage.py set mybot allowed_user_ids '[123,456]'
 ```
 
-Discord 自带 7 个 slash command（`/status` `/end` `/restart` `/stop` `/docs` `/context` `/sessions`），bot 启动时自动注册到 Server。
+Discord 自带 9 个 slash command（`/status` `/end` `/restart` `/stop` `/docs` `/context` `/sessions` `/say` `/leave`），bot 启动时自动注册到 Server。
 
 **常驻语音频道**（可选）：active channel 是飞书时，也能让 bot 额外连一条只做语音输出的 Discord 连接。配 `channels.discord.voice_sidecar=true` + `voice_channel_id` + `tts_voice`，或运行时发 `/discordon`（会落盘，跨重启保持）。
 
@@ -463,7 +463,7 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 | Zello PTT 对讲 | ✅ 消息回灌飞书 | — | — |
 | 交互卡片 | ✅ animated card · streaming card · 卡片按钮回调 | edit + emoji | — |
 | 点赞 → 快捷指令 | ✅ 7 种 emoji 语义 | — | — |
-| 命令 | ✅ 23 个 | ✅ 7 个 slash command | — |
+| 命令 | ✅ 23 个 | ✅ 9 个 slash command | — |
 | 消息引用 | ✅ | ✅ | — |
 | 连接方式 | WebSocket (lark_ws 长连接) | Discord Gateway | Stream |
 

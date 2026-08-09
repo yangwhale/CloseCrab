@@ -30,6 +30,10 @@
 
 set -euo pipefail
 
+# 私有 skill 目录（可选）。默认 ~/private-skills；有需要就 export 覆盖，
+# 或把它软链到你自己的私有仓库。不存在则整段跳过。
+PRIVATE_SKILLS_DIR="${PRIVATE_SKILLS_DIR:-$HOME/private-skills}"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/config/env.sh"
 
@@ -535,7 +539,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 0. 基础工具检查 (nodejs, npm, git)
     # ----------------------------------------------------------------
-    echo "[0/11] 检查基础工具..."
+    echo "[0/12] 检查基础工具..."
     # git
     if ! command -v git &>/dev/null; then
         echo "  安装 git..."
@@ -573,7 +577,7 @@ install_cc() {
     # 确保 ~/.local/bin 在 PATH 中（Claude CLI 默认安装位置）
     export PATH="$HOME/.local/bin:$PATH"
 
-    echo "[1/11] 检查 Claude Code CLI..."
+    echo "[1/12] 检查 Claude Code CLI..."
     if command -v claude &>/dev/null; then
         echo "  已安装: $(claude --version)"
     else
@@ -636,7 +640,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 2. GCP 认证
     # ----------------------------------------------------------------
-    echo "[2/11] GCP 认证..."
+    echo "[2/12] GCP 认证..."
     GCLOUD_ACCOUNT=$(gcloud auth list --filter='status:ACTIVE' --format='value(account)' 2>/dev/null || true)
     if [[ -n "$GCLOUD_ACCOUNT" ]]; then
         echo "  gcloud 已认证: $GCLOUD_ACCOUNT"
@@ -668,7 +672,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 3. Claude Code 配置
     # ----------------------------------------------------------------
-    echo "[3/11] 配置 Claude Code..."
+    echo "[3/12] 配置 Claude Code..."
     mkdir -p ~/.claude ~/.claude/closecrab
 
     # 确保 ~/.zshenv 中的环境变量在非登录 shell 中也能用
@@ -716,7 +720,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 4. Skills 部署（增量拷贝，不删除用户自行添加的 skill）
     # ----------------------------------------------------------------
-    echo "[4/11] 部署 Skills..."
+    echo "[4/12] 部署 Skills..."
     # 如果存在旧的 symlink，先移除
     if [[ -L ~/.claude/skills ]]; then
         echo "  移除旧 symlink: $(readlink ~/.claude/skills)"
@@ -731,9 +735,9 @@ install_cc() {
         rm -rf ~/.claude/skills/"$skill_name"
         cp -a "$skill_dir" ~/.claude/skills/
     done
-    # 私有 skills (从 ClosedCrab) — 同样按 allowlist 过滤
-    if [[ -d "$HOME/ClosedCrab/skills" ]]; then
-        for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
+    # 私有 skills — 同样按 allowlist 过滤。目录由 PRIVATE_SKILLS_DIR 指定
+    if [[ -d "$PRIVATE_SKILLS_DIR" ]]; then
+        for skill_dir in "$PRIVATE_SKILLS_DIR"/*/; do
             [[ -d "$skill_dir" ]] || continue
             local skill_name="$(basename "$skill_dir")"
             skill_allowed "$skill_name" || continue
@@ -773,8 +777,8 @@ install_cc() {
             fi
         done
         # 私有 skills 也链接到 Gemini
-        if [[ -d "$HOME/ClosedCrab/skills" ]]; then
-            for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
+        if [[ -d "$PRIVATE_SKILLS_DIR" ]]; then
+            for skill_dir in "$PRIVATE_SKILLS_DIR"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name=$(basename "$skill_dir")
                 skill_allowed "$skill_name" || continue
@@ -792,7 +796,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 5. Helper Scripts 部署
     # ----------------------------------------------------------------
-    echo "[5/11] 部署 Helper Scripts..."
+    echo "[5/12] 部署 Helper Scripts..."
     mkdir -p ~/.claude/scripts
     for f in "$SCRIPT_DIR/scripts/"*; do
         cp -a "$f" ~/.claude/scripts/
@@ -804,7 +808,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 6. Auto Memory 同步（从 private repo）
     # ----------------------------------------------------------------
-    echo "[6/11] 同步 Auto Memory..."
+    echo "[6/12] 同步 Auto Memory..."
     # 检测 CC project 目录名（依赖 $HOME 路径）
     PROJECT_NAME=$(echo "$HOME" | tr '/' '-')
     MEMORY_DIR="$HOME/.claude/projects/${PROJECT_NAME}/memory"
@@ -837,7 +841,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 7. Plugins 恢复
     # ----------------------------------------------------------------
-    echo "[7/11] 恢复 Plugins..."
+    echo "[7/12] 恢复 Plugins..."
     mkdir -p ~/.claude/plugins
     if [[ -d "$PRIVATE_REPO/claude-code/plugins" ]]; then
         # 恢复插件注册和市场配置
@@ -854,13 +858,13 @@ install_cc() {
     # ----------------------------------------------------------------
     # 8. gcsfuse 挂载 (CC Pages + 共享 Memory)
     # ----------------------------------------------------------------
-    echo "[8/11] 设置 gcsfuse..."
+    echo "[8/12] 设置 gcsfuse..."
     setup_gcsfuse
 
     # ----------------------------------------------------------------
     # 9. Gemini CLI 安装
     # ----------------------------------------------------------------
-    echo "[9/11] 安装 Gemini CLI..."
+    echo "[9/12] 安装 Gemini CLI..."
     if command -v gemini &>/dev/null; then
         echo "  已安装: $(gemini --version 2>/dev/null || echo 'unknown')"
         echo "  更新到最新版..."
@@ -985,7 +989,7 @@ else:
     # ----------------------------------------------------------------
     # 10. MCP Config 注入
     # ----------------------------------------------------------------
-    echo "[10/11] 配置 MCP Server..."
+    echo "[10/12] 配置 MCP Server..."
     if [[ ! -f ~/.claude.json ]]; then
         echo '{}' > ~/.claude.json
         echo "  ~/.claude.json 已创建"
@@ -1133,9 +1137,9 @@ with open(path, 'w') as f:
                 OC_SKILL_COUNT=$((OC_SKILL_COUNT + 1))
             done
         fi
-        # 私有 skills (如有 ClosedCrab)
-        if [[ -d "$HOME/ClosedCrab/skills" ]]; then
-            for skill_dir in "$HOME/ClosedCrab/skills"/*/; do
+        # 私有 skills (如有)
+        if [[ -d "$PRIVATE_SKILLS_DIR" ]]; then
+            for skill_dir in "$PRIVATE_SKILLS_DIR"/*/; do
                 [[ -d "$skill_dir" ]] || continue
                 local skill_name="$(basename "$skill_dir")"
                 if ! skill_allowed "$skill_name"; then

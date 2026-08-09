@@ -121,9 +121,9 @@ for skill in ~/CloseCrab/skills/*/; do
   cp -r "$skill" ~/.openclaw/workspace/skills/
 done
 
-# 部署私有 skills（如果有 ClosedCrab）
-if [[ -d ~/ClosedCrab/skills ]]; then
-  for skill in ~/ClosedCrab/skills/*/; do
+# 部署私有 skills（如果配了 PRIVATE_SKILLS_DIR）
+if [[ -d "$PRIVATE_SKILLS_DIR" ]]; then
+  for skill in "$PRIVATE_SKILLS_DIR"/*/; do
     cp -r "$skill" ~/.openclaw/workspace/skills/
   done
 fi

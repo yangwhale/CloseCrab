@@ -55,12 +55,12 @@ User → Channel Adapter → BotCore → Worker → AI CLI
 | **通信协议** | Unix socketpair IPC | ACP (JSON-RPC 2.0 / NDJSON) | ACP (JSON-RPC 2.0 / NDJSON) | HTTP SSE |
 | **进程模型** | 持久子进程 | 持久子进程 | 持久子进程 + 外部 Gateway | 外部 server |
 | **MCP 加载** | 自动读取 `~/.claude.json` | 需在 `session/new` 显式传入 | Gateway 管理（传空数组） | `~/.config/kilo/kilo.json` |
-| **System Prompt** | `--system-prompt` flag | `~/GEMINI.md` | `AGENTS.md` | 请求参数 |
+| **System Prompt** | `--append-system-prompt` flag | `~/GEMINI.md` | `AGENTS.md` | 请求参数 |
 | **内置搜索** | WebSearch | Google Search (Grounding) | Gateway 配置 | Cloud 侧 |
 | **Context 压缩** | Claude 内置 | — | 自定义 Compaction | Cloud 侧 |
 | **配置切换** | `set-worker-type <bot> claude` | `... gemini` | `... openclaw` | `... kilo` |
 
-**ClaudeCodeWorker** — Bot 端通过 socketpair `fd[0]` 发送 JSON 消息，接收 stream-json 事件流。CLI 端将 `fd[1]` 映射为 stdin/stdout。1 秒间隔的 Buffer Poller 通过 `FIONREAD` ioctl + `MSG_PEEK` 非阻塞监测数据。
+**ClaudeCodeWorker** — Bot 端通过 socketpair `fd[0]` 发送 JSON 消息，接收 stream-json 事件流。CLI 端将 `fd[1]` 映射为 stdin/stdout，启动参数是 `--input-fd` / `--output-fd`。
 
 **GeminiACPWorker** — 通过 stdin/stdout 发送 JSON-RPC 请求，接收 NDJSON 流式事件。启动时读取 `~/.gemini/settings.json` 中的 MCP 配置，转换格式后注入 `session/new`（ACP 不自动加载 settings.json）。Gemini CLI 自带 Google Search grounding 和 gLinux Extensions（Workspace、Code Search 等），无需额外配置。
 
@@ -261,7 +261,7 @@ python3 -m closecrab --bot mybot --daemon  # 后台
 bash scripts/launcher.sh start mybot       # 带自动重启
 ```
 
-`deploy.sh` 自动完成 11 个步骤：
+`deploy.sh` 自动完成 13 个步骤（编号 `[0/12]`~`[12/12]`）：
 
 1. 检查基础工具（git、Node.js 20+，版本不足自动升级）
 2. 安装 Claude Code CLI（官方脚本优先，失败自动 fallback 到 npm）
@@ -274,6 +274,8 @@ bash scripts/launcher.sh start mybot       # 带自动重启
 9. 设置 gcsfuse（自动安装 + 挂载 GCS 桶 + CC Pages 目录 + 共享 Memory）
 10. 安装 Gemini CLI（+ 配置 `~/.gemini/settings.json` 和 `~/.gemini/.env` + 注入 MCP Server）
 11. 配置 MCP Server（Claude Code 的 `~/.claude.json`）
+12. 配置 OpenClaw（从 `config/openclaw.json` 模板生成，已有配置不覆盖）
+13. 配置 Kilo Code
 
 ### deploy.sh 交互式提示
 
@@ -333,6 +335,8 @@ Discord User ID 获取方式：开启开发者模式（设置 → 高级 → 开
 | `/stop` | 中断正在执行的任务 |
 | `/restart` | 重启 bot（exit code 42 触发自动重启） |
 | `/docs` | 打开 CC Pages 知识库 |
+| `/say` | 让 bot 进语音频道用 TTS 念一段话 |
+| `/leave` | 让 bot 离开语音频道 |
 
 ### 飞书命令（23 个，发消息或点 bot 菜单都行）
 
@@ -380,7 +384,7 @@ Claude Code 的 Plan Mode 和 AskUserQuestion 工具会映射到聊天界面：
 | 进度反馈 | 编辑消息 + emoji | 动画螃蟹卡片 🦀 | 文字更新 |
 | 消息引用 | ✅ Reply 上下文 | ✅ | — |
 | 连接方式 | Gateway | WebSocket 长连接 | Stream 模式 |
-| Slash 命令 | ✅ 7 个 | — | — |
+| Slash 命令 | ✅ 9 个 | — | — |
 
 ### 语音输入 (STT)
 
@@ -594,17 +598,17 @@ OpenClaw Worker 通过外部 Gateway 管理模型调用和 MCP 插件，适用�
 
 **前提条件**：
 - Node.js 20+
-- OpenClaw CLI 和 Gateway 已安装（`npm install -g @anthropic-ai/openclaw @anthropic-ai/openclaw-gateway`）
-- OpenClaw Gateway 已启动（`openclaw-gateway start`）
+- OpenClaw CLI 已安装（包名就是 `openclaw`，**不是** `@anthropic-ai/openclaw`）
+- Gateway 已启动（`openclaw gateway`）
 
 **快速开始**：
 
 ```bash
 # 1. 安装
-npm install -g @anthropic-ai/openclaw @anthropic-ai/openclaw-gateway
+npm install -g openclaw
 
 # 2. 启动 Gateway
-nohup openclaw-gateway start > /tmp/openclaw-gateway.log 2>&1 &
+nohup openclaw gateway > /tmp/openclaw-gateway.log 2>&1 &
 
 # 3. 切换 bot
 python3 scripts/config-manage.py set-worker-type mybot openclaw
@@ -897,7 +901,8 @@ Zello 的开发者 token 由本地私钥**每次登录现签**，不写死（写
 
 ## Skills
 
-Skill 源码在 `skills/`（public，48 个）和 ClosedCrab（私有仓库）（private）。
+Skill 源码在 `skills/`（public，48 个）；另可选地把自己的私有 skill 目录
+通过 `PRIVATE_SKILLS_DIR` 环境变量接进来（默认 `~/private-skills`，不存在则跳过）。
 **deploy.sh 只部署 `config/skill-allowlist.txt` 里放行的那些**（当前 28 项 = 24 个 public + 4 个 private）——其余源码留在仓库、默认不装，
 需要时在 allowlist 加一行再跑 deploy 即可恢复。
 
@@ -909,7 +914,7 @@ Skill 源码在 `skills/`（public，48 个）和 ClosedCrab（私有仓库）�
 | **部署** | deploy.sh symlink 到 `~/.claude/skills/{name}`；Gemini CLI 走 `gemini skills link` |
 | **结构** | `skills/{name}/SKILL.md`（必需，含 frontmatter）+ 可选 `scripts/` `references/` |
 | **新建** | 用 `skill-creator` 自举，不要手写目录 |
-| **私有** | `install-private-skills.sh` 从 ClosedCrab 拉，同样受 allowlist 约束 |
+| **私有** | `PRIVATE_SKILLS_DIR` 指向的目录会一并部署，同样受 allowlist 约束 |
 
 > **别在 skill 里硬编码机器地址或凭据**，脚本要幂等（重复执行不出错）。
 
@@ -1249,7 +1254,7 @@ gcloud firestore indexes composite create \
 
 > 索引创建需要几分钟。可在 [Firebase Console → Firestore → Indexes](https://console.firebase.google.com/) 中查看状态，等待变为 `READY`。
 
-技术栈：Firebase SDK v11 (ES module CDN) · Google Sans + Material Icons · Firestore onSnapshot 实时监听 · 零依赖零构建，单文件 ~97KB。
+技术栈：Firebase SDK v11 (ES module CDN) · Google Sans + Material Icons · Firestore onSnapshot 实时监听 · 零依赖零构建，单文件 ~105KB。
 
 ## CC Pages
 
@@ -1372,7 +1377,7 @@ GCS_BUCKET=YOUR_BUCKET bash setup-client.sh
 |------|------|----------|
 | **前台调试** | `python3 -m closecrab --bot mybot` | 开发调试，日志直接输出到终端。**不支持** `/restart` 自动重启 |
 | **后台运行** | `nohup ./run.sh mybot > /tmp/mybot.log 2>&1 &` | 生产运行。`run.sh` 封装了 exit code 42 重启循环，支持 `/restart` |
-| **launcher 管理** | `bash scripts/launcher.sh start mybot` | 多 bot 管理。基于 tmux 会话，支持 start/stop/restart/status/logs |
+| **launcher 管理** | `bash scripts/launcher.sh start mybot` | 多 bot 管理。内部 `setsid nohup ./run.sh`（**不是** tmux），支持 start/stop/restart/status/logs |
 
 > **推荐**：开发时用前台模式看日志，生产环境用 `run.sh` 或 `launcher.sh`。
 
