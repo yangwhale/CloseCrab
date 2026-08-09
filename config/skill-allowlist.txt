@@ -22,15 +22,12 @@ wiki
 # === B 档: 周/月使用 (15) ===
 bot-config
 browser-cli
-customer-qa-tracker
 feishu-mail
 weather-forecast
-google-internal-mcp
 imagen-generator
 music-generator
 page-style
 skill-creator
-ant-tpu-sync
 live-canvas
 cc-pages-backup
 wechat-reader
@@ -53,7 +50,6 @@ wechat-reader
 hk-share-award-tax-dipn38
 deck-builder
 nvl72-qa
-tpu-v7-cluster
 
 # === 2026-08-09 补：使用频次不低但一直没进 allowlist（等于用得着却没装）===
 hk-bus
@@ -72,3 +68,12 @@ feishu-user-msg
 # memory-lint            — 同上，撤回
 # multimodal-explainer   — 同上，撤回
 # vector                 — Salesforce CRM，几乎不用
+
+# === 只存在于私有 skill 目录的条目 ===
+# 这几个在 public 仓库里没有对应目录，只有配了 PRIVATE_SKILLS_DIR 的机器才装得上。
+# 放开注释对外部使用者是**静默无效**（deploy 找不到目录会跳过，不报错），
+# 所以默认注释掉，自己的机器上再打开。
+# customer-qa-tracker
+# google-internal-mcp
+# ant-tpu-sync
+# tpu-v7-cluster

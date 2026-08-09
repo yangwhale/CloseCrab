@@ -12,9 +12,23 @@
 
 > **把 Claude Code、OpenClaw、Kilo Code、Gemini CLI 变成 24/7 在线的聊天 Bot——跑在飞书、Discord、钉钉上，支持共享记忆、bot 间协作、运行时热切换、实时语音。**
 
-CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实现 agent 能力——直接驱动 CLI 进程，所以**上游生态里的每一个 Skill、Plugin、MCP Server 都能即装即用，零适配成本**。
+CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实现 agent 能力——直接驱动 CLI 进程，所以**上游生态里的每一个 Skill、Plugin、MCP Server 都能即装即用，零适配成本**。
 
 > 🌍 **English readers**: see [README.en.md](README.en.md) for the full English documentation.
+
+---
+
+## 先认几个词
+
+| 词 | 意思 |
+|---|---|
+| **Runtime** | 后端的 AI Agent CLI 进程。CloseCrab 不自己实现 agent，而是驱动 [Claude Code](https://github.com/anthropics/claude-code) / [Gemini CLI](https://github.com/google-gemini/gemini-cli) / OpenClaw / Kilo Code 这些现成的 CLI |
+| **turn** | 一次「用户消息进来 → agent 想完 → 回复发出」的完整往返。**它是本文的成本单位** —— 说「零 turn」就是不花模型钱 |
+| **Channel** | 聊天平台适配层（飞书 / Discord / 钉钉），负责把各家消息统一成 `UnifiedMessage` |
+| **ACP** | Agent Client Protocol，Gemini CLI 和 OpenClaw 用的 JSON-RPC over NDJSON 协议 |
+| **CC Pages** | 本项目的 HTML 发布通道：bot 写文件到 GCS，通过你自己的域名访问。（注意：下文「Claude Code CLI」不缩写成 CC，避免混淆） |
+| **allowlist** | `config/skill-allowlist.txt`。仓库里的 skill 很多，只有列在这里的才会被 deploy 装上 |
+| **gcsfuse** | 把 GCS 桶挂成本地目录的工具，多机共享 memory 和 CC Pages 靠它 |
 
 ---
 
@@ -178,7 +192,7 @@ python3 scripts/watch-task.py list|stop <name>
 |---|---|
 | **知识与记忆** | `wiki`（Quartz Wiki + 7 个 MCP tools）· `session-handoff`（会话崩了写交接） |
 | **多媒体生成** | `imagen-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `deck-builder`（PPT / Google Docs）· `live-canvas`（实时白板讲解） |
-| **浏览器 / 阅读** | `browser-cli`（CDP 直连，比 MCP 省 40 倍 token）· `wechat-reader`（公众号文章，绕验证码） |
+| **浏览器 / 阅读** | `browser-cli`（CDP 直连；一次页面快照 ~350 token，走 MCP 是 15-20K）· `wechat-reader`（公众号文章，绕验证码） |
 | **飞书** | `feishu-mail`（企业邮箱收发）· `feishu-user-msg` |
 | **GPU 集群** | `nvl72-qa`（GB200/GB300 验收：DCGM 诊断 · NCCL 带宽 · 跨域多节点 · 故障节点处理） |
 | **生活 / 本地** | `weather-forecast`（香港天文台 + Open-Meteo）· `hk-bus`（Maps + KMB/Citybus 实时到站）· `hk-share-award-tax-dipn38`（香港股票报税 DIPN 38） |
@@ -215,6 +229,42 @@ skills/tts-generator/scripts/tts-generate.py "[casually] hello"
 
 ---
 
+## 你需要准备什么
+
+| 必备 | 说明 |
+|---|---|
+| **GCP 项目** | Vertex AI（Claude / Gemini 模型）+ Firestore（配置 + inbox + logs） |
+| **聊天平台 Bot** | 飞书 / Discord / 钉钉任选（推荐飞书） |
+| **Linux 机器** | GCE VM、gLinux、WSL、Ubuntu/Debian 均可。Python 3.10+, Node.js 20+ |
+
+| 可选 | 用处 |
+|---|---|
+| **GCS 桶** | CC Pages（Web 报告）+ 跨机器共享 memory（gcsfuse 挂载） |
+| **MCP API keys** | GitHub · Context7 · Jina——各解锁一个 MCP server |
+| **Zello 账号** | PTT 对讲通道（开发者 token 由本地私钥每次登录现签） |
+
+> **Python 3.13+ 注意**：`audioop` 已被 PEP 594 移除，Discord 语音 sidecar 在新系统上需要先装 `audioop-lts`。音色配置模块 `voice/tts_config.py` 已刻意做成零重依赖，不受影响。
+
+---
+
+## ⚠️ 安全边界（部署前请务必读完）
+
+**这个项目的本质是：把聊天消息变成你机器上的 shell 命令。** agent 拥有 Read / Edit / Bash
+和所有 MCP，权限等同于跑它的那个 Linux 用户。请按这个前提评估风险。
+
+| 风险 | 现状 | 你该做什么 |
+|---|---|---|
+| **谁能使唤它** | `allowed_user_ids` / `allowed_open_ids` **默认为空 = 任何人都能对话** | 部署第一件事就是配白名单。群聊里还要确认 bot 只响应被 @ 或指定 chat |
+| **它能干什么** | 任意 shell、读写整个 home、调用全部 MCP。没有沙箱 | 用**独立的 Linux 用户**跑，别用你的主账号；敏感目录别放在它的 `work_dir` 下 |
+| **凭据放在哪** | 平台 token、API key 存 Firestore，不进 git | 给 Firestore 配 IAM 白名单；`.env` 只放 project + database 两个非敏感值 |
+| **多用户之间** | 会话隔离，但**文件系统共享** —— A 建的文件 B 的 agent 读得到 | 别把「多用户」当成「多租户」，它不是 |
+| **prompt injection** | agent 会读网页、PDF、别人发的消息，这些内容可能包含指令 | 别让它在能碰生产凭据的机器上处理不可信输入 |
+| **成本** | 每条消息就是一次模型调用，长会话会带大量 cache_read | 用 `/status` 和 `scripts/session-status.py` 盯用量；探针类任务挑 haiku 档 |
+
+> 一句话：**当作「给别人一个你机器上的 shell」来对待**，而不是当作一个聊天机器人。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -245,49 +295,6 @@ scripts/boot-autostart.sh [--check]
 ```
 
 顺序：补 cron 最小环境 → 等 DNS → gcsfuse → OpenClaw Gateway → `launcher.sh start all`。**cron-daemon 不在这里起**，由第一个 bot 的 run.sh 拉起，这样它跟 bot 拿到同一份 PATH。
-
----
-
-## ⚠️ Claude Code CLI 升级注意事项
-
-> **别随便升级**。CC 没有 auto-upgrade，所有升级都是手动 `claude install <version>`。历史上 **2.1.144 / 2.1.145 出现过 900K 上下文 regression**，所以每次升级前**必须**先验证「上下文有没有被卡死在 200K」。
-
-### 历史 regression（2026-05-21 二分法实测）
-
-| 版本 | 状态 | 行为 |
-|------|------|------|
-| 2.1.143 | ✅ 当时的良品 | autoCompactWindow=900000 生效，peak cache_read 369K 无 compact |
-| 2.1.144 | ❌ Compact thrashing | 5 分钟内 3 次 compact；post-compact 仅 20K 可用预算 |
-| 2.1.145 | ❌ Cap 钳死 ~200K | 不 thrash 但完全锁死 900K 配置 |
-| **2.1.226** | ✅ **当前主力** | 2026-08-09 实测：peak cache_read **805K**，新增 compact **0** |
-
-根因（反编译验证）：`Math.min(jL() cap, autoCompactWindow) - min(CqH(H), 20000)`，144 改了 compact decision function 让 `autoCompactWindow` 失效。
-
-### 升级前必检清单
-
-```bash
-# Step 1: 记下当前良品版本（旧版本留在 versions/ 目录里当回滚点）
-readlink ~/.local/bin/claude
-
-# Step 2: 装目标版本（原生 installer 只换 symlink）
-~/.local/bin/claude install <target-version>
-
-# Step 3: 拿一个非主力 bot 做压力测试，让它连读 5 个大文件
-python3 scripts/inbox-send.py <test-bot> "请依次 Read 这 5 个大文件不要停 ..."
-
-# Step 4: 验收标准（两项都要满足才算 PASS）
-#   ✅ peak cache_read > 250K        （证明 cap 没被钳到 200K）
-#   ✅ 本次新增 compact 事件 = 0      （证明没 thrash）
-
-# Step 5: 失败 → 立即回滚
-~/.local/bin/claude install <known-good-version>
-
-# Step 6: PASS 才推全 fleet
-```
-
-> **两个测量陷阱**：
-> 1. `claude --version` 查的是 **PATH 上**那个（可能是 npm 装的），**不是 bot 实际调用的**。要问就问代码：`_resolve_config(bot)["claude_bin"]` 再对它 `--version`。
-> 2. 别把 `claude_bin` 写成 `versions/2.1.156` 这种**绝对版本路径**——那会让该 bot 永远停在那个版本，`claude install` 换的是 symlink，绕不过绝对路径。统一指向 `~/.local/bin/claude`。
 
 ---
 
@@ -351,7 +358,7 @@ python3 scripts/inbox-send.py <test-bot> "请依次 Read 这 5 个大文件不�
 | 会话 | `/status` `/end` `/restart` `/stop` `/context` `/sessions` `/docs` |
 | 模型与推理档位 | `/model` `/low` `/medium` `/high` `/xhigh` `/think` `/mode` `/mcp` |
 | 上下文压缩 | `/cmp`（透传 Claude Code 的 compact） |
-| 语音 | `/voice` · `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/hlson` `/hlsoff`（HLS 直播） |
+| 语音 | `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/hlson` `/hlsoff`（HLS 直播）· ~~`/voice`~~（LiveKit 浏览器通话已停用） |
 
 #### Step 5 — Reaction 快捷指令（点赞语义）
 
@@ -434,24 +441,6 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 
 ---
 
-## 你需要准备什么
-
-| 必备 | 说明 |
-|---|---|
-| **GCP 项目** | Vertex AI（Claude / Gemini 模型）+ Firestore（配置 + inbox + logs） |
-| **聊天平台 Bot** | 飞书 / Discord / 钉钉任选（推荐飞书） |
-| **Linux 机器** | GCE VM、gLinux、WSL、Ubuntu/Debian 均可。Python 3.10+, Node.js 20+ |
-
-| 可选 | 用处 |
-|---|---|
-| **GCS 桶** | CC Pages（Web 报告）+ 跨机器共享 memory（gcsfuse 挂载） |
-| **MCP API keys** | GitHub · Context7 · Jina——各解锁一个 MCP server |
-| **Zello 账号** | PTT 对讲通道（开发者 token 由本地私钥每次登录现签） |
-
-> **Python 3.13+ 注意**：`audioop` 已被 PEP 594 移除，Discord 语音 sidecar 在新系统上需要先装 `audioop-lts`。音色配置模块 `voice/tts_config.py` 已刻意做成零重依赖，不受影响。
-
----
-
 ## 平台功能对比
 
 | 功能 | 飞书 / Lark | Discord | 钉钉 |
@@ -512,6 +501,49 @@ scripts/sync-memory.sh --push|--pull
 | `130` / `137` / `143` | SIGINT / SIGKILL / SIGTERM | 不重启 |
 | `1` | 配置错误 | 不重启 |
 | 其他非零 | 崩溃 | 重启（连续 >10 次停止） |
+
+---
+
+## ⚠️ Claude Code CLI 升级注意事项
+
+> **别随便升级**。Claude Code CLI 没有 auto-upgrade，所有升级都是手动 `claude install <version>`。历史上 **2.1.144 / 2.1.145 出现过 900K 上下文 regression**，所以每次升级前**必须**先验证「上下文有没有被卡死在 200K」。
+
+### 历史 regression（2026-05-21 二分法实测）
+
+| 版本 | 状态 | 行为 |
+|------|------|------|
+| 2.1.143 | ✅ 当时的良品 | autoCompactWindow=900000 生效，peak cache_read 369K 无 compact |
+| 2.1.144 | ❌ Compact thrashing | 5 分钟内 3 次 compact；post-compact 仅 20K 可用预算 |
+| 2.1.145 | ❌ Cap 钳死 ~200K | 不 thrash 但完全锁死 900K 配置 |
+| **2.1.226** | ✅ **当前主力** | 2026-08-09 实测：peak cache_read **805K**，新增 compact **0** |
+
+根因（反编译验证）：`Math.min(jL() cap, autoCompactWindow) - min(CqH(H), 20000)`，144 改了 compact decision function 让 `autoCompactWindow` 失效。
+
+### 升级前必检清单
+
+```bash
+# Step 1: 记下当前良品版本（旧版本留在 versions/ 目录里当回滚点）
+readlink ~/.local/bin/claude
+
+# Step 2: 装目标版本（原生 installer 只换 symlink）
+~/.local/bin/claude install <target-version>
+
+# Step 3: 拿一个非主力 bot 做压力测试，让它连读 5 个大文件
+python3 scripts/inbox-send.py <test-bot> "请依次 Read 这 5 个大文件不要停 ..."
+
+# Step 4: 验收标准（两项都要满足才算 PASS）
+#   ✅ peak cache_read > 250K        （证明 cap 没被钳到 200K）
+#   ✅ 本次新增 compact 事件 = 0      （证明没 thrash）
+
+# Step 5: 失败 → 立即回滚
+~/.local/bin/claude install <known-good-version>
+
+# Step 6: PASS 才推全 fleet
+```
+
+> **两个测量陷阱**：
+> 1. `claude --version` 查的是 **PATH 上**那个（可能是 npm 装的），**不是 bot 实际调用的**。要问就问代码：`_resolve_config(bot)["claude_bin"]` 再对它 `--version`。
+> 2. 别把 `claude_bin` 写成 `versions/2.1.143` 这种**绝对版本路径**——那会让该 bot 永远停在那个版本，`claude install` 换的是 symlink，绕不过绝对路径。统一指向 `~/.local/bin/claude`。
 
 ---
 
