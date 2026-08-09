@@ -79,8 +79,11 @@ def cmd_start():
                     # 空转是常态（多数 tick 什么都不到期），只记有内容的
                     if out and '"count": 0' not in out:
                         log.write(f"[{time.strftime('%F %T')}] {name}: {out}\n")
-                    if r.returncode != 0 and r.stderr:
-                        log.write(f"[{time.strftime('%F %T')}] {name} STDERR: {r.stderr[:200]}\n")
+                    # 退出码 0 也要记 stderr：播报出口是 best-effort 的，失败只打一行
+                    # warn 就照常返回 0。只在非零时记，等于把「飞书发出去了但语音没推
+                    # 成」这类半失败全吞掉 —— 事后分不清是探针判了 SKIP 还是出口挂了。
+                    if r.stderr:
+                        log.write(f"[{time.strftime('%F %T')}] {name} STDERR: {r.stderr[:400]}\n")
                 except subprocess.TimeoutExpired:
                     log.write(f"[{time.strftime('%F %T')}] {name} tick timeout\n")
                 except Exception as e:
