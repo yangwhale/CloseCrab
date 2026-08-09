@@ -388,10 +388,9 @@ bot 发的交互卡片（如 `ExitPlanMode` 审批卡、`/sessions` 切换卡）
 python3 scripts/config-manage.py create mybot --channel feishu \
     --app-id "cli_xxxxxxx" --app-secret "xxxxxxxxxxxxx"
 
-# 可选：单聊 + 群聊 + log_chat（专门转发日志的群）
-python3 scripts/config-manage.py set-feishu mybot \
-    --allowed-open-ids "ou_xxx,ou_yyy" \
-    --log-chat-id "oc_zzzz"
+# 可选：白名单 + 日志群。set 用 Firestore 点号路径，值按 JSON 解析
+python3 scripts/config-manage.py set mybot channels.feishu.allowed_open_ids '["ou_xxx","ou_yyy"]'
+python3 scripts/config-manage.py set mybot channels.feishu.log_chat_id '"oc_zzzz"'
 ```
 
 #### Step 9 — 选填：飞书企业邮件
@@ -410,7 +409,7 @@ python3 scripts/config-manage.py set-feishu mybot \
 
 ```bash
 python3 scripts/config-manage.py create mybot --channel discord --token "DISCORD_TOKEN"
-python3 scripts/config-manage.py set-discord mybot --allowed-user-ids "123,456"
+python3 scripts/config-manage.py set mybot allowed_user_ids '[123,456]'
 ```
 
 Discord 自带 7 个 slash command（`/status` `/end` `/restart` `/stop` `/docs` `/context` `/sessions`），bot 启动时自动注册到 Server。

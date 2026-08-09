@@ -423,19 +423,29 @@ FIRESTORE_DATABASE=closecrab
   "channels": {
     "discord": {
       "token": "BOT_TOKEN",
+      "guild_id": "222222",
       "auto_respond_channels": [111111],
-      "log_channel_id": "333333"
+      "log_channel_id": "333333",
+      "allowed_user_ids": [444444],
+
+      "voice_sidecar": true,
+      "voice_channel_id": "555555",
+      "tts_voice": "Orus"
     },
     "feishu": {
       "app_id": "cli_xxxxx",
       "app_secret": "SECRET",
       "allowed_open_ids": ["ou_xxxxx"],
-      "auto_respond_chats": ["oc_xxxxx"]
+      "auto_respond_chats": ["oc_xxxxx"],
+      "log_chat_id": "oc_yyyyy",
+      "voice_mode_users": ["ou_xxxxx"]
     },
+    "lark": { "app_id": "cli_xxxxx", "app_secret": "SECRET" },
     "dingtalk": {
       "client_id": "CLIENT_ID",
       "client_secret": "CLIENT_SECRET"
-    }
+    },
+    "zello": { "enabled": false }
   },
 
   "email": {
@@ -471,6 +481,12 @@ FIRESTORE_DATABASE=closecrab
 | `stt_engine` | — | 语音引擎：`gemini` / `chirp2` / `whisper:medium` |
 | `allowed_user_ids` | — | 白名单用户 ID（空 = 允许所有） |
 | `channels` | ✅ | 至少配置一个平台 |
+| `channels.discord.voice_sidecar` | — | active channel 非 discord 时，是否额外连一条只做语音输出的 Discord 连接。`/discordon` `/discordoff` 会改写它 |
+| `channels.discord.voice_channel_id` | — | 常驻的语音频道 ID。**必填**（没有就报错，不做「随便找一个频道」的静默兜底） |
+| `channels.discord.tts_voice` | — | **bot 级音色**，Gemini TTS 的 15 个 voice 之一（如 `Orus` / `Leda` / `Puck`）。流式直播和 ogg 语音消息共用它；**没配则任何 TTS 调用直接抛错** |
+| `channels.feishu.log_chat_id` | — | 专门转发日志的群 |
+| `channels.feishu.voice_mode_users` | — | 这些 open_id 发来的消息按 voice 模式处理 |
+| `channels.zello.enabled` | — | Zello PTT 开关，`/zelloon` `/zellooff` 会改写它。账号在 `config/zello`（全 bot 共享） |
 | `email` | — | 飞书企业邮件 |
 | `team` | — | 团队配置 |
 | `inbox` | — | Inbox 通信 |
@@ -882,7 +898,7 @@ Zello 的开发者 token 由本地私钥**每次登录现签**，不写死（写
 ## Skills
 
 Skill 源码在 `skills/`（public，48 个）和 [ClosedCrab](https://github.com/yangwhale/ClosedCrab)（private）。
-**deploy.sh 只部署 `config/skill-allowlist.txt` 里放行的那些**（当前 28 项）——其余源码留在仓库、默认不装，
+**deploy.sh 只部署 `config/skill-allowlist.txt` 里放行的那些**（当前 28 项 = 24 个 public + 4 个 private）——其余源码留在仓库、默认不装，
 需要时在 allowlist 加一行再跑 deploy 即可恢复。
 
 分类清单见 [README 的 Skill 章节](../README.md#默认部署的-skill24-个)，这里只讲机制：
