@@ -44,6 +44,7 @@ import importlib.util
 import json
 import os
 import socket
+import shutil
 import subprocess
 import sys
 import time
@@ -178,6 +179,29 @@ def _model_tier(v: str) -> str:
 
 # ── 探针 ────────────────────────────────────────────────────────────────────
 
+def claude_bin() -> str | None:
+    """探针要的 `claude` 可执行文件，解析成绝对路径。
+
+    两个坑叠在一起，合成一个**静默永久失败**：
+    1. daemon 的 PATH 是 `/usr/local/bin:/usr/bin:/bin:/usr/games` —— 交互 shell
+       里找得到的东西，daemon 里不一定找得到。
+    2. 不是每台机器都装了 Claude Code CLI。跑 kilo / openclaw worker 的机器
+       （hulk 所在的 gLinux 就是）压根没有这个命令。
+    结果：任务建得下去、看着成功，然后每个周期抛一次 FileNotFoundError。
+    而 ERROR 分支既不涨 consecutive_skips 也就不会触发停滞播报 —— 用户什么都
+    收不到，任务空转到 max_age 才消失。所以要在**创建时**就拦下来。
+    """
+    p = shutil.which("claude")
+    if p:
+        return p
+    for c in (Path.home() / ".npm-global/bin/claude",
+              Path.home() / ".local/bin/claude",
+              Path.home() / ".claude/local/claude"):
+        if c.exists() and os.access(c, os.X_OK):
+            return str(c)
+    return None
+
+
 def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) -> tuple[str, str]:
     """跑一次 headless sub-agent。返回 (verdict, body)。
 
@@ -192,7 +216,8 @@ def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) ->
         # 都正常，只有最便宜、也就是默认的那一档会挂。
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BETAS"}
         out = subprocess.run(
-            ["claude", "-p", full, "--model", model, "--dangerously-skip-permissions"],
+            [claude_bin() or "claude", "-p", full, "--model", model,
+             "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=PROBE_TIMEOUT, cwd="/tmp", env=env,
         ).stdout.strip()
     except subprocess.TimeoutExpired:
@@ -366,6 +391,15 @@ def cmd_create(args):
     }
     if args.test_run_id:
         doc["test_run_id"] = args.test_run_id
+    if not claude_bin():
+        print(json.dumps({
+            "error": f"本机 ({this_host().split('.')[0]}) 找不到 claude 可执行文件，"
+                     f"watch 任务的探针跑不了 —— 拒绝创建",
+            "why": "watch 任务钉死在创建它的机器上，探针要在本机跑 `claude -p`。"
+                   "跑 kilo / openclaw worker 的机器通常没装这个 CLI。",
+            "hint": "去装了 Claude Code CLI 再建，或者改到装了的机器上建。",
+        }, ensure_ascii=False))
+        sys.exit(2)
     ref = db().collection(COLL).document(args.name)
     # 名字直接当文档 ID，所以重名是覆盖而不是新建。原来这里是裸 set()：
     # 第二个任务顶掉第一个，第一个从此再没有人盯，而且两边都不报错 ——
@@ -412,6 +446,7 @@ def cmd_list(args):
 
 
 def cmd_stop(args):
+    # 停任务不需要探针，任何机器都得能停 —— 尤其是那台装不了 claude 的。
     ref = db().collection(COLL).document(args.name)
     if not ref.get().exists:
         print(json.dumps({"error": f"watch task {args.name} not found"}))
