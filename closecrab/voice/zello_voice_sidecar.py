@@ -188,6 +188,7 @@ def _hls_remove_endlist():
 _sidecar_loop: "asyncio.AbstractEventLoop | None" = None
 _sidecar_thread: "threading.Thread | None" = None
 _zello_client: "ZelloClient | None" = None
+_main_task: "asyncio.Task | None" = None
 _speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
 _feishu_ref = None     # FeishuChannel 实例 (全双工桥)
 _feishu_loop = None
@@ -1368,7 +1369,15 @@ async def _run(config: dict):
         log.warning("等待飞书桥超时")
     asyncio.create_task(_wait_bridge())
 
-    await client.recv_loop()
+    try:
+        await client.recv_loop()
+    finally:
+        # 被 cancel 时也要跟 Zello 道别, 否则服务端留着旧会话, 下次登录会被
+        # 当成同账号的第二个连接而互踢。shield 防止 close 自己又被 cancel 掉。
+        try:
+            await asyncio.shield(client.disconnect())
+        except Exception:
+            pass
 
 
 def start(bot_name: str, config: dict | None = None):
@@ -1395,17 +1404,24 @@ def start(bot_name: str, config: dict | None = None):
         return False
 
     def _thread_main():
-        global _sidecar_loop
+        global _sidecar_loop, _main_task
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         _sidecar_loop = loop
+
+        async def _main():
+            global _main_task
+            _main_task = asyncio.current_task()
+            await _run(config)
+
         try:
-            loop.run_until_complete(_run(config))
+            loop.run_until_complete(_main())
         except asyncio.CancelledError:
             pass
         except Exception:
             log.exception("Zello sidecar 主循环异常")
         finally:
+            _main_task = None
             _sidecar_loop = None
             log.info("Zello sidecar 线程退出")
 
@@ -1418,11 +1434,13 @@ def start(bot_name: str, config: dict | None = None):
 def stop():
     """停止 Zello sidecar。
 
-    先杀 encoder 再停 loop: sender loop 挂在 encoder stdout 上, encoder 不死
-    线程要很久才肯退, 而 start() 看 is_alive() 会一直报「已在运行」。
+    取消主任务让协程自然返回, 而不是 loop.stop() 从外面硬停 —— 硬停时
+    recv_loop 的重连分支会立刻拉起新连接, 线程根本不退 (Discord sidecar
+    早就是靠 bot.close() 让 run_until_complete 自己返回, 同一个道理)。
+    先杀 encoder 是因为 sender loop 挂在它的 stdout 上。
     """
     global _sidecar_loop, _zello_client, _sidecar_thread
-    loop = _sidecar_loop
+    loop, task, th = _sidecar_loop, _main_task, _sidecar_thread
     if loop is None:
         return
 
@@ -1434,26 +1452,20 @@ def stop():
         except (ProcessLookupError, PermissionError) as e:
             log.warning("杀 encoder 失败: %s", e)
 
-    client = _zello_client
-    if client:
+    if task is not None:
         try:
-            asyncio.run_coroutine_threadsafe(client.disconnect(), loop).result(timeout=5)
-        except Exception:
-            pass
-    try:
-        loop.call_soon_threadsafe(loop.stop)
-    except Exception:
-        pass
-    _zello_client = None
-    _sidecar_loop = None
+            loop.call_soon_threadsafe(task.cancel)
+        except Exception as e:
+            log.warning("取消 Zello 主任务失败: %s", e)
 
-    th = _sidecar_thread
     if th is not None:
-        th.join(timeout=8)
+        th.join(timeout=10)
         if th.is_alive():
-            log.warning("Zello sidecar 线程 8s 内未退出，/zelloon 会要求 /restart")
+            log.warning("Zello sidecar 线程 10s 内未退出，/zelloon 会要求 /restart")
         else:
             _sidecar_thread = None
+    _zello_client = None
+    _sidecar_loop = None
     log.info("Zello sidecar 已停止")
 
 
