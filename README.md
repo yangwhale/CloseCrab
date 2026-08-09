@@ -98,7 +98,7 @@ CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实�
   <img src="assets/auto-memory.svg" alt="Auto Memory" width="900"/>
 </p>
 
-每个 bot 都有四层持久化记忆，重启、runtime 切换、迁移机器后不丢：
+每个 bot 都有四层持久化记忆，重启、runtime 切换、迁移机器后不丢（另有第五层「会话自动召回」，见[跑起来之后会自动发生的事](#跑起来之后会自动发生的事)）：
 
 | 层 | 内容 | 加载时机 |
 |---|---|---|
@@ -226,6 +226,37 @@ BOT_NAME=<bot> python3 scripts/self-restart.py --note "重启后要做的事"
 skills/imagen-generator/scripts/imagen-generate.sh "prompt" --aspect 16:9
 skills/tts-generator/scripts/tts-generate.py "[casually] hello"
 ```
+
+---
+
+## 跑起来之后会自动发生的事
+
+这些默认开启、用户看不见，但**在花钱或在改写 prompt**，部署前值得知道：
+
+| 机制 | 代码 | 它干什么 | 怎么关 |
+|---|---|---|---|
+| **会话自动召回（记忆第五层）** | `utils/session_recall.py` + `session_search.py` | 消息超过一定长度时，自动到历史会话里检索相关片段**前置注入 prompt**；每 turn 还起一次小模型给召回结果打相关性分。本地 SQLite FTS5 索引 | 见 `core/bot.py` 里的召回开关 |
+| **GBrain 索引注入** | `utils/gbrain_index.py` | 启动时把知识库索引塞进 system prompt，吃 cold-start token | `bots/{name}.gbrain_index.enabled = false` |
+| **Vertex 用量策略兜底** | `utils/usage_policy_fallback.py` | 撞到 Usage Policy 限制时**静默换一个模型用 SDK 重发** —— 你拿到的回复可能不是配置里那个模型出的 | 看日志里的 fallback 记录 |
+| **入站消息防抖** | `utils/inbound_debouncer.py` | 连发几条消息会被合并成一次 turn（bot 会先「愣一下」），省 token | — |
+
+### 语音相关的两个标签
+
+- `<voice-summary>` —— 文字回复末尾加这个，内容会被 TTS 念出来做口语摘要
+- `<voice-file>/tmp/xxx.ogg</voice-file>` —— 已经生成好的 ogg 直接发出去（tts / music skill 的产物走这条）
+
+### 聊天平台之外的入口
+
+`tools/cc-api.py` 是一个 HTTP 入口，让 Siri 快捷指令这类外部客户端也能给 bot 发消息，
+不必经过飞书/Discord。配套 `tools/board-push.sh` 服务 `live-canvas` skill 的实时白板。
+
+### 发布 HTML 到 CC Pages
+
+```bash
+scripts/publish-cc-page.sh <本地html> [--to pages|assets|both]
+```
+
+> **内部文档必须显式 `--to pages`** —— 默认 `both` 会同时传一份到无鉴权的公开路径。
 
 ---
 
