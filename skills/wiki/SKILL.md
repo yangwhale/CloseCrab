@@ -3,12 +3,72 @@ name: wiki
 description: 个人知识 Wiki 管理（Quartz v2）。录入资料、查询知识、健康检查。当用户说"录入wiki"、"wiki ingest"、"加到wiki"、"wiki查一下"、"wiki lint"、"/wiki"等关键词时触发。
 ---
 
-# CC Wiki v2 — 个人知识 Wiki 管理
+# CC Wiki — 个人知识 Wiki 管理
 
 基于 Quartz (Static Site Generator) + Markdown + BM25 搜索引擎 + MCP Server 的 LLM 维护知识 Wiki。灵感来自 Karpathy 的 LLM Wiki 模式。
 
-**站点**: `$WIKI_URL`（环境变量配置）
-**完整技术文档**: `~/CloseCrab/docs/wiki-v2.md`
+## ⚠️ 先确定这台机器管哪个 Wiki（做任何操作之前）
+
+**一台机器只管自己那一个 Wiki，绝不去碰另一个。** 两套 Wiki 内容、用途、域名、机器都不同：
+
+| Wiki | 用途 | 仓库 | 站点 | 归属机器 |
+|---|---|---|---|---|
+| **工作 Wiki (v2)** | 技术/工作知识 | `~/my-wiki-v2` | `cc.higcp.com/wiki-v2`（**有 IAP 鉴权**） | jarvis |
+| **Study Wiki** | 孩子学习资料 | `~/my-wiki-study` | `www.closecrab.com/wiki-study`（无鉴权） | athena / doraemon |
+
+**路由方法 —— 用 `$WIKI_REPO`，不要靠猜、更不要写死**：
+
+`config/env.sh` 的 `compute_dynamic_vars()` 会在部署时按机器探测
+（`my-wiki-v2` → `my-wiki` → `my-wiki-study`，已设则不覆盖），
+写进 `~/.claude/settings.json` 的 `env`。所以脚本里直接用就行：
+
+```bash
+WIKI="$WIKI_REPO"        # deploy 已注入；本 skill 全部脚本也都读它
+```
+
+> **为什么这件事值得单列一节**：`scripts/` 下 16 个脚本本来就写的是
+> `os.environ.get("WIKI_REPO", "~/my-wiki")` —— 环境变量优先、默认值兜底，写法没问题。
+> 但过去**没有任何地方记录这台机器该用哪个 Wiki**，于是全部回落到默认的 `~/my-wiki`，
+> 而那个目录在大多数机器上并不存在，导致 `rebuild-graph` / `build-search-index` /
+> `rebuild-index` / `fix-backlinks` / `scan-uningested` 等整套脚本**静默失效**
+> —— 不报错，只是什么都找不到。补上 `$WIKI_REPO` 注入之后它们立刻恢复。
+
+补充配置源（供跨机器查询归属）：Firestore `bots/{name}.wiki`
+= `{role, repo, url, gcs}`。站点地址用 `$WIKI_URL`。
+
+> **绝不要用 `$CC_PAGES_URL_PREFIX` 拼 Wiki 地址。** `config/global.cc_pages_url`
+> 存的是 `cc.higcp.com`（jarvis 的域名），而 athena 的 `CC_PAGES_URL_PREFIX` 是
+> `www.closecrab.com` —— 拼出来必然指向别人家或 404。Wiki 地址只认 `$WIKI_URL`。
+
+本文档下方所有 `~/my-wiki-v2/...` 路径，在只有 Study Wiki 的机器上一律换成 `~/my-wiki-study/...`。
+**Study Wiki 的脚本集与 v2 不完全相同**，以实际 `ls ~/my-wiki-study/scripts/` 为准：
+
+| 操作 | 工作 Wiki (v2) | Study Wiki |
+|---|---|---|
+| 查询 | `scripts/wiki-query.py`（chunk 级 BM25 + 图增强，依赖预建 `wiki-data/`） | `scripts/query.py`（直扫 markdown，免索引；**`--check` 判断记过没** / 繁简互查 / 覆盖率过滤 / 图关联） |
+| 图谱 | `scripts/graph-query.py`（读 `graph.json`）+ `rebuild-graph.py` | `scripts/graph.py`（实时建图，免 rebuild） |
+| 录入 | `scripts/ingest-pipeline.py` | `scripts/ingest.py` |
+| 体检 | `scripts/lint.py` / `status.py` | 同名 |
+| 发布 | `scripts/sync-to-gcs.py` | `scripts/build-and-sync.sh` |
+
+### 标准查询流程（回答用户问题之前先走一遍）
+
+```bash
+# 1. 先判断「这事 Wiki 记过没」——  exit 0 记过 / exit 1 没记过
+python3 "$WIKI/scripts/query.py" "<用户的问题>" --check
+
+# 2. 记过 → 看细节（含命中段落、图关联页）
+python3 "$WIKI/scripts/query.py" "<问题>" --top-k 5
+
+# 3. 想知道两个概念怎么关联的 / 哪些是骨架概念
+python3 "$WIKI/scripts/graph.py" path <slug-a> <slug-b>
+python3 "$WIKI/scripts/graph.py" central --top 10
+```
+
+回答时**引用命中页的 URL**，让知识可追溯；没记过且内容有长期价值 → 问用户要不要录入。
+
+**站点**: 见上表（不要用 `$CC_PAGES_URL_PREFIX + /wiki-v2` 拼 —— 在 athena 上会拼出 404 的地址）
+**完整技术文档**: `~/CloseCrab/docs/wiki-v2.md`（仅描述工作 Wiki）
 
 ## 触发条件
 
