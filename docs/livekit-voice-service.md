@@ -70,7 +70,7 @@ LiveKit Server 用官方二进制，无 fork。
 
 ```bash
 gcloud compute instances create closecrab-live-XX \
-  --project=chris-pgp-host \
+  --project=YOUR_PROJECT \
   --zone=asia-east2-c \
   --machine-type=e2-standard-2 \
   --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud \

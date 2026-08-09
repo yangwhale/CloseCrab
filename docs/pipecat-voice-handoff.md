@@ -5,7 +5,7 @@
 
 **状态**: 设计 + 单机原型已跑通（chrisya-cc，asia-southeast1-b）
 **日期**: 2026-05-03
-**作者**: chrisya@google.com
+**作者**: you@example.com
 
 ---
 
@@ -189,7 +189,7 @@ Vertex AI (location="global", ADC) ──► 失败 fallback ──► Gemini AP
 
 - Vertex AI 走用户的 GCP quota，无需额外 API key
 - `location="global"` 是 Vertex 的"全球路由 endpoint"，preview 模型只在这里可用
-- ADC 来自 `gcloud auth application-default login`（chrisya@google.com user creds）
+- ADC 来自 `gcloud auth application-default login`（you@example.com user creds）
 - 项目 `gpu-launchpad-playground`（metadata SA 项目）
 
 ### 自定义适配器原因

@@ -46,7 +46,7 @@ gemini -m gemini-2.5-pro
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `VERTEX_PROJECT` | `chris-pgp-host` | GCP 项目 |
+| `VERTEX_PROJECT` | `YOUR_PROJECT` | GCP 项目 |
 | `VERTEX_LOCATION` | `global` | Vertex AI 区域 |
 | `PROXY_PORT` | `8888` | proxy 监听端口 |
 
@@ -82,7 +82,7 @@ proxy 日志输出到 stderr：
 
 ```
 [proxy] Auth warmup... OK
-Proxy on :8888 (chris-pgp-host/global)
+Proxy on :8888 (YOUR_PROJECT/global)
 [proxy] gemini-2.5-pro → claude-opus-4-6 (stream) msgs=2
 [proxy] ✓ 156 chars (7385+42 tok)
 ```

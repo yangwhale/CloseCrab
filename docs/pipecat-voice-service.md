@@ -69,7 +69,7 @@
 
 ```bash
 gcloud compute instances create <name> \
-  --project=chris-pgp-host \
+  --project=YOUR_PROJECT \
   --zone=asia-east2-c \
   --machine-type=e2-standard-4 \
   --boot-disk-size=50GB \
@@ -106,7 +106,7 @@ uv pip install google-genai
 ```bash
 # Vertex AI 认证（推荐）
 gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT=chris-pgp-host
+export GOOGLE_CLOUD_PROJECT=YOUR_PROJECT
 
 # 或用 API key
 export GEMINI_API_KEY=<key>
@@ -134,7 +134,7 @@ After=network.target
 Type=simple
 User=chrisya
 WorkingDirectory=/home/chrisya/pipecat-mcp-server
-Environment=GOOGLE_CLOUD_PROJECT=chris-pgp-host
+Environment=GOOGLE_CLOUD_PROJECT=YOUR_PROJECT
 ExecStart=/home/chrisya/.local/bin/uv run pipecat-mcp-server --transport webrtc
 Restart=on-failure
 RestartSec=5

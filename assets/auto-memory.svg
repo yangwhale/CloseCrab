@@ -85,7 +85,7 @@
       <text x="320" y="22" text-anchor="end" fill="#B06000" font-size="10">GCS gcsfuse · 多 bot 实时共享</text>
       <text x="14" y="42" fill="#202124" font-size="10">- 团队基础设施文档（架构 / 工具 / 调试）</text>
       <text x="14" y="58" fill="#202124" font-size="10">- 任一 bot 写入，所有 bot 立刻可读</text>
-      <text x="14" y="74" fill="#5F6368" font-size="9" font-style="italic">gs://chris-pgp-host-asia/memory/shared/</text>
+      <text x="14" y="74" fill="#5F6368" font-size="9" font-style="italic">gs://YOUR_BUCKET/memory/shared/</text>
     </g>
 
     <g transform="translate(20, 312)">
@@ -119,7 +119,7 @@
     <g transform="translate(20, 20)">
       <rect width="180" height="72" rx="6" fill="#E0F7FA" stroke="#006064"/>
       <text x="90" y="22" text-anchor="middle" fill="#006064" font-size="12" font-weight="600">GCS Bucket</text>
-      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">gs://chris-pgp-host-asia</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">gs://YOUR_BUCKET</text>
       <text x="90" y="52" text-anchor="middle" fill="#5F6368" font-size="9">/memory/shared/</text>
       <text x="90" y="64" text-anchor="middle" fill="#5F6368" font-size="9">gcsfuse 挂载</text>
     </g>
@@ -127,7 +127,7 @@
     <g transform="translate(20, 110)">
       <rect width="180" height="72" rx="6" fill="#FCE8E6" stroke="#C5221F"/>
       <text x="90" y="22" text-anchor="middle" fill="#C5221F" font-size="12" font-weight="600">private repo 备份</text>
-      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">my-private/claude-code/</text>
+      <text x="90" y="38" text-anchor="middle" fill="#5F6368" font-size="9">your-private-repo/</text>
       <text x="90" y="52" text-anchor="middle" fill="#5F6368" font-size="9">memory/ (git)</text>
       <text x="90" y="64" text-anchor="middle" fill="#5F6368" font-size="9">sync-memory.sh --push</text>
     </g>
