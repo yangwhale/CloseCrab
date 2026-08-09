@@ -749,6 +749,25 @@ install_cc() {
         echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, allowlist 过滤)"
     fi
 
+    # allowlist 里列了、但本机两个源都找不到的条目 —— 必须说出来。
+    # 之前是静默跳过：循环是「遍历源目录 → 查名单」，名单里多一行找不到源的，
+    # deploy 从头到尾不会提它一个字。后果是私有 skill 写进公开 allowlist 后，
+    # 对没配 PRIVATE_SKILLS_DIR 的人「看起来装上了、实际没有」，
+    # 而这正是我们到处在修的那个模式：静默失效。
+    local _missing=()
+    while read -r _sk; do
+        [[ -z "$_sk" || "$_sk" == \#* ]] && continue
+        [[ -d "$SCRIPT_DIR/skills/$_sk" ]] && continue
+        [[ -d "$PRIVATE_SKILLS_DIR/$_sk" ]] && continue
+        [[ -d "$SCRIPT_DIR/skills-nvidia/$_sk" ]] && continue
+        _missing+=("$_sk")
+    done < "$SCRIPT_DIR/config/skill-allowlist.txt"
+    if (( ${#_missing[@]} )); then
+        echo "  ⚠️  allowlist 有 ${#_missing[@]} 条在本机找不到源，未安装："
+        printf '        %s\n' "${_missing[@]}"
+        echo "      多为只存在于私有 skill 目录的条目 —— 设 PRIVATE_SKILLS_DIR 后重跑即可。"
+    fi
+
     # NVIDIA GPU Skills (可选, --nvidia-skills 参数启用)
     if [[ "${NVIDIA_SKILLS:-}" == "1" ]] && [[ -d "$SCRIPT_DIR/skills-nvidia" ]]; then
         for skill_dir in "$SCRIPT_DIR/skills-nvidia/"*/; do
