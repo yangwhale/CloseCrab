@@ -912,7 +912,7 @@ Skill 源码在 `skills/`（public，48 个）；另可选地把自己的私有 
 | 机制 | 说明 |
 |---|---|
 | **放行** | `config/skill-allowlist.txt`，一行一个 kebab-case 名字，`#` 开头是注释 |
-| **部署** | deploy.sh symlink 到 `~/.claude/skills/{name}`；Gemini CLI 走 `gemini skills link` |
+| **部署** | deploy.sh 按 allowlist `cp -a` 到 `~/.claude/skills/{name}`（拷贝，不是 symlink）；Gemini CLI 走 `gemini skills link` |
 | **结构** | `skills/{name}/SKILL.md`（必需，含 frontmatter）+ 可选 `scripts/` `references/` |
 | **新建** | 用 `skill-creator` 自举，不要手写目录 |
 | **私有** | `PRIVATE_SKILLS_DIR` 指向的目录会一并部署，同样受 allowlist 约束 |
@@ -965,7 +965,7 @@ Skill 源码在 `skills/`（public，48 个）；另可选地把自己的私有 
 
 ```bash
 # 一条命令完成：保存原文 → 创建骨架页面 → 重建索引 → 同步发布
-# v1（脚本在 skills/wiki/scripts/，部署后 symlink 到 ~/.claude/skills/wiki/scripts/）
+# v1（脚本在 skills/wiki/scripts/，部署后拷贝到 ~/.claude/skills/wiki/scripts/）
 python3 ~/.claude/skills/wiki/scripts/ingest-pipeline.py pdf paper.pdf --slug my-paper --title "Paper Title" --tags "ml,training"
 
 # v2 用 $WIKI_REPO/scripts/ingest.py，签名不同，见 docs/wiki-deploy.md
@@ -996,13 +996,18 @@ Wiki 暴露为 MCP Server，所有 Bot 通过标准协议查询同一个知识�
   "mcpServers": {
     "wiki": {
       "command": "python3",
-      "args": ["~/.claude/skills/wiki/scripts/wiki-mcp-server.py"]
+      "args": ["$WIKI_REPO/scripts/wiki-mcp-server.py"]
     }
   }
 }
 ```
 
-提供 `wiki_query`、`wiki_page`、`wiki_graph_neighbors`、`wiki_graph_path`、`wiki_search`、`wiki_list`、`wiki_status` 七个 MCP tools。
+注册的是 **Wiki 仓库里的那份脚本**（`$WIKI_REPO/scripts/`），不是 `~/.claude/skills/wiki/`
+下的拷贝 —— 后者不会被执行。`WIKI_REPO` 由 `config/env.sh` 探测注入，
+判据是「目录下有 `content/`」。
+
+提供 9 个 MCP tools：`wiki_query`、`wiki_ask`、`wiki_page`、`wiki_related`、
+`wiki_search`、`wiki_list`、`wiki_graph_neighbors`、`wiki_graph_path`、`wiki_status`。
 
 ### Health Dashboard
 
@@ -1511,7 +1516,7 @@ CloseCrab/
 │       ├── firestore_inbox.py  # Bot 间实时通信（on_snapshot）
 │       ├── registry.py         # 自注册（硬件 + context 上报）
 │       └── stt.py              # 语音转文字（Gemini / Chirp2 / Whisper）
-├── skills/                     # 48 个 Skills（deploy.sh 按 allowlist symlink 到 ~/.claude/skills/）
+├── skills/                     # 48 个 Skills（deploy.sh 按 allowlist 拷贝到 ~/.claude/skills/）
 │   └── wiki/                   # CC Wiki（Karpathy LLM Wiki 实现）
 ├── scripts/
 │   ├── launcher.sh             # 本地 bot 管理（start/stop/restart/status/logs）

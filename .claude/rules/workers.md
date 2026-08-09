@@ -9,8 +9,10 @@ CloseCrab 支持多种 Worker 实现，通过 Firestore `bots/{name}.worker_type
 - `claude`（默认）→ `ClaudeCodeWorker` — Claude Code CLI + socketpair
 - `gemini` → `GeminiACPWorker` — Gemini CLI + ACP 协议
 - `openclaw` → `OpenClawWorker` — OpenClaw CLI + ACP 协议 + 外部 Gateway
+- `kilo` → `KiloWorker` — Kilo CLI `serve` + HTTP REST + SSE
 
-`BotCore._create_worker()` 根据 `worker_type` 实例化对应 Worker。
+`BotCore._create_worker()` 根据 `worker_type` 实例化对应 Worker
+（`closecrab/core/bot.py:982-1010`，四个分支）。
 
 ## ClaudeCodeWorker（claude_code.py）
 
@@ -153,6 +155,62 @@ OpenClaw CLI 自动读取工作目录下的 `AGENTS.md`。`_write_bootstrap_file
 
 ### 权限审批
 Gateway 的 `requestPermission` 事件默认自动批准（`_auto_approve_permission()`）。
+
+## KiloWorker（kilo.py）
+
+四个 worker 里**唯一不走 stdio 的**。Kilo CLI 起一个本地 HTTP server，
+worker 用 REST 发消息、用 SSE 收流式事件。改这个文件前先记住这条差异 ——
+另外三个 worker 的 "解析 NDJSON 行" 那套心智模型在这里完全不适用。
+
+### 通信方式
+```
+Bot Process                  kilo serve (127.0.0.1:<port>)
+    │                              │
+    ├── HTTP POST ─────────────►  /session, /session/{id}/message
+    │                              │
+    ◄── SSE (GET /event) ◄────────┘
+```
+
+| 端点 | 用途 |
+|---|---|
+| `POST /session` | 建会话 |
+| `POST /session/{id}/message` | 发消息（**阻塞到本轮结束**） |
+| `POST /session/{id}/abort` | 中断 |
+| `GET /event` | SSE 流，实时 part 事件 |
+| `POST /permission/{id}/reply` | 工具权限自动批准 |
+| `POST /question/{id}/reply` | 转发 AskUserQuestion |
+
+### 端口和认证
+- 端口**不固定**：从 `kilo serve` 的 stdout 解析
+  （`kilo server listening on http://127.0.0.1:<port>`，见 `_parse_server_port()`）。
+  不要硬编码端口。
+- Kilo 7.x 的 serve 强制 HTTP Basic auth，密码取 `$KILO_SERVER_PASSWORD`。
+  **这个变量由 `run.sh` 开头设置** —— 绕过 run.sh 直接起 bot 会让 kilo 静默 401。
+
+### SSE 是主要数据通道，注意三件事
+- **必须订阅 `message.part.delta`**：Kilo 的正文是增量 `text` 字段流式推的。
+  只监听 `part.updated` 会丢掉绝大部分内容。
+- **要过滤用户自己的回显**：Kilo 会把用户输入原样作为一条
+  `message.part.updated` 播回来。worker 记下那条的 messageID，
+  之后同 message 的 delta 一并跳过（`kilo.py:197-208`）。
+- **断线要退避重连**：`_SSE_RECONNECT_DELAYS = [1,2,4,8,16,30]`。
+  SSE 断了但 HTTP 还活着，这时候本轮回复会变空——
+  `_last_activity` 就是给这种情况兜底的。
+
+### Model 配置
+`model` 构造参数格式是 `"providerID/modelID"`（如 `anthropic/claude-opus-4-5`），
+也接受裸 `modelID`。`kilo.py:1041-1046` 按有没有 `/` 分两种 body 结构下发。
+Kilo 抽象了 25+ provider，**model ID 写法必须跟 Kilo 的 provider 定义对齐**，
+不是 Anthropic/Vertex 的原始 ID。
+
+### 配置文件
+`_ensure_kilo_config()` 在 `work_dir/.kilo/kilo.jsonc` 生成 bot 模式默认配置。
+注意这份**不是** Kilo 读的全部配置 —— 用户级 `~/.config/kilo/kilo.json`
+（MCP 列表在这里）优先级更高，排查 MCP 问题要看那份。
+
+### 进程清理
+Kilo server 是独立子进程，`_write_pid_file()` / `_kill_orphan_kilo()`
+负责跨重启回收孤儿。改 `stop()` 时不要只 kill worker 自己持有的 handle。
 
 ## 通用规则
 - `self._lock` — asyncio.Lock，防止并发操作同一个 worker

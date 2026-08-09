@@ -58,12 +58,16 @@ scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 | 码 | 含义 | 重启 |
 |----|------|------|
 | `42` | `/restart` 命令 | 立即重启 |
+| `0` | **异常**（bot 正常运行时不该自己退出） | 重启，并 touch `.dirty_restart` 计入失败 |
 | `130` / `137` / `143` | SIGINT / SIGKILL / SIGTERM | 不重启 |
 | `1` | 配置错误 | 不重启 |
 | 其他非零 | 崩溃 | 重启（连续 >10 次停止） |
 
+`0` 那行反直觉但是故意的，见 `run.sh:120-125`。
+
 ## 配置体系
-- **Bootstrap**: `.env`（只含 `FIRESTORE_PROJECT` + `FIRESTORE_DATABASE`，deploy.sh 生成）
+- **Bootstrap**: `.env`（deploy.sh 生成，正常只有 `FIRESTORE_PROJECT` + `FIRESTORE_DATABASE`；
+  本机另有一行手工加的 `export STT_AB_DEBUG=1`，是个例外——它会在下次 deploy 时丢失）
 - **运行时配置**: Firestore `bots/{name}`（见下方 Firestore 表）
 - **全局常量**: Firestore `config/global`（cc_pages_url、gcs_bucket）
 - **CC 环境**: `~/.claude/settings.json`（env / permissions / plugins）；**MCP**: `~/.claude.json`
@@ -78,8 +82,12 @@ scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 | `bots/{name}/logs/{id}` | 对话日志（timestamp、status、steps、reply、duration_seconds、usage、worker_type、assistant） |
 | `messages` | Bot 间收件箱（from、to、instruction、status、result） |
 | `registry` | Bot 运行时状态（hostname、accelerator、last_seen） |
-| `config/global` | 全局常量 |
+| `config/global` | 全局常量（cc_pages_url、gcs_bucket） |
+| `config/secrets` | deploy.sh 拉取的部署期 secrets |
+| `config/zello` | Zello 账号与频道配置（`zello_voice_sidecar.py`） |
+| `config/watch_sweep` / `config/inbox_sweep` | 两个清扫器的游标 |
 | `scheduled_jobs` | cron-tool 任务（job_id、target、fire_at、cron、message、status） |
+| `watch_tasks` | watch-task.py 长跑盯梢任务（name、interval、prompt、model、host） |
 
 ## Bot Team 系统
 Leader（协调派活）/ Teammate（执行汇报）两种角色，配置存 `bots/{name}.team`。`build_system_prompt()` 按角色动态注入协调规则（运行时 system prompt 已含完整规则，此处仅备忘）。Leader 在 team 频道 @mention 派活，也可走 Firestore Inbox 异步通信。

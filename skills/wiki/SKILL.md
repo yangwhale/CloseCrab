@@ -40,17 +40,27 @@ SKILL.md 是**活文档**，随使用不断迭代。Bot 在操作中发现规则
 
 ## 路径约定
 
+**所有命令都用 `$WIKI_REPO`，不要写死 `~/my-wiki-v2`** —— 不同机器上 wiki
+仓库的目录名不一样（`my-wiki-v2` / `my-wiki` / `my-wiki-study`）。
+`WIKI_REPO` 由 `config/env.sh` 的 `compute_dynamic_vars()` 探测后注入。
+
 ```
-WIKI_REPO=~/my-wiki-v2                         # Quartz repo
-WIKI_CONTENT=~/my-wiki-v2/content              # Markdown 源文件
-WIKI_RAW=~/my-wiki-v2/raw                      # 原始资料（不可变）
-WIKI_URL=$CC_PAGES_URL_PREFIX/wiki-v2   # 由环境变量配置
+$WIKI_REPO                        # Quartz repo（本机实际路径见下方自检）
+$WIKI_REPO/content                # Markdown 源文件
+$WIKI_REPO/raw                    # 原始资料（不可变）
+WIKI_URL=$CC_PAGES_URL_PREFIX/wiki-v2
+```
+
+跑任何 wiki 命令前先自检一次，**没设就当场报错，不要猜路径**：
+
+```bash
+echo "${WIKI_REPO:?WIKI_REPO 未设置 —— 检查 config/env.sh 的 compute_dynamic_vars}"
 ```
 
 ## 目录结构
 
 ```
-~/my-wiki-v2/
+$WIKI_REPO/
 ├── content/                    # Markdown 源文件（Bot 维护）
 │   ├── index.md                # 首页
 │   ├── sources/                # 来源摘要
@@ -153,7 +163,7 @@ query.py 是一个高性能搜索引擎，核心特性：
 1. **获取内容**: URL → WebFetch 抓取；PDF → 读取；文本 → 直接使用
 2. **创建骨架页面**:
    ```bash
-   python3 ~/my-wiki-v2/scripts/ingest.py url \
+   python3 "$WIKI_REPO"/scripts/ingest.py url \
      --slug article-name --title "Title" --tags "tag1,tag2" \
      --source-url "https://..." --text "fetched content..."
    ```
@@ -162,7 +172,7 @@ query.py 是一个高性能搜索引擎，核心特性：
 5. **创建/更新 entity 和 concept 页面**（Bot LLM 判断需要时）
 6. **构建部署**:
    ```bash
-   bash ~/my-wiki-v2/scripts/build-and-sync.sh
+   bash "$WIKI_REPO"/scripts/build-and-sync.sh
    ```
 7. **回复用户**: 附上新页面 URL `$WIKI_URL/sources/slug`
 
@@ -191,7 +201,7 @@ Source 页面是**编译后的知识页面**，用户打开就能获取核心知
    wiki_search("type:source tag:tpu")  # 结构化过滤
    
    # CLI 回退
-   python3 ~/my-wiki-v2/scripts/query.py "搜索关键词" --top-k 5
+   python3 "$WIKI_REPO"/scripts/query.py "搜索关键词" --top-k 5
    ```
 2. 深入阅读返回的相关页面（用 `wiki_page(slug)` 或 Read 工具）
 3. 发现相关页面：`wiki_related(slug)` 获取推荐
@@ -204,7 +214,7 @@ Source 页面是**编译后的知识页面**，用户打开就能获取核心知
 ### /wiki lint — 健康检查
 
 ```bash
-python3 ~/my-wiki-v2/scripts/lint.py
+python3 "$WIKI_REPO"/scripts/lint.py
 ```
 
 检查项：
@@ -222,7 +232,7 @@ python3 ~/my-wiki-v2/scripts/lint.py
 ### /wiki status — 统计信息 + 知识覆盖度
 
 ```bash
-python3 ~/my-wiki-v2/scripts/status.py
+python3 "$WIKI_REPO"/scripts/status.py
 ```
 
 显示：页面总数（按类型）、标签分布、最近变更、知识覆盖度评分（connectivity × 40 + freshness × 30 + tag diversity × 30）、orphan 数量、平均 wikilinks 数。
@@ -231,12 +241,12 @@ python3 ~/my-wiki-v2/scripts/status.py
 
 ```bash
 # 一键构建 + 同步
-bash ~/my-wiki-v2/scripts/build-and-sync.sh
+bash "$WIKI_REPO"/scripts/build-and-sync.sh
 ```
 
 等价于：
 ```bash
-cd ~/my-wiki-v2
+cd "$WIKI_REPO"
 npx quartz build
 gsutil -m rsync -r -d public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
 ```
@@ -245,7 +255,7 @@ gsutil -m rsync -r -d public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
 
 ## MCP Server（9 个 Tools）
 
-MCP Server 路径：`~/my-wiki-v2/scripts/wiki-mcp-server.py`
+MCP Server 路径：`$WIKI_REPO/scripts/wiki-mcp-server.py`
 配置在 `~/.claude.json` 的 `mcpServers.wiki` 中。基于 fastmcp 框架，所有 tools 用 `@_safe_tool` 包裹防崩溃。
 
 | Tool | 用途 | 适用场景 |

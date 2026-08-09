@@ -46,9 +46,13 @@ compute_dynamic_vars() {
     # 于是全都回落到默认的 ~/my-wiki —— 而那个目录在多数机器上并不存在，
     # 结果是一整套 rebuild-graph / build-search-index / fix-backlinks 静默失效。
     # 这里按机器探测一次并落盘，就是那份缺失的「归属记录」。
+    #
+    # 判据必须是「目录下有 content/」而不是「目录存在」。本机 ~/my-wiki-study
+    # 就是个空目录，只看 -d 会把它选中并导出 —— 那正是上面这段注释在骂的
+    # 「指向一个不是 Wiki 的路径，然后静默查空」。判据比顺序重要。
     if [[ -z "${WIKI_REPO:-}" ]]; then
         for _wiki_cand in "$HOME/my-wiki-v2" "$HOME/my-wiki" "$HOME/my-wiki-study"; do
-            [[ -d "$_wiki_cand" ]] && WIKI_REPO="$_wiki_cand" && break
+            [[ -d "$_wiki_cand/content" ]] && WIKI_REPO="$_wiki_cand" && break
         done
     fi
     export WIKI_REPO

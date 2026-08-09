@@ -5,15 +5,29 @@ globs: deploy.sh, run.sh, scripts/*.sh, scripts/*.py
 # 部署和运维脚本规则
 
 ## deploy.sh
-- 920+ 行，自动化安装 Claude Code + Skills + Bot Python 依赖
-- 支持 `--cc-only`（只装 CC 环境）、`--bot`（补装 Bot 依赖）、`--npm`（用 npm 代替官方 installer）
-- 会生成 `.env`、`~/.claude/settings.json`、skills symlinks
-- 修改 deploy.sh 后**必须**在至少一台 VM 上测试 `./deploy.sh --cc-only` 通过
+约 1500 行，共 **12 步**，自动化安装 Claude Code + Skills + Bot Python 依赖 +
+Gemini CLI + OpenClaw + Kilo CLI。
+
+| Flag | 作用 |
+|---|---|
+| `--cc-only` | 只装 CC 环境 |
+| `--bot` | 补装 Bot 依赖 |
+| `--npm` | 用 npm 代替官方 installer |
+| `--voice` | 装语音栈 |
+| `--nvidia-skills` | 额外部署 `skills-nvidia/` |
+| `--voice-frontend-domain <d>` / `--voice-signaling-domain <d>` / `--voice-email <e>` | 语音域名与证书邮箱 |
+
+产物：`.env`、`~/.claude/settings.json`、`~/.claude/skills/`（**拷贝，不是 symlink**，
+详见 rules/skills.md）、`~/.gemini/`、`~/.openclaw/`。
+
+修改 deploy.sh 后**必须**在至少一台 VM 上测试 `./deploy.sh --cc-only` 通过。
 
 ## run.sh
 - 自动重启 wrapper，检测退出码决定是否重启
 - 连续崩溃 >10 次自动停止（dirty restart 保护）
-- 不要改退出码约定（42=restart, 130/137/143=不重启, 1=不重启）
+- 不要改退出码约定（42=restart, **0=异常**, 130/137/143=不重启, 1=不重启）。
+  `0` 反直觉但是故意的：bot 正常运行时不该自己退出，所以 exit 0 被当作异常，
+  会 touch `.dirty_restart` 并计入连续失败（`run.sh:120-125`）
 - **启动 bot 的唯一入口**：run.sh 开头那段环境设置（source `.zshenv`、nvm/npm-global 的
   PATH、`KILO_SERVER_PASSWORD`、TTS 后端）是 bot 能正常工作的前提。`launcher.sh` 现在
   直接调它，**不要再另抄一份重启循环** —— 抄漏环境平时看不出来（交互 shell 会继承），
@@ -54,6 +68,13 @@ deploy.sh 第 11 步自动配置 OpenClaw（如已安装）：
 - 已有配置不覆盖（与 Gemini CLI 行为一致）
 - 模板中 `${GEMINI_API_KEY}` 和 `${ANTHROPIC_VERTEX_PROJECT_ID}` 由 envsubst 替换
 - 新增 MCP：编辑 `config/openclaw.json`，支持 stdio 类型（command+args）和 SSE 类型（url-based，通过 mcp-proxy）
+
+## Kilo CLI 部署
+deploy.sh 第 12 步（`deploy.sh:1192-1232`）安装配置 Kilo CLI：
+- `install_npm_bin` 装 Kilo，失败则整步跳过（不阻断部署）
+- Kilo `serve` 强制 HTTP Basic auth，密码取 `$KILO_SERVER_PASSWORD` —— 由 run.sh 设置
+- **真实 MCP 配置在 `~/.config/kilo/kilo.json`**，不是 worker 生成的
+  `work_dir/.kilo/kilo.jsonc`。排查 Kilo MCP 问题要看前者
 
 ## 注意
 - 所有脚本都假设在 CloseCrab 根目录执行或通过绝对路径调用

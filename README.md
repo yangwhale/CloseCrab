@@ -190,7 +190,7 @@ python3 scripts/watch-task.py list|stop <name>
 
 | 分类 | Skills |
 |---|---|
-| **知识与记忆** | `wiki`（Quartz Wiki + 7 个 MCP tools）· `session-handoff`（会话崩了写交接） |
+| **知识与记忆** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `session-handoff`（会话崩了写交接） |
 | **多媒体生成** | `imagen-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `deck-builder`（PPT / Google Docs）· `live-canvas`（实时白板讲解） |
 | **浏览器 / 阅读** | `browser-cli`（CDP 直连；一次页面快照 ~350 token，走 MCP 是 15-20K）· `wechat-reader`（公众号文章，绕验证码） |
 | **飞书** | `feishu-mail`（企业邮箱收发）· `feishu-user-msg` |

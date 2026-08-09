@@ -21,7 +21,7 @@ globs: closecrab/channels/*.py
 
 | Channel | multiSelect=False (单选) | multiSelect=True (多选) |
 |---|---|---|
-| feishu | 渲染按钮 (`tag: action`)，点一个 resolve future | **不渲染按钮**，把选项列成 `1. label — desc` 文本，hint 提示「请用文字回复，例如 `1,3,4`」，用户文字消息走 `_pending_input` 路径 (feishu.py:2955) |
+| feishu | 渲染按钮 (`tag: action`)，点一个 resolve future | **不渲染按钮**，把选项列成 `1. label — desc` 文本，hint 提示「请用文字回复，例如 `1,3,4`」，用户文字消息走 `_pending_input` 路径（`feishu.py` 里搜 `_pending_input`，别记行号 —— 它漂过一次了） |
 | discord | 渲染按钮（未实现 multi） | 未实现，目前跟单选一样 |
 | dingtalk | 纯文本列出 | 未实现 |
 
