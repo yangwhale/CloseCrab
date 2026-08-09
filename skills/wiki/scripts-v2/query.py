@@ -22,7 +22,8 @@ import jieba
 jieba.setLogLevel(jieba.logging.WARNING)  # 静默加载日志
 
 sys.path.insert(0, str(Path(__file__).parent))
-from wiki_utils import WIKI_CONTENT, all_pages, parse_frontmatter, page_url
+from wiki_utils import (WIKI_CONTENT, all_pages, parse_frontmatter, page_url,
+                        require_content)
 
 # ── 同义词表 ──────────────────────────────────────────────────
 
@@ -755,6 +756,7 @@ def main():
                         help="只回答「Wiki 记过没」（exit 0 记过 / 1 没记过）")
 
     args = parser.parse_args()
+    require_content()          # 指错 Wiki 时吵闹地失败，而不是静默返回 0 条
     results = query(args.query, args.top_k, args.type, args.tag,
                     min_coverage=args.min_coverage)
 

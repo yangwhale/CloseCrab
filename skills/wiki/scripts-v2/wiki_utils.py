@@ -8,10 +8,32 @@ from pathlib import Path
 from typing import Optional
 
 # ── 路径常量 ──────────────────────────────────────────────────
-# 跟 WIKI_GCS / WIKI_URL 一样读环境变量：deploy 的 compute_dynamic_vars() 会按机器
-# 探测并注入 WIKI_REPO，这里若写死，那份注入等于白做（本文件原本写死 ~/my-wiki-v2，
-# 导致在没有该目录的机器上 content 目录不存在、任何查询都返回空且不报错）。
-WIKI_REPO = Path(os.path.expanduser(os.environ.get("WIKI_REPO", "~/my-wiki-v2")))
+# WIKI_REPO 的取值顺序：环境变量 → 自定位到本文件所在仓库根 → 兜底常见目录。
+#
+# 本文件原本写死 ~/my-wiki-v2，导致 deploy 在 env.sh 里做的 WIKI_REPO 注入完全失效：
+# 换台机器就指向不存在的目录，content 找不到、查询恒为空、而且不报错。
+#
+# 自定位（Path(__file__).parent.parent）只对**运行副本**成立：
+#   ~/my-wiki-v2/scripts/wiki_utils.py        → ~/my-wiki-v2        ✅ 有 content/
+#   CloseCrab/skills/wiki/scripts-v2/...      → skills/wiki         ❌ 永远没有 content/
+# 主仓这份是分发副本，恰恰是新机器会用的那份，所以自定位在这里靠不住。
+# 结论：与其挑一个「更好的默认值」，不如让取不到有效值时**明确报错** ——
+# 今天连撞六次的都是同一个模式：静默回落到不存在的默认值，系统看着在跑，实际什么都没做。
+def _resolve_wiki_repo() -> Path:
+    env = os.environ.get("WIKI_REPO")
+    if env:
+        return Path(os.path.expanduser(env))
+    here = Path(__file__).resolve().parent.parent      # 运行副本时即仓库根
+    if (here / "content").is_dir():
+        return here
+    for cand in ("~/my-wiki-v2", "~/my-wiki", "~/my-wiki-study"):
+        p = Path(os.path.expanduser(cand))
+        if (p / "content").is_dir():
+            return p
+    return here                                        # 交给 require_content() 报错
+
+
+WIKI_REPO = _resolve_wiki_repo()
 WIKI_CONTENT = WIKI_REPO / "content"
 WIKI_RAW = WIKI_REPO / "raw"
 WIKI_PUBLIC = WIKI_REPO / "public"
@@ -20,6 +42,27 @@ WIKI_PUBLIC = WIKI_REPO / "public"
 # 缺省留空表示「本机不发布，只做本地索引和查询」，而不是悄悄发到别人的桶里。
 WIKI_GCS = os.environ.get("WIKI_GCS", "")          # 例: gs://YOUR_BUCKET/cc-pages/wiki-v2/
 WIKI_URL = os.environ.get("WIKI_URL", "")          # 例: https://wiki.example.com/wiki-v2
+
+
+def require_content(exit_on_error: bool = True) -> bool:
+    """确认 WIKI_REPO 指向的目录真的是个 Wiki；不是就**明确报错**而不是返回空结果。
+
+    在任何要读内容的入口（query / lint / status / ingest）开头调用。
+    没有这道检查时，指错目录的表现是「查什么都没有」——跟「Wiki 里确实没这条」
+    长得一模一样，最难排查。宁可吵闹地失败。
+    """
+    if WIKI_CONTENT.is_dir():
+        return True
+    msg = [
+        f"[wiki] WIKI_REPO 指向 {WIKI_REPO}，但其下没有 content/ 目录。",
+        f"       当前取值来源: {'环境变量 WIKI_REPO' if os.environ.get('WIKI_REPO') else '自动探测（未设环境变量）'}",
+        "       修法：export WIKI_REPO=/path/to/your/wiki，或在 ~/.claude/settings.json 的 env 里配置。",
+        "       注意本文件若是 CloseCrab 仓库内的分发副本，自动探测无法定位到 Wiki，必须显式设置。",
+    ]
+    print("\n".join(msg), file=sys.stderr)
+    if exit_on_error:
+        sys.exit(2)
+    return False
 
 # 页面类型 → 子目录
 TYPE_DIRS = {
