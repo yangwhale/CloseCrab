@@ -127,7 +127,8 @@ def main():
     parser.add_argument("--model", help="Override model ID (default: auto by duration)")
     args = parser.parse_args()
 
-    model_id = args.model or MODELS[args.duration]
+    duration_key = "pro" if args.duration == "full" else args.duration
+    model_id = args.model or MODELS[duration_key]
     prompt = build_prompt(args.prompt, style=args.style, key=args.key, tempo=args.tempo, vocal=args.vocal)
 
     output_name = args.output_name
