@@ -476,10 +476,19 @@ def _claim(d, name: str, cutoff: datetime):
             return None
         # 先把 next_fire_at 推远，占住这一轮；真正的 anchor=complete
         # 在探针跑完后再写一次准确值。
-        t.update(ref, {
+        upd = {
             "next_fire_at": cutoff + timedelta(seconds=x.get("interval_sec", 120)),
             "fire_count": (x.get("fire_count") or 0) + 1,
-        })
+        }
+        # 没有 host 的任务（只可能是老文档）第一次被抢到就**认领归属**，此后只有
+        # 这台跑。不认领的话 `_is_mine` 对所有机器都放行，同一条任务会被不同机器
+        # 轮流执行 —— 实测三台各跑过一次同一批任务。后果有两层：探针在没有那个
+        # 日志文件的机器上会瞎判，而且现在出错就终止，**一台环境不对的机器足以
+        # 掐死一条在别处跑得好好的任务**。认领之后各机器之间才真的互不相干。
+        if not x.get("host"):
+            upd["host"] = this_host()
+            x = {**x, "host": upd["host"]}
+        t.update(ref, upd)
         return x
 
     return _run(tx)
