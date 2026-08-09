@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Optional
 
 # ── 路径常量 ──────────────────────────────────────────────────
-WIKI_REPO = Path(os.path.expanduser("~/my-wiki-v2"))
+# 跟 WIKI_GCS / WIKI_URL 一样读环境变量：deploy 的 compute_dynamic_vars() 会按机器
+# 探测并注入 WIKI_REPO，这里若写死，那份注入等于白做（本文件原本写死 ~/my-wiki-v2，
+# 导致在没有该目录的机器上 content 目录不存在、任何查询都返回空且不报错）。
+WIKI_REPO = Path(os.path.expanduser(os.environ.get("WIKI_REPO", "~/my-wiki-v2")))
 WIKI_CONTENT = WIKI_REPO / "content"
 WIKI_RAW = WIKI_REPO / "raw"
 WIKI_PUBLIC = WIKI_REPO / "public"

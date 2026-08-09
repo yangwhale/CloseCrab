@@ -299,6 +299,13 @@ def _expand_terms(idx: WikiIndex, terms: list[str]) -> list[str]:
     for term in terms:
         t = term.lower()
 
+        # 0. 繁简变体扩展：内容库常繁简混用（页面「中國地形」，用户查「中国的地形」）。
+        #    倒排索引存的是原文，简体查询词根本对不上繁体条目，该命中的会被判成没命中。
+        #    在这里扩展成本最低 —— 同义词/模糊匹配本来就在这一步。需要 opencc，没装则跳过。
+        for variant in _han_variants(t):
+            if variant not in expanded:
+                expanded.append(variant)
+
         # 1. 同义词扩展
         syns = _synonym_map.get(t, [])
         for syn in syns:
@@ -617,16 +624,120 @@ def _query_cache(query_key: str, top_k: int, type_filter: str,
     return tuple(results[:top_k])
 
 
+# ── 相关性闸门 ────────────────────────────────────────────────
+#
+# 没有闸门时 score>0 就进结果，于是 wiki 里根本没有的话题也能返回一堆页 ——
+# 它们只是蹭中了「用 / 配 / 哪里」这类词。实测（jarvis，456 页真实语料）：
+# 「如何用微波炉烤惠灵顿牛排配红酒汁」返回 5 条全无关，耗时还是真查询的 28 倍
+# （虚词的倒排表巨大），所以这同时是性能修复。
+
+# 只放纯功能词。刻意不放「注意 / 影响 / 使用」这类泛技术词：泛词表会越滚越长，
+# 而且容易误伤（「注意力」含「注意」）。分母小的情况交给 MIN_HITS 兜底。
+_GATE_STOP = {
+    "的", "了", "是", "在", "有", "和", "与", "也", "就", "都", "很", "会", "要",
+    "能", "可以", "对", "把", "被", "将", "从", "到", "而", "及", "其", "之",
+    "我", "你", "他", "她", "它", "吗", "呢", "吧", "啊", "这", "那",
+    "这个", "那个", "什么", "怎么", "怎样", "如何", "为什么", "请问", "一下",
+    "哪里", "哪个", "多少", "比较", "或者", "但是", "因为", "所以", "如果",
+    "以及", "是否", "有没有", "一些", "一个",
+}
+
+MIN_COVERAGE = 0.34   # 命中实词占比下限
+MIN_HITS = 2          # 绝对命中数下限（见下方注释）
+
+
+try:                                     # 可选依赖：没装则繁简相关能力静默退化
+    import opencc as _opencc
+    _T2S = _opencc.OpenCC("t2s")
+    _S2T = _opencc.OpenCC("s2t")
+
+    def _norm(t: str) -> str:
+        """归一到简体，用于比对。"""
+        return _T2S.convert(t or "")
+
+    def _han_variants(t: str) -> list:
+        """返回 t 的繁简变体（不含自身、不含非中文）。"""
+        if not t or not _CJK_RE.search(t):
+            return []
+        return [v for v in {_T2S.convert(t), _S2T.convert(t)} if v and v != t]
+except Exception:
+    def _norm(t: str) -> str:
+        return t or ""
+
+    def _han_variants(t: str) -> list:
+        return []
+
+
+def content_terms(terms) -> set:
+    """从分词结果里挑出真正承载语义的词。
+
+    CJK 单字要剔除：jieba 几乎不会把它们单独切出来（页面里「人」总是以「人體」
+    「人类」出现），所以单字进了分母就基本注定命不中，白白拉低覆盖率。
+    实测「人是怎么受精的」实词曾是 {人, 受精}，命中「受精」也只有 50% 而被误杀。
+    全部是单字时保留，避免「猫」这类查询实词为空。
+    """
+    kept = {t for t in terms
+            if t and t not in _GATE_STOP and not (len(t) == 1 and _CJK_RE.match(t))}
+    if not kept:
+        kept = {t for t in terms if t and t not in _GATE_STOP}
+    return kept
+
+
+def relevance_gate(q_content: set, matched: list, min_coverage: float = MIN_COVERAGE):
+    """判断一条结果是不是真的在讲这件事。返回 (是否通过, 覆盖率, 命中实词)。
+
+    两个条件都要满足：
+      1) coverage >= min_coverage
+      2) 命中实词数 >= MIN_HITS，**或** coverage 达到 100%
+
+    第 2 条是必需的：覆盖率是比率，分母小的时候会失去分辨率。
+    实测漏网案例「请问一下养猫要注意什么」只剩 2 个实词 ['养猫','注意']，
+    命中 1 个就是 50% > 0.34 直接放行 —— 而「注意」在任何技术 wiki 里都遍地都是。
+    实词只有 1-2 个时要求全中，既堵住这个洞，又不误伤「蒲公英」这种单词查询。
+    """
+    if not q_content:
+        return False, 0.0, set()
+    # 繁简归一化后比对：内容库常繁简混用（页面标题「中國地形」vs 查询「中国的地形」），
+    # 不归一会把该命中的判成没命中 —— 漏报比误报更糟。只在判定时归一，不动索引。
+    norm_matched = {_norm(m) for m in (matched or ())}
+    hit = {t for t in q_content if _norm(t) in norm_matched}
+    cov = len(hit) / len(q_content)
+    if cov < min_coverage:
+        return False, cov, hit
+    return (len(hit) >= MIN_HITS or cov >= 1.0), cov, hit
+
+
 def query(query_str: str, top_k: int = 5, type_filter: str = None,
-          tag_filter: str = None) -> list[dict]:
-    """搜索 Wiki 页面，返回排序后的结果列表。"""
+          tag_filter: str = None, min_coverage: float = MIN_COVERAGE) -> list[dict]:
+    """搜索 Wiki 页面，返回排序后的结果列表。
+
+    min_coverage=0 可完全关闭相关性闸门，回到加闸门之前的行为。
+    """
     if not query_str or not query_str.strip():
         return []
     # 限制输入长度，防止超长查询
     query_str = query_str.strip()[:500]
     top_k = max(1, min(top_k, 50))
-    result = _query_cache(query_str, top_k, type_filter or "", tag_filter or "")
-    return list(result)
+
+    if min_coverage <= 0:
+        return list(_query_cache(query_str, top_k, type_filter or "", tag_filter or ""))
+
+    # 多取一些再过滤，避免闸门刷掉之后凑不满 top_k。
+    # 缓存键不含 min_coverage —— 缓存的是未过滤结果，闸门在外面算，改阈值不用清缓存。
+    raw = _query_cache(query_str, max(top_k * 3, 15), type_filter or "", tag_filter or "")
+    q_content = content_terms(_tokenize(query_str))
+
+    passed = []
+    for info in raw:
+        ok, cov, hit = relevance_gate(q_content, info.get("matched_terms"), min_coverage)
+        if ok:
+            item = dict(info)
+            item["coverage"] = round(cov, 2)
+            item["content_hits"] = sorted(hit)
+            passed.append(item)
+        if len(passed) >= top_k:
+            break
+    return passed
 
 
 def main():
@@ -637,13 +748,29 @@ def main():
     parser.add_argument("--tag", default=None, help="按标签过滤")
     parser.add_argument("--format", default="text", choices=["text", "json"],
                         help="输出格式")
+    parser.add_argument("--min-coverage", type=float, default=MIN_COVERAGE,
+                        help=f"相关性闸门：命中实词占比下限（默认 {MIN_COVERAGE}，"
+                             f"设 0 关闭闸门回到旧行为）")
+    parser.add_argument("--check", action="store_true",
+                        help="只回答「Wiki 记过没」（exit 0 记过 / 1 没记过）")
 
     args = parser.parse_args()
-    results = query(args.query, args.top_k, args.type, args.tag)
+    results = query(args.query, args.top_k, args.type, args.tag,
+                    min_coverage=args.min_coverage)
+
+    if args.check:
+        if results:
+            print(f"COVERED: {args.query} — {len(results)} 页")
+            for r in results:
+                cov = int(r.get("coverage", 0) * 100)
+                print(f"  · {r['title']}（{cov}% 实词命中）  {r['url']}")
+            return 0
+        print(f"NOT COVERED: {args.query}")
+        return 1
 
     if not results:
         print("未找到匹配页面。")
-        return
+        return 1
 
     if args.format == "json":
         import json
@@ -651,14 +778,17 @@ def main():
     else:
         for i, r in enumerate(results, 1):
             tags_str = ", ".join(r["tags"][:5]) if r["tags"] else ""
-            print(f"\n{i}. [{r['type']}] {r['title']}  (score: {r['score']})")
+            cov = r.get("coverage")
+            cov_str = f" · {int(cov * 100)}% 实词命中" if cov is not None else ""
+            print(f"\n{i}. [{r['type']}] {r['title']}  (score: {r['score']}{cov_str})")
             print(f"   路径: {r['path']}")
             print(f"   URL: {r['url']}")
             if tags_str:
                 print(f"   标签: {tags_str}")
             if r["context"]:
                 print(f"   上下文: ...{r['context']}...")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
