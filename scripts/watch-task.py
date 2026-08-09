@@ -215,16 +215,26 @@ def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) ->
         # 但 **haiku 不支持这个 beta**，带着它调直接 400。坑在于 opus/sonnet 带着
         # 都正常，只有最便宜、也就是默认的那一档会挂。
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BETAS"}
-        out = subprocess.run(
+        r = subprocess.run(
             [claude_bin() or "claude", "-p", full, "--model", model,
              "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=PROBE_TIMEOUT, cwd="/tmp", env=env,
-        ).stdout.strip()
+        )
+        out = (r.stdout or "").strip()
     except subprocess.TimeoutExpired:
         # 跟「没进展」区分开。两者都不该播报，但一个是任务在正常跑，另一个是
         # 探针自己就没跑完 —— 全都记成 SKIP 的话，一个每轮都超时的探针会一路
         # 静默到 max_age，看起来跟「任务还在跑」一模一样。
         return "TIMEOUT", ""
+    # 退出码非零 = 探针根本没跑成，stdout 里那行字不是判断结果。以前这里只取
+    # stdout 不看退出码，于是 `Not logged in · Please run /login`（退出码 1）
+    # 走到下面的「没守契约就当成 REPORT」兜底，变成一条正经播报：
+    # 用户收到「进展：请先登录」，consecutive_skips 被重置所以停滞检测也永不触发，
+    # 任务看起来健康得很，每个周期准时汇报。**不是静默失败，是主动撒谎。**
+    # 抛出去交给 cmd_tick 的错误升级路径 —— 不猜是什么错，一律终止 + 交接。
+    if r.returncode != 0:
+        detail = (out or (r.stderr or "").strip() or "(无输出)")[:200]
+        raise RuntimeError(f"探针退出码 {r.returncode}: {detail}")
     if not out:
         return "SKIP", ""
     head, _, rest = out.partition("\n")
