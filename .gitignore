@@ -11,3 +11,6 @@ controlboard/config.js
 .playwright-mcp/
 CLAUDE.md.bak
 .serena/
+
+# deck-builder 运行时状态: Drive fileId 缓存 (为保持分享链接不变)，本机私有
+skills/deck-builder/.strategy_deck_fileid
