@@ -12,7 +12,7 @@ CloseCrab 将 AI CLI 工具包装为多平台聊天 Bot。默认通过 Unix sock
 
 ### 为什么选择直接集成 CLI 工具？
 
-CloseCrab 不重新造轮子——它直接驱动 Claude Code / Gemini CLI 进程，这意味着 **CLI 生态里的一切你都能直接用**：官方 Skills、第三方 Plugins、[Marketplace](https://marketplace.claudecode.ai) 里的 MCP Server，装上就能在聊天平台里调用，零适配成本。
+CloseCrab 不重新造轮子——它直接驱动 Claude Code / Gemini CLI 进程，这意味着 **CLI 生态里的一切你都能直接用**：官方 Skills、第三方 Plugins、Marketplace 里的 MCP Server，装上就能在聊天平台里调用，零适配成本。
 
 更重要的是：**Claude Code 和 Gemini CLI 都在以极高频率迭代**。新工具、新能力、性能优化——上游一发布，你只需升一下版本，CloseCrab 立刻就能用上。不需要等框架跟进、不需要改一行代码。这是 API wrapper 方案做不到的。
 
@@ -668,7 +668,7 @@ Context7 MCP Server 用于查询最新的框架/库文档（React、Next.js、Dj
 Jina AI MCP Server 提供网页内容提取、事实核查等能力。
 
 1. 访问 [Jina AI](https://jina.ai) → 注册/登录
-2. 进入 [API Keys 页面](https://jina.ai/api-key)
+2. 进入 [API Keys 页面](https://jina.ai/?sui=apikey)
 3. 创建新密钥，复制以 `jina_` 开头的 key
 
 > 有免费额度，超出后按用量计费。
@@ -897,7 +897,7 @@ Zello 的开发者 token 由本地私钥**每次登录现签**，不写死（写
 
 ## Skills
 
-Skill 源码在 `skills/`（public，48 个）和 [ClosedCrab](https://github.com/yangwhale/ClosedCrab)（private）。
+Skill 源码在 `skills/`（public，48 个）和 ClosedCrab（私有仓库）（private）。
 **deploy.sh 只部署 `config/skill-allowlist.txt` 里放行的那些**（当前 28 项 = 24 个 public + 4 个 private）——其余源码留在仓库、默认不装，
 需要时在 allowlist 加一行再跑 deploy 即可恢复。
 
