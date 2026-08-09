@@ -30,7 +30,7 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 | 🧠 **共享记忆** | MEMORY.md + 100+ topic 文件 + GCS 同步 + OpenClaw sqlite 向量索引 |
 | ⏰ **Timeline（定时 + 盯梢）** | `cron-tool` 到点叫醒 · `watch-task` 起小 agent 自己判断进度，SKIP/REPORT/DONE 三态 |
 | 🤝 **Bot 团队** | 多 bot 跨机器协作 · `#team-ops` 频道派活 · Firestore inbox 实时推送 |
-| 🔧 **48 个内置 Skill** | Wiki · Imagen/Veo/TTS/音乐生成 · 飞书四件套 · 浏览器自动化 · GPU 集群验收 · skill-creator 自举 |
+| 🔧 **48 个内置 Skill** | Wiki · Imagen/TTS/音乐生成 · 飞书邮件 · 浏览器自动化 · GPU 集群验收 · skill-creator 自举 |
 | 📄 **CC Pages** | bot 生成 HTML 报告，一条命令发布到 GCS + 自定义域名 |
 | 🔌 **完整上游生态** | Claude Code skills · MCP servers · Gemini extensions · OpenClaw plugins |
 
