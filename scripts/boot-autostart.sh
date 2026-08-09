@@ -39,7 +39,7 @@ if [[ -d "$HOME/.nvm/versions/node" ]]; then
     NVM_NODE_DIR="$(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -1)"
     [[ -n "$NVM_NODE_DIR" ]] && export PATH="$NVM_NODE_DIR/bin:$PATH"
 fi
-export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:$PATH"
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:/usr/local/bin:/snap/bin:$PATH"
 
 # ── 2. 等依赖就绪 ────────────────────────────────────────────
 # Firestore 要 DNS + 元数据服务器发凭据。@reboot 跑得比网络早是常态，

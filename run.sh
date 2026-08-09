@@ -33,7 +33,7 @@ fi
 # ~/.npm-global/bin: kilo/openclaw 等 npm 全局包. BotCore 进程通过 subprocess_exec
 # 启动 worker 时走 shutil.which (查 PATH), 必须加 (即便 deploy.sh 已 symlink 到
 # /usr/local/bin 作为兜底, 这里也加上确保两条路径都覆盖)
-export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:$PATH"
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:/usr/local/bin:/snap/bin:$PATH"
 
 # 第一个参数作为 bot name（必需）
 BOT_NAME="$1"
