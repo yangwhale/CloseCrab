@@ -54,15 +54,10 @@ export BOT_NAME
 # 已设)。显式 export 覆盖启动 shell 可能继承的旧值 (如手动 export 的 qwen3)。
 export DISCORD_TTS_BACKEND="gemini"
 
-# 每 bot 独立 Discord 语音角色 (Gemini TTS voice)。缺省 Orus (沉稳男声)。
-# `*` 分支不能省：没有它这个变量就是**可继承**的 —— 启动 shell 里只要已经有值
-# （比如先起过 bunny 的那个 shell 又去起别人），后面每个 bot 都会静默用上别人的
-# 声音。实测五个 bot 全成了 Aoede，也就是全在用巴尼的嗓子说话，无任何报错，
-# 只能靠耳朵发现。跟上面 DISCORD_TTS_BACKEND 那条是同一个道理。
-case "$BOT_NAME" in
-    bunny) export DISCORD_TTS_VOICE="Aoede" ;;   # 巴尼: 轻快女声
-    *)     export DISCORD_TTS_VOICE="Orus"  ;;   # 其余: 沉稳男声
-esac
+# Discord 语音音色**不在这里设** —— 它是每 bot 一份的配置，跟 token / 频道号
+# 一样存在 Firestore `bots/{name}.channels.discord.tts_voice`，由 sidecar 启动时
+# 读取并无条件覆盖 env。放 shell 里做过一次，结果环境变量被继承，五个 bot 全用了
+# 同一个声音且毫无报错（见 commit 21ccc1b）。
 
 # Kilo 7.x serve 强制 HTTP Basic Auth（password from $KILO_SERVER_PASSWORD）。
 # Bot 的 kilo serve 是子进程，靠继承此 env var 启动；KiloWorker 用同一个值发请求。

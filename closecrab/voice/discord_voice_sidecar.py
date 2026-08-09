@@ -255,6 +255,10 @@ def _load_sidecar_config(bot_name: str) -> dict | None:
             "enabled": bool(discord_cfg.get("voice_sidecar", False)),
             "guild_id": str(data.get("guild_id", "")),
             "voice_channel_id": str(discord_cfg.get("voice_channel_id", "")),
+            # 音色跟 token / 频道号一样是**每 bot 一份**的配置，就该跟它们放在一起。
+            # 以前它是 run.sh 里的一个 export，而环境变量是会被继承的 —— 谁先起过
+            # bunny，同一个 shell 再起别人就全变成 Aoede，五个 bot 一个声音且无任何报错。
+            "tts_voice": str(discord_cfg.get("tts_voice") or ""),
         }
     except Exception as e:
         log.warning("读取 Discord sidecar 配置失败 (non-fatal): %s", e)
@@ -3017,13 +3021,18 @@ def is_sidecar_running() -> bool:
 
 
 def _spawn_sidecar_thread(
-    bot_name: str, token: str, guild_id: str, voice_channel_id: str
+    bot_name: str, token: str, guild_id: str, voice_channel_id: str,
+    tts_voice: str = ""
 ):
     """拉起 sidecar daemon 线程 (独立 loop 跑 discord.Bot)。返回 thread 或 None。
 
     开机自启 (maybe_start_discord_voice_sidecar) 和命令强制启动 (start_sidecar)
     共用这段。调用方负责校验 token / enabled。
     """
+    # **无条件赋值**，不是 setdefault —— 这一行的全部意义就是让父环境里那个可能
+    # 残留的旧值永远赢不了。Firestore 是唯一真源，没配就落 Orus。
+    os.environ["DISCORD_TTS_VOICE"] = tts_voice or "Orus"
+
     try:
         import discord  # noqa: F401
     except ImportError:
@@ -3102,7 +3111,8 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
         return None
     vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
-    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
+    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch,
+                                   cfg.get("tts_voice", ""))
     if thread is not None:
         # 后台验证：15s 后检查是否真的连上了语音频道，没连上就清除持久化标记
         import threading as _th
@@ -3130,7 +3140,8 @@ def start_sidecar(bot_name: str) -> tuple[bool, str]:
     if not cfg or not cfg["token"]:
         return False, "这个 bot 没配 Discord token，连不了。"
     vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
-    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
+    thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch,
+                                   cfg.get("tts_voice", ""))
     if thread is None:
         return False, "启动失败 (py-cord 未装？看 bot.log)。"
     import time
