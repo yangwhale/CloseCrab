@@ -248,8 +248,10 @@ def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) ->
             inline = head[len(v):].lstrip(":： ").strip()
             body = "\n".join(x for x in [inline, rest.strip()] if x)
             return v, body
-    # 模型没守契约：当成有话要说，宁可多播报一条也别把进展吞掉
-    return "REPORT", out
+    # 模型没守契约。**偶尔一次**当成有话要说 —— 它可能写了段好播报只是漏了抬头，
+    # 宁可多播一条也别把进展吞掉。但**连续不守**是另一回事：那说明这个探针根本
+    # 没在参与协议，每一轮都会掉进这个兜底、每一轮都播报一次。计数交给 _run_one。
+    return "MALFORMED", out
 
 
 # ── 出口 ────────────────────────────────────────────────────────────────────
@@ -713,7 +715,22 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
             notify_chat(name, body, task.get("notify_bot"))
             notify_voice(name, body, task.get("notify_bot") or "jarvis", brief=False)
         return {"name": name, "verdict": verdict}
-    elif verdict == "REPORT":
+    elif verdict in ("REPORT", "MALFORMED"):
+        # MALFORMED 连续 3 轮 = 探针没在参与协议（实测：bj 上的模型把我们的输出
+        # 契约当成 prompt injection，用英文拒绝执行）。退出码是 0、内容也像模像样，
+        # 所以退出码检查抓不到；而它每轮都掉进「违约就当 REPORT」的兜底，于是
+        # **每 60 秒播报一次拒绝声明，连播 49 轮**。REPORT 还会把 consecutive_skips
+        # 清零，停滞检测因此永远不触发。跟出错同等对待：终止 + 交接。
+        if verdict == "MALFORMED":
+            bad = (task.get("consecutive_malformed") or 0) + 1
+            upd["consecutive_malformed"] = bad
+            if bad >= 3:
+                if _finalize_error(d, name, task,
+                                   f"探针连续 {bad} 轮没有按契约输出 SKIP/REPORT/DONE，"
+                                   f"最后一次输出：{str(body)[:200]}"):
+                    return {"name": name, "verdict": "MALFORMED_FAILED"}
+        else:
+            upd["consecutive_malformed"] = 0
         notify_chat(name, body, task.get("notify_bot"))
         notify_voice(name, body, task.get("notify_bot") or "jarvis", brief=True)
         upd.update({"last_report": body, "consecutive_skips": 0, "stall_notified": False})
