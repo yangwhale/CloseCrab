@@ -981,6 +981,9 @@ def _get_persistent_source():
             # 清空 buffer + 重新 play，让新一轮的 TTS 从头开始。
             vc.stop()
             _persistent_source._consec_silence = 0
+            _persistent_source._written = 0
+            _persistent_source._real = 0
+            _persistent_source._silence = 0
             _persistent_source.clear()
             try:
                 vc.play(_persistent_source)
@@ -994,6 +997,9 @@ def _get_persistent_source():
             return _persistent_source
         # idle 停播后重新 play: 清空残留 buffer + reset idle 计数器
         _persistent_source._consec_silence = 0
+        _persistent_source._written = 0
+        _persistent_source._real = 0
+        _persistent_source._silence = 0
         _persistent_source.clear()  # 丢掉上一轮残留的 PCM，防止播旧音频
         try:
             vc.play(_persistent_source)
@@ -1139,7 +1145,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             except Exception:
                 pass
         if fid:
-            _set_progress(fid, total=source._written if _use_dc else wrote, active=False)
+            _set_progress(fid, total=wrote, active=False)
         if _use_zl:
             try:
                 _zsv.zello_signal_done_threadsafe()
@@ -1231,6 +1237,58 @@ def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
         return False
 
 
+_ipc_server = None
+
+
+def _ipc_sock_path(bot_name: str) -> str:
+    return f"/tmp/closecrab-voice-{bot_name}.sock"
+
+
+async def _start_ipc_listener(bot_name: str):
+    """Unix socket 入口：本机外部进程把一行 JSON 推进直播流。
+
+    watch-task 探针是独立进程，拿不到 sidecar 的 in-process 队列，只能走这里。
+    协议: 请求 {"text": "...", "fid": "", "backend": ""} 一行；响应 {"ok": bool} 一行。
+    fid 非空 → 按 reply 入队（不会因排队超时被丢、也不会被后来的 reply 冲掉），
+    结论类播报该带上；状态类播报留空当 hint，过期被丢是对的。
+    """
+    global _ipc_server
+    import json as _json
+
+    path = _ipc_sock_path(bot_name)
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+    async def _handle(reader, writer):
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=5)
+            payload = _json.loads(raw.decode("utf-8"))
+            text = (payload.get("text") or "").strip()
+            ok = False
+            if text and _speak_queue is not None and is_voice_connected():
+                await _enqueue_speak(text, str(payload.get("fid") or ""),
+                                     backend=payload.get("backend", ""))
+                ok = True
+            writer.write((_json.dumps({"ok": ok}) + "\n").encode())
+            await writer.drain()
+        except Exception:
+            log.exception("voice IPC 处理失败")
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    try:
+        _ipc_server = await asyncio.start_unix_server(_handle, path=path)
+        os.chmod(path, 0o600)
+        log.info("voice IPC listener 已启动: %s", path)
+    except Exception:
+        log.exception("voice IPC listener 启动失败 (不影响 TTS 主路径)")
+
+
 def _notify_feishu_voice_card(fid: str):
     """通知飞书发语音控制卡片 (复用已有的 _build_voice_control_card)。"""
     feishu = _feishu_ref
@@ -1319,6 +1377,7 @@ def _get_file_source_class():
 
         文件已是 Discord 原生 PCM 格式 (生成时即落盘), 无需再 resample。
         read() 在播放线程被调, 必须快; 文件顺序读已足够快, 不另开缓冲线程。
+        seek_to() 支持无缝跳转: 播放线程不停, 下一帧自动从新位置读。
         """
 
         FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
@@ -1327,6 +1386,7 @@ def _get_file_source_class():
             self._fid = fid
             self._f = open(path, "rb")
             self._total = total
+            self._seek_lock = threading.Lock()
             if start_byte > 0:
                 try:
                     self._f.seek(min(start_byte, total))
@@ -1336,13 +1396,23 @@ def _get_file_source_class():
             self._played = start_byte
             _set_progress(fid, played=start_byte, total=total, active=True)
 
+        def seek_to(self, byte_pos: int):
+            """无缝跳转: 原子地改文件读取位置, 播放线程无需停止。"""
+            byte_pos = max(0, min(byte_pos, self._total))
+            byte_pos -= byte_pos % self.FRAME
+            with self._seek_lock:
+                self._f.seek(byte_pos)
+                self._played = byte_pos
+            _set_progress(self._fid, played=byte_pos, active=True)
+
         def read(self) -> bytes:
-            chunk = self._f.read(self.FRAME)
-            if not chunk:
-                _set_progress(self._fid, played=self._total,
-                              total=self._total, active=False)
-                return b""
-            self._played += len(chunk)
+            with self._seek_lock:
+                chunk = self._f.read(self.FRAME)
+                if not chunk:
+                    _set_progress(self._fid, played=self._total,
+                                  total=self._total, active=False)
+                    return b""
+                self._played += len(chunk)
             _set_progress(self._fid, played=self._played, active=True)
             if len(chunk) < self.FRAME:  # 末帧补齐静音
                 chunk = chunk + b"\x00" * (self.FRAME - len(chunk))
@@ -1411,9 +1481,8 @@ def replay_file(fid: str) -> bool:
 async def _seek(fid: str, delta_frac: float) -> bool:
     """sidecar loop 内: 从当前播放位置按 delta_frac*总长 跳转 (正=前进, 负=倒退)。
 
-    实现 = 打断当前播放 + 用 _FilePCMSource(start_byte=...) 从目标点重开。
-    当前位置取自 _progress (须 fid 匹配, 直播/重播都更新它); 取不到则从头。
-    目标点 clamp 到 [0, total] 并对齐 20ms 帧边界 (FRAME=3840) 防左右声道错位。
+    优先无缝 seek: 如果当前 source 已是同 fid 的 _FilePCMSource, 直接改文件读取位置,
+    播放线程不停, 零断流。否则 fallback 到 stop→play (如从直播切换到重播)。
     """
     path = _buf_path(fid)
     if not path or not os.path.exists(path):
@@ -1436,16 +1505,27 @@ async def _seek(fid: str, delta_frac: float) -> bool:
     step = int(total * delta_frac)
     start = max(0, min(total, played + step))
     start -= start % 3840  # 对齐帧边界
+
+    # 无缝 seek: 当前 source 是同 fid 的 _FilePCMSource → 直接改读取位置, 不断流
+    FileCls = _get_file_source_class()
+    cur = getattr(vc, "source", None)
+    if cur is not None and isinstance(cur, FileCls) and getattr(cur, "_fid", None) == fid:
+        cur.seek_to(start)
+        log.info("seamless seek fid=%s delta=%+.0f%% → %.1fs/%.1fs", fid, delta_frac * 100,
+                 start / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
+        return True
+
+    # Fallback: 当前 source 不是 _FilePCMSource (如直播), 需要 stop→play
     if vc.is_playing() or vc.is_paused():
-        vc.stop()  # 打断当前 (直播或上一次重播)
-        for _ in range(40):  # 最多 ~2s 等 stop 落定
+        vc.stop()
+        for _ in range(40):
             if not vc.is_playing() and not vc.is_paused():
                 break
             await asyncio.sleep(0.05)
     try:
-        source = _get_file_source_class()(fid, path, total, start_byte=start)
+        source = FileCls(fid, path, total, start_byte=start)
         vc.play(source)
-        log.info("seek fid=%s delta=%+.0f%% → %.1fs/%.1fs", fid, delta_frac * 100,
+        log.info("seek (stop→play) fid=%s delta=%+.0f%% → %.1fs/%.1fs", fid, delta_frac * 100,
                  start / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
         return True
     except Exception:
@@ -2985,6 +3065,7 @@ def _spawn_sidecar_thread(
         _sidecar_loop = loop
         bot = _build_bot(bot_name, guild_id, voice_channel_id)
         _sidecar_bot = bot
+        asyncio.ensure_future(_start_ipc_listener(bot_name), loop=loop)
         try:
             # 用 start() 而非 run()——run() 装 signal handler 只能在主线程
             loop.run_until_complete(bot.start(token))

@@ -46,6 +46,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -200,8 +201,6 @@ def run_probe(prompt: str, prev: str, skips: int, model: str = DEFAULT_MODEL) ->
 
 # ── 出口 ────────────────────────────────────────────────────────────────────
 
-_TTS = Path.home() / ".claude/skills/tts-generator/scripts/tts-generate.py"
-_SEND_DC = Path.home() / ".claude/scripts/send-to-discord.sh"
 # REPORT 是每隔几分钟一条的状态更新，念全文会很吵。只取第一句。
 _BRIEF_MAX = 50
 _FULL_MAX = 300
@@ -227,48 +226,29 @@ def _brief(text: str) -> str:
     return t[:_BRIEF_MAX] + "…"
 
 
-def _dm_user_id(d, bot: str) -> str | None:
-    """Discord DM 目标从 bot 配置读，不写死。"""
-    try:
-        cfg = (d.collection("bots").document(bot).get().to_dict() or {})
-        ids = cfg.get("allowed_user_ids") or []
-        return str(ids[0]) if ids else None
-    except Exception:
-        return None
+def notify_voice(name: str, text: str, bot: str, brief: bool) -> None:
+    """推进 bot 的 Discord 语音频道直播流。**零 turn**，跟 notify_chat 一样是旁路。
 
+    走 sidecar 的 unix socket，跟正常 turn 的播报同一条队列同一个频道 —— 用户挂在
+    那个频道上就能听见，不用去翻 DM。sidecar 没起 / 没连语音频道 → 连不上，静默跳过。
 
-def notify_voice(d, name: str, text: str, bot: str, brief: bool) -> None:
-    """把播报念出来发到 Discord DM。**零 turn**，跟 notify_chat 一样是旁路。
-
-    不需要 bot 进程的 voice client —— discord.py 的 _send_voice_summary 也只是
-    「生成 ogg + send-to-discord.sh --voice」两步，外部脚本自己就能做。
-
-    best-effort：TTS 或 Discord 挂了都不许影响 chat 播报和 inbox 交接。
+    best-effort：语音挂了不许影响 chat 播报和 inbox 交接。
     """
-    if not _TTS.exists() or not _SEND_DC.exists():
-        return
-    uid = _dm_user_id(d, bot)
-    if not uid:
-        return
     body = _brief(text) if brief else " ".join(text.split())[:_FULL_MAX]
     if not body:
         return
     # REPORT 是轻量状态更新，语气放松；DONE 是结论，让它平实一点
     spoken = f"[casually] {body}" if brief else f"[thinking] {body}"
+    # 带 fid 的按结论入队，排队久了也不丢。REPORT 不带 —— 状态更新过期就该丢。
+    req = {"text": spoken}
+    if not brief:
+        req["fid"] = f"watch{int(time.time())}"
     try:
-        r = subprocess.run([sys.executable, str(_TTS), spoken, "--voice", "orus"],
-                           capture_output=True, text=True, timeout=180)
-        ogg = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
-        if r.returncode != 0 or not ogg or not Path(ogg).exists():
-            print(json.dumps({"warn": f"tts failed for {name}"}), file=sys.stderr)
-            return
-        env = {**os.environ, "DISCORD_DM_USER_ID": uid}
-        subprocess.run(["bash", str(_SEND_DC), "--voice", ogg],
-                       capture_output=True, timeout=120, env=env)
-        try:
-            Path(ogg).unlink()
-        except OSError:
-            pass
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(5)
+            s.connect(f"/tmp/closecrab-voice-{bot}.sock")
+            s.sendall((json.dumps(req) + "\n").encode())
+            s.recv(256)
     except Exception as e:
         print(json.dumps({"warn": f"notify_voice {name}: {e}"}), file=sys.stderr)
 
@@ -566,11 +546,11 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
         # 只有把 status 从 active 翻成 done 的那一方才写 inbox。
         if _finalize_done(d, name, task, body):
             notify_chat(name, body, task.get("notify_bot"))
-            notify_voice(d, name, body, task.get("notify_bot") or "jarvis", brief=False)
+            notify_voice(name, body, task.get("notify_bot") or "jarvis", brief=False)
         return {"name": name, "verdict": verdict}
     elif verdict == "REPORT":
         notify_chat(name, body, task.get("notify_bot"))
-        notify_voice(d, name, body, task.get("notify_bot") or "jarvis", brief=True)
+        notify_voice(name, body, task.get("notify_bot") or "jarvis", brief=True)
         upd.update({"last_report": body, "consecutive_skips": 0, "stall_notified": False})
     elif verdict == "TIMEOUT":
         # 探针没跑完。不播报（跟 SKIP 一样安静），但单独计数：连续超时说明
