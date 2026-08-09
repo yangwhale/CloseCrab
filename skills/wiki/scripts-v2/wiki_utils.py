@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Optional
 
 # ── 路径常量 ──────────────────────────────────────────────────
-WIKI_REPO = Path(os.path.expanduser("~/my-wiki-v2"))
+# 优先环境变量；否则**自定位**到本文件所在的仓库根 —— 这比写死一个绝对路径
+# 稳，也比回落到 ~/my-wiki 这种「不存在的默认值」稳（后者会静默失效：
+# 目录不存在 → 查询恒为空 → 不报错。2026-08-09 athena 就是这么被坑了半天）。
+WIKI_REPO = Path(os.environ.get("WIKI_REPO") or Path(__file__).resolve().parent.parent)
 WIKI_CONTENT = WIKI_REPO / "content"
 WIKI_RAW = WIKI_REPO / "raw"
 WIKI_PUBLIC = WIKI_REPO / "public"

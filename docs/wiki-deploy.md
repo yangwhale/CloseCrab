@@ -10,7 +10,7 @@
 | 脚本 | `skills/wiki/scripts/` | `skills/wiki/scripts-v2/` |
 | 站点生成 | 自制 HTML 模板 | [Quartz](https://quartz.jzhao.xyz/)（Node） |
 | 内容目录 | `wiki/`（HTML） | `content/`（Markdown） |
-| 索引 | `wiki-data/search-chunks.json` + `graph.json` | 同左，但由 `ingest.py` 增量维护 |
+| 索引 | `wiki-data/search-chunks.json` + `graph.json`，**查询依赖它** | **查询不依赖索引**，MCP 直接读 Markdown + `[[wikilinks]]`；`search-chunks.json` / `graph.json` 仍会由 `rebuild_incremental.py` 生成，但那是给**网站搜索页**用的 |
 | 查询 | `wiki-query.py` | `query.py`（BM25 + 图增强 + 同义词） |
 | MCP | `scripts/wiki-mcp-server.py` | `scripts-v2/wiki-mcp-server.py` |
 
@@ -44,9 +44,14 @@ export WIKI_REPO=~/my-wiki-study
 
 ```bash
 cd ~/CloseCrab/skills/wiki/scripts-v2
-python3 -c "from wiki_utils import WIKI_REPO; print(WIKI_REPO, WIKI_REPO.exists())"
-# 必须打印 True。打印 False 就是没设对，后面全都白做。
+python3 -c "from wiki_utils import WIKI_REPO, WIKI_CONTENT; print(WIKI_REPO, WIKI_CONTENT.exists())"
+# 必须打印 True。打印 False = 这台机器指错了 Wiki，后面全都白做。
 ```
+
+> `wiki_utils.py` 里 `WIKI_REPO` 的取值顺序是 **环境变量 → 本文件所在仓库根（自定位）**。
+> 早先它写死成 `~/my-wiki-v2`，导致 `deploy.sh` 的注入完全不生效 ——
+> 设了 `WIKI_REPO=~/my-wiki-study` 也照样解析到 my-wiki-v2，
+> 目录不存在 → 查询恒为空 → **不报错**。2026-08-09 已修。
 
 ---
 
@@ -58,6 +63,8 @@ python3 -c "from wiki_utils import WIKI_REPO; print(WIKI_REPO, WIKI_REPO.exists(
 | `WIKI_GCS` | — | 构建产物上传到哪个 GCS 路径 | **只构建不上传**（不会误发到别人的桶） |
 | `WIKI_URL` | — | 站点公网地址，用于生成页面链接 | 链接留空 |
 | `CC_PAGES_URL_PREFIX` | — | 从 CC Pages HTML 反向录入时的来源链接 | 来源链接留空 |
+
+> 可选依赖 **`opencc`**：装了才支持繁简互查（简体查询命中繁体页面）。没装静默降级，简体查询不受影响。
 
 都写在 `~/.claude/settings.json` 的 `env` 里（`deploy.sh` 会生成）。
 **不要靠 shell export** —— 那个会跨进程继承，改了还不在 `/proc/environ` 里显形，
@@ -78,9 +85,10 @@ mkdir -p content/{sources,entities,concepts,analyses} wiki-data
 # 3. 告诉这台机器它归谁管
 export WIKI_REPO=~/my-wiki-v2
 
-# 4. 建初始索引（空的也要建，否则 query 会报 index not found）
+# 4. 录入第一篇内容（v2 的检索直接读 Markdown，**不需要**预先建索引）
 cd ~/CloseCrab/skills/wiki/scripts-v2
-python3 ingest.py --rebuild-index
+python3 ingest.py text --slug hello --title "第一页" --text "这是第一条内容"
+#   ingest.py 的签名: {url|pdf|text} [路径] --slug X --title Y [--tags a,b]
 
 # 5. 冒烟
 python3 status.py          # 页数、类型分布、最后构建时间
@@ -108,7 +116,7 @@ content/
 
 ```
 目录：$WIKI_REPO → ~/my-wiki-v2 → ~/my-wiki → ~/my-wiki-study
-脚本：scripts/wiki-mcp-server.py → mcp-server/wiki_mcp.py → scripts/wiki_mcp.py
+脚本：scripts/wiki-mcp-server.py → scripts-v2/wiki-mcp-server.py → mcp-server/wiki_mcp.py
 ```
 
 手工注册（Claude Code）：
@@ -121,6 +129,7 @@ content/
       "type": "stdio",
       "command": "python3",
       "args": ["/绝对路径/到/你的wiki/scripts/wiki-mcp-server.py"]
+      // v2 如果放在 CloseCrab 里，路径是 skills/wiki/scripts-v2/wiki-mcp-server.py
     }
   }
 }
@@ -189,7 +198,7 @@ bash build-and-sync.sh                                                 # Quartz 
 
 | 现象 | 原因 | 怎么查 |
 |---|---|---|
-| `Search index not found` | 没建索引，或 `WIKI_REPO` 指错了 | 先跑上面第一节的验证命令 |
+| `Search index not found` | **v1 才有的报错**；v2 不读索引，出现它说明你在用 v1 脚本查 v2 目录 | 确认用的是 `scripts-v2/query.py` |
 | 脚本跑完什么也没发生 | `WIKI_REPO` 回落到不存在的默认值 | 同上。**这是最常见的一个** |
 | MCP tool 不出现 | `~/.claude.json` 里没注册，或脚本路径不存在 | `python3 <那条路径> --help` 直接跑一下 |
 | 查什么都返回一堆无关页 | 见第五节，缺相关性下限 | 看返回结果的 `matched_terms`，如果只命中虚词就是这个问题 |
