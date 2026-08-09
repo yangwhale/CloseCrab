@@ -55,8 +55,13 @@ export BOT_NAME
 export DISCORD_TTS_BACKEND="gemini"
 
 # 每 bot 独立 Discord 语音角色 (Gemini TTS voice)。缺省 Orus (沉稳男声)。
+# `*` 分支不能省：没有它这个变量就是**可继承**的 —— 启动 shell 里只要已经有值
+# （比如先起过 bunny 的那个 shell 又去起别人），后面每个 bot 都会静默用上别人的
+# 声音。实测五个 bot 全成了 Aoede，也就是全在用巴尼的嗓子说话，无任何报错，
+# 只能靠耳朵发现。跟上面 DISCORD_TTS_BACKEND 那条是同一个道理。
 case "$BOT_NAME" in
     bunny) export DISCORD_TTS_VOICE="Aoede" ;;   # 巴尼: 轻快女声
+    *)     export DISCORD_TTS_VOICE="Orus"  ;;   # 其余: 沉稳男声
 esac
 
 # Kilo 7.x serve 强制 HTTP Basic Auth（password from $KILO_SERVER_PASSWORD）。
