@@ -485,6 +485,69 @@ def _claim(d, name: str, cutoff: datetime):
     return _run(tx)
 
 
+def _finalize_error(d, name: str, task: dict, reason: str) -> bool:
+    """出错就收摊，并把摊子交给主进程。跟 `_finalize_done` 同一条路、同一个事务。
+
+    为什么不逐个预防错误：错误的花样是无穷的（PATH 里没有 claude、磁盘满、
+    Firestore 抽风、prompt 触发 API 400……）。挨个加防御是打地鼠，而且**漏掉的
+    那个一定是最贵的**——ERROR 分支既不涨 consecutive_skips 也就不触发停滞播报，
+    任务会一声不吭空转到 max_age，用户全程以为有人在盯。
+
+    所以把「出错」提成跟「跑完」平级的终态：立刻终止 + 推 inbox。主进程手上有
+    上下文和工具，它能判断是暂时抽风还是环境不对，也能直接重建一个对的。
+    一次误报的代价是主进程多花一个 turn 重建；漏报的代价是几小时的假监控。
+
+    正文里必须带**能直接粘贴的重建命令**，否则主进程还得自己去翻任务原始参数。
+    """
+    ref = d.collection(COLL).document(name)
+    msg_ref = d.collection("messages").document()
+    # 每个字段都过一次 str()：**这条路自己绝不能再抛异常**。它是「任何错误都会被
+    # 上报」这个保证的最后一环，一旦它挂了就退化回静默失败。而触发它的往往正是
+    # 脏文档——实测中一条 prompt 被写成整数的任务，让 `[:300]` 直接炸了。
+    def f(k, default=""):
+        v = task.get(k)
+        return default if v is None or v == "" else str(v)
+
+    recreate = (
+        f"python3 ~/CloseCrab/scripts/watch-task.py create --name {name} "
+        f"--interval {f('interval_sec', '120')} --model {f('model', DEFAULT_MODEL)} "
+        f"--notify-bot {f('notify_bot', 'jarvis')} --prompt '<原 prompt>'"
+    )
+    body = (
+        f"[❌ 后台任务出错自行终止 · {name}]\n"
+        f"机器：{f('host', '(不限)')}\n"
+        f"错误：{reason}\n"
+        f"已触发 {f('fire_count', '0')} 次，最后一次播报：{f('last_report', '（还没报过）')[:120]}\n\n"
+        f"原 prompt：{f('prompt')[:300]}\n\n"
+        f"请判断是环境问题还是暂时抽风。修好后重建：\n{recreate}"
+    )
+    tx = d.transaction()
+
+    @firestore.transactional
+    def _run(t):
+        snap = ref.get(transaction=t)
+        if not snap.exists or (snap.to_dict() or {}).get("status") != "active":
+            return False
+        t.set(msg_ref, {
+            "from": task.get("sender") or task.get("notify_bot") or "cron",
+            "to": task["notify_bot"],
+            "instruction": body,
+            "task_id": f"watch-{name}",
+            "status": "pending",
+            "result": "",
+            "created_at": NOW(),
+        })
+        t.update(ref, {"status": "failed", "last_error": reason[:300], "failed_at": NOW()})
+        return True
+
+    if not _run(tx):
+        return False
+    notify_chat(name, f"❌ 出错自行终止：{reason[:150]}", task.get("notify_bot"))
+    notify_voice(name, f"后台任务 {name} 出错了，已自行终止。{reason[:120]}",
+                 task.get("notify_bot") or "jarvis", brief=False)
+    return True
+
+
 def _expire_if_stale(d, name: str, task: dict, cutoff) -> bool:
     """超龄就收，**任何一台机器都能收**。返回 True 表示这一方收的。
 
@@ -530,7 +593,7 @@ def _sweep(d, now) -> int:
     doomed = []
     for s_ in d.collection(COLL).stream():
         x = s_.to_dict() or {}
-        if x.get("status") not in ("done", "cancelled", "expired"):
+        if x.get("status") not in ("done", "cancelled", "expired", "failed"):
             continue
         ts = x.get("created_at")
         # 没时间戳的终态任务永远算不出年龄，也就永远扫不掉 —— 直接收
@@ -591,11 +654,15 @@ def cmd_tick(args):
             acted.append({"name": name, "would_probe": True, "due_hkt": _hkt(nf)})
             continue
 
-        task = _claim(d, name, cutoff)
-        if task is None:
-            continue
-
+        # _claim 也得在 try 里：它会拿 interval_sec 去算 timedelta，文档里那个字段
+        # 要是脏的（比如被手改成字符串），异常从这儿冒出来会掀掉**整轮**，后面
+        # 排队的任务一个都不跑，而且从外面看只是「怎么没动静」。
+        task = x  # _claim 自己就炸的话，交接用的还是这份原始文档
         try:
+            claimed = _claim(d, name, cutoff)
+            if claimed is None:
+                continue
+            task = claimed
             acted.append(_run_one(d, name, task, cutoff))
         except Exception as e:
             # 一条任务出错不能拖垮整轮。R3 审计发现：探针崩了 / 飞书挂了 /
@@ -603,6 +670,12 @@ def cmd_tick(args):
             # 这一轮全都不跑**。一条持续坏掉的任务足以永久饿死其它所有任务，
             # 而且从外面看只是「怎么没动静」。
             print(json.dumps({"error": f"{name}: {e}"}, ensure_ascii=False), file=sys.stderr)
+            # 只记日志不够：日志没人看，而这条任务会一直错下去。交给主进程。
+            try:
+                _finalize_error(d, name, task, f"{type(e).__name__}: {e}")
+            except Exception as e2:
+                print(json.dumps({"error": f"{name} finalize_error: {e2}"}),
+                      file=sys.stderr)
             acted.append({"name": name, "verdict": "ERROR", "error": str(e)[:200]})
 
     out = {"acted": acted, "count": len(acted)}
@@ -645,11 +718,14 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
         upd["consecutive_timeouts"] = touts
         skips += 1
         upd["consecutive_skips"] = skips
-        if touts == 3:
-            notify_chat(name,
-                        f"⚠️ 探针连续 {touts} 轮超时（每轮上限 {PROBE_TIMEOUT}s），"
-                        f"这不代表任务卡住，是判断本身没跑完 —— prompt 可能太重。",
-                        task.get("notify_bot"))
+        # 连续三轮超时 = 这条任务实际上已经没在被盯了。以前只发一条飞书，
+        # 那是个**不触发任何人**的提示，任务照样空转到 max_age。跟出错同等对待：
+        # 终止 + 交接，让主进程决定是砍 prompt 还是换档位重建。
+        if touts >= 3:
+            if _finalize_error(d, name, task,
+                               f"探针连续 {touts} 轮超时（每轮上限 {PROBE_TIMEOUT}s）—— "
+                               f"prompt 可能太重，或这台机器扛不住"):
+                return {"name": name, "verdict": "TIMEOUT_FAILED"}
     else:
         skips += 1
         upd["consecutive_skips"] = skips
