@@ -74,6 +74,8 @@ def get_adjacency():
 
 
 # ── BM25 (inline, same as wiki-query.py) ──
+# ⚠️ 2026-08-09 核实：本文件没有任何注册方（deploy 注册的是
+#    $WIKI_REPO/scripts/wiki-mcp-server.py）。这份内联 BM25 同样无人调用。
 
 
 def tokenize(text):

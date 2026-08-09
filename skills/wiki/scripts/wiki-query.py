@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""wiki-query.py — Query the Wiki knowledge base using BM25 + graph augmentation.
+"""wiki-query.py — ⚠️ 已无调用方（DEPRECATED），保留仅为兼容 v1 索引格式。
+
+    2026-08-09 核实：全仓 grep 只在 docstring 和注释里提到它，**没有任何真实调用**。
+    同目录的 wiki-mcp-server.py 里那份「inline, same as wiki-query.py」的 BM25
+    同样没有注册方 —— deploy 注册的是 $WIKI_REPO/scripts/wiki-mcp-server.py。
+
+    要做检索请用 v2：$WIKI_REPO/scripts/query.py（倒排索引 + LRU + 同义词扩展）。
+    这个文件没删，是因为它和 build-search-index.py / rebuild-* 共享同一套
+    search-chunks.json 索引格式，v1 Wiki（如 Study Wiki）仍可能需要一个命令行入口。
+
+    —— 归属混乱的教训见 docs/wiki-deploy.md「先确认哪份在跑」。
+
+wiki-query.py — Query the Wiki knowledge base using BM25 + graph augmentation.
 
 Usage:
   python3 wiki-query.py "TPU v7 和 B200 谁更适合 MoE？"
