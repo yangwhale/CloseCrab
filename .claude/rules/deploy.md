@@ -21,7 +21,7 @@ globs: deploy.sh, run.sh, scripts/*.sh, scripts/*.py
 
 ## boot-autostart.sh
 - 开机自启入口，三台机器的 `@reboot` 都调它。顺序：补 cron 最小环境 → 等 DNS →
-  gcsfuse → OpenClaw Gateway → `launcher.sh start all`（顺带 cron-daemon）
+  gcsfuse → OpenClaw Gateway → `launcher.sh start all`（cron-daemon 由 run.sh 单例拉起，不在这里）
 - **幂等**：已在跑的一律跳过，所以随时可以手动执行验证，不必真重启在服役的机器
 - 改完必须用 cron 的最小环境实测，别只看那行写对了没有：
   ```

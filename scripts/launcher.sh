@@ -157,39 +157,12 @@ _local_stop() {
     echo -e "${GREEN}Bot '$bot_name' stopped${NC}"
 }
 
-# Ensure the shared cron-daemon is running on this host. Idempotent.
-# Cron jobs live in Firestore scheduled_jobs/; daemon ticks every 30s
-# to dispatch due reminders via inbox. One daemon per host is enough.
-_ensure_cron_daemon() {
-    local pid_file="/tmp/closecrab-cron-daemon.pid"
-    local script="$SCRIPT_DIR/cron-daemon.py"
-    [[ -x "$script" ]] || return 0
-    if [[ -f "$pid_file" ]]; then
-        local pid
-        pid=$(cat "$pid_file" 2>/dev/null)
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            return 0   # already running
-        fi
-        rm -f "$pid_file"
-    fi
-    echo -e "${CYAN}Starting cron-daemon (host singleton)...${NC}"
-    setsid python3 "$script" start </dev/null >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-    sleep 1
-    if [[ -f "$pid_file" ]]; then
-        echo -e "${GREEN}cron-daemon started (PID: $(cat "$pid_file"))${NC}"
-    else
-        echo -e "${YELLOW}cron-daemon may have failed to start; check ~/.claude/closecrab/cron-daemon.log${NC}"
-    fi
-}
+# cron-daemon 的单例检查已挪进 run.sh —— 它必须跟 bot 拿到同一份环境。
+# launcher / boot-autostart 各自的环境跟 run.sh 不同，在这里起会让 daemon
+# 的 PATH 跟 bot 分叉（2026-08-09 探针找不到 gcloud 就是这么来的）。
 
 _local_start() {
     local bot_name="$1"
-
-    # 放在「已在跑就早退」之前：cron-daemon 和 bot 是各自独立死活的。
-    # 放在后面的话，只要 bot 还活着就永远走不到这里 —— daemon 死了没人管，
-    # 整条定时任务 timeline 静默停摆。
-    _ensure_cron_daemon
 
     if _is_running "$bot_name"; then
         local pid=$(cat "$(_pidfile "$bot_name")")

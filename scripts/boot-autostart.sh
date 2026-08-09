@@ -115,10 +115,11 @@ ensure_gateway() {
     return 1
 }
 
-# ── 5. Bots + cron-daemon ────────────────────────────────────
+# ── 5. Bots ──────────────────────────────────────────────────
 # launcher.sh start all 会：按 registry 里的 hostname 挑出本机的 bot，
-# 逐个 _local_start（已在跑的自己跳过），并 _ensure_cron_daemon。
-# 定时任务的那条 timeline 就挂在 cron-daemon 上，所以这一步也是它的自启。
+# 逐个 _local_start（已在跑的自己跳过），每个都走 run.sh。
+# cron-daemon **不在这里起** —— 由第一个 bot 的 run.sh 以单例方式拉起，
+# 这样它跟 bot 同环境。机器上没 bot 就不该有 daemon。
 ensure_bots() {
     if (( CHECK_ONLY )); then
         log "WOULD RUN  launcher.sh start all"

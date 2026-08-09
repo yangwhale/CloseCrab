@@ -43,7 +43,7 @@ python3 scripts/config-manage.py list|show <bot>|set-channel <bot> <ch>|set-work
 python3 scripts/inbox-send.py <target_bot> "<message>"
 python3 scripts/subagent-parallel.py --inline '{"tasks":[{"label":"A","prompt":"..."}]}'
 python3 scripts/cron-tool.py add --target <bot> --in 10m|--cron "0 9 * * MON-FRI" --message "..."
-python3 scripts/cron-tool.py list|remove <id>|tick      # cron-daemon 由 launcher 自动拉起，30s tick
+python3 scripts/cron-tool.py list|remove <id>|tick      # cron-daemon 由第一个 bot 的 run.sh 单例拉起，30s tick
 python3 scripts/session-status.py <bot> [--days N]
 
 # 运维 / 健康检查

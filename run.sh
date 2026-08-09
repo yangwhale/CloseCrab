@@ -85,11 +85,30 @@ if command -v gcsfuse &>/dev/null && [ -n "$GCS_BUCKET_NAME" ] && ! mountpoint -
     fi
 fi
 
+# ── cron-daemon 单例 ─────────────────────────────────────────
+# 定时任务的 timeline 挂在它上面。**在这里起**，不在 boot-autostart / launcher
+# 里起 —— 那两处各有一份自己的环境，daemon 拿到的 PATH 就跟 bot 不一样
+# (2026-08-09 探针因此找不到 gcloud，而同机 bot 好好的)。放在 run.sh 里，
+# daemon 与 bot 同源同环境；机器上没 bot 时也就不会有 daemon。
+# 放在重启循环里每轮都查一次：daemon 中途死了，bot 下次重启会把它带回来。
+_ensure_cron_daemon() {
+    local pid_file="/tmp/closecrab-cron-daemon.pid"
+    local script="$SCRIPT_DIR/scripts/cron-daemon.py"
+    [ -f "$script" ] || return 0
+    if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$pid_file"
+    echo "[$(date)] cron-daemon 不在，拉起 (随 $BOT_NAME 同环境)"
+    setsid python3 "$script" start </dev/null >/dev/null 2>&1 &
+}
+
 # ── Bot 重启循环 ──────────────────────────────────────────────
 
 FAIL_COUNT=0
 
 while true; do
+    _ensure_cron_daemon
     python3 -m closecrab --bot "$BOT_NAME" "$@"
     EXIT_CODE=$?
 
