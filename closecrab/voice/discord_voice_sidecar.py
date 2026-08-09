@@ -158,8 +158,6 @@ class _SpeakItem:
 _speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
 _speak_consumer_task: "asyncio.Task | None" = None
 
-# 没配 voice_channel_id 的 bot 默认连这个频道 (Discord General)。多 bot 共用。
-_DEFAULT_VOICE_CHANNEL_ID = "1471064068851761165"
 
 # ─── 语音「接收」(STT) 模块级状态 ────────────────────────────────────────────
 # py-cord 2.8.0 + davey 0.1.5 原生做完 DAVE/MLS 握手 + 逐人解密, 解密后的 PCM 直接
@@ -267,20 +265,39 @@ def _load_sidecar_config(bot_name: str) -> dict | None:
 
 
 async def _resolve_voice_channel(bot, voice_channel_id: str):
-    """解析常驻语音频道：优先配置的 id，缺省取 server 第一个语音频道。"""
+    """解析常驻语音频道。**只认显式配置**，解析不到就报错返回 None。
+
+    以前这里有两层静默兜底：没配就用一个硬编码的公共频道，配了但解析不到就抓
+    guild 里的第一个语音频道。两层都是「悄悄连到别的地方」—— 频道号打错一位，
+    bot 会一声不吭地待在另一个房间，日志里一切正常，只能靠耳朵发现。
+    现在三个 bot 的频道号都显式配在 Firestore 里，没有谁需要靠猜。
+
+    缓存未命中单独处理：get_channel 走本地缓存，可能只是还没同步；那种情况
+    补一次 API fetch，而不是退回去随便找一个频道。
+    """
     import discord
 
-    if voice_channel_id:
+    if not voice_channel_id:
+        log.error("未配置 voice_channel_id（Firestore bots/<bot>.channels.discord），"
+                  "不连任何语音频道 —— 宁可不出声，也不要连错房间")
+        return None
+    try:
+        cid = int(voice_channel_id)
+    except (ValueError, TypeError):
+        log.error("voice_channel_id 不是数字: %r", voice_channel_id)
+        return None
+
+    ch = bot.get_channel(cid)
+    if ch is None:
         try:
-            ch = bot.get_channel(int(voice_channel_id))
-            if isinstance(ch, discord.VoiceChannel):
-                return ch
-        except (ValueError, TypeError):
-            pass
-    for g in bot.guilds:
-        if g.voice_channels:
-            return g.voice_channels[0]
-    return None
+            ch = await bot.fetch_channel(cid)
+        except Exception as e:
+            log.error("语音频道 %s 取不到（不存在？没权限？）: %s", cid, e)
+            return None
+    if not isinstance(ch, discord.VoiceChannel):
+        log.error("频道 %s 不是语音频道，实际是 %s", cid, type(ch).__name__)
+        return None
+    return ch
 
 
 async def _ensure_connected():
@@ -3121,7 +3138,7 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
     if not cfg["token"]:
         log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
         return None
-    vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
+    vch = cfg.get("voice_channel_id", "")
     thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch,
                                    cfg.get("tts_voice", ""))
     if thread is not None:
@@ -3150,7 +3167,7 @@ def start_sidecar(bot_name: str) -> tuple[bool, str]:
     cfg = _load_sidecar_config(bot_name)
     if not cfg or not cfg["token"]:
         return False, "这个 bot 没配 Discord token，连不了。"
-    vch = cfg.get("voice_channel_id") or _DEFAULT_VOICE_CHANNEL_ID
+    vch = cfg.get("voice_channel_id", "")
     thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch,
                                    cfg.get("tts_voice", ""))
     if thread is None:
