@@ -147,6 +147,21 @@ def _task_name(v: str) -> str:
     return v
 
 
+def _interval(v: str) -> int:
+    """间隔必须为正。
+
+    `--interval 0` 或负数会让抢占算出一个**不在未来**的 next_fire_at，于是每个
+    tick 都判定到期 —— 每 30 秒烧一个探针，一直烧到 max_age（默认 6 小时 = 720 次）。
+    参数长得完全正常，日志里也只是「一直在跑」，没人看得出是输入错了。
+    下限取 30 秒：daemon 的 tick 就是 30 秒，比它更密没有意义。
+    """
+    n = int(v)
+    if n < 30:
+        raise argparse.ArgumentTypeError(
+            f"--interval 必须 ≥30 秒（daemon tick 就是 30 秒），收到 {n}")
+    return n
+
+
 def _model_tier(v: str) -> str:
     """档位校验。非法值必须报错，不能静默退回默认 —— 否则你以为在跑 opus，
     实际跑的是 haiku，而结论看起来一样是一段中文，根本发现不了。"""
@@ -435,6 +450,38 @@ def _claim(d, name: str, cutoff: datetime):
     return _run(tx)
 
 
+def _expire_if_stale(d, name: str, task: dict, cutoff) -> bool:
+    """超龄就收，**任何一台机器都能收**。返回 True 表示这一方收的。
+
+    过期判断是纯时间判断，不需要读本机文件，所以不该锁在 host 后面。以前它在
+    `_run_one` 里，而 `_run_one` 只有本机任务才走得到 —— 于是任务被钉死在一台
+    永久下线的机器上时：没人 claim（不是自己的）、没人过期（跑不到那行）、
+    sweep 也不收（sweep 只管终态）。任务永远 active 躺在 list 里，看着像有人在盯，
+    实际什么都没在盯。
+    """
+    ts = task.get("created_at")
+    ma = task.get("max_age_sec")
+    if not ma or ts is None or (cutoff - ts).total_seconds() <= ma:
+        return False
+    ref = d.collection(COLL).document(name)
+    tx = d.transaction()
+
+    @firestore.transactional
+    def _run(t):
+        snap = ref.get(transaction=t)
+        if not snap.exists or (snap.to_dict() or {}).get("status") != "active":
+            return False
+        t.update(ref, {"status": "expired", "expired_at": NOW()})
+        return True
+
+    if not _run(tx):
+        return False
+    mins = int((cutoff - ts).total_seconds() / 60)
+    notify_chat(name, f"⏱ 已盯了 {mins} 分钟仍未结束，自动停止本 watch。",
+                task.get("notify_bot"))
+    return True
+
+
 def _sweep(d, now) -> int:
     """删掉过期的终态任务。跟 cron-tool 的 sweep 同一个理由和同一个节奏。"""
     meta = d.collection("config").document("watch_sweep")
@@ -490,6 +537,16 @@ def cmd_tick(args):
         if not nf or nf > cutoff:
             continue
 
+        # 超龄先收，且放在 host 判定之前 —— 否则钉在下线机器上的任务永远没人收。
+        if args.dry_run:
+            ts, ma = x.get("created_at"), x.get("max_age_sec")
+            if ma and ts is not None and (cutoff - ts).total_seconds() > ma:
+                acted.append({"name": name, "would_expire": True})
+                continue
+        elif _expire_if_stale(d, name, x, cutoff):
+            acted.append({"name": name, "verdict": "EXPIRED"})
+            continue
+
         # **必须在抢占之前判**：先 claim 再发现不是自己的，next_fire_at 已经被
         # 推到下一个周期了，真正该跑的那台机器这一轮就被饿死 —— 而且是静默的。
         if not _is_mine(x):
@@ -525,13 +582,7 @@ def _run_one(d, name: str, task: dict, cutoff) -> dict:
     """跑一条已经抢到手的任务。抽出来是为了让上面那个 try 的边界清清楚楚。"""
     ref = d.collection(COLL).document(name)
 
-    # 兜底：跑太久了也要收，免得任务泄漏成永久后台负担
-    age = (cutoff - task["created_at"]).total_seconds()
-    if task.get("max_age_sec") and age > task["max_age_sec"]:
-        notify_chat(name, f"⏱ 已盯了 {int(age/60)} 分钟仍未结束，自动停止本 watch。", task.get("notify_bot"))
-        ref.update({"status": "expired"})
-        return {"name": name, "verdict": "EXPIRED"}
-
+    # 超龄兜底已经上移到 cmd_tick（在 host 判定之前），这里不再重复判。
     skips = task.get("consecutive_skips") or 0
     # 老任务库里没有 model 字段，按默认档跑，不需要数据迁移
     verdict, body = run_probe(task["prompt"], task.get("last_report", ""), skips,
@@ -587,7 +638,7 @@ def main():
     c = sub.add_parser("create", aliases=["add"])
     c.add_argument("--name", required=True, type=_task_name)
     c.add_argument("--prompt", required=True, help="给探针 agent 的指令，讲清楚看哪里、怎么算跑完")
-    c.add_argument("--interval", type=int, default=120, help="秒，默认 120")
+    c.add_argument("--interval", type=_interval, default=120, help="秒，默认 120，最小 30")
     c.add_argument("--model", type=_model_tier, default=DEFAULT_MODEL,
                    help=f"探针档位 {'|'.join(MODEL_TIERS)}，默认 {DEFAULT_MODEL}。"
                         "看日志有没有变用 haiku；要读懂内容再判断用 sonnet；"

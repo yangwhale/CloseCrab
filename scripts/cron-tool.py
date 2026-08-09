@@ -299,7 +299,9 @@ def cmd_add(args):
         else:
             fire_at = next_cron_fire(args.cron, NOW(), tz)
             kind, cron_expr = "recurring", args.cron
-    except ValueError as e:
+    # OverflowError 也要接：`--in 99999999d` 的乘法在 timedelta 里溢出，抛的不是
+    # ValueError，于是一个纯粹的输入错误变成一页 traceback。
+    except (ValueError, OverflowError) as e:
         print(json.dumps({"error": str(e)}))
         sys.exit(2)
 
