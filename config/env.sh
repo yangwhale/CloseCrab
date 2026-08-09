@@ -39,13 +39,27 @@ compute_dynamic_vars() {
         CC_PAGES_WEB_ROOT="/gcs/cc-pages"
     fi
     export CC_PAGES_WEB_ROOT
+
+    # WIKI_REPO：这台机器归哪个 Wiki 管。
+    # wiki skill 的 16 个脚本都是 os.environ.get("WIKI_REPO", "~/my-wiki")，
+    # 即「环境变量优先 + 默认值兜底」。问题在于**没有任何地方记录这台机器该用哪个**，
+    # 于是全都回落到默认的 ~/my-wiki —— 而那个目录在多数机器上并不存在，
+    # 结果是一整套 rebuild-graph / build-search-index / fix-backlinks 静默失效。
+    # 这里按机器探测一次并落盘，就是那份缺失的「归属记录」。
+    if [[ -z "${WIKI_REPO:-}" ]]; then
+        for _wiki_cand in "$HOME/my-wiki-v2" "$HOME/my-wiki" "$HOME/my-wiki-study"; do
+            [[ -d "$_wiki_cand" ]] && WIKI_REPO="$_wiki_cand" && break
+        done
+    fi
+    export WIKI_REPO
 }
 
 # 需要 envsubst 替换的所有变量名（secrets + dynamic）
-CC_ENVSUBST_VARS='$ANTHROPIC_VERTEX_PROJECT_ID $CC_PAGES_URL_PREFIX $CC_PAGES_WEB_ROOT $CONTEXT7_API_KEY $GCS_BUCKET $GEMINI_API_KEY $GITHUB_PERSONAL_ACCESS_TOKEN $JINA_API_KEY $TAVILY_API_KEY'
+CC_ENVSUBST_VARS='$ANTHROPIC_VERTEX_PROJECT_ID $CC_PAGES_URL_PREFIX $CC_PAGES_WEB_ROOT $CONTEXT7_API_KEY $GCS_BUCKET $GEMINI_API_KEY $GITHUB_PERSONAL_ACCESS_TOKEN $JINA_API_KEY $TAVILY_API_KEY $WIKI_REPO'
 
 # 需要持久化到 ~/.zshenv 的变量
 CC_DYNAMIC_PERSIST=(
     CC_PAGES_URL_PREFIX
     CC_PAGES_WEB_ROOT
+    WIKI_REPO
 )
