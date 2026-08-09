@@ -1,5 +1,29 @@
 # Voice IO 部署 Quickstart
 
+> ## ⚠️ 这套栈当前没有在跑 —— 照着做能装出来，但装完没人用
+>
+> 核实于 2026-08-09：
+>
+> | | 状态 |
+> |---|---|
+> | `livekit-server` / `livekit-frontend` systemd 服务 | 两台机器上都是 `inactive` |
+> | 本文教你解析的域名（房间 wss + 网页前端） | 不响应 |
+> | `bots/*.livekit.enabled` | **8 个 bot 全部未开启** |
+> | `LiveKitVoiceIO`（本文的部署目标） | 只在 `feishu.py:5814` 构造，因上一行而从不执行 |
+>
+> **但不要因此去删 `closecrab/voice/livekit_io.py`。** 死的是「房间 + 网页前端 +
+> livekit-server」这套基础设施，不是这个文件 —— 文件里的 `CloseCrabLLM`
+> （`livekit_io.py:580`）和 `livekit.plugins.silero` 仍然承重
+> **Discord 全双工语音**（`discord_voice_sidecar.py` 复用它拼
+> STT → CloseCrabLLM → GeminiTTS 三阶段）。文件名在误导，边界在这儿。
+>
+> 那现在的语音怎么跑的？飞书/Discord 的语音消息在 Channel 层做 STT
+> （`closecrab/utils/stt.py`），TTS 走 `closecrab/voice/tts_config.py`，
+> **都不经过 LiveKit 房间**。日常语音不需要本文任何一步。
+>
+> 保留本文是因为：LiveKit infra 那部分（DNS / Caddy / 证书 / systemd）
+> 如果哪天要重启房间模式，仍然是可用的操作序列。**当参考读，别当 runbook 跑。**
+
 CloseCrab 飞书 bot 的 voice 功能基于 LiveKit。本文档教你两件事：
 
 - **A**: 在新机器上从零部署一个**带 voice 的飞书 bot**
