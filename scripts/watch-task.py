@@ -430,13 +430,18 @@ def cmd_create(args):
             "hint": f"换个名字，或先 `watch-task.py stop {args.name}`，或加 --force 覆盖",
         }, ensure_ascii=False))
         sys.exit(2)
+    prev_owner = (prev.to_dict() or {}).get("sender") if prev.exists else None
     ref.set(doc)
-    print(json.dumps({
+    out = {
         "name": args.name, "interval_sec": args.interval,
         "model": args.model, "host": doc["host"],
         "first_fire_hkt": _hkt(doc["next_fire_at"]),
         "notify_bot": doc["notify_bot"],
-    }, ensure_ascii=False))
+    }
+    if prev_owner and prev_owner != doc["sender"]:
+        out["warn"] = (f"--force 顶掉了 {prev_owner} 建的同名任务。"
+                       f"需要的话去跟 {prev_owner} 说一声。")
+    print(json.dumps(out, ensure_ascii=False))
 
 
 def cmd_list(args):
@@ -461,11 +466,20 @@ def cmd_list(args):
 def cmd_stop(args):
     # 停任务不需要探针，任何机器都得能停 —— 尤其是那台装不了 claude 的。
     ref = db().collection(COLL).document(args.name)
-    if not ref.get().exists:
+    snap = ref.get()
+    if not snap.exists:
         print(json.dumps({"error": f"watch task {args.name} not found"}))
         sys.exit(1)
     ref.update({"status": "cancelled"})
-    print(json.dumps({"name": args.name, "status": "cancelled"}))
+    out = {"name": args.name, "status": "cancelled"}
+    # 不拦跨 bot 停止（同机多 bot 是协作关系，leader 本来就该能掐掉跑飞的任务），
+    # 但**不能不吭声**：被停的那个 bot 不会回头看 Firestore，只有动手的这个
+    # 看得见输出。把原主人名字摆出来，让它自己决定要不要去说一声。
+    owner = (snap.to_dict() or {}).get("sender")
+    me = os.environ.get("BOT_NAME")
+    if owner and me and owner != me:
+        out["warn"] = f"这条任务是 {owner} 建的，不是你的。已停 —— 需要的话去跟 {owner} 说一声。"
+    print(json.dumps(out, ensure_ascii=False))
 
 
 def _claim(d, name: str, cutoff: datetime):
