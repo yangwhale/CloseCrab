@@ -20,7 +20,7 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 
 ## 能力矩阵一览
 
-**4 个 Agent Runtime · 3 个聊天平台 · 48 个内置 Skill（默认部署 39 个，其余按需 allowlist 放行）· 3 条语音通道 · 1 套统一身份和记忆。**
+**4 个 Agent Runtime · 3 个聊天平台 · 默认部署 24 个 Skill（仓库共 48 个，按 allowlist 放行）· 3 条语音通道 · 1 套统一身份和记忆。**
 
 | 维度 | 能力 |
 |---|---|
@@ -30,7 +30,7 @@ CloseCrab 把全球顶尖的 AI Agent CLI 工具包装成多平台聊天 Bot。�
 | 🧠 **共享记忆** | MEMORY.md + 100+ topic 文件 + GCS 同步 + OpenClaw sqlite 向量索引 |
 | ⏰ **Timeline（定时 + 盯梢）** | `cron-tool` 到点叫醒 · `watch-task` 起小 agent 自己判断进度，SKIP/REPORT/DONE 三态 |
 | 🤝 **Bot 团队** | 多 bot 跨机器协作 · `#team-ops` 频道派活 · Firestore inbox 实时推送 |
-| 🔧 **48 个内置 Skill** | Wiki · Imagen/TTS/音乐生成 · 飞书邮件 · 浏览器自动化 · GPU 集群验收 · skill-creator 自举 |
+| 🔧 **Skill（默认 24 个）** | Wiki · Imagen/TTS/音乐生成 · 飞书邮件 · 浏览器自动化 · GPU 集群验收 · skill-creator 自举 |
 | 📄 **CC Pages** | bot 生成 HTML 报告，一条命令发布到 GCS + 自定义域名 |
 | 🔌 **完整上游生态** | Claude Code skills · MCP servers · Gemini extensions · OpenClaw plugins |
 
@@ -170,22 +170,22 @@ python3 scripts/watch-task.py list|stop <name>
 
 ---
 
-## 48 个内置 Skill
+## 默认部署的 Skill（24 个）
 
-每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`。**deploy.sh 只 link `config/skill-allowlist.txt` 里放行的**（当前 39 个）——源码全留在仓库，临时要用某个就在 allowlist 加一行再跑 deploy。新建 skill 用 `skill-creator` 自举。
+每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`。**deploy.sh 只 link `config/skill-allowlist.txt` 里放行的**——仓库里还有 20 多个低频 skill，源码都在、默认不装，需要时在 allowlist 加一行再跑 deploy 就回来。新建 skill 用 `skill-creator` 自举。
 
 | 分类 | Skills |
 |---|---|
-| **企业办公（飞书）** | `feishu-mail` · `feishu-doc` · `feishu-sheet` · `feishu-bitable` · `feishu-user-msg` |
-| **知识管理** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `code-wiki-recon` · `paper-explainer` · `fireworks-tech-graph` · `memory-gc` · `memory-lint` |
-| **多媒体生成** | `imagen-generator` · `veo-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `frontend-slides` · `deck-builder` · `math-video-tutor` · `multimodal-explainer` · `live-canvas` |
-| **浏览器 / 阅读** | `browser-cli`（CDP 直连，比 MCP 省 40 倍 token）· `wechat-reader` · `docx-form-filler` |
-| **GPU 集群** | `nvl72-qa`（GB200/GB300 验收：DCGM 诊断 · NCCL 带宽 · 跨域多节点 · 故障节点处理）· `lustre-mounter` |
-| **系统 / 环境** | `tmux-installer` · `tmux-orchestrator` · `zsh-installer` · `bwrap-bypass` · `vscode-reference` · `smoke-test` · `cc-pages-backup` |
-| **学习 / 生活** | `chinese-dictation`（听写练习页）· `lesson-read-aloud`（课文朗读）· `study-material` · `weather-forecast` · `hk-bus` · `hk-share-award-tax-dipn38` |
-| **元能力** | `skill-creator`（自举）· `agent-teams` · `evolution`（三方互评优化 worker）· `bot-config` · `chat-style` · `page-style` · `notify` · `issue-handler` · `session-handoff` · `gemini-ui-reviewer` |
+| **知识与记忆** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `session-handoff`（会话崩了写交接） |
+| **多媒体生成** | `imagen-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `deck-builder`（PPT / Google Docs）· `live-canvas`（实时白板讲解） |
+| **浏览器 / 阅读** | `browser-cli`（CDP 直连，比 MCP 省 40 倍 token）· `wechat-reader`（公众号文章，绕验证码） |
+| **飞书** | `feishu-mail`（企业邮箱收发）· `feishu-user-msg` |
+| **GPU 集群** | `nvl72-qa`（GB200/GB300 验收：DCGM 诊断 · NCCL 带宽 · 跨域多节点 · 故障节点处理） |
+| **生活 / 本地** | `weather-forecast`（香港天文台 + Open-Meteo）· `hk-bus`（Maps + KMB/Citybus 实时到站）· `hk-share-award-tax-dipn38`（香港股票报税 DIPN 38） |
+| **运维** | `smoke-test`（部署后健康检查）· `cc-pages-backup` · `bot-config` |
+| **元能力** | `skill-creator`（自举）· `agent-teams`（团队协调）· `evolution`（三方互评优化 worker）· `notify`（多平台通知）· `chat-style` / `page-style`（输出风格，注入式） |
 
----
+> 部分 skill 依赖内部环境（Google 内网 MCP、客户群追踪等），放在私有仓库，不在这份清单里。
 
 ## 跨 Worker 通用脚本
 

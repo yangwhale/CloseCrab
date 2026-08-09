@@ -22,22 +22,14 @@ wiki
 # === B 档: 周/月使用 (15) ===
 bot-config
 browser-cli
-chrome-browser
-code-wiki-recon
 customer-qa-tracker
 feishu-mail
-fireworks-tech-graph
-frontend-slides
-gemini-cli
-go-eat
 weather-forecast
 google-internal-mcp
 imagen-generator
 music-generator
-internal-doc-site
 page-style
 skill-creator
-vector
 ant-tpu-sync
 live-canvas
 cc-pages-backup
@@ -65,8 +57,18 @@ tpu-v7-cluster
 
 # === 2026-08-09 补：使用频次不低但一直没进 allowlist（等于用得着却没装）===
 hk-bus
-memory-gc
-memory-lint
-multimodal-explainer
 feishu-user-msg
 
+# === 2026-08-09 精简：以下按「SKILL.md 实际被加载次数」判定为低频，移出 allowlist ===
+# 源码都还在仓库里，需要时加回一行 + 跑 deploy 即可。
+# chrome-browser         — 被 browser-cli 取代（CDP 直连，省 40 倍 token）
+# code-wiki-recon        — 低频，需要时加回
+# fireworks-tech-graph   — 低频，需要时加回
+# frontend-slides        — 被 deck-builder 取代
+# gemini-cli             — 有 Gemini worker，不需要再从 skill 里调
+# go-eat                 — 食堂菜单，几乎不用
+# internal-doc-site      — 低频，需要时加回
+# memory-gc              — 2026-08-09 我基于坏指标加的，实测低频，撤回
+# memory-lint            — 同上，撤回
+# multimodal-explainer   — 同上，撤回
+# vector                 — Salesforce CRM，几乎不用
