@@ -920,6 +920,9 @@ Skill 源码在 `skills/`（public，48 个）；另可选地把自己的私有 
 
 ## CC Wiki — 个人知识 Wiki
 
+> **要在别的机器上部署 Wiki，看 [wiki-deploy.md](wiki-deploy.md)** —— 那里讲了 v1/v2 差异、
+> `WIKI_REPO` 归属探测、索引与 MCP 注册，以及中文检索缺相关性下限这个坑。
+
 受 [Andrej Karpathy 的 LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 启发，CloseCrab 内置了一个 LLM 驱动的个人知识 Wiki 系统。核心理念：**知识应该编译一次、持续增值，而不是每次从原始文档重新检索。**
 
 传统 RAG 每次查询都要从原始文档检索碎片再拼凑答案。CC Wiki 反其道而行——将知识 **编译** 为结构化的 HTML 页面，交叉引用已建好，矛盾已标记，综合分析已完成。每次录入新资料，不只是存档，而是触发级联更新，让整个知识图谱变得更完整。
