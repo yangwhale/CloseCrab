@@ -1,5 +1,20 @@
 # LiveKit Voice Channel — 实施 Plan
 
+> ## ⚠️ 状态：房间模式已停用（核实于 2026-08-09）
+>
+> `livekit-server` / `livekit-frontend` 两台机器上都是 `inactive`，本文涉及的
+> 域名不响应，`bots/*.livekit.enabled` **8 个 bot 全部未开启**。
+>
+> **但别删 `closecrab/voice/livekit_io.py`** —— 死的是「房间 + 网页前端 +
+> livekit-server」这套基础设施，不是这个文件。文件里的 `CloseCrabLLM`（:580）
+> 和 `livekit.plugins.silero` 仍然承重 **Discord 全双工语音**。
+>
+> 日常语音走的是 Channel 层 STT（`closecrab/utils/stt.py`）+
+> `closecrab/voice/tts_config.py`，**不经过 LiveKit 房间**。
+>
+> 保留本文是因为选型过程和 infra 操作序列仍有参考价值。**当史料读，别当 runbook 跑。**
+
+
 > 配套设计文档：[livekit-voice-channel-design.md](./livekit-voice-channel-design.md)
 > 范围与不做的事见设计文档 §6
 > **Plan 版本**：v2（2026-05-04，配合 design v2 "双推 + IO 模式" 方案）

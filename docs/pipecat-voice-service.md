@@ -1,5 +1,14 @@
 # Pipecat MCP 语音服务部署指南
 
+> ## ⚠️ 状态：从未上线，全仓零 pipecat 代码（核实于 2026-08-09）
+>
+> 唯一提到 pipecat 的地方是 `deploy.sh:1054-1056` —— 一段**删除**遗留
+> pipecat MCP 配置的清理代码。没有实现、没有调用方、零入链。
+>
+> 语音最终走的是另一条路（Channel 层 STT + `voice/tts_config.py`）。
+> 本文保留为选型记录，**不要照着实施**。
+
+
 > Pipecat MCP Server 通过 MCP 协议暴露语音 I/O 工具，让 Claude Code bot 具备 listen/speak 能力。WebRTC 前端供浏览器直连。
 
 **仓库**: <https://github.com/yangwhale/pipecat-mcp-server>（fork 自 pipecat-ai/pipecat-mcp-server）

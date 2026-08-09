@@ -359,14 +359,20 @@ OpenClaw 模型配置分两层：
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic-vertex/claude-opus-4-6",
+        "primary": "anthropic-vertex/claude-opus-4-7",
         "fallbacks": [
+          "anthropic-vertex/claude-opus-4-6",
           "anthropic-vertex/claude-sonnet-4-6",
           "google/gemini-2.5-flash"
         ]
       },
-      "subagents": { "model": { "primary": "google/gemini-3.1-flash-lite-preview" } },
-      "compaction": { "model": "google/gemini-2.5-flash" }
+      "subagents": {
+        "model": {
+          "primary": "anthropic-vertex/claude-opus-4-6",
+          "fallbacks": ["anthropic-vertex/claude-sonnet-4-6", "google/gemini-2.5-flash"]
+        }
+      },
+      "compaction": { "model": "anthropic-vertex/claude-sonnet-4-6" }
     }
   }
 }
@@ -374,11 +380,20 @@ OpenClaw 模型配置分两层：
 
 | 角色 | 模型 | 用途 |
 |------|------|------|
-| Primary | `anthropic-vertex/claude-opus-4-6` | 主力 Agent |
-| Fallback 1 | `anthropic-vertex/claude-sonnet-4-6` | 备用 |
-| Fallback 2 | `google/gemini-2.5-flash` | 二级备用 |
-| Subagent | `google/gemini-3.1-flash-lite-preview` | 子代理 / 图片 / PDF |
-| Compaction | `google/gemini-2.5-flash` | Context 压缩 |
+| Primary | `anthropic-vertex/claude-opus-4-7` | 主力 Agent |
+| Fallback 1 | `anthropic-vertex/claude-opus-4-6` | 同族降一代 |
+| Fallback 2 | `anthropic-vertex/claude-sonnet-4-6` | 备用 |
+| Fallback 3 | `google/gemini-2.5-flash` | 末级备用 |
+| Subagent | `anthropic-vertex/claude-opus-4-6`（带自己的 fallback 链） | 子代理 |
+| Compaction | `anthropic-vertex/claude-sonnet-4-6` | Context 压缩 |
+
+> **fallback 链必须同 provider 优先**。子代理和 compaction 各自要有完整链 ——
+> 缺链的那一个会在 provider 不可用时跨 provider 退，而退到的 model 会被写进
+> `sessions.json` 的 `modelOverride` 并且 **sticky 不会自己清除**，
+> 表现是「配置写着 A，卡片一直显示 B」。这个坑 heartbeat 上踩过一次。
+
+以上为 `config/openclaw.json` + `config/openclaw-models.json` 的当前值
+（核实于 2026-08-09）。**改配置后记得同步这张表** —— 它已经漂过一代。
 
 ### 切换主模型
 

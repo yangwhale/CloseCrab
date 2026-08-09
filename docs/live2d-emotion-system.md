@@ -1,5 +1,12 @@
 # Live2D 情绪可视化系统
 
+> ## ⚠️ 状态：部分失效（核实于 2026-08-09）
+>
+> 依赖的 LiveKit 网页前端已停用，所以 §6（前端接入）没有落点。
+> §1-5 的情绪分类与表情映射设计本身与前端无关，仍可参考。
+> 仓库里只有 `scripts/download-live2d-models.sh`，没有运行时代码。
+
+
 > AI 角色通过 Live2D 实时展示 Gemini TTS 情绪标签对应的面部表情。本文档是完整的设计和实现参考，为集成到 LiveKit 语音助手前端做准备。
 
 **线上 Demo**: <https://cc.higcp.com/pages/ai-live2d-v2-20260506.html>

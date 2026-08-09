@@ -1,5 +1,20 @@
 # LiveKit 中文语音助手部署指南（Phase 1 PoC 历史档案）
 
+> ## ⚠️ 状态：房间模式已停用（核实于 2026-08-09）
+>
+> `livekit-server` / `livekit-frontend` 两台机器上都是 `inactive`，本文涉及的
+> 域名不响应，`bots/*.livekit.enabled` **8 个 bot 全部未开启**。
+>
+> **但别删 `closecrab/voice/livekit_io.py`** —— 死的是「房间 + 网页前端 +
+> livekit-server」这套基础设施，不是这个文件。文件里的 `CloseCrabLLM`（:580）
+> 和 `livekit.plugins.silero` 仍然承重 **Discord 全双工语音**。
+>
+> 日常语音走的是 Channel 层 STT（`closecrab/utils/stt.py`）+
+> `closecrab/voice/tts_config.py`，**不经过 LiveKit 房间**。
+>
+> 保留本文是因为选型过程和 infra 操作序列仍有参考价值。**当史料读，别当 runbook 跑。**
+
+
 > **⚠️ 本文档是 Phase 1 PoC 阶段的部署记录，仅作历史参考。**
 >
 > Phase 2 后 LLM 已并入 bot 进程内（`closecrab/voice/livekit_io.py`），`livekit-agent.service` 不再使用。
@@ -9,7 +24,7 @@
 > `scripts/install-livekit.sh` 的实现参考；(2) 排查老机器上的 PoC 残留时需要它。
 
 **线上地址**: <https://live.higcp.com>（前端） + `wss://livekit.higcp.com`（LiveKit signaling + RTC）
-**当前实例**: GCP `closecrab-live`，asia-east2-c（HK），外网 IP `35.220.227.219`
+**当时的实例**: GCP asia-east2-c（HK）的一台 VM（**已停用**，见文首状态说明）
 
 ---
 

@@ -1,5 +1,20 @@
 # LiveKit Voice Channel — 设计文档
 
+> ## ⚠️ 状态：房间模式已停用（核实于 2026-08-09）
+>
+> `livekit-server` / `livekit-frontend` 两台机器上都是 `inactive`，本文涉及的
+> 域名不响应，`bots/*.livekit.enabled` **8 个 bot 全部未开启**。
+>
+> **但别删 `closecrab/voice/livekit_io.py`** —— 死的是「房间 + 网页前端 +
+> livekit-server」这套基础设施，不是这个文件。文件里的 `CloseCrabLLM`（:580）
+> 和 `livekit.plugins.silero` 仍然承重 **Discord 全双工语音**。
+>
+> 日常语音走的是 Channel 层 STT（`closecrab/utils/stt.py`）+
+> `closecrab/voice/tts_config.py`，**不经过 LiveKit 房间**。
+>
+> 保留本文是因为选型过程和 infra 操作序列仍有参考价值。**当史料读，别当 runbook 跑。**
+
+
 > 本文档定义 LiveKit voice 作为飞书 channel 的"语音 IO 模式"接入到 CloseCrab 的设计。
 > 配套实施计划见 [livekit-voice-channel-plan.md](./livekit-voice-channel-plan.md)。
 > 历史的"独立部署版" runbook 见 [livekit-voice-service.md](./livekit-voice-service.md)。
@@ -443,7 +458,7 @@ Firestore 日志结构不变。`logs/{id}` 里通过 `metadata.source=stt`（语
 
 **关键利好**：tianmaojingling 已经跑在 closecrab-live 上，跟 LiveKit Server 同机器，voice IO 直接进 tianmaojingling 进程，全部本地通信，零跨网络跳数。
 
-DNS：`live.higcp.com` 和 `livekit.higcp.com` → closecrab-live IP `35.220.227.219`（已配）
+DNS：`live.higcp.com` 和 `livekit.higcp.com` → 该 VM 的公网 IP（部署时填自己的）
 
 ---
 
