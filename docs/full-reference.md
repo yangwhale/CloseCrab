@@ -314,8 +314,9 @@ GEMINI_API_KEY — Gemini CLI（可选）
 
 ```bash
 # 创建 bot 时指定白名单（Discord User ID）
-python3 scripts/config-manage.py create mybot --channel discord \
-  --token "BOT_TOKEN" --allowed-user-ids 123456789
+python3 scripts/config-manage.py create mybot --channel discord --token "BOT_TOKEN"
+# 白名单不是 create 的参数（create 只有 --allowed-open-ids 给飞书用），事后单独设：
+python3 scripts/config-manage.py set mybot allowed_user_ids '[123456789]'
 
 # 或事后在 Firestore 的 bots/mybot 文档中添加 allowed_user_ids 数组
 ```
@@ -964,8 +965,10 @@ Skill 源码在 `skills/`（public，48 个）；另可选地把自己的私有 
 
 ```bash
 # 一条命令完成：保存原文 → 创建骨架页面 → 重建索引 → 同步发布
-python3 ingest-pipeline.py pdf paper.pdf --slug my-paper --title "Paper Title" --tags "ml,training"
-python3 ingest-pipeline.py url --slug article --title "Article" --tags "infra" --text "content..."
+# v1（脚本在 skills/wiki/scripts/，部署后 symlink 到 ~/.claude/skills/wiki/scripts/）
+python3 ~/.claude/skills/wiki/scripts/ingest-pipeline.py pdf paper.pdf --slug my-paper --title "Paper Title" --tags "ml,training"
+
+# v2 用 $WIKI_REPO/scripts/ingest.py，签名不同，见 docs/wiki-deploy.md
 ```
 
 Bot 自动完成体力活（存档、建索引、同步），LLM 专注于有价值的部分：填充详细内容、识别实体和概念、建立交叉引用。PDF 提取支持四级降级链（pymupdf4llm → markitdown → pdfminer → pypdf）。
@@ -973,7 +976,8 @@ Bot 自动完成体力活（存档、建索引、同步），LLM 专注于有价
 **Query — 知识检索**
 
 ```bash
-python3 wiki-query.py "TPU v7 和 B200 谁更适合 MoE？" --top-k 5 --format json
+# v1（已无调用方，见文件头标注）；v2 请用 $WIKI_REPO/scripts/query.py
+python3 ~/.claude/skills/wiki/scripts/wiki-query.py "TPU v7 和 B200 谁更适合 MoE？" --top-k 5 --format json
 ```
 
 BM25 关键词匹配 + 知识图谱增强（1-hop 邻居扩展），返回相关页面和匹配段落。好的分析结果可以回存为新的 analysis 页面——**每次查询都在让 Wiki 变得更好**。

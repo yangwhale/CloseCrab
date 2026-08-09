@@ -512,7 +512,10 @@ scripts/boot-autostart.sh [--check]
 scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 
 # 远程部署（多 bot 调度）
-scripts/dispatch-bot.sh deploy|recall|move|check <bot> <host>
+scripts/dispatch-bot.sh deploy <bot> <host>   # 三种动作签名不同，别套同一个模板
+scripts/dispatch-bot.sh move   <bot> <host>
+scripts/dispatch-bot.sh recall <bot>          # 不收 host
+scripts/dispatch-bot.sh check  <ssh_host>     # 只收 host，不收 bot
 
 # Runtime 切换
 scripts/config-manage.py set-worker-type <bot> claude|openclaw|kilo|gemini
