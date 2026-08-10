@@ -137,6 +137,51 @@ def _buf_path(fid: str) -> str:
         return ""
     return os.path.join(_BUF_DIR, f"{fid}.pcm")
 
+
+_BUF_RETENTION_SEC = 7 * 86400   # 重播缓存保留 7 天
+_BUF_GC_MIN_INTERVAL = 3600      # 最多每小时扫一次目录
+_last_buf_gc = [0.0]
+
+
+def _maybe_gc_buf_dir() -> None:
+    """按需清掉过期的重播缓存 (每小时最多扫一次, 落盘时顺带触发)。
+
+    这个目录**原先完全没有清理**: 2026-08-10 查的时候攒了 2359 个文件 / 46GB,
+    最老的是一个月前的 —— 未压缩 48k/stereo/s16 PCM, 一分钟音频约 11MB,
+    按当时的用量每天涨 1.5GB 左右。
+
+    保留 7 天的依据: 重播按钮只在语音卡片上, 实际会被点的是刚发出的那条;
+    缓存不在时 `_replay()` 会 log warning 并返回 False, 不会崩。
+
+    zello sidecar 往同一个目录落盘, 共用这里的清理 —— 只要有一侧在跑就够了。
+    """
+    now = time.time()
+    if now - _last_buf_gc[0] < _BUF_GC_MIN_INTERVAL:
+        return
+    _last_buf_gc[0] = now
+
+    cutoff = now - _BUF_RETENTION_SEC
+    removed = freed = 0
+    try:
+        with os.scandir(_BUF_DIR) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                    if st.st_mtime >= cutoff:
+                        continue
+                    os.unlink(entry.path)
+                    removed += 1
+                    freed += st.st_size
+                except OSError:
+                    continue          # 正在被别的进程写/已消失, 跳过就好
+    except OSError:
+        return                        # 目录还不存在: 下次落盘会建
+    if removed:
+        log.info("TTS 重播缓存 GC: 删除 %d 个文件, 释放 %.2f GB",
+                 removed, freed / 1024 ** 3)
+
 # 模块级状态：给飞书线程跨线程调用 speak_text() 用。sidecar 未启动时全为 None/0，
 # speak_text() 据此静默跳过。
 _sidecar_loop: "asyncio.AbstractEventLoop | None" = None
@@ -1084,6 +1129,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     if bpath:
         try:
             os.makedirs(_BUF_DIR, exist_ok=True)
+            _maybe_gc_buf_dir()      # 顺带回收过期缓存, 自带每小时节流
             buf_f = open(bpath, "wb")
         except Exception:
             log.exception("打开 buffer 落盘文件失败: %s", bpath)
