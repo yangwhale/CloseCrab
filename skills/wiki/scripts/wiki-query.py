@@ -7,7 +7,11 @@
 
     要做检索请用 v2：$WIKI_REPO/scripts/query.py（倒排索引 + LRU + 同义词扩展）。
     这个文件没删，是因为它和 build-search-index.py / rebuild-* 共享同一套
-    search-chunks.json 索引格式，v1 Wiki（如 Study Wiki）仍可能需要一个命令行入口。
+    search-chunks.json 索引格式。（更正：Study Wiki **不是** v1 —— 它也是
+    content/ + jieba + 相关性闸门的 v2 结构，只是脚本集更精简。所以目前
+    并没有哪个 Wiki 真的需要这个入口；search-chunks.json 最后写入停在
+    2026-04-12，两个站点各用自己的 _pagefind / contentIndex.json。
+    留着纯粹是「删除的收益不抵误删的风险」。）
 
     —— 归属混乱的教训见 docs/wiki-deploy.md「先确认哪份在跑」。
 
