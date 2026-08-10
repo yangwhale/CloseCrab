@@ -171,8 +171,118 @@ def size_envelope() -> dict:
     }
 
 
+
+# ── 历史落盘与环比 ────────────────────────────────────────────────
+# 加于 2026-08-10：此前脚本跑完只打印、不存，于是「这周比上周多/少了多少」
+# 只能靠人自己记。而这个脚本的全部价值就在趋势上 —— 单次绝对值是估算，
+# 误差不小；但同一套估算方法前后相减，误差大部分抵消，差值反而可信。
+def total_tokens(report: dict) -> int:
+    """总 token。独立算，不依赖 to_markdown ——
+    首版我直接写 report["total_tokens"]，那个 key 只在 markdown 路径下存在，
+    于是 `--json`（不走 to_markdown）直接 KeyError。典型的「假设某处会顺手
+    塞好数据」。"""
+    return sum(s.get("est_tokens", s.get("tokens", 0))
+               for s in report["sections"].values())
+
+
+HISTORY = HOME / ".claude" / "prompt-audit-history.jsonl"
+# 变化小于这个比例就不报，避免估算抖动被当成信号
+NOISE_FLOOR = 0.02
+
+
+def load_prev(bot: str):
+    """取同一个 bot 上一次的记录。按 bot 分开 —— 不同 bot 的 prompt 段本来就不一样。"""
+    if not HISTORY.exists():
+        return None
+    prev = None
+    for line in HISTORY.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue          # 手工编辑过的坏行不该让整个脚本挂掉
+        if rec.get("bot_name") == bot:
+            prev = rec
+    return prev
+
+
+def append_history(report: dict):
+    """只存数字，不存明细 —— 明细每次都能重算，存了徒增体积。"""
+    HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    slim = {
+        "timestamp": report["timestamp"],
+        "bot_name": report["bot_name"],
+        "total": total_tokens(report),
+        "sections": {k: v.get("est_tokens", v.get("tokens", 0))
+                     for k, v in report["sections"].items()},
+        # 这几个是解释变化用的：token 变了要能说出是"东西变多了"还是"东西变大了"
+        "counts": {
+            "mcp_servers": report["sections"]["3. MCP tool descriptions"].get("count"),
+            "plugins": report["sections"]["4. Plugin tool descriptions"].get("enabled_count"),
+            "skills": report["sections"]["5. Skills catalog"].get("count"),
+            "memory_lines": report["sections"]["6. MEMORY.md auto-load"].get("lines"),
+        },
+    }
+    with HISTORY.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(slim, ensure_ascii=False) + "\n")
+
+
+def diff_lines(report: dict, prev: dict):
+    """生成环比段落。没有历史就返回空 —— 第一次跑不该假装有对比。"""
+    if not prev:
+        return ["## 环比", "", "_首次记录，下次运行起有环比。_", "", ""]
+    out = ["## 环比（对比 " + str(prev.get("timestamp", "?"))[:16] + "）", ""]
+    now_total = total_tokens(report)
+    d_total = now_total - prev.get("total", 0)
+    sign = "+" if d_total >= 0 else ""
+    out.append(f"**总计 {sign}{d_total:,} tokens** "
+               f"({prev.get('total', 0):,} → {now_total:,})")
+    out.append("")
+    rows = []
+    for name, sec in report["sections"].items():
+        now = sec.get("est_tokens", sec.get("tokens", 0))
+        was = prev.get("sections", {}).get(name, 0)
+        d = now - was
+        if was and abs(d) / max(was, 1) < NOISE_FLOOR:
+            continue
+        if d == 0:
+            continue
+        rows.append((abs(d), name, was, now, d))
+    if not rows:
+        out.append("_各段均无显著变化（阈值 "
+                   f"{int(NOISE_FLOOR * 100)}%）。_")
+        out.append("")
+        out.append("")
+        return out
+    out.append("| 段 | 上次 | 本次 | 变化 |")
+    out.append("|---|---:|---:|---:|")
+    for _, name, was, now, d in sorted(rows, reverse=True):
+        out.append(f"| {name} | {was:,} | {now:,} | {'+' if d > 0 else ''}{d:,} |")
+    out.append("")
+    # 数量变化 —— 用来区分「东西变多了」和「东西变大了」
+    cn = {
+        "mcp_servers": report["sections"]["3. MCP tool descriptions"].get("count"),
+        "plugins": report["sections"]["4. Plugin tool descriptions"].get("enabled_count"),
+        "skills": report["sections"]["5. Skills catalog"].get("count"),
+        "memory_lines": report["sections"]["6. MEMORY.md auto-load"].get("lines"),
+    }
+    cp = prev.get("counts") or {}
+    moved = [f"{k} {cp.get(k)}→{v}" for k, v in cn.items()
+             if cp.get(k) is not None and cp.get(k) != v]
+    if moved:
+        out.append("**数量变化**：" + " · ".join(moved))
+        out.append("")
+        out.append("_token 变了先看这行：数量没动而 token 动了，说明是单个条目变长，"
+                   "不是多装了东西。_")
+        out.append("")
+    out.append("")
+    return out
+
+
 def to_markdown(report: dict) -> str:
-    total = sum(s.get("est_tokens", s.get("tokens", 0)) for s in report["sections"].values())
+    total = total_tokens(report)
 
     lines = [
         f"# 📋 Cold-start Prompt Audit — {report['timestamp']}",
@@ -224,6 +334,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bot", default="default", help="模拟某 bot 的 system prompt")
     p.add_argument("--json", action="store_true", help="JSON 输出")
+    p.add_argument("--no-save", action="store_true", help="不写入历史（试跑用）")
+    p.add_argument("--history", action="store_true", help="打印历史趋势后退出")
     args = p.parse_args()
 
     from datetime import datetime, timezone
@@ -245,10 +357,21 @@ def main():
         "sections": sections,
     }
 
+    prev = load_prev(args.bot)
+
     if args.json:
+        report["prev"] = prev
         print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     else:
-        print(to_markdown(report))
+        md = to_markdown(report)
+        # 环比插在总估算之后、breakdown 之前 —— 变化比绝对值更该先看到
+        marker = "## 9 大段 breakdown"
+        block = "\n".join(diff_lines(report, prev))
+        md = md.replace(marker, block + marker, 1) if marker in md else md + "\n" + block
+        print(md)
+
+    if not args.no_save:
+        append_history(report)
 
 
 if __name__ == "__main__":
