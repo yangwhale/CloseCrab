@@ -885,6 +885,35 @@ python3 scripts/watch-task.py list|stop <name>
 Zello 全网只有一个账号，`/zelloon` 会先检查有没有别的 bot 占着（同账号双登会互踢）。
 Zello 的开发者 token 由本地私钥**每次登录现签**，不写死（写死的会过期）。
 
+### 接收方向怎么工作的（三条通道各不相同）
+
+发送方向都是 TTS，接收方向差别很大，排查时别串了：
+
+| 通道 | 音频从哪来 | 断句 | STT |
+|---|---|---|---|
+| 语音消息 | 平台给一个完整音频文件 | 不需要 | `utils/stt.py` |
+| Discord 语音频道 | `vc.start_recording` 连续 PCM，DAVE/MLS 逐人解密 | **silero VAD** | Gemini STT |
+| Zello | Channel API 推 Opus 帧，PTT 天然分段 | 按 PTT 起止 | 同上 |
+
+Discord 那条最复杂：解密后的 PCM 进 sink → 连续流 → silero VAD 断句 → STT →
+**复用飞书的 `CloseCrabLLM`**（Discord 只当麦克风和喇叭）→ Gemini TTS 推回。
+`instant_ack.py` 在模型还在想的时候先出一声，避免对话空着 ——
+它被 Zello 子线程和 livekit_io 主线程共用，单独抽出来是为了避免
+Zello import livekit_io 触发 silero 的主线程注册限制。
+
+### Zello：全网单账号，这不是限制是事故来源
+
+所有 bot 共用一个 Zello 账号。同账号双登会**互相踢下线**，而被踢的一方会重连，
+于是变成无限循环。2026 年 6 月底到 7 月初实测峰值 **12396 次/天**，
+根因是多个 bot 各自回落到同一份本地配置、拿同一个账号登同一个频道。
+
+所以 `/zelloon` 必须先查 Firestore 有没有别的 bot 占着 —— 这个闸门不是优化，
+是防止风暴复活的必要条件。**只续签 token 而不修排他，风暴会当场回来。**
+
+> 顺带一个排查教训：那段时间日志"很安静"，因为 7 月 10 日开发者令牌过期后谁都登不上，
+> 踢人风暴自动停了。**安静不是变好，是坏得更彻底所以没声了。**
+> 数错误频率要按类型全量分组，别拿 `tail` 看最近几条就下结论。
+
 > **Python 3.13+ 注意**：`audioop` 已被 PEP 594 移除，`discord_voice_sidecar` 在新系统上
 > import 不了，需要先装 `audioop-lts`。`tts_config.py` 刻意做成零重依赖，不受影响。
 >
