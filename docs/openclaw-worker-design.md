@@ -135,15 +135,22 @@ OpenClaw Gateway 使用不同于 Claude Code 的工具命名。Worker 通过 `_T
 
 ```python
 _TOOL_NAME_MAP = {
-    "run_shell_command": "Bash",
-    "read_file":         "Read",
-    "write_file":        "Write",
-    "edit_file":         "Edit",
-    "list_files":        "Glob",
-    "search_files":      "Grep",
-    "web_search":        "WebSearch",
-    "web_fetch":         "WebFetch",
+    "run_shell_command":   "Bash",
+    "read_file":           "Read",
+    "write_file":          "Write",
+    "edit_file":           "Edit",
+    "list_files":          "Glob",
+    "list_directory":      "Glob",
+    "search_files":        "Grep",
+    "web_search":          "WebSearch",
+    "web_fetch":           "WebFetch",
+    "update_topic":        "update_topic",
+    "save_memory":         "save_memory",
+    "search_memory":       "search_memory",
 }
+
+# 与代码同步于 2026-08-10（closecrab/workers/openclaw_acp.py）。
+# 后 3 条是 OpenClaw 自带的记忆/话题工具，不映射成 CC 名字、原样透传。
 ```
 
 **Tool Kind 映射**（基于 ACP `tool_call_start` 事件的 `kind` 字段）：

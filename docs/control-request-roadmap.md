@@ -2,7 +2,8 @@
 
 > CC stream-json 带外控制通道。不触发 LLM turn，直接改运行中 CC 进程状态。
 > 核心价值：把「改 Firestore + 重启」的事变成「热切换、零重启、不丢 session」。
-> 所有 subtype 均 binary 2.1.143 dispatch 实测确认（offset 163.9M handler）。
+> 所有 subtype 均经 binary dispatch 实测确认（**当时版本 2.1.143**，offset 随版本变，
+> 换版本要重新定位；反编译得出的 offset 只对该 binary 成立）。
 >
 > **进度标记**：`[ ]` 未做 · `[~]` 进行中 · `[x]` 完成
 > 实现某项后在此 mark done，并记 commit hash。
@@ -58,9 +59,9 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 
 ### 2. MCP 热管理
 - subtype: `mcp_set_servers {servers:[...]}` / `mcp_reconnect` / `mcp_status` / `mcp_toggle`
-- 价值：解决两个老大难——LOAS2 cert 过期（重连不重启）+ 冷启动 token（懒加载）
+- 价值：解决两个老大难——企业 SSO 证书过期（重连不重启）+ 冷启动 token（懒加载）
 - [x] **2.1 worker.mcp_status()** — 查 MCP 连接状态。返回 `mcpServers[]`（name/status/serverInfo/config/scope/tools）。实测 8 servers 全 connected。
-- [x] **2.2 worker.mcp_reconnect(name)** — 重连挂掉的 MCP。**坑**：binary handler destructure `serverName` 非 `name`（2.1.143 offset 157555664 "Cannot destructure property 'serverName'"），传错回 `Server not found: undefined`。改 `{"serverName": name}` 后 binary 真正执行重连。主用途：LOAS2 cert 过期免冷重启。
+- [x] **2.2 worker.mcp_reconnect(name)** — 重连挂掉的 MCP。**坑**：binary handler destructure `serverName` 非 `name`（2.1.143 offset 157555664 "Cannot destructure property 'serverName'"），传错回 `Server not found: undefined`。改 `{"serverName": name}` 后 binary 真正执行重连。主用途：企业 SSO 证书过期时免冷重启。
 - [x] **2.3 /mcp 飞书命令** — `/mcp` 列 server 状态（🟢/🔴 + tools 数），`/mcp reconnect <name>` 重连。core 层 `mcp_status_cmd` / `mcp_reconnect_cmd`，channel 层 `/mcp` 分支。
 - [ ] **2.4 MCP 懒加载** — 冷启动只挂核心 MCP，按需 `mcp_set_servers` 加（砍冷启动 token，依赖 2.x）。schema 已侦察：`mcp_set_servers {servers}`、字段对齐待核。
 
@@ -68,7 +69,7 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 - subtype: `set_max_thinking_tokens {max_thinking_tokens:<int>}`
 - 价值：比 effort 更细的思考量硬上限
 - [x] **3.1 worker.set_max_thinking_tokens(n) → /think 命令** — commit 08eb176（`set_thinking_live` + bot.py `set_thinking` + feishu.py `/think <n>`，fire-and-forget）
-- ~~3.2 语音模式自动低 thinking~~ — ⚠️ **废弃**。2026-05-30 benchmark 实测（16 cells，levels 0/2048/8192/32000 × 简单 2 + 难 2）：set_max_thinking_tokens 是**自适应上限不是目标**，level=0 不稳定加速（4 题里 2 题反而更慢），延迟大头卡 Vertex 路径（cc-tw 慢 gLinux 16x）不在思考段；Opus 4.7 强到两道难题 level 0 也全对，打不出质量差。结论：thinking 控制不是「秒回」杠杆，自动切换无收益。/think 手动开关保留。
+- ~~3.2 语音模式自动低 thinking~~ — ⚠️ **废弃**。2026-05-30 benchmark 实测（16 cells，levels 0/2048/8192/32000 × 简单 2 + 难 2）：set_max_thinking_tokens 是**自适应上限不是目标**，level=0 不稳定加速（4 题里 2 题反而更慢），延迟大头卡在 Vertex 路径（不同地域的机器可差 16 倍）而不在思考段；Opus 4.7 强到两道难题 level 0 也全对，打不出质量差。结论：thinking 控制不是「秒回」杠杆，自动切换无收益。/think 手动开关保留。
 
 ---
 
@@ -112,4 +113,4 @@ fire-and-forget 类（set/apply/interrupt）直接发即可。
 7. ~~4.1–4.3 实时状态~~ — get_* spawn 不可行，废弃
 8. 其余按需（L3 rewind/plugins/feedback…）
 
-> 全部在小爱（xiaoaitongxue）单 bot 验证，未铺给其他 bot。cc-tw bots 共享同一 checkout，铺开只需各自 SIGHUP 重启。
+> 全部在单 bot 上验证，未铺给其他 bot。同机 bots 共享同一 checkout，铺开只需各自 SIGHUP 重启。

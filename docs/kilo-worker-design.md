@@ -88,12 +88,25 @@ class KiloWorker(Worker):
 
 ```python
 _TOOL_NAME_MAP = {
-    "read": "Read", "write": "Write", "edit": "Edit",
-    "multiedit": "Edit", "patch": "Edit",
-    "bash": "Bash", "glob": "Glob", "grep": "Grep",
-    "fetch": "WebFetch", "task": "Agent",
-    "todoread": "TodoWrite", "todowrite": "TodoWrite",
+    "read":          "Read",
+    "write":         "Write",
+    "edit":          "Edit",
+    "apply_patch":   "Edit",
+    "bash":          "Bash",
+    "glob":          "Glob",
+    "grep":          "Grep",
+    "webfetch":      "WebFetch",
+    "websearch":     "WebSearch",
+    "task":          "Agent",
+    "todo":          "TodoWrite",
+    "todowrite":     "TodoWrite",
+    "lsp":           "LSP",
+    "skill":         "Skill",
 }
+
+# 与代码同步于 2026-08-10（closecrab/workers/kilo.py）。
+# 注意键名易记错：是 apply_patch / webfetch / todo，
+# 不是 patch / fetch / todoread —— 写错不会报错，只是进度展示回落成原始名。
 ```
 
 SSE `message.part.updated` 事件翻译为 BotCore 期望的 stream-json dict：

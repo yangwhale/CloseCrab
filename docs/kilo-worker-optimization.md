@@ -1,6 +1,28 @@
 # KiloWorker 优化：用好 Kilo CLI 现有能力
 
-> 2026-05-09 | Status: 进行中
+> 2026-05-09 | Status: **已大部分落地，本文转为设计记录**（2026-08-10 复核）
+
+> ## ⚠️ 读之前先知道这些
+>
+> 本文写于 kilo.py 约 700 行的时候，**现在是 1343 行**，所以文中的行号引用
+> （如「kilo.py lines 434-450」）一律失效 —— 请按符号名搜，别按行号跳。
+>
+> 复核结果：
+>
+> | 文中提议 | 现状 |
+> |---|---|
+> | 用 Kilo 内置 permission 配置 | ✅ 已用（`permission` 相关 16 处） |
+> | 交给 Kilo 做 context compaction | ✅ 已接 |
+> | `_ensure_kilo_config` 生成 bot 模式配置 | ✅ 已实现 |
+> | 手动按行解析 SSE 太脆 | ⚠️ **仍是手动解析**（`_sse_reader`），但补了退避重连
+>   （`_SSE_RECONNECT_DELAYS`）和用户回显过滤，实践中没再出问题 |
+> | 用 Kilo skills | ❌ 未做（`skills` 在 kilo.py 里 0 命中） |
+>
+> 「预计净减少 ~30 行代码」这个目标没达成也不重要 —— 后来加的 SSE 重连、
+> 孤儿进程回收、model 双格式下发都是必要的，代码变多是对的。
+>
+> 当前 KiloWorker 的**运行时规则**看 `.claude/rules/workers.md` 的 KiloWorker 节，
+> 那份是跟着代码维护的；本文只当设计思路的历史记录。
 
 ## 背景
 

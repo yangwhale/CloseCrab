@@ -21,7 +21,7 @@ CloseCrab 的 ClaudeCodeWorker / OpenClawWorker 通过 stdio MCP launcher 把每
 |---|---|
 | **数据库** | 独立 `GBRAIN_HOME` 目录，各自一个 `brain.pglite` |
 | **端口** | 每 bot 绑独立 port（避免冲突） |
-| **OAuth 凭据** | 每 bot 一份 `cc-tw-{bot}-creds.json`（600 perm） |
+| **OAuth 凭据** | 每 bot 一份 `~/.gbrain/cc-tw-{bot}-creds.json`（600 perm）。`cc-tw-` 只是**默认前缀**（`gbrain_index.py:29` 的 `DEFAULT_CREDS_PATH`，沿用最早那台机器的名字），可用 `bots/{name}.gbrain.creds_path` 覆盖 —— 换机器不必改名，改了反而要同步三处代码默认值 |
 | **进程** | 每 bot 单独的 `gbrain serve --http` 长进程 |
 
 参考端口分配（自行调整）：
@@ -151,7 +151,7 @@ WantedBy=default.target
 
 ### 5. 接入 CloseCrab
 
-CloseCrab 通过 `scripts/mcp-proxy-launcher.py`（stdio → HTTP MCP 桥接）让 Claude Code 看到 GBrain。CloseCrab 启动时会自动尝试加载 `~/.gbrain/cc-tw-{bot_name}-creds.json`，找到就接入，找不到就静默跳过（bot 仍然正常运行）。
+CloseCrab 通过 `~/.gbrain/mcp-proxy-launcher.py`（stdio → HTTP MCP 桥接，**不在本仓库**）让 Claude Code 看到 GBrain。CloseCrab 启动时会自动尝试加载 `~/.gbrain/cc-tw-{bot_name}-creds.json`，找到就接入，找不到就静默跳过（bot 仍然正常运行）。
 
 确认凭据文件命名匹配你的 bot：
 
