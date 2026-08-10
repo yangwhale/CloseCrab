@@ -82,6 +82,19 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
   - `serena` 必须带 `--project <repo>`，否则每次首调都报 `No active project`，
     agent 吃一次错就退回 grep，整个 session 不再用它（2026-08-10 实测 30 天 0 调用）
   - 一台机器的 `~/.claude.json` 是**所有 bot 共用**的，改了要把这台上的 bot 都重启
+  - **浏览器操作走 `browser-cli` skill，不走 MCP**。`chrome-devtools-mcp`
+    已于 2026-08-10 从 Claude 侧移除 —— 近 7 天 48 次调用里属于它独有能力
+    （Lighthouse / heap snapshot / performance trace）的是 **0 次**，
+    其余全是 `browser-cli` 能做且便宜 40 倍的操作。真要用那三样时加回：
+    ```jsonc
+    // ~/.claude.json → mcpServers
+    "chrome-devtools-mcp": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--browserUrl", "http://127.0.0.1:9222"]
+    }
+    ```
+    加完**必须重启 bot**。Gemini CLI 那边（`~/.gemini/settings.json`）保留着
+    —— 它没有 browser-cli skill，砍了是真损失能力
 - **OpenClaw**: `~/.openclaw/openclaw.json`（deploy.sh 从 `config/openclaw.json` 模板生成）
 - **GBrain (可选)**: PGLite 记忆 + OAuth MCP，client silent-failure，详见 docs/gbrain-integration.md
 - **Secrets**: 绝不硬编码 / 不进 git — Firestore 存 tokens，GKE 用 K8s Secret 挂载
