@@ -50,6 +50,14 @@ Gemini CLI + OpenClaw + Kilo CLI。
 - `dispatch-bot.sh` — 多 bot 调度（deploy/recall/move/check）
 - `send-to-discord.sh` — 直接发 Discord 消息（webhook）
 - `sync-memory.sh` — 记忆同步（本地 ↔ private repo）
+- `install-wiki-mcp.sh` — 装 Wiki MCP（幂等，`--check` 只体检）。
+  冒烟测试**真调用每个 tool**（`wiki-mcp-smoke.py`），任一失败就不注册 ——
+  「9 个 tool 都定义着」不代表它们能跑，接口契约见 docs/wiki-deploy.md
+- `firestore-backup-cron.sh` — 周度备份，系统 crontab（纯 gcloud/git，不调 LLM）。
+  **PATH 必须含 `/snap/bin`** —— 本机 gcloud 是 snap 装的，cron 默认 PATH 没有
+- `prompt-audit.py` / `memory-audit.py` — 周一 cron 体检。
+  prompt-audit 有**两个调用方**：cron（写趋势历史）和 `main.py` 启动时
+  （必须 `--no-save`，否则每次重启都往历史里灌噪音）
 
 ## Gemini CLI 部署
 deploy.sh 第 9 步自动安装 Gemini CLI 并配置：

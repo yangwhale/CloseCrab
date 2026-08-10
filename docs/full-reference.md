@@ -1516,7 +1516,7 @@ CloseCrab/
 │       ├── firestore_inbox.py  # Bot 间实时通信（on_snapshot）
 │       ├── registry.py         # 自注册（硬件 + context 上报）
 │       └── stt.py              # 语音转文字（Gemini / Chirp2 / Whisper）
-├── skills/                     # 48 个 Skills（deploy.sh 按 allowlist 拷贝到 ~/.claude/skills/）
+├── skills/                     # 47 个 Skills（deploy.sh 按 allowlist 拷贝到 ~/.claude/skills/）
 │   └── wiki/                   # CC Wiki（Karpathy LLM Wiki 实现）
 ├── scripts/
 │   ├── launcher.sh             # 本地 bot 管理（start/stop/restart/status/logs）

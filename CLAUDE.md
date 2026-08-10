@@ -52,6 +52,13 @@ scripts/dispatch-bot.sh deploy|recall|move|check
 scripts/sync-memory.sh --push|--pull
 scripts/send-to-discord.sh --channel <id> "<msg>"
 scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
+
+# 可观测性 / 备份
+python3 scripts/memory-audit.py --action-only         # 记忆体检（周一 cron）
+python3 scripts/prompt-audit.py --bot <bot>           # cold-start token 账 + 环比
+                                                      # 启动时 main.py 也会跑，但带 --no-save 不写趋势
+scripts/firestore-backup-cron.sh                      # 周度：GCS export + 私有仓库脱敏快照
+~/CloseCrab/scripts/install-wiki-mcp.sh [--check]     # 装 Wiki MCP（幂等，见 docs/wiki-deploy.md）
 ```
 
 ## 退出码约定（run.sh 行为）
@@ -71,6 +78,10 @@ scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 - **运行时配置**: Firestore `bots/{name}`（见下方 Firestore 表）
 - **全局常量**: Firestore `config/global`（cc_pages_url、gcs_bucket）
 - **CC 环境**: `~/.claude/settings.json`（env / permissions / plugins）；**MCP**: `~/.claude.json`
+  - MCP 改动**要重启 bot 才生效** —— CLI 只在启动时读一次
+  - `serena` 必须带 `--project <repo>`，否则每次首调都报 `No active project`，
+    agent 吃一次错就退回 grep，整个 session 不再用它（2026-08-10 实测 30 天 0 调用）
+  - 一台机器的 `~/.claude.json` 是**所有 bot 共用**的，改了要把这台上的 bot 都重启
 - **OpenClaw**: `~/.openclaw/openclaw.json`（deploy.sh 从 `config/openclaw.json` 模板生成）
 - **GBrain (可选)**: PGLite 记忆 + OAuth MCP，client silent-failure，详见 docs/gbrain-integration.md
 - **Secrets**: 绝不硬编码 / 不进 git — Firestore 存 tokens，GKE 用 K8s Secret 挂载
@@ -88,6 +99,16 @@ scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 | `config/watch_sweep` / `config/inbox_sweep` | 两个清扫器的游标 |
 | `scheduled_jobs` | cron-tool 任务（job_id、target、fire_at、cron、message、status） |
 | `watch_tasks` | watch-task.py 长跑盯梢任务（name、interval、prompt、model、host） |
+
+## Firestore 备份（三层，2026-08-10 起）
+| 层 | 频率 | 防什么 |
+|---|---|---|
+| 托管 backup schedule | 每日，留 7 天 | 库整个没了 |
+| PITR | 连续 7 天 | 数据被脚本改坏 —— 能回到出事前一分钟，托管备份只能回到昨天快照 |
+| `firestore-backup-cron.sh` | 每周一 04:30 | 离线归档（GCS export）+ 配置可 diff（私有仓库脱敏 JSON） |
+
+两个 database 都已开**删除保护**。JSON 快照**不含凭据不能用于还原** ——
+要还原用 GCS export 或托管 backup。
 
 ## Bot Team 系统
 Leader（协调派活）/ Teammate（执行汇报）两种角色，配置存 `bots/{name}.team`。`build_system_prompt()` 按角色动态注入协调规则（运行时 system prompt 已含完整规则，此处仅备忘）。Leader 在 team 频道 @mention 派活，也可走 Firestore Inbox 异步通信。

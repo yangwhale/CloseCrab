@@ -34,7 +34,7 @@ CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实�
 
 ## 能力矩阵一览
 
-**4 个 Agent Runtime · 3 个聊天平台 · 默认部署 24 个 Skill（仓库共 48 个，按 allowlist 放行）· 3 条语音通道 · 1 套统一身份和记忆。**
+**4 个 Agent Runtime · 3 个聊天平台 · 默认部署 28 个 Skill（24 个公共 + 4 个私有；仓库共 47 个，按 allowlist 放行）· 3 条语音通道 · 1 套统一身份和记忆。**
 
 | 维度 | 能力 |
 |---|---|
