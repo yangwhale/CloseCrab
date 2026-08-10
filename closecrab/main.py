@@ -762,8 +762,13 @@ def main():
             )
             if not audit_script.exists():
                 return
+            # --no-save: 启动这次**不写趋势历史**。它的目的是往 bot.log 里
+            # 留一份当下快照给人看，不是记录趋势。少了这个参数，一台机器
+            # 5 个 bot 每次重启就往 prompt-audit-history.jsonl 写 5 条，
+            # 周一那次定时体检的「上次」会变成几分钟前某个 bot 重启时的记录 ——
+            # 环比退化成跟噪音比，趋势被淹掉。(2026-08-10)
             result = subprocess.run(
-                ["python3", str(audit_script), "--bot", bot_name],
+                ["python3", str(audit_script), "--bot", bot_name, "--no-save"],
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode == 0:
