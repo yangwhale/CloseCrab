@@ -130,34 +130,96 @@ content/
 
 ## 四、让 agent 能调用它（MCP）
 
-`deploy.sh` 会自动注入。它**探测**目录和脚本名，不写死：
+**没有 MCP，Wiki 的体验是打折的。** agent 只能 bash 调 `query.py` 再自己解析
+stdout —— 拿不到结构化结果，也用不上 `wiki_ask` / `wiki_related` 这些
+命令行没有的能力。实测一台没装 MCP 的机器，`query.py` 被调了 68 次，
+那是它访问 Wiki 的唯一途径。
 
-```
-目录：$WIKI_REPO → ~/my-wiki-v2 → ~/my-wiki → ~/my-wiki-study
-脚本：v1 用 `skills/wiki/scripts/wiki-mcp-server.py`；v2 用 `$WIKI_REPO/scripts/wiki-mcp-server.py`
-```
+### 一条命令装完
 
-手工注册（Claude Code）：
-
-```json
-// ~/.claude.json
-{
-  "mcpServers": {
-    "wiki": {
-      "type": "stdio",
-      "command": "python3",
-      "args": ["/绝对路径/到/你的wiki/scripts/wiki-mcp-server.py"]
-      // v2 的脚本住在 Wiki 仓库里，不在 CloseCrab —— 路径由 $WIKI_REPO 决定
-    }
-  }
-}
+```bash
+~/CloseCrab/scripts/install-wiki-mcp.sh
 ```
 
-注册后 agent 可用这些 tool：`wiki_query`（语义检索）· `wiki_page`（读整页）·
-`wiki_search`（关键词）· `wiki_graph_neighbors` / `wiki_graph_path`（图上游走）·
-`wiki_list` · `wiki_status`。
+幂等，可反复跑。它会依次：探测 `WIKI_REPO`（判据是「有 `content/`」）→
+**从正在跑的 bot 进程反查解释器** → 校验依赖符号 → 装 `mcp` → 加载测试
+→ 注册进 `~/.claude.json`（先备份）。
 
-**验证**：让 bot 问一个你 Wiki 里确定有的话题，看 `wiki_query` 有没有返回。
+```bash
+./install-wiki-mcp.sh --check    # 只体检不改动
+./install-wiki-mcp.sh --from <另一个wiki>/scripts/wiki-mcp-server.py
+WIKI_REPO=~/my-wiki-study ./install-wiki-mcp.sh
+```
+
+装完**必须重启 bot** —— MCP 配置是 CLI 启动时读的，改了不重启等于没改。
+
+```bash
+pkill -f 'closecrab --bot <name>'   # run.sh 会自动拉起
+```
+
+### 三个坑，装之前先知道
+
+**① PyPI 上有两个都叫 `mcp` 的项目**
+
+我们要的是官方 SDK（`mcp==1.27.x`，`server/` 下有 `fastmcp`）。
+另一个 `mcp==2.x` 没有 `fastmcp`。装错了报的是：
+
+```
+ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+```
+
+这个报错**看起来像「没装」，实际是「装了另一个同名项目」**。
+2026-08-10 我照着报错去「卸载重装」，方向正好反了 ——
+对比两台机器 `mcp/server/` 目录的内容才看清是版本不同不是包不同。
+脚本里钉死了版本，升级前先确认 `mcp.server.fastmcp` 还在。
+
+**② PEP 668：Ubuntu 24.04+ 的 pip 直接拒绝安装**
+
+报 `externally-managed-environment`。要 `--user --break-system-packages`。
+
+**③ 装到错的解释器上等于没装**
+
+一台机器可能有 python3.12 和 3.14 两个。**bot 用哪个就得装到哪个的
+user-site**。脚本从正在跑的 bot 进程 `/proc/<pid>/exe` 反查，不猜 ——
+所以最好在 bot 跑着的时候装。
+
+### MCP server 需要 Wiki 提供什么
+
+它是个薄适配层，只依赖 8 个符号。你的 Wiki 只要有这些就能接：
+
+| 来源 | 符号 |
+|---|---|
+| `wiki_utils.py` | `WIKI_CONTENT` `WIKI_URL` `all_pages` `parse_frontmatter` `extract_wikilinks` `find_page_by_slug` `page_url` |
+| `query.py` | `query()` |
+
+**缺哪个补哪个，不要整份 query.py 照搬** —— 各家 Wiki 的 query.py 本来就不同
+（一个 29 页的 Study Wiki 不需要倒排索引和 LRU 缓存，那是给 456 页准备的）。
+脚本会在装之前先校验这 8 个符号，缺了直接报出名字。
+
+### 装好之后有哪 9 个 tool
+
+| Tool | 用途 |
+|---|---|
+| `wiki_query(question, top_k)` | BM25 检索，主入口 |
+| `wiki_ask(question)` | RAG 式问答，直接提取答案段落 |
+| `wiki_page(slug)` | 读整页 |
+| `wiki_related(slug, top_k)` | 图 + tag + 类型推荐相关页 |
+| `wiki_search(keyword)` | 结构化过滤 `type:source tag:tpu` |
+| `wiki_list(type, tag)` | 按类型/标签列出 |
+| `wiki_graph_neighbors(slug, depth)` | N-hop wikilink 邻居 |
+| `wiki_graph_path(source, target)` | 两页最短路径 |
+| `wiki_status()` | 统计 + 覆盖度 |
+
+`wiki_ask` 和 `wiki_related` 是命令行完全没有的能力。
+
+### 验证
+
+```bash
+./install-wiki-mcp.sh --check          # 应报 9 个 tool
+```
+
+重启 bot 后让 agent 真跑一次 `wiki_query("<你 Wiki 里确定有的词>")`。
+**只看 --check 通过不够** —— 那只证明脚本能加载，不证明 CLI 真的注册上了。
 
 ---
 

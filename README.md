@@ -586,7 +586,7 @@ python3 scripts/inbox-send.py <test-bot> "请依次 Read 这 5 个大文件不�
 | 文档 | 内容 |
 |---|---|
 | [完整参考](docs/full-reference.md) | 详细部署指南、配置参考、故障排查 |
-| [Wiki 部署指南](docs/wiki-deploy.md) | 在新机器上从零跑起 Wiki：v1/v2 差异 · WIKI_REPO 归属 · 索引/检索/MCP · 中文检索的坑 |
+| [Wiki 部署指南](docs/wiki-deploy.md) | 在新机器上从零跑起 Wiki：v1/v2 差异 · WIKI_REPO 归属 · **一条命令装 MCP**（`scripts/install-wiki-mcp.sh`）· 中文检索的坑 |
 | [Timeline 设计](docs/task-scheduler-design.md) | cron-daemon 单例、watch-task 三态协议、多机事务抢占 |
 | [Inbox 任务协议 V1](docs/inbox-task-protocol.md) | kickoff / progress / done 三阶段，progress 旁路省 turn |
 | [OpenClaw 部署指南](docs/openclaw-deploy-quickstart.md) | OpenClaw Gateway + agent.json 配置 |
