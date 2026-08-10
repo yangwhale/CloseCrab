@@ -45,6 +45,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+SMOKE_PY="$(cd "$(dirname "$0")" && pwd)/wiki-mcp-smoke.py"
+
 ok()   { echo "  ✅ $*"; }
 warn() { echo "  ⚠️  $*"; }
 die()  { echo "  ❌ $*" >&2; exit 1; }
@@ -141,24 +143,32 @@ else
     fi
 fi
 
-# ── 6. 冒烟：能不能加载出 9 个 tool ──────────────────────────────
-echo "── 加载测试 ──"
-TOOLS=$(cd "$WIKI_REPO/scripts" && "$PY" - <<'PYEOF' 2>/dev/null
-import sys, importlib.util
-sys.path.insert(0, ".")
-try:
-    s = importlib.util.spec_from_file_location("wm", "wiki-mcp-server.py")
-    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
-    print(" ".join(sorted(n for n in dir(m) if n.startswith("wiki_"))))
-except Exception as e:
-    print(f"ERR {type(e).__name__}: {e}")
-PYEOF
-)
-case "$TOOLS" in
-    ERR*) die "加载失败: $TOOLS" ;;
-    "")   die "加载没报错但一个 tool 都没有，检查 wiki-mcp-server.py 是否完整" ;;
-    *)    ok "$(echo "$TOOLS" | wc -w) 个 tool: $TOOLS" ;;
+# ── 6. 冒烟：**真调用**每个 tool，不是数一数它们存在 ─────────────
+#
+# 首版这里只 import 模块然后数 dir(m) 里有几个 wiki_ 开头的名字，报 9 个就绿。
+# 2026-08-10 实证这个测试没用：往一台机器拷了 MCP server，9 个 tool「全在」，
+# 一调用 4 个直接炸 —— 那份 server 是照另一个 Wiki 的 query.py 写的，
+# 返回类型（dict vs list）和结果项的键（有没有 "path"）都不一样。
+#
+# 更阴的是 server 用 @_safe_tool 把异常包成 {"error": ...} 字符串返回，
+# **不抛异常**。所以「调用没报错」也不算通过，必须检查返回内容。
+echo "── 冒烟测试（真调用每个 tool）──"
+SMOKE=$(cd "$WIKI_REPO/scripts" && "$PY" "$SMOKE_PY" 2>/dev/null)
+case "$SMOKE" in
+    LOADFAIL*) die "MCP server 加载失败: ${SMOKE#LOADFAIL }" ;;
+    "")        die "冒烟测试无输出，检查解释器与脚本" ;;
 esac
+SUMMARY=$(echo "$SMOKE" | grep '^RESULT' | sed 's/^RESULT //')
+FAILED=$(echo "$SMOKE" | grep '^FAILED' | sed 's/^FAILED //')
+if [ -n "$FAILED" ]; then
+    warn "$SUMMARY"
+    echo "     失败的 tool: $FAILED"
+    echo "     多半是这份 server 照搬自另一个 Wiki，跟本地 query.py 接口对不上。"
+    echo "     常见三处：query() 返回 dict 还是 list / 结果项有没有 'path' 键 /"
+    echo "     server 里 import 了本地 query.py 没有的符号（如 _tokenize、get_index）。"
+    die "冒烟未全通过，先修接口再装 —— 不注册，避免装上一个坏的"
+fi
+ok "冒烟全通过 $SUMMARY"
 
 [ "$CHECK_ONLY" = 1 ] && { echo "  （--check 模式，未修改 ~/.claude.json）"; exit 0; }
 

@@ -194,7 +194,24 @@ user-site**。脚本从正在跑的 bot 进程 `/proc/<pid>/exe` 反查，不猜
 
 **缺哪个补哪个，不要整份 query.py 照搬** —— 各家 Wiki 的 query.py 本来就不同
 （一个 29 页的 Study Wiki 不需要倒排索引和 LRU 缓存，那是给 456 页准备的）。
-脚本会在装之前先校验这 8 个符号，缺了直接报出名字。
+
+### ⚠️ 光有这 8 个符号还不够，还有运行时契约
+
+2026-08-10 实证：一台机器 8 个符号全齐、9 个 tool 全部加载成功，
+**一调用 4 个直接炸**。符号在不代表接口对得上，还有三处隐性约定：
+
+| 约定 | server 假设 | 对不上会怎样 |
+|---|---|---|
+| `query()` 返回什么 | **list** of dict | 返回 dict 时 `for r in results` 迭代到 key 字符串，`r["title"]` 炸 |
+| 结果项有哪些键 | 必须有 `path`（用来算 slug）、`title`、`url` | `KeyError: 'path'` |
+| 额外符号 | `wiki_ask` 用了 `_tokenize` / `get_index` / `idx.get_page` | `ImportError` |
+
+而且 server 用 `@_safe_tool` 把异常**包成 `{"error": ...}` 字符串返回、不抛出**，
+所以「调用没报错」也不算通过 —— 必须看返回内容里有没有 error。
+
+所以脚本的冒烟测试是**真调用每个 tool**（`scripts/wiki-mcp-smoke.py`），
+参数从真实语料里取（用假词测不出来，空结果那条分支太短碰不到会炸的地方），
+**任何一个 tool 失败就不注册** —— 宁可装不上，也别装上一个坏的。
 
 ### 装好之后有哪 9 个 tool
 
