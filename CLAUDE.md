@@ -96,7 +96,11 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
     加完**必须重启 bot**。Gemini CLI 那边（`~/.gemini/settings.json`）保留着
     —— 它没有 browser-cli skill，砍了是真损失能力
 - **OpenClaw**: `~/.openclaw/openclaw.json`（deploy.sh 从 `config/openclaw.json` 模板生成）
-- **GBrain (可选)**: PGLite 记忆 + OAuth MCP，client silent-failure，详见 docs/gbrain-integration.md
+- **GBrain**: **2026-08-10 已归档停用**（MCP 摘除 + 同步 cron 停 + `bots/*.gbrain_index.enabled=false`）。
+  数据和服务原样保留，恢复方法与停用理由见 `~/.gbrain/ARCHIVED-README.md`。
+  一句话理由：它装的是 MEMORY.md 的副本（同步脚本全量灌 memory 目录），
+  而那批内容的索引本来就自动注入，要哪条直接 Read 更快 —— 近 7 天 query 0 次。
+  省 8.5K cold start。架构文档仍在 docs/gbrain-integration.md
 - **Secrets**: 绝不硬编码 / 不进 git — Firestore 存 tokens，GKE 用 K8s Secret 挂载
 
 ## Firestore 数据结构
