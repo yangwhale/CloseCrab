@@ -5476,7 +5476,9 @@ class FeishuChannel(Channel):
 
         ~1.5s 一次, 直到播放结束 (active=False 且 played≈total) 或超时 (~5min)。
         重播会重置 active=True, updater 已退出则不会复活 — 由 voice_replay 分支
-        重新拉起一个 updater。读不到进度 (sidecar 没连/无文件) 直接退出。
+        重新拉起一个 updater。**完全**读不到进度 (sidecar 没连 / 播放器空着)
+        连续 4 次才退出；读得到但在放别的 fid 属于「排队等」，要一直等下去 ——
+        这两种情况早先没分开，导致上一条语音没念完时，这一条的卡片必然停更。
         """
         try:
             from ..voice.discord_voice_sidecar import get_playback_progress
@@ -5484,22 +5486,39 @@ class FeishuChannel(Channel):
             return
         last_note = ""
         idle = 0
+        waiting = 0
         log.info(f"[voice-progress] updater 启动 fid={fid} card_id={card_id}")
-        for _ in range(200):  # 200 * 1.5s = 5min 上限
+        for _ in range(200):  # 200 * 1.5s = 5min 总上限
             await asyncio.sleep(1.5)
             try:
                 prog = get_playback_progress()
             except Exception:
                 prog = None
             # prog: (played_s, total_s, active, cur_fid)
-            if not prog or prog[3] != fid:
+            if not prog:
+                # 完全读不到进度 = sidecar 没连 / 播放器空着 → 这才是真 idle
                 idle += 1
-                log.info(f"[voice-progress] idle={idle} prog={prog} (待 fid={fid})")
-                if idle >= 4:  # ~6s 拿不到本 fid 进度 → 认为没在播, 退出
+                log.info(f"[voice-progress] idle={idle} (待 fid={fid})")
+                if idle >= 4:      # ~6s 完全没有播放状态 → 认为不会播了, 退出
                     log.info(f"[voice-progress] idle 退出 fid={fid}")
                     break
                 continue
+            if prog[3] != fid:
+                # 播放器活着，只是在放**别的**（通常是上一条还没念完）。
+                # 这是「还没轮到我」，不是「我这条不会播」——
+                # 原来这一支也累加 idle，6 秒就放弃，于是只要上一条语音没播完，
+                # 这一条的进度卡片就永远停在初始状态，再也不动。
+                # 实测 2026-08-10 当天：idle 提前退出 196 次，正常播完退出仅 2 次，
+                # 也就是九成九的语音卡片根本没更新过。回复越长越必然撞上 ——
+                # 一条三分钟的语音，后面那条的 updater 只等 6 秒就走了。
+                # 这里不设独立上限，靠外层 5 分钟总上限兜底（轮不到就自然退场）。
+                waiting += 1
+                if waiting % 20 == 1:      # 每 30s 记一条，别刷屏
+                    log.info(f"[voice-progress] 排队等待 {waiting * 1.5:.0f}s "
+                             f"(在播 fid={prog[3]}, 待 fid={fid})")
+                continue
             idle = 0
+            waiting = 0
             played, total, active, _ = prog
             note = self._fmt_progress_note(played, total, active)
             if note != last_note:
