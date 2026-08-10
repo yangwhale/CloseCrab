@@ -194,7 +194,11 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
     if action_only and action_count == 0:
         return (
             f"# 🟢 Memory Audit — {today}\n\n"
-            f"**actionable=0, 无需 cleanup**. "
+            + (f"**⚠️ 但 MEMORY.md 字符 {report['memory_md_chars']/1024:.1f}K / 24.4K 上限"
+               f"（余量 {(24.4 - report['memory_md_chars']/1024):.1f}K）—— 该跑 memory-lint 了。**\n"
+               f"超出部分 CC CLI 会**静默丢弃**，尾部条目等于不存在。\n\n"
+               if report["memory_md_chars"] > 23.5 * 1024 else "")
+            + f"**actionable=0, 无需 cleanup**. "
             f"MEMORY.md {report['memory_md_lines']} 行 / {len(report['indexed'])} 索引 / "
             f"{report['disk_count']} disk 文件.\n\n"
             "_(cold ≠ garbage. 没新东西进来时, 不要找事清. 类比真正的睡眠 — 没学新知识的晚上, "
@@ -297,7 +301,9 @@ def to_markdown(report: dict, cold_days: int, action_only: bool = False) -> str:
     lines += [
         "## 总评",
         f"**状态**: {health}",
-        f"- MEMORY.md: {report['memory_md_lines']} 行 / {report['memory_md_bytes']} bytes",
+        f"- MEMORY.md: {report['memory_md_lines']}/200 行 · "
+        f"{report['memory_md_chars']/1024:.1f}K/24.4K 字符"
+        f"（**字符是真正的截断线**，余量 {(24.4 - report['memory_md_chars']/1024):.1f}K）",
         f"- disk 上 memory 文件: {report['disk_count']}",
         f"- MEMORY.md 索引数: {len(report['indexed'])}",
         f"- ACTIONABLE: {action_count} | NEEDS REVIEW: {len(report['orphans'])} | "
@@ -345,6 +351,11 @@ def main():
         "today": today.isoformat(),
         "memory_md_lines": text.count("\n"),
         "memory_md_bytes": len(text.encode("utf-8")),
+        # 字符数才是 CC CLI 的截断依据。CJK 一个字 3 bytes，
+        # 只看 bytes 会以为 34K 快爆了，其实字符才 23K。
+        # 2026-08-10 实测：176 行 / 23.4K 字符 —— 行数余量 12%，字符只剩 4%，
+        # **字符先到顶**，所以告警要挂在这个数上。
+        "memory_md_chars": len(text),
         "disk_count": len(disk),
         "indexed": sorted(indexed),
         "orphans": orphans,
