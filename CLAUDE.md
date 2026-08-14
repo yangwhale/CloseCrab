@@ -79,15 +79,11 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
 - **全局常量**: Firestore `config/global`（cc_pages_url、gcs_bucket）
 - **CC 环境**: `~/.claude/settings.json`（env / permissions / plugins）；**MCP**: `~/.claude.json`
   - MCP 改动**要重启 bot 才生效** —— CLI 只在启动时读一次
-  - **Google 内部工具不走 MCP，走 `glinux-tools` skill**（2026-08-14 起）。
-    `coding` / `google-workspace` / `bugged` / `c2xprof` 四个 MCP 已从 `~/.claude.json` 移除
-    —— 39 个工具的 schema 常驻 system prompt，实测 **10.4K token** 冷启动开销，而且
-    mcp-proxy 驱动 `coding_server.par` 时 Gaia mint 必失败（排查 13 项因素未定位根因）。
-    现在：`~/.claude/skills/glinux-tools/scripts/gcall.py <server> <tool> '<json>'`，
-    Buganizer 走 `scripts/bugged.sh`（CLI 直通 ~1s，比原来快十几倍）。
-    **不要再去调 `mcp__coding__*` / `mcp__bugged__*` / `mcp__google-workspace__*` / `mcp__c2xprof__*`
-    —— 这些工具已不存在。** 前置条件只有一个：gLinux 上凭据有效（`ls /google/bin/...`
-    报 ENOKEY 就让 Chris 跑 `gcert`）。
+  - **雇主内部工具一律不走 MCP**（2026-08-14 起）。相关的 4 个 MCP 已从
+    `~/.claude.json` 移除 —— 它们的工具 schema 常驻 system prompt，实测约
+    **10.4K token** 冷启动开销，而且那条链路本身有未定位的故障。
+    改用私有 skill 直连后端，按需加载、零常驻开销。
+    **配置与用法只在私有 skill 目录里，本仓库不记录。**
   - 目前 `~/.claude.json` 里只剩 `jina-ai`（远程 HTTP）、`wiki`（本地）、`serena`（本地 LSP）
   - `serena` 必须带 `--project <repo>`，否则每次首调都报 `No active project`，
     agent 吃一次错就退回 grep，整个 session 不再用它（2026-08-10 实测 30 天 0 调用）
@@ -106,14 +102,11 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
     加完**必须重启 bot**。Gemini CLI 那边（`~/.gemini/settings.json`）2026-08-14
     也一并砍了 —— 本机不用 Gemini CLI，而它那份是走 mcp-proxy 的 SSE 版，
     随 proxy 下线已成死链。现在那里只剩 `jina-ai` + `wiki`
-  - **mcp-proxy 已于 2026-08-14 彻底退役**（两台 gLinux 均 `disable --now`），
-    连带 autossh 反向隧道里的 `-R 18090/18091 → 9091` 也拆掉了 ——
-    隧道本身**保留**，它还扛着 `2220`(HK) / `2222`(BJ) 这条 ssh 命脉，别整个停掉。
-    真正的隧道配置在 gLinux 的 systemd user unit **`ssh-tunnel-cc-tw.service`**，
-    不是 `~/.ssh/config`（那里的 `RemoteForward 18090` 是没在用的死代码）。
-    退役时同步迁走了三类消费者：cc-tw 的 Gemini/OpenClaw 配置**删除**死链条目，
-    gLinux 上的 hulk(`~/.claude.json` 的 c2xprof) 和 tommy(`~/.config/kilo/kilo.jsonc`
-    的 5 个 remote) **改成 stdio 直连同一批 par**。备份一律 `*.bak-mcpproxy-20260814`
+  - 那套 SSE 聚合代理（`mcp-proxy`）已于 2026-08-14 整体退役，相关端口转发一并拆除。
+    **拆解过程与拓扑细节记在私有 skill 与 memory 里，本仓库不展开。**
+    这里只留一条通用教训：**反向隧道常常一条连接同时扛多个端口**，
+    其中可能包括你赖以登录那台机器的端口 —— 只想关掉其中一个转发时，
+    改配置后重启，别直接 kill 整条隧道，并且给改动配一个失败自动回滚的自检
 - **OpenClaw**: `~/.openclaw/openclaw.json`（deploy.sh 从 `config/openclaw.json` 模板生成）
 - **GBrain**: **2026-08-10 已归档停用**（MCP 摘除 + 同步 cron 停 + `bots/*.gbrain_index.enabled=false`）。
   数据和服务原样保留，恢复方法与停用理由见 `~/.gbrain/ARCHIVED-README.md`。
