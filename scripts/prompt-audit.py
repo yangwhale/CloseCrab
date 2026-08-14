@@ -145,10 +145,24 @@ def size_memory() -> dict:
     }
 
 
-def size_gbrain_index() -> dict:
-    """GBrain index 注入大小 (Phase E)."""
+def size_gbrain_index(bot_name: str = "default") -> dict:
+    """GBrain index 注入大小 (Phase E)。
+
+    **必须看开关，不能写死。** 2026-08-10 起所有 bot 的
+    `bots/{name}.gbrain_index.enabled` 都是 False，但本函数原来无脑返回 5000，
+    导致审计连续四天虚报 5K —— 报告里写着一段根本没注入的东西。
+    """
+    try:
+        from google.cloud import firestore
+        db = firestore.Client(project="chris-pgp-host", database="closecrab")
+        cfg = (db.collection("bots").document(bot_name).get().to_dict() or {})
+        gi = cfg.get("gbrain_index") or {}
+        if not gi.get("enabled"):
+            return {"est_tokens": 0,
+                    "note": f"gbrain_index.enabled=False（{gi.get('_archived', '未启用')}）—— 不注入"}
+    except Exception as e:
+        return {"est_tokens": 0, "note": f"读不到 Firestore 开关({e.__class__.__name__})，按未启用计"}
     # 静态估算 - DEFAULT_LIST_LIMIT=30, 每行 ~80 bytes, 加 envelope ~2K
-    # R1 实测 ~5K tokens
     return {
         "est_tokens": 5000,
         "note": "30 recent + dedup salient pages, R1 实测 ~5K tokens",
@@ -355,7 +369,7 @@ def main():
         "4. Plugin tool descriptions": {**size_plugins(), "source": "settings.json", "controllable": "✅ disable plugin"},
         "5. Skills catalog": {**size_skills(), "source": "~/.claude/skills/", "controllable": "⚠️ 物理 move only"},
         "6. MEMORY.md auto-load": {**size_memory(), "source": "memory/MEMORY.md", "controllable": "✅ GC"},
-        "7. GBrain index": {**size_gbrain_index(), "source": "gbrain_index.py Phase E", "controllable": "⚠️ 算法改"},
+        "7. GBrain index": {**size_gbrain_index(args.bot), "source": "gbrain_index.py Phase E", "controllable": "⚠️ 算法改"},
         "8. envelope + reminder": {**size_envelope(), "source": "CC runtime", "controllable": "❌ 难"},
     }
 
