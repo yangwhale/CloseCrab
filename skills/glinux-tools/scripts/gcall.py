@@ -32,7 +32,8 @@ SERVERS = {
     "coding": ["python3", f"{GHOME}/.local/bin/coding-server-wrapper.py"],
     "workspace": ["/google/bin/releases/codemind-mcp-servers/workspace_server.par"],
     "c2xprof": ["python3", f"{GHOME}/.claude/scripts/c2xprof-mcp-server.py"],
-    "bugged": ["python3", f"{GHOME}/.claude/scripts/bugged-mcp-server.py"],
+    # bugged 故意不在这里：Buganizer 只保留 bugged.sh 一种叫法（CLI 直通 ~1s，
+    # 比绕 MCP 协议快十几倍）。同一件事留两条路只会让人选错。
 }
 
 TIMEOUT = 300

@@ -77,9 +77,17 @@ scripts/gcall.py <server> --list          # 列该 server 的全部工具与参�
 > 而 ssh 进去落在 `$HOME`（不是 Piper client 根），必然抛 `PiperError`。
 > **改用 `list_piper_workspaces`**（能列出全部 11 个，正常）。
 
-### `bugged`（8 个 —— **优先用 `bugged.sh` CLI**）
+### Buganizer —— **只有 `bugged.sh` 一种叫法**
 
-`bugged_show` `bugged_search` `bugged_edit` `bugged_create` `bugged_comment` `bugged_list_attachments` `bugged_search_hotlists` `bugged_hotlist`
+```bash
+scripts/bugged.sh show 503386547
+scripts/bugged.sh search 'assignee:me status:open'
+scripts/bugged.sh edit|create|comment <args>
+```
+
+原来还有一套 `bugged_*` MCP 工具（走 `gcall.py bugged`），**2026-08-14 已删除**。
+它底下也只是 shell 出去调同一个 `bugged` 命令，白绕一层协议、慢十几倍。
+同一件事留两条路只会让人选错，所以 `gcall.py` 的 server 列表里没有 `bugged`。
 
 ### `workspace`（12 个）
 
