@@ -108,7 +108,17 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
     其中可能包括你赖以登录那台机器的端口 —— 只想关掉其中一个转发时，
     改配置后重启，别直接 kill 整条隧道，并且给改动配一个失败自动回滚的自检
 - **OpenClaw**: `~/.openclaw/openclaw.json`（deploy.sh 从 `config/openclaw.json` 模板生成）
-- **GBrain**: **2026-08-10 已归档停用**（MCP 摘除 + 同步 cron 停 + `bots/*.gbrain_index.enabled=false`）。
+- **GBrain**: **2026-08-10 宣布归档停用，但直到 2026-08-14 才真正停干净** ——
+  当初只摘了 `~/.claude.json`，**漏了另外两个 MCP 配置源**，所以它一直在跑：
+  每个 agent 会话一个 launcher，实测 cc-tw 上同时有 7 个、占 382 MB，
+  当初记着要省的 8.5K 冷启动 token 一分没省到。
+  > **教训：这台机器的 MCP 有三个配置源，砍 MCP 要三个都查**
+  > 1. `~/.claude.json` — Claude CLI 用户级
+  > 2. `~/.mcp.json` — **Claude CLI 项目级**（bot 的 cwd 是 `$HOME`，所以它生效）。最容易漏
+  > 3. `~/.openclaw/openclaw.json` — OpenClaw 自己那份
+  >
+  > 判据别看配置，直接数进程：`ps -ef | grep <你以为已经停掉的东西>`。
+  三处均已清理（备份 `*.bak-gbrain-20260814`）。
   数据和服务原样保留，恢复方法与停用理由见 `~/.gbrain/ARCHIVED-README.md`。
   一句话理由：它装的是 MEMORY.md 的副本（同步脚本全量灌 memory 目录），
   而那批内容的索引本来就自动注入，要哪条直接 Read 更快 —— 近 7 天 query 0 次。
