@@ -118,7 +118,13 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
   > 3. `~/.openclaw/openclaw.json` — OpenClaw 自己那份
   >
   > 判据别看配置，直接数进程：`ps -ef | grep <你以为已经停掉的东西>`。
-  三处均已清理（备份 `*.bak-gbrain-20260814`）。
+  三处均已清理（备份 `*.bak-gbrain-20260814`）。另外 `bots/*.gbrain_index.enabled`
+  08-10 起就是 `false`，但 `prompt-audit.py` 一直写死 5000 不看开关，
+  连续四天虚报 5K —— 08-14 一并修了。清理后 jarvis 冷启动 65.5K → **46.2K**。
+  > ⚠️ **`bun ... gbrain serve --http --port 3131` 那个进程是故意留着的，不要杀。**
+  > 它是 GBrain 服务本体（~484 MB），Chris 08-14 明确要求保留。而且它底下是 PGLite ——
+  > **跑得好 ≠ 能重启**，大量未 checkpoint 的 WAL 会让它再也起不来
+  > （见 memory `feedback_pglite-wal-timebomb`）。真要停，先备份 + 确认能从 markdown 重建。
   数据和服务原样保留，恢复方法与停用理由见 `~/.gbrain/ARCHIVED-README.md`。
   一句话理由：它装的是 MEMORY.md 的副本（同步脚本全量灌 memory 目录），
   而那批内容的索引本来就自动注入，要哪条直接 Read 更快 —— 近 7 天 query 0 次。
