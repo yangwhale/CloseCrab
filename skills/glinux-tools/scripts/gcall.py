@@ -47,27 +47,33 @@ def drive(server, method, params):
         p.stdin.write(json.dumps(o) + "\n")
         p.stdin.flush()
 
-    def read():
+    def read(want_id):
+        # 后端会在结果前插 notifications/message 之类的进度通知（fetch_resource
+        # 就会）。只认 id 对得上的那条响应，否则会把通知当结果返回、正文全丢。
         while True:
             line = p.stdout.readline()
             if not line:
                 return None
             line = line.strip()
-            if line.startswith("{"):
-                try:
-                    return json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            if not line.startswith("{"):
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if o.get("id") == want_id:
+                return o
 
     try:
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
               "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                          "clientInfo": {"name": "gcall", "version": "1"}}})
-        if read() is None:
-            return None, "后端没响应 initialize（ssh 通吗？gcert 过期了吗？）"
+        if read(1) is None:
+            return None, ("后端没响应 initialize。依次查：1) gcert 过期？"
+                          "2) 是不是并发太多把 sshd 打满了 —— gcall 并发别超过 5 个")
         send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
         send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
-        return read(), None
+        return read(2), None
     finally:
         try:
             p.kill()

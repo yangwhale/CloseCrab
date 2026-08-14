@@ -42,6 +42,12 @@ scripts/gcall.py <server> --list          # 列该 server 的全部工具与参�
 
 慢是因为每次现开一个 par。**低频调用可接受，高频的请优先找 CLI。**
 
+> [!warning] 并发别超过 5
+> 每次调用起一条 ssh。并发太多会撞上 gLinux `sshd-user` 的 MaxStartups，
+> 多余的连接被直接拒掉，报的却是 **「后端没响应 initialize」** ——
+> 跟凭据过期的症状一模一样。2026-08-14 一口气开 13 个，两个假失败，
+> 串行重跑全过。**报这个错先降并发重试，再去怀疑 `gcert`。**
+
 ## 工具清单
 
 ### `coding`（18 个）
@@ -54,7 +60,7 @@ scripts/gcall.py <server> --list          # 列该 server 的全部工具与参�
 | `search_changelists` | `query` | 搜 CL |
 | `get_critique_comments` | `cl_number` | 读 Critique 评论 |
 | `get_critique_analysis` | `cl_number` | 读 Critique 静态分析结果 |
-| `get_current_workspace` | — | 当前 Piper workspace |
+| ~~`get_current_workspace`~~ | — | **用不了**，见下方注 |
 | `list_piper_workspaces` | — | 列 workspace |
 | `create_piper_workspace` | `workspace_name` | 建 workspace |
 | `get_workspace_for_cl` | `cl_number` | CL 对应的 workspace |
@@ -66,6 +72,10 @@ scripts/gcall.py <server> --list          # 列该 server 的全部工具与参�
 | `list_sponge_artifacts` | `invocation_id` | 列 artifact |
 | `read_sponge_artifact` | `uri` | 读单个 artifact |
 | `create_gpaste` | `title`, `content` | 建 gPaste |
+
+> `get_current_workspace` 靠**当前工作目录**跑 `vcstool source-root` 反推 workspace，
+> 而 ssh 进去落在 `$HOME`（不是 Piper client 根），必然抛 `PiperError`。
+> **改用 `list_piper_workspaces`**（能列出全部 11 个，正常）。
 
 ### `bugged`（8 个 —— **优先用 `bugged.sh` CLI**）
 
