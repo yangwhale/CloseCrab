@@ -85,3 +85,4 @@ tpu-v7-cluster
 #   research 共 9 次，全部集中在 6/29-6/30 → 四十天没用了
 chrome-browser
 multimodal-explainer
+glinux-tools
