@@ -113,6 +113,9 @@ def _resolve_config(bot_name: str) -> dict:
         "log_chat_id": cfg.get("log_chat_id", ""),
         "accelerator_override": cfg.get("accelerator_override", ""),
         "worker_type": cfg.get("worker_type", "claude"),
+        # web channel 专属
+        "web_host": cfg.get("web_host", "127.0.0.1"),
+        "web_port": int(cfg.get("web_port", 8800)),
         "claude_proxy_url": cfg.get("claude_proxy_url"),
         # LiveKit voice IO 配置 (仅飞书 channel 用): {url, api_key, api_secret, frontend_url, enabled}
         "livekit": cfg.get("livekit") or {},
@@ -165,6 +168,10 @@ def build_system_prompt(
         from .channels.dingtalk import load_dingtalk_style
         channel_style = load_dingtalk_style()
         platform = "钉钉"
+    elif channel_type == "web":
+        from .channels.web import load_web_style
+        channel_style = load_web_style()
+        platform = "Web"
     else:
         from .channels.discord import load_discord_style
         channel_style = load_discord_style()
@@ -387,7 +394,19 @@ def build_system_prompt(
 
     # Wiki 知识感知（仅在配置了 Wiki URL 时注入）
     wiki_url = os.environ.get("WIKI_URL", "")
-    if wiki_url:
+    if wiki_url and channel_type == "web":
+        # web channel 面向外部用户：Wiki 只读不引用 —— 站点在 IAP 后面，
+        # 贴出去对方点不开，还等于把内部站点地址告诉了外人。
+        prompt += (
+            "\n\n## Wiki 知识感知（只读，不外露）\n"
+            "你有一个内部知识 Wiki，覆盖 AI/ML 基础设施、TPU/GPU 训练、推理优化。\n"
+            "回答技术问题前先用 `wiki_query` MCP tool 查一遍，引用**内容**。\n"
+            "**❌ 绝对不要把 Wiki 的 URL、页面路径或站点域名写进回复** —— "
+            "这个站点对外不可访问，贴出去只会暴露内部地址。要给参考链接就给"
+            "公开可查的（GitHub PR、arXiv、官方文档）。\n"
+            "对外用户不要建议「录入 Wiki」，那是内部动作。"
+        )
+    elif wiki_url:
         prompt += (
             "\n\n## Wiki 知识感知（自动行为）\n"
             f"你有一个 180+ 页面的知识 Wiki（{wiki_url}），"
@@ -681,6 +700,16 @@ def main():
             stt_engine=stt,
             bot_name=bot_name,
             allowed_staff_ids=cfg.get("allowed_open_ids", set()),
+            state_dir=cfg["state_dir"],
+        )
+    elif channel_type == "web":
+        from .channels.web import WebChannel
+
+        channel = WebChannel(
+            core=core,
+            bot_name=bot_name,
+            host=cfg.get("web_host", "127.0.0.1"),
+            port=cfg.get("web_port", 8800),
             state_dir=cfg["state_dir"],
         )
     else:

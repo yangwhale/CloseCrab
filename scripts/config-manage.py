@@ -131,6 +131,9 @@ def _parse_channel_args(channel_type: str, args) -> dict:
             print("Error: --client-id and --client-secret are required for DingTalk channel")
             sys.exit(1)
         return {"client_id": args.client_id, "client_secret": args.client_secret}
+    elif channel_type == "web":
+        # web channel 自建 HTTP server，无平台凭据
+        return {"host": args.web_host or "127.0.0.1", "port": int(args.web_port or 8800)}
     else:
         print(f"Error: unknown channel type '{channel_type}'")
         sys.exit(1)
@@ -528,7 +531,7 @@ def main():
     # create
     p_create = subparsers.add_parser("create", help="Create a new bot")
     p_create.add_argument("bot_name")
-    p_create.add_argument("--channel", required=True, choices=["discord", "feishu", "lark", "dingtalk"])
+    p_create.add_argument("--channel", required=True, choices=["discord", "feishu", "lark", "dingtalk", "web"])
     p_create.add_argument("--description", default="")
     p_create.add_argument("--guild-id", default="")
     p_create.add_argument("--worker-type", default="claude", choices=list(VALID_WORKER_TYPES),
@@ -540,7 +543,7 @@ def main():
     # add-channel
     p_add = subparsers.add_parser("add-channel", help="Add a channel to existing bot")
     p_add.add_argument("bot_name")
-    p_add.add_argument("channel_type", choices=["discord", "feishu", "lark", "dingtalk"])
+    p_add.add_argument("channel_type", choices=["discord", "feishu", "lark", "dingtalk", "web"])
     _add_channel_args(p_add)
 
     # set-channel
@@ -629,6 +632,8 @@ def _add_channel_args(parser):
     parser.add_argument("--auto-respond-channels", help="Discord auto-respond channel IDs (comma-separated)")
     parser.add_argument("--auto-respond-chats", help="Feishu auto-respond chat IDs (comma-separated)")
     parser.add_argument("--allowed-open-ids", help="Feishu/Lark allowed open IDs (comma-separated)")
+    parser.add_argument("--web-host", help="Web channel listen host (default 127.0.0.1)")
+    parser.add_argument("--web-port", help="Web channel listen port (default 8800)")
 
 
 if __name__ == "__main__":

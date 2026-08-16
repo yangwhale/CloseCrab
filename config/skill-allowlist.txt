@@ -86,3 +86,4 @@ tpu-v7-cluster
 chrome-browser
 multimodal-explainer
 glinux-tools
+tpuguru

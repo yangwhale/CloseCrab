@@ -136,6 +136,10 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
     elif active_channel == "dingtalk":
         cfg["app_id"] = channel_cfg.get("client_id", "")
         cfg["app_secret"] = channel_cfg.get("client_secret", "")
+    elif active_channel == "web":
+        # web channel 自己起 HTTP server，没有平台凭据，只有监听地址
+        cfg["web_host"] = channel_cfg.get("host", "127.0.0.1")
+        cfg["web_port"] = channel_cfg.get("port", 8800)
 
     log.info(f"Loaded config for '{bot_name}' from Firestore (channel={active_channel})")
     return cfg

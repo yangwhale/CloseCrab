@@ -56,3 +56,41 @@ UnifiedMessage(channel_type="discord", user_id=str(uid), content=text, reply=cal
 - 卡片消息用 interactive message card JSON
 - 动画进度 header（螃蟹动画 + AI 段子）
 - 日志频道（log_chat_id）单独输出
+
+## Web channel（`web.py`）—— 跟另外三个不是一类
+
+前三个 channel 是**平台适配器**：SDK 建长连接、平台推消息进来。
+`web` 没有平台 —— 它自己 `aiohttp` 起一个 HTTP server，交互是**请求–响应**：
+前端 POST 一条消息，`handle_message` 跑完才返回。给 tpuguru 这类
+「只有网页、没有 IM」的对外 bot 用。
+
+改它之前记住三条差异：
+
+1. **没有主动推送。** `send_message()` 只能把文本塞进 `_history` 等前端轮询
+   （`GET /api/progress` / `/api/history`）。别指望像飞书那样随时 push 卡片。
+2. **交互式工具一律 auto-continue。** 网页上没有按钮，也没有「挂着等用户点」
+   的长连接。`_make_input_callback` 把 plan / 问题作为普通消息落进 history，
+   然后按默认项返回（ExitPlanMode → `approved`，AskUserQuestion → 第一个选项）。
+   **不这么做控制请求会一直挂到 BotCore 的 user lock 超时** —— 跟 dingtalk 那个
+   `is_inbox` fast-path 是同一个病因。
+3. **出站文本必须走 `_emit()`**，它调 `sanitize_outbound()`。理由见下。
+
+### 为什么清洗放在 channel 层而不是只写进 prompt
+
+这个 channel 面向**外部用户**，跟另外三个的受众根本不同：
+
+- `★ Insight` 那种装饰块是 `explanatory-output-style` plugin 的 session-start
+  hook 注入的，**跟 system prompt 是两个来源**。实测在 style.md 里明令禁止后
+  仍然三问漏一 —— prompt 压不住另一个 prompt。
+- 内部地址泄露是事故级的，不能只靠模型自觉。system prompt 里同时还有
+  「引用 Wiki」这类**方向相反**的指令（已按 channel 分叉，见 `main.py`
+  的 Wiki 知识感知段），但配置一改就可能又冲突。
+
+所以 `sanitize_outbound()` 做确定性删除：insight 块、内网域名、`go/` 链接、
+工单号、`/home/...` 与 `~/...` 本机路径。**新增对外 channel 时复用这个函数。**
+
+### 配置
+
+Firestore `bots/{name}.channels.web = {host, port}`，`active_channel = "web"`。
+`config-manage.py create <bot> --channel web --web-port <p>`。
+风格指南在 `channels/web_static/style.md`，前端单文件 `web_static/index.html`。
