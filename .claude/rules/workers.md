@@ -10,9 +10,10 @@ CloseCrab 支持多种 Worker 实现，通过 Firestore `bots/{name}.worker_type
 - `gemini` → `GeminiACPWorker` — Gemini CLI + ACP 协议
 - `openclaw` → `OpenClawWorker` — OpenClaw CLI + ACP 协议 + 外部 Gateway
 - `kilo` → `KiloWorker` — Kilo CLI `serve` + HTTP REST + SSE
+- `dsh` → `DSHWorker` — DeepSeek Harness CLI + line-framed JSON-RPC on stdio
 
 `BotCore._create_worker()` 根据 `worker_type` 实例化对应 Worker
-（`closecrab/core/bot.py:982-1010`，四个分支）。
+（`closecrab/core/bot.py` 里搜 `_create_worker`，五个分支）。
 
 ## ClaudeCodeWorker（claude_code.py）
 
@@ -211,6 +212,104 @@ Kilo 抽象了 25+ provider，**model ID 写法必须跟 Kilo 的 provider 定�
 ### 进程清理
 Kilo server 是独立子进程，`_write_pid_file()` / `_kill_orphan_kilo()`
 负责跨重启回收孤儿。改 `stop()` 时不要只 kill worker 自己持有的 handle。
+
+
+## DSHWorker（dsh_worker.py）
+
+### 为什么不用官方那两条现成的路
+
+dsh 有两个 Python 能碰到的入口，都不够用：
+
+| 入口 | 有什么 | 缺什么 |
+|---|---|---|
+| `pip install deepseek-harness-sdk` | 常驻 session、流式事件、好接 asyncio | **没有 MCP**。它驱动的是一个封装好的 runtime 二进制，`dsh-mcp-client` 没编进去 |
+| npm CLI 的 `web` / `headless` profile | 全套插件含 MCP | 一个是浏览器 UI，一个跑完一个任务就退出。都撑不住聊天 bot |
+
+所以走第三条：**npm CLI 托管 SDK 用的那个
+`@deepseek-ai/dsh-sdk-jsonrpc-server` 插件**，一个进程同时拿到常驻 session、
+流式事件和 MCP。profile 由 `scripts/dsh-setup.sh` 建（幂等，`--check` 只体检）。
+
+> ⚠️ **把 `dsh-mcp-client` 挂到 SDK 那个 runtime 上不会报错，它会静默卡死。**
+> 我在这上面耗了七分钟才反应过来不是网络问题。同样会卡死的还有
+> `dsh-fs`、`dsh-tool-todo`、`dsh-agent-instructions`。
+
+### 通信方式
+```
+Bot Process                 dsh --profile closecrab
+    │                            │
+    ├── proc.stdin ──────────►  stdin  (line-framed JSON-RPC)
+    │                            │
+    ◄── proc.stdout ◄──────── stdout (responses + notifications)
+    │                            │
+    └── stderr file ◄────────  stderr
+```
+
+协议很小，而且**除了 SDK 源码没有别处写**：
+
+| 方向 | 消息 |
+|---|---|
+| → | `initialize {cwd, provider, model, maxTokens}` |
+| → | `session/prompt {sessionId, contentBlocks}` → `{messageId}` |
+| → | `shutdown {}` |
+| ← | `session.event {sessionId, event:{type, data}}` |
+| ← | `session.status {sessionId, status}` |
+
+### 三个会咬人的地方
+
+1. **`session/prompt` 一提交就返回**，返回值里只有 messageId。一轮结束的标志是
+   `session.status` 报 `idle`，不是那个响应。
+
+2. **必须先等到自己那条 prompt 的 inbox 回执再开始看 idle。** 新起的 runtime 会
+   先播一条 `status: idle`（此时还没干活）。不做这个门控，第一次 send 会立刻
+   返回空字符串 —— 看起来像模型没话说，实际是根本没等。门控逻辑抄自 SDK 的
+   `_is_inbox_receipt`：认 `agent/inbox/spliced` 里 `inserted[].id == messageId`。
+
+3. **session id 不能复用。** id 是客户端生成的，但**没有 resume**：JSON-RPC 只有
+   initialize / session/prompt / shutdown。新 runtime 拿到一个磁盘上已有日志的
+   id，每一轮都会以
+   `already has a persisted log on disk that does not match this live session
+   (id collision)` 失败。所以 `start()` 和 respawn 都会检查
+   `$DSH_HOME/sessions/*/<id>` 是否存在，存在就换新 id。
+   **代价：进程一重启，dsh 侧的对话历史就没了**，只有工作目录留着。
+
+### interrupt 是硬中断
+
+JSON-RPC 没有 cancel。`interrupt()` 只能杀进程；杀完按上一条换新 session。
+这跟另外四个 worker「中断但保留 session」的语义不一样，改之前先知道这点。
+
+### 配置与凭据
+
+- profile 在 `$DSH_HOME/profiles/$DSH_PROFILE`（默认
+  `~/.closecrab/dsh-home` + `closecrab`），patch 文件由 `dsh-setup.sh` 重写，
+  **手改会被覆盖**。
+- 模型全部走 LiteLLM 网关，所以 Firestore 的 `model` 就是网关别名
+  （`claude-opus-5`），不带 provider 前缀、不带 `@default`。
+- profile 只认两个环境变量名：`LITELLM_KEY`（`apiKeyEnv` 写死的）和
+  `JINA_AUTH`。**缺了不报错，只在第一次调模型时失败。** run.sh 从
+  `~/.closecrab-litellm-key` / `~/.closecrab-jina-auth` 读。
+- 网关走公开地址 `https://litellm.higcp.com/v1`（`LITELLM_BASE_URL` 可覆盖）。
+  **不要再退回 `127.0.0.1:18000` 那条 SSH 隧道** —— 公开端点 TTFT 慢约 0.5s，
+  但不用养隧道、重启不丢、任何机器都能用。同一把 key，无 key 401。
+
+### patch 文件两条反直觉规则
+
+写 `cordis.patch.yml` 时最容易踩的两条，官方文档提了但很容易漏：
+
+- 一条 patch **整个替换**目标 row 的 `config`，不做深合并。只想加一个字段，
+  结果 baseURL 和 key 一起没了。
+- `- id: X` 是**改已有 row**。加新 row 要用 `- insert: [...]`。
+  拿 `- id:` 加新 row 只会打一行 `patch: entry "X" not found` 然后继续跑，
+  你会以为配好了。
+
+### 事件映射
+
+`_TOOL_NAME_MAP` 把 dsh 的小写工具名映射成 Claude Code 名字（`bash`→`Bash`），
+BotCore 和三个 channel 的进度展示才能跟其他 worker 一致。MCP 工具本来就是
+`mcp__<server>__<tool>`，跟 Claude Code 同形，不用映射。
+
+Token 用量挂在 `assistant/message` 事件的 `data.usage` 上，camelCase
+（`inputTokens` / `cacheWriteTokens`），`_accumulate_usage()` 转成其他 worker
+用的 snake_case。**一轮多次模型调用会有多条**，要累加不是取最后一条。
 
 ## 通用规则
 - `self._lock` — asyncio.Lock，防止并发操作同一个 worker

@@ -425,7 +425,8 @@ def build_system_prompt(
     # Kilo/OpenClaw 只加 common, 因为:
     #   - Kilo 自己 anthropic.txt 已 cover "responses short/concise" 等基础原则
     #   - Kilo/OpenClaw 通常不配 Chrome MCP, 配的 MCP 通过自己配置文件加载
-    if worker_type in ("gemini", "kilo", "openclaw"):
+    #   - dsh 同理: MCP 在 profile 的 cordis.patch.yml 里声明, 不经 prompt
+    if worker_type in ("gemini", "kilo", "openclaw", "dsh"):
         _prompts_dir = Path(__file__).parent / "prompts"
         try:
             _common = (_prompts_dir / "common-worker-guide.md").read_text(encoding="utf-8")
@@ -459,7 +460,7 @@ def build_system_prompt(
 
     # 非 Claude worker 的语言指令
     # Claude Code CLI 自带 "Always respond in 中文"，但其他 worker 需要显式注入
-    if worker_type in ("gemini", "kilo", "openclaw"):
+    if worker_type in ("gemini", "kilo", "openclaw", "dsh"):
         prompt += (
             "\n\n## 语言\n"
             "始终使用中文回答。所有解释、分析、总结都用中文。"

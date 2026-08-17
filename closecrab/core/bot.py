@@ -30,6 +30,7 @@ from .session import SessionManager
 from .types import UnifiedMessage
 from ..workers.claude_code import ClaudeCodeWorker
 from ..workers.gemini_acp import GeminiACPWorker
+from ..workers.dsh_worker import DSHWorker
 from ..workers.kilo import KiloWorker
 from ..workers.openclaw_acp import OpenClawWorker
 from ..workers.base import Worker
@@ -1004,6 +1005,27 @@ class BotCore:
                 session_id=session_id,
                 model=self._backbone_model,
                 state_dir=str(self._state_dir),
+            )
+        if self._worker_type == "dsh":
+            dsh_bin = shutil.which("dsh")
+            if not dsh_bin:
+                npm_global = Path.home() / ".npm-global" / "bin" / "dsh"
+                if npm_global.exists():
+                    dsh_bin = str(npm_global)
+            # dsh reaches models through the LiteLLM gateway declared in the
+            # profile, so the Firestore model is a plain LiteLLM alias
+            # (claude-opus-5, gemini-3.7-flash) — not provider/model.
+            return DSHWorker(
+                dsh_bin=dsh_bin or "dsh",
+                profile=os.environ.get("DSH_PROFILE", "closecrab"),
+                dsh_home=os.environ.get(
+                    "DSH_HOME", str(Path.home() / ".closecrab" / "dsh-home")),
+                work_dir=self._work_dir,
+                timeout=self._timeout,
+                system_prompt=self._system_prompt,
+                session_id=session_id,
+                model=self._backbone_model or "claude-opus-5",
+                bot_name=self.bot_name,
             )
         if self._worker_type == "openclaw":
             oc_bin = shutil.which("openclaw")

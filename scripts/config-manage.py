@@ -8,7 +8,7 @@ Usage:
     config-manage.py add-channel <bot_name> <channel_type> [channel options]
     config-manage.py set-channel <bot_name> <channel_type>
     config-manage.py set-model <bot_name> <preset>     (claude-opus-4.6|claude-opus-4.7|claude-sonnet-4.6|gemini-3-flash|gemini-3.1-pro)
-    config-manage.py set-worker-type <bot_name> <claude|gemini|kilo>
+    config-manage.py set-worker-type <bot_name> <claude|gemini|kilo|openclaw|dsh>
     config-manage.py set <bot_name> <field> <value>
     config-manage.py delete <bot_name>
 
@@ -306,11 +306,31 @@ def cmd_set_livekit(args):
             print(f"(首次启动时 bot 会自动生成 hmac_secret 并回写 Firestore)")
 
 
-VALID_WORKER_TYPES = ("claude", "gemini", "kilo", "openclaw")
+VALID_WORKER_TYPES = ("claude", "gemini", "kilo", "openclaw", "dsh")
 
 # Model presets: friendly name → worker-specific model string
 # Each preset maps worker_type to the exact model ID that worker expects.
 MODEL_PRESETS = {
+    # dsh routes through the LiteLLM gateway declared in its cordis profile, so
+    # its ids are plain gateway aliases -- no provider prefix, no @default.
+    "claude-opus-5": {
+        "claude": "claude-opus-5@default",
+        "kilo":   "google-vertex-anthropic/claude-opus-5@default",
+        "gemini": None,
+        "dsh":    "claude-opus-5",
+    },
+    "claude-sonnet-5": {
+        "claude": "claude-sonnet-5@default",
+        "kilo":   "google-vertex-anthropic/claude-sonnet-5@default",
+        "gemini": None,
+        "dsh":    "claude-sonnet-5",
+    },
+    "gemini-3.7-flash": {
+        "claude": None,
+        "kilo":   "google-vertex/gemini-3.7-flash",
+        "gemini": "gemini-3.7-flash",
+        "dsh":    "gemini-3.7-flash",
+    },
     "claude-opus-4.6": {
         "claude": "claude-opus-4-6@default",
         "kilo":   "google-vertex-anthropic/claude-opus-4-6@default",

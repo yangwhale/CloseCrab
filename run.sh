@@ -71,6 +71,18 @@ if [ -z "${KILO_SERVER_PASSWORD:-}" ]; then
     export KILO_SERVER_PASSWORD="$(cat "$KILO_PW_FILE")"
 fi
 
+# dsh worker 的凭据。dsh 的 cordis profile 里写的是 apiKeyEnv: LITELLM_KEY 和
+# process.env.JINA_AUTH —— 它只认这两个名字，缺了不会报错，只会在第一次调模型
+# 时失败。跟 KILO_SERVER_PASSWORD 一样，从文件读，文件不在就什么都不设，让
+# dsh worker 自己在日志里喊，而不是在这里把整个 bot 拖住。
+for _pair in "LITELLM_KEY:$HOME/.closecrab-litellm-key" "JINA_AUTH:$HOME/.closecrab-jina-auth"; do
+    _var="${_pair%%:*}"; _file="${_pair#*:}"
+    if [ -z "$(eval echo "\$$_var")" ] && [ -f "$_file" ]; then
+        export "$_var=$(cat "$_file")"
+    fi
+done
+unset _pair _var _file
+
 # ── gcsfuse 挂载检测 ─────────────────────────────────────────
 # gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失
 # 在 Bot 启动前自动检测并恢复，确保 CC Pages 和 shared memory 可用

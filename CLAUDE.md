@@ -19,7 +19,7 @@ rules/ 是各 area 单源真理，本文件不重复其内容。
 -->
 
 ## 项目概述
-CloseCrab 将 Claude Code CLI 包装为多平台 AI Bot（Discord/飞书/钉钉）。每个 bot 是独立进程，通过 Unix socketpair 与 Claude CLI 通信，Firestore 存配置和日志。支持 4 种 worker（claude/gemini/openclaw/kilo），由 Firestore `bots/{name}.worker_type` 切换。
+CloseCrab 将 Claude Code CLI 包装为多平台 AI Bot（Discord/飞书/钉钉）。每个 bot 是独立进程，通过 Unix socketpair 与 Claude CLI 通信，Firestore 存配置和日志。支持 5 种 worker（claude/gemini/openclaw/kilo/dsh），由 Firestore `bots/{name}.worker_type` 切换。
 
 ```
 用户消息 → Channel Adapter → UnifiedMessage → BotCore → Worker ⇄ CLI (Claude/Gemini/...)
@@ -52,6 +52,7 @@ scripts/dispatch-bot.sh deploy|recall|move|check
 scripts/sync-memory.sh --push|--pull
 scripts/send-to-discord.sh --channel <id> "<msg>"
 scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
+scripts/dsh-setup.sh [--check]               # 建 dsh worker 用的 cordis profile（幂等）
 
 # 可观测性 / 备份
 python3 scripts/memory-audit.py --action-only         # 记忆体检（周一 cron）

@@ -539,7 +539,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 0. 基础工具检查 (nodejs, npm, git)
     # ----------------------------------------------------------------
-    echo "[0/12] 检查基础工具..."
+    echo "[0/13] 检查基础工具..."
     # git
     if ! command -v git &>/dev/null; then
         echo "  安装 git..."
@@ -577,7 +577,7 @@ install_cc() {
     # 确保 ~/.local/bin 在 PATH 中（Claude CLI 默认安装位置）
     export PATH="$HOME/.local/bin:$PATH"
 
-    echo "[1/12] 检查 Claude Code CLI..."
+    echo "[1/13] 检查 Claude Code CLI..."
     if command -v claude &>/dev/null; then
         echo "  已安装: $(claude --version)"
     else
@@ -640,7 +640,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 2. GCP 认证
     # ----------------------------------------------------------------
-    echo "[2/12] GCP 认证..."
+    echo "[2/13] GCP 认证..."
     GCLOUD_ACCOUNT=$(gcloud auth list --filter='status:ACTIVE' --format='value(account)' 2>/dev/null || true)
     if [[ -n "$GCLOUD_ACCOUNT" ]]; then
         echo "  gcloud 已认证: $GCLOUD_ACCOUNT"
@@ -672,7 +672,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 3. Claude Code 配置
     # ----------------------------------------------------------------
-    echo "[3/12] 配置 Claude Code..."
+    echo "[3/13] 配置 Claude Code..."
     mkdir -p ~/.claude ~/.claude/closecrab
 
     # 确保 ~/.zshenv 中的环境变量在非登录 shell 中也能用
@@ -720,7 +720,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 4. Skills 部署（增量拷贝，不删除用户自行添加的 skill）
     # ----------------------------------------------------------------
-    echo "[4/12] 部署 Skills..."
+    echo "[4/13] 部署 Skills..."
     # 如果存在旧的 symlink，先移除
     if [[ -L ~/.claude/skills ]]; then
         echo "  移除旧 symlink: $(readlink ~/.claude/skills)"
@@ -815,7 +815,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 5. Helper Scripts 部署
     # ----------------------------------------------------------------
-    echo "[5/12] 部署 Helper Scripts..."
+    echo "[5/13] 部署 Helper Scripts..."
     mkdir -p ~/.claude/scripts
     for f in "$SCRIPT_DIR/scripts/"*; do
         cp -a "$f" ~/.claude/scripts/
@@ -827,7 +827,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 6. Auto Memory 同步（从 private repo）
     # ----------------------------------------------------------------
-    echo "[6/12] 同步 Auto Memory..."
+    echo "[6/13] 同步 Auto Memory..."
     # 检测 CC project 目录名（依赖 $HOME 路径）
     PROJECT_NAME=$(echo "$HOME" | tr '/' '-')
     MEMORY_DIR="$HOME/.claude/projects/${PROJECT_NAME}/memory"
@@ -860,7 +860,7 @@ install_cc() {
     # ----------------------------------------------------------------
     # 7. Plugins 恢复
     # ----------------------------------------------------------------
-    echo "[7/12] 恢复 Plugins..."
+    echo "[7/13] 恢复 Plugins..."
     mkdir -p ~/.claude/plugins
     if [[ -d "$PRIVATE_REPO/claude-code/plugins" ]]; then
         # 恢复插件注册和市场配置
@@ -877,13 +877,13 @@ install_cc() {
     # ----------------------------------------------------------------
     # 8. gcsfuse 挂载 (CC Pages + 共享 Memory)
     # ----------------------------------------------------------------
-    echo "[8/12] 设置 gcsfuse..."
+    echo "[8/13] 设置 gcsfuse..."
     setup_gcsfuse
 
     # ----------------------------------------------------------------
     # 9. Gemini CLI 安装
     # ----------------------------------------------------------------
-    echo "[9/12] 安装 Gemini CLI..."
+    echo "[9/13] 安装 Gemini CLI..."
     if command -v gemini &>/dev/null; then
         echo "  已安装: $(gemini --version 2>/dev/null || echo 'unknown')"
         echo "  更新到最新版..."
@@ -1026,7 +1026,7 @@ else:
     # ----------------------------------------------------------------
     # 10. MCP Config 注入
     # ----------------------------------------------------------------
-    echo "[10/12] 配置 MCP Server..."
+    echo "[10/13] 配置 MCP Server..."
     if [[ ! -f ~/.claude.json ]]; then
         echo '{}' > ~/.claude.json
         echo "  ~/.claude.json 已创建"
@@ -1093,9 +1093,9 @@ with open(path, 'w') as f:
     fi
 
     # ------------------------------------------------------------------
-    # [11/12] OpenClaw 安装 + 配置
+    # [11/13] OpenClaw 安装 + 配置
     # ------------------------------------------------------------------
-    echo "[11/12] 安装 + 配置 OpenClaw..."
+    echo "[11/13] 安装 + 配置 OpenClaw..."
     install_npm_bin "openclaw" "openclaw" "OpenClaw"
 
     local OPENCLAW_BIN=""
@@ -1204,18 +1204,18 @@ with open(path, 'w') as f:
             echo "  bugged: 云上路径 (SSE MCP), 已跳过 skill"
         fi
     else
-        echo "[11/12] OpenClaw 未安装, 跳过配置 (install_npm_bin 失败)"
+        echo "[11/13] OpenClaw 未安装, 跳过配置 (install_npm_bin 失败)"
     fi
 
     # ------------------------------------------------------------------
-    # [12/12] Kilo CLI 安装 + 配置
+    # [12/13] Kilo CLI 安装 + 配置
     #
     # Kilo serve is a long-lived HTTP daemon spawned by KiloWorker on first
     # message. KiloWorker._ensure_kilo_config() auto-generates ~/.kilo/{
     # system-prompt.md, memory-guide.md, kilo.jsonc} at runtime, so deploy.sh
     # only needs the CLI + ~/.config/kilo/kilo.json (provider + MCP).
     # ------------------------------------------------------------------
-    echo "[12/12] 安装 + 配置 Kilo CLI..."
+    echo "[12/13] 安装 + 配置 Kilo CLI..."
     install_npm_bin "@kilocode/cli" "kilo" "Kilo CLI"
 
     local KILO_BIN=""
@@ -1248,9 +1248,44 @@ with open(path, 'w') as f:
         # ~/.kilo/* 由 KiloWorker._ensure_kilo_config() 启动时自动生成, deploy.sh 不写
         echo "  ~/.kilo/{system-prompt.md, memory-guide.md, kilo.jsonc} 由 KiloWorker 启动时自动生成"
     else
-        echo "[12/12] Kilo CLI 未安装, 跳过配置 (install_npm_bin 失败)"
+        echo "[12/13] Kilo CLI 未安装, 跳过配置 (install_npm_bin 失败)"
     fi
 
+
+    # ------------------------------------------------------------------
+    # [13/13] DeepSeek Harness (dsh) 安装 + profile
+    #
+    # DSHWorker 不用 dsh 自带的 web / headless profile —— 前者是浏览器 UI,
+    # 后者跑完一个任务就退出, 都撑不起一个常驻会话。scripts/dsh-setup.sh 建
+    # 第三个 profile, 在 dsh-base 之上挂 sdk-jsonrpc-server, 一个进程同时拿到
+    # 常驻 session、流式事件和 MCP。脚本幂等, 失败不阻断部署。
+    # ------------------------------------------------------------------
+    echo "[13/13] 安装 + 配置 DeepSeek Harness (dsh)..."
+    install_npm_bin "@deepseek-ai/dsh" "dsh" "DeepSeek Harness"
+
+    local DSH_BIN=""
+    if command -v dsh &>/dev/null; then
+        DSH_BIN="$(command -v dsh)"
+    elif [[ -x "$HOME/.npm-global/bin/dsh" ]]; then
+        DSH_BIN="$HOME/.npm-global/bin/dsh"
+    fi
+
+    if [[ -n "$DSH_BIN" ]]; then
+        if [[ -x "$SCRIPT_DIR/scripts/dsh-setup.sh" ]]; then
+            # LITELLM_KEY / JINA_AUTH 有就用, 没有就跳过冒烟测试与 MCP 那一行,
+            # 不让缺凭据变成部署失败。
+            if DSH_HOME="${DSH_HOME:-$HOME/.closecrab/dsh-home}" \
+               "$SCRIPT_DIR/scripts/dsh-setup.sh"; then
+                echo "  dsh profile 就绪"
+            else
+                echo "  ⚠ dsh-setup.sh 失败, dsh worker 不可用 (其他 worker 不受影响)"
+            fi
+        else
+            echo "  ⚠ 未找到 scripts/dsh-setup.sh, 跳过 profile 配置"
+        fi
+    else
+        echo "[13/13] dsh 未安装, 跳过配置 (install_npm_bin 失败)"
+    fi
     echo ""
     echo "Claude Code 环境就绪！"
     echo "  Skills: $(ls "$SCRIPT_DIR/skills" 2>/dev/null | wc -l) 个"
@@ -1259,6 +1294,7 @@ with open(path, 'w') as f:
     echo "  Gemini CLI: $(command -v gemini &>/dev/null && echo '已安装' || echo '未安装')"
     echo "  OpenClaw: $([[ -n "$OPENCLAW_BIN" ]] && echo '已配置' || echo '未安装')"
     echo "  Kilo CLI: $([[ -n "$KILO_BIN" ]] && echo '已配置' || echo '未安装')"
+    echo "  dsh: $([[ -n "$DSH_BIN" ]] && echo '已配置' || echo '未安装')"
     echo "  运行 'claude' 开始使用"
 }
 
