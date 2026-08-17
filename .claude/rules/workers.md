@@ -163,6 +163,19 @@ Worker 侧已经准备好了那一天：`model` 支持 `provider/model` 写法�
 **token 不能放环境变量** —— dsh 的凭据解析环境层优先且只读，放进去就再也刷不动；
 要写 `$DSH_HOME/.credentials.yaml`，那层 `watch: true` 热重载。
 
+### 内部 MCP 走私有 overlay，不进这个仓库
+
+**CloseCrab 是公开仓库。** 任何点名雇主内部工具的东西 —— server 名、指向它的
+绝对路径、它监听的端口 —— 都不能写进 `dsh-setup.sh`。
+
+`dsh-setup.sh` 只留一个钩子：存在就 source
+`$PRIVATE_SKILLS_DIR/dsh/profile-overlay.sh`（默认 `~/private-skills/dsh/`），
+由它往 `$PATCH` 追加内部 MCP 的行。公开这边看不出追加了什么。
+
+> 2026-08-17 hulk 曾把 5 个内部 MCP 的配置（含绝对路径）直接 commit 进
+> `dsh-setup.sh`。**没推出去**，但它并不知道这个仓库是公开的 —— 这是流程缺口
+> 不是它的错。让 bot 自主 commit 的仓库，公开/私有的边界必须写进它的约束里。
+
 ### 事件映射
 Gemini 工具名与 Claude 不同，`_TOOL_NAME_MAP` 负责映射（如 `run_shell_command` → `Bash`），确保 BotCore 和 Channel 层的进度展示一致。
 
@@ -302,6 +315,19 @@ Worker 侧已经准备好了那一天：`model` 支持 `provider/model` 写法�
 斜杠切，因为 Vertex 的 id 本身含斜杠），`_refresh_vertex_token()` 负责续期。
 **token 不能放环境变量** —— dsh 的凭据解析环境层优先且只读，放进去就再也刷不动；
 要写 `$DSH_HOME/.credentials.yaml`，那层 `watch: true` 热重载。
+
+### 内部 MCP 走私有 overlay，不进这个仓库
+
+**CloseCrab 是公开仓库。** 任何点名雇主内部工具的东西 —— server 名、指向它的
+绝对路径、它监听的端口 —— 都不能写进 `dsh-setup.sh`。
+
+`dsh-setup.sh` 只留一个钩子：存在就 source
+`$PRIVATE_SKILLS_DIR/dsh/profile-overlay.sh`（默认 `~/private-skills/dsh/`），
+由它往 `$PATCH` 追加内部 MCP 的行。公开这边看不出追加了什么。
+
+> 2026-08-17 hulk 曾把 5 个内部 MCP 的配置（含绝对路径）直接 commit 进
+> `dsh-setup.sh`。**没推出去**，但它并不知道这个仓库是公开的 —— 这是流程缺口
+> 不是它的错。让 bot 自主 commit 的仓库，公开/私有的边界必须写进它的约束里。
 
 ### 事件映射
 `_map_tool_kind()` 根据 ACP 事件的 `kind` 字段（execute/read/write/edit/search/list/function）映射为 Claude Code 风格的工具名。`_TOOL_NAME_MAP` 处理 `function` 类型的细粒度映射。
@@ -579,6 +605,19 @@ Worker 侧已经准备好了那一天：`model` 支持 `provider/model` 写法�
 斜杠切，因为 Vertex 的 id 本身含斜杠），`_refresh_vertex_token()` 负责续期。
 **token 不能放环境变量** —— dsh 的凭据解析环境层优先且只读，放进去就再也刷不动；
 要写 `$DSH_HOME/.credentials.yaml`，那层 `watch: true` 热重载。
+
+### 内部 MCP 走私有 overlay，不进这个仓库
+
+**CloseCrab 是公开仓库。** 任何点名雇主内部工具的东西 —— server 名、指向它的
+绝对路径、它监听的端口 —— 都不能写进 `dsh-setup.sh`。
+
+`dsh-setup.sh` 只留一个钩子：存在就 source
+`$PRIVATE_SKILLS_DIR/dsh/profile-overlay.sh`（默认 `~/private-skills/dsh/`），
+由它往 `$PATCH` 追加内部 MCP 的行。公开这边看不出追加了什么。
+
+> 2026-08-17 hulk 曾把 5 个内部 MCP 的配置（含绝对路径）直接 commit 进
+> `dsh-setup.sh`。**没推出去**，但它并不知道这个仓库是公开的 —— 这是流程缺口
+> 不是它的错。让 bot 自主 commit 的仓库，公开/私有的边界必须写进它的约束里。
 
 ### 事件映射
 

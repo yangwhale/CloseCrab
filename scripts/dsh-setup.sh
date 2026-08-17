@@ -240,6 +240,25 @@ else
   say "JINA_AUTH not set — skipping the jina MCP row"
 fi
 
+# ── private overlay ────────────────────────────────────────────────
+# Anything that names an employer-internal tool — a server name, an absolute
+# path to one, a port it listens on — belongs in the private skills tree, not
+# here: this repository is public. The hook is deliberately dumb (source a
+# file if it exists) so the public side carries no hint of what it appends.
+#
+# The overlay is sourced, so it can append to "$PATCH" directly. It runs after
+# the base patch is written and before the smoke test, and its absence is
+# normal, not an error.
+PRIVATE_SKILLS_DIR="${PRIVATE_SKILLS_DIR:-$HOME/private-skills}"
+PRIVATE_OVERLAY="$PRIVATE_SKILLS_DIR/dsh/profile-overlay.sh"
+if [[ -f "$PRIVATE_OVERLAY" ]]; then
+  say "applying private profile overlay"
+  # shellcheck disable=SC1090
+  source "$PRIVATE_OVERLAY"
+else
+  say "no private profile overlay (looked in $PRIVATE_OVERLAY)"
+fi
+
 say "wrote $PATCH"
 
 # ── 4. smoke test ──────────────────────────────────────────────────
