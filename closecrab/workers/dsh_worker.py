@@ -508,17 +508,33 @@ class DSHWorker(Worker):
         return "".join(out)
 
     def _accumulate_usage(self, usage) -> None:
-        """dsh reports camelCase counts; BotCore and Firestore expect the
-        Anthropic snake_case names every other worker emits."""
+        """Fold one round trip's usage in, using ClaudeCodeWorker's semantics.
+
+        dsh reports camelCase names, so they are translated to the Anthropic
+        snake_case ones every other worker emits. The subtler half is *how* they
+        combine, and getting it wrong is not visible without a cross-check:
+
+        Input and cache counts grow monotonically across a turn -- each round
+        trip resends the whole conversation -- so the LATEST message already
+        carries the turn's real input. Summing them counts the same prefix once
+        per round trip. Measured on one real turn: 794,166 summed versus 96,154
+        actual, an 8.3x overstatement that made dsh look wildly more expensive
+        than the claude worker on identical work.
+
+        Output tokens are per-message increments, so those do accumulate.
+        See claude_code.py's msg_id-dedupe block, which this mirrors.
+        """
         if not isinstance(usage, dict):
             return
         for src, dst in (("inputTokens", "input_tokens"),
-                         ("outputTokens", "output_tokens"),
                          ("cacheWriteTokens", "cache_creation_input_tokens"),
                          ("cacheReadTokens", "cache_read_input_tokens")):
             value = usage.get(src)
             if isinstance(value, (int, float)):
-                self._usage[dst] += int(value)
+                self._usage[dst] = int(value)
+        out = usage.get("outputTokens")
+        if isinstance(out, (int, float)):
+            self._usage["output_tokens"] += int(out)
 
     @staticmethod
     async def _safe_callback(callback, arg, *, name: str = "callback"):

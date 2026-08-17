@@ -136,7 +136,7 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
 | Collection | 用途 |
 |-----------|------|
 | `bots/{name}` | Bot 配置（channel tokens、model、allowed users、team、inbox、email、worker_type、livekit） |
-| `bots/{name}/logs/{id}` | 对话日志（timestamp、status、steps、reply、duration_seconds、usage、worker_type、assistant） |
+| `bots/{name}/logs/{id}` | 对话日志（timestamp、status、duration_seconds、usage、worker_type、user、source、session_id）。**完整回复在 `assistant`（截 10K），没有 `reply` 字段**；`steps` 是过程轨迹，**每条截 500 字符、最多 200 条**，所以结论要从 `assistant` 读不是从 `steps` 读 |
 | `messages` | Bot 间收件箱（from、to、instruction、status、result） |
 | `registry` | Bot 运行时状态（hostname、accelerator、last_seen） |
 | `config/global` | 全局常量（cc_pages_url、gcs_bucket） |

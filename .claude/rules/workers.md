@@ -360,7 +360,15 @@ BotCore 和三个 channel 的进度展示才能跟其他 worker 一致。MCP 工
 
 Token 用量挂在 `assistant/message` 事件的 `data.usage` 上，camelCase
 （`inputTokens` / `cacheWriteTokens`），`_accumulate_usage()` 转成其他 worker
-用的 snake_case。**一轮多次模型调用会有多条**，要累加不是取最后一条。
+用的 snake_case。
+
+**合并方式必须跟 ClaudeCodeWorker 一致，否则数字不可比**：一轮里每次模型往返
+一条，input / cache 三项**单调递增**（每次都重发整个对话），所以**取最新那条**
+就是本轮真实输入；累加等于把同一段前缀按往返次数重复计。只有 `outputTokens`
+是每条增量，那一项才累加。
+
+实测一轮：累加得 794,166，取最新是 96,154 —— **虚高 8.3 倍**，会让 dsh 在成本
+看板上看着比 claude worker 贵一个数量级，而实际做的是同一件事。
 
 ## 通用规则
 - `self._lock` — asyncio.Lock，防止并发操作同一个 worker
