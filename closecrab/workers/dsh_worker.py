@@ -142,6 +142,9 @@ class DSHWorker(Worker):
         self._provider = provider
         self._max_tokens = max_tokens
         self._skill_dir = skill_dir or str(Path.home() / ".claude" / "skills")
+        # Matches the contextWindow the profile declares for these models; the
+        # card divides by it, so a wrong value silently skews every reading.
+        self._context_window = (200_000 if "haiku" in model else 1_000_000)
         self._permission_mode = permission_mode
 
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -185,7 +188,29 @@ class DSHWorker(Worker):
         return bool(self._proc and self._proc.returncode is None)
 
     def get_context_usage(self) -> dict:
-        return dict(self._usage)
+        """Usage plus the derived fields the channel cards read.
+
+        Returning only the raw counters is why the Feishu card showed CTX 0:
+        it reads total_context_tokens / context_window / usage_pct, and a
+        worker that omits them renders as an empty bar rather than as an
+        error. Mirrors ClaudeCodeWorker.get_context_usage().
+        """
+        u = dict(self._usage)
+        # input/cache are already the latest turn's real values, not sums --
+        # see _accumulate_usage -- so this is the live context, not a lifetime
+        # total that would creep past the window and pin the bar at 100%.
+        total_ctx = (u["input_tokens"] + u["cache_creation_input_tokens"]
+                     + u["cache_read_input_tokens"])
+        window = self._context_window
+        u["total_context_tokens"] = total_ctx
+        u["context_window"] = window
+        u["usage_pct"] = round(total_ctx / window * 100, 1) if total_ctx else 0
+        u["session_model"] = self._model
+        u["session_duration_s"] = (int(time.monotonic() - self._start_time)
+                                   if self._start_time is not None else 0)
+        if self._start_wall:
+            u["session_start_ts"] = self._start_wall
+        return u
 
     # ── Process lifecycle ──────────────────────────────────────────
 
