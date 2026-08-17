@@ -221,24 +221,90 @@ cat > "$PATCH" <<EOF
       name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
 EOF
 
-# MCP is opt-in by design in dsh: every server is trusted code running outside
-# the agent sandbox. Only wire jina in when a token is actually available.
-if [[ -n "${JINA_AUTH:-}" ]]; then
-  cat >> "$PATCH" <<'EOF'
-    - id: mcp-jina
-      name: '@deepseek-ai/dsh-mcp-client'
-      config:
-        serverName: jina
-        transport: streamable-http
-        url: https://mcp.jina.ai/v1
-        headers:
-          Authorization: !!js process.env.JINA_AUTH
-        toolCallTimeoutMs: 120000
-EOF
-  say "jina MCP wired in (JINA_AUTH present)"
-else
-  say "JINA_AUTH not set — skipping the jina MCP row"
-fi
+# MCP servers: sync from ~/.claude.json or wire standard servers (jina, wiki, serena)
+python3 - "$PATCH" <<'PY'
+import json, yaml, sys, os
+
+patch_path = sys.argv[1]
+claude_json_path = os.path.expanduser("~/.claude.json")
+mcp_servers = {}
+if os.path.exists(claude_json_path):
+    try:
+        with open(claude_json_path) as f:
+            mcp_servers = json.load(f).get("mcpServers", {})
+    except Exception as e:
+        print(f"  warning: failed to read {claude_json_path}: {e}")
+
+# Read existing patch
+with open(patch_path) as f:
+    patch = yaml.safe_load(f) or []
+
+# Find the insert block
+insert_block = None
+for item in patch:
+    if "insert" in item and isinstance(item["insert"], list):
+        insert_block = item["insert"]
+        break
+
+if insert_block is None:
+    insert_block = []
+    patch.append({"insert": insert_block})
+
+# Build MCP client entries
+for name, srv in mcp_servers.items():
+    srv_type = srv.get("type")
+    # Clean server name for DSH namespace (e.g. jina-ai -> jina)
+    server_name = "jina" if name == "jina-ai" else name
+    entry_id = f"mcp-{server_name}"
+    
+    # Skip if already in insert block
+    if any(e.get("id") == entry_id for e in insert_block if isinstance(e, dict)):
+        continue
+        
+    if srv_type == "http":
+        url = srv.get("url")
+        headers = srv.get("headers", {})
+        if not url:
+            continue
+        entry = {
+            "id": entry_id,
+            "name": "@deepseek-ai/dsh-mcp-client",
+            "config": {
+                "serverName": server_name,
+                "transport": "streamable-http",
+                "url": url,
+                "headers": headers,
+                "toolCallTimeoutMs": 120000,
+            }
+        }
+        insert_block.append(entry)
+        print(f"  added HTTP MCP server: {server_name}")
+    elif srv_type == "stdio":
+        cmd = srv.get("command")
+        args = srv.get("args", [])
+        if not cmd:
+            continue
+        entry = {
+            "id": entry_id,
+            "name": "@deepseek-ai/dsh-mcp-client",
+            "config": {
+                "serverName": server_name,
+                "transport": "stdio",
+                "command": cmd,
+                "args": args,
+                "toolCallTimeoutMs": 60000,
+            }
+        }
+        if "env" in srv:
+            entry["config"]["env"] = srv["env"]
+        if "cwd" in srv:
+            entry["config"]["cwd"] = srv["cwd"]
+        insert_block.append(entry)
+        print(f"  added stdio MCP server: {server_name}")
+
+with open(patch_path, "w") as f:
+    yaml.dump(patch, f, sort_keys=False, default_flow_style=False)
+PY
 
 # ── private overlay ────────────────────────────────────────────────
 # Anything that names an employer-internal tool — a server name, an absolute
