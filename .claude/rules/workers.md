@@ -130,6 +130,39 @@ process-wide default"）。分级不是选档位，是**给每个会调 LLM 的�
 `maxDepth` 默认 3（0 禁止委派）。同一条 assistant 消息里的兄弟委派会在
 `maxParallelToolCalls` 池里并发，结果按模型顺序提交。
 
+
+### Gemini 必须走 LiteLLM，不能直连 Vertex 的 OpenAI 兼容端点
+
+这条是 **dsh 存在的理由本身**（Claude Code 不支持 Gemini），所以值得写清楚边界。
+
+`llm-pi-ai` 插件只注册了三种 dialect：`openai-completions` / `openai-responses`
+/ `anthropic-messages`。pi-ai **库里有 `google-vertex`，插件没暴露** ——
+配了报 `no adapter registered for provider "vertex"`。
+
+于是唯一的直连选项是 Vertex 自己的 OpenAI 兼容端点
+（`.../locations/global/endpoints/openapi`，模型 id 要带 `google/` 前缀）。
+**纯对话能通，一带工具就必挂**：
+
+```
+400: Function call is missing a thought_signature in functionCall parts.
+     This is required for tools to work correctly.
+```
+
+Gemini 3.x 的工具调用要求每个 function call 回传 **thought signature**，
+而 OpenAI 的 schema 里没有这个字段的位置 —— 兼容层把它丢了，下一轮回传时
+签名缺失，Vertex 拒绝。**对 agent 场景等于不可用，不是配置能修的。**
+
+LiteLLM 能行，是因为它翻到 **Gemini 原生 API**，签名在它内部完整往返
+（响应里能看到 `provider_specific_fields.thought_signatures`）。
+
+⇒ **Gemini 一律走 `litellm/gemini-*`。** 直连要等 pi-ai 插件把
+`google-vertex` 这个原生 dialect 注册出来。
+
+Worker 侧已经准备好了那一天：`model` 支持 `provider/model` 写法（按**第一个**
+斜杠切，因为 Vertex 的 id 本身含斜杠），`_refresh_vertex_token()` 负责续期。
+**token 不能放环境变量** —— dsh 的凭据解析环境层优先且只读，放进去就再也刷不动；
+要写 `$DSH_HOME/.credentials.yaml`，那层 `watch: true` 热重载。
+
 ### 事件映射
 Gemini 工具名与 Claude 不同，`_TOOL_NAME_MAP` 负责映射（如 `run_shell_command` → `Bash`），确保 BotCore 和 Channel 层的进度展示一致。
 
@@ -236,6 +269,39 @@ process-wide default"）。分级不是选档位，是**给每个会调 LLM 的�
 
 `maxDepth` 默认 3（0 禁止委派）。同一条 assistant 消息里的兄弟委派会在
 `maxParallelToolCalls` 池里并发，结果按模型顺序提交。
+
+
+### Gemini 必须走 LiteLLM，不能直连 Vertex 的 OpenAI 兼容端点
+
+这条是 **dsh 存在的理由本身**（Claude Code 不支持 Gemini），所以值得写清楚边界。
+
+`llm-pi-ai` 插件只注册了三种 dialect：`openai-completions` / `openai-responses`
+/ `anthropic-messages`。pi-ai **库里有 `google-vertex`，插件没暴露** ——
+配了报 `no adapter registered for provider "vertex"`。
+
+于是唯一的直连选项是 Vertex 自己的 OpenAI 兼容端点
+（`.../locations/global/endpoints/openapi`，模型 id 要带 `google/` 前缀）。
+**纯对话能通，一带工具就必挂**：
+
+```
+400: Function call is missing a thought_signature in functionCall parts.
+     This is required for tools to work correctly.
+```
+
+Gemini 3.x 的工具调用要求每个 function call 回传 **thought signature**，
+而 OpenAI 的 schema 里没有这个字段的位置 —— 兼容层把它丢了，下一轮回传时
+签名缺失，Vertex 拒绝。**对 agent 场景等于不可用，不是配置能修的。**
+
+LiteLLM 能行，是因为它翻到 **Gemini 原生 API**，签名在它内部完整往返
+（响应里能看到 `provider_specific_fields.thought_signatures`）。
+
+⇒ **Gemini 一律走 `litellm/gemini-*`。** 直连要等 pi-ai 插件把
+`google-vertex` 这个原生 dialect 注册出来。
+
+Worker 侧已经准备好了那一天：`model` 支持 `provider/model` 写法（按**第一个**
+斜杠切，因为 Vertex 的 id 本身含斜杠），`_refresh_vertex_token()` 负责续期。
+**token 不能放环境变量** —— dsh 的凭据解析环境层优先且只读，放进去就再也刷不动；
+要写 `$DSH_HOME/.credentials.yaml`，那层 `watch: true` 热重载。
 
 ### 事件映射
 `_map_tool_kind()` 根据 ACP 事件的 `kind` 字段（execute/read/write/edit/search/list/function）映射为 Claude Code 风格的工具名。`_TOOL_NAME_MAP` 处理 `function` 类型的细粒度映射。
@@ -480,6 +546,39 @@ process-wide default"）。分级不是选档位，是**给每个会调 LLM 的�
 
 `maxDepth` 默认 3（0 禁止委派）。同一条 assistant 消息里的兄弟委派会在
 `maxParallelToolCalls` 池里并发，结果按模型顺序提交。
+
+
+### Gemini 必须走 LiteLLM，不能直连 Vertex 的 OpenAI 兼容端点
+
+这条是 **dsh 存在的理由本身**（Claude Code 不支持 Gemini），所以值得写清楚边界。
+
+`llm-pi-ai` 插件只注册了三种 dialect：`openai-completions` / `openai-responses`
+/ `anthropic-messages`。pi-ai **库里有 `google-vertex`，插件没暴露** ——
+配了报 `no adapter registered for provider "vertex"`。
+
+于是唯一的直连选项是 Vertex 自己的 OpenAI 兼容端点
+（`.../locations/global/endpoints/openapi`，模型 id 要带 `google/` 前缀）。
+**纯对话能通，一带工具就必挂**：
+
+```
+400: Function call is missing a thought_signature in functionCall parts.
+     This is required for tools to work correctly.
+```
+
+Gemini 3.x 的工具调用要求每个 function call 回传 **thought signature**，
+而 OpenAI 的 schema 里没有这个字段的位置 —— 兼容层把它丢了，下一轮回传时
+签名缺失，Vertex 拒绝。**对 agent 场景等于不可用，不是配置能修的。**
+
+LiteLLM 能行，是因为它翻到 **Gemini 原生 API**，签名在它内部完整往返
+（响应里能看到 `provider_specific_fields.thought_signatures`）。
+
+⇒ **Gemini 一律走 `litellm/gemini-*`。** 直连要等 pi-ai 插件把
+`google-vertex` 这个原生 dialect 注册出来。
+
+Worker 侧已经准备好了那一天：`model` 支持 `provider/model` 写法（按**第一个**
+斜杠切，因为 Vertex 的 id 本身含斜杠），`_refresh_vertex_token()` 负责续期。
+**token 不能放环境变量** —— dsh 的凭据解析环境层优先且只读，放进去就再也刷不动；
+要写 `$DSH_HOME/.credentials.yaml`，那层 `watch: true` 热重载。
 
 ### 事件映射
 

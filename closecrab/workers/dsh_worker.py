@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -138,6 +139,12 @@ class DSHWorker(Worker):
         self._timeout = timeout
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
+        # Firestore may name the route as "provider/model" (kilo uses the same
+        # shape). Split on the FIRST slash only: Vertex's OpenAI-compatible
+        # endpoint needs ids like "google/gemini-3.7-flash", so the model half
+        # legitimately contains one.
+        if "/" in model:
+            provider, model = model.split("/", 1)
         self._model = model
         self._provider = provider
         self._max_tokens = max_tokens
@@ -157,6 +164,7 @@ class DSHWorker(Worker):
         self._pending: dict[int, asyncio.Future] = {}
         self._notes: Optional[asyncio.Queue] = None
         self._reader_task: Optional[asyncio.Task] = None
+        self._token_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
         self._stderr_path: Optional[str] = None
         self._start_time: Optional[float] = None
@@ -227,6 +235,53 @@ class DSHWorker(Worker):
         log.info(f"dsh: new session {self._session_id} ({why})")
         return self._session_id
 
+    def _refresh_vertex_token(self) -> bool:
+        """Put a fresh Vertex access token where dsh can hot-reload it.
+
+        Going direct to Vertex instead of through the LiteLLM gateway means
+        bearer auth with a gcloud token, and those expire in about an hour
+        while this runtime stays up for days.
+
+        The token must NOT go in the environment. dsh resolves credentials
+        environment-first and treats that layer as read-only, so an env value
+        would win permanently and no refresh could ever take effect. The
+        $DSH_HOME/.credentials.yaml layer is watched and hot-published, which
+        is the only layer a long-lived process can actually update.
+        """
+        if self._provider != "vertex":
+            return False
+        try:
+            out = subprocess.run(["gcloud", "auth", "print-access-token"],
+                                 capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning(f"could not mint a Vertex token: {e}")
+            return False
+        token = (out.stdout or "").strip()
+        if out.returncode != 0 or not token:
+            log.warning(f"gcloud returned no token: {(out.stderr or '')[:200]}")
+            return False
+        path = Path(self._dsh_home) / ".credentials.yaml"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(path.parent, 0o700)
+            path.write_text(f"VERTEX_TOKEN: {token}\n", encoding="utf-8")
+            os.chmod(path, 0o600)   # the provider refuses group/other bits
+        except OSError as e:
+            log.warning(f"could not write {path}: {e}")
+            return False
+        log.info("Vertex token refreshed into the credentials document")
+        return True
+
+    async def _token_refresh_loop(self) -> None:
+        """Re-mint well before the ~1h expiry; dsh picks it up without a restart."""
+        try:
+            while True:
+                await asyncio.sleep(45 * 60)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._refresh_vertex_token)
+        except asyncio.CancelledError:
+            raise
+
     def _refresh_shared_memory(self) -> None:
         """Publish the shared memory index into dsh's user-global slot.
 
@@ -274,10 +329,14 @@ class DSHWorker(Worker):
             # fails every turn with "id collision". Reusing the id looks like
             # continuity and is actually a permanently broken worker.
             self._fresh_session_id(f"{self._session_id} already has a log on disk")
+        self._refresh_vertex_token()
         self._refresh_shared_memory()
         self._write_agents_md()
         await self._ensure_process()
         self._started = True
+        if self._provider == "vertex" and (
+                self._token_task is None or self._token_task.done()):
+            self._token_task = asyncio.create_task(self._token_refresh_loop())
         self._start_time = time.monotonic()
         self._start_wall = datetime.datetime.now(datetime.timezone.utc).isoformat()
         log.info(f"DSHWorker started: profile={self._profile}, cwd={self._cwd}, "
@@ -803,13 +862,14 @@ class DSHWorker(Worker):
             except (asyncio.TimeoutError, Exception):  # noqa: B014 - best effort
                 pass
             await self._kill_process()
-        for task in (self._reader_task, self._stderr_task):
+        for task in (self._reader_task, self._stderr_task, self._token_task):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+        self._token_task = None
         self._proc = None
         self._started = False
         self._initialized = False
