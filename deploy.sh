@@ -1261,10 +1261,17 @@ with open(path, 'w') as f:
     # 常驻 session、流式事件和 MCP。脚本幂等, 失败不阻断部署。
     # ------------------------------------------------------------------
     echo "[13/13] 安装 + 配置 DeepSeek Harness (dsh)..."
-    # dsh 要 Node ^22.19 || >=24。fleet 里有机器根本没装 node（gLinux 那台），
-    # deploy.sh 是 set -e，不先挡一道会把整个部署带崩。
+    # dsh 要 Node ^22.19 || >=24。
+    # 这里必须跟 run.sh 用同一套解析：run.sh 取 nvm 下**版本号最高**的那个
+    # （`sort -V | tail -1`），而裸 `command -v node` 拿到的是 nvm 的 default
+    # 别名。gLinux 上 default 指向 v20、实际装着 v22 和 v24 —— 只看 default
+    # 会得出「这台机器没法跑 dsh」的错误结论，而 bot 运行时明明有 v24。
+    if [[ -d "$HOME/.nvm/versions/node" ]]; then
+        DSH_NVM_DIR="$(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -1)"
+        [[ -n "$DSH_NVM_DIR" ]] && export PATH="$DSH_NVM_DIR/bin:$PATH"
+    fi
     if ! command -v node &>/dev/null; then
-        echo "  未装 node，跳过 dsh（worker_type=dsh 在这台机器上不可用）"
+        echo "  未装 node（含 nvm 也没有），跳过 dsh（worker_type=dsh 在这台机器上不可用）"
     else
         DSH_NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
         DSH_NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)"

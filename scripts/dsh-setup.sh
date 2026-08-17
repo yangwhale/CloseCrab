@@ -38,11 +38,29 @@ say() { printf '  %s\n' "$*"; }
 die() { printf 'dsh-setup: %s\n' "$*" >&2; exit 1; }
 
 # ── prerequisites ──────────────────────────────────────────────────
+# Match run.sh: it prepends the HIGHEST nvm version, not nvm's `default` alias.
+# On a box where default is v20 but v22/v24 are installed, checking the alias
+# concludes "this host cannot run dsh" while the bot runtime happily has v24.
+if [[ -d "$HOME/.nvm/versions/node" ]]; then
+  NVM_DIR_LATEST="$(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -1)"
+  [[ -n "$NVM_DIR_LATEST" ]] && export PATH="$NVM_DIR_LATEST/bin:$PATH"
+fi
 command -v node >/dev/null 2>&1 || die "node not found; dsh needs Node 22.19+"
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
 NODE_MINOR=$(node -p 'process.versions.node.split(".")[1]')
 if [[ "$NODE_MAJOR" -lt 22 || ( "$NODE_MAJOR" -eq 22 && "$NODE_MINOR" -lt 19 ) ]]; then
   die "node $(node --version) is too old; dsh needs ^22.19 || >=24"
+fi
+
+# dsh manages profile plugins by shelling out to pnpm, and says only
+# "pnpm not found on PATH" when it is missing -- after it has already created
+# the profile directory, so a re-run looks like it is resuming rather than
+# starting over. Install it rather than failing the deploy on a one-liner.
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "  pnpm not found, installing into ~/.npm-global"
+  npm install -g --prefix "$HOME/.npm-global" pnpm >/dev/null 2>&1 || true
+  export PATH="$HOME/.npm-global/bin:$PATH"
+  command -v pnpm >/dev/null 2>&1 || die "pnpm install failed; dsh cannot manage profile plugins"
 fi
 
 dsh_run() {
