@@ -120,6 +120,7 @@ class DSHWorker(Worker):
         provider: str = "litellm",
         max_tokens: int = 32000,
         skill_dir: str | None = None,
+        permission_mode: str = "danger-full-access",
         bot_name: str = "",
     ):
         self._dsh_bin = dsh_bin or shutil.which("dsh") or "dsh"
@@ -141,6 +142,7 @@ class DSHWorker(Worker):
         self._provider = provider
         self._max_tokens = max_tokens
         self._skill_dir = skill_dir or str(Path.home() / ".claude" / "skills")
+        self._permission_mode = permission_mode
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
@@ -200,6 +202,41 @@ class DSHWorker(Worker):
         log.info(f"dsh: new session {self._session_id} ({why})")
         return self._session_id
 
+    def _refresh_shared_memory(self) -> None:
+        """Publish the shared memory index into dsh's user-global slot.
+
+        dsh-agent-instructions always reads $DSH_HOME/AGENTS.md -- the exact
+        counterpart of Claude Code's ~/.claude/CLAUDE.md -- and renders it as a
+        durable <system-reminder> under a byte budget, dropping broader files
+        before truncating specific ones. That is a better home for the index
+        than the CloseCrab system prompt, which has no budget and no framing.
+        Refreshed on every start() so a session never opens on a stale index.
+
+        The file is per-host, not per-bot: the index is shared state, and every
+        bot on the box should see the same one.
+        """
+        mem_dir = (Path.home() / ".claude" / "projects"
+                   / str(Path.home()).replace("/", "-") / "memory")
+        index = mem_dir / "MEMORY.md"
+        if not index.exists():
+            return
+        target = Path(self._dsh_home) / "AGENTS.md"
+        header = (
+            "<!-- CloseCrab managed: rewritten by DSHWorker on every start. -->\n\n"
+            "# 共享记忆（与 Claude Code 及其他 bot 同一套文件）\n\n"
+            f"下面是索引。**详情页在 `{mem_dir}/` 下，用 `read` 读具体文件** —— "
+            "索引只给一行摘要，值钱的细节在详情页里。\n"
+            "`shared/` 子目录通过 GCS 在所有机器的 bot 之间实时共享。\n"
+            "产生了值得跨 session 保留的经验，用 `write` 写进该目录，"
+            "并在索引对应 section 加一行。\n\n"
+        )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(header + index.read_text(encoding="utf-8"),
+                              encoding="utf-8")
+        except OSError as e:
+            log.warning(f"could not publish memory index to {target}: {e}")
+
     async def start(self, session_id: Optional[str] = None) -> str:
         if session_id is not None:
             self._session_id = session_id
@@ -212,6 +249,7 @@ class DSHWorker(Worker):
             # fails every turn with "id collision". Reusing the id looks like
             # continuity and is actually a permanently broken worker.
             self._fresh_session_id(f"{self._session_id} already has a log on disk")
+        self._refresh_shared_memory()
         self._write_agents_md()
         await self._ensure_process()
         self._started = True
@@ -249,7 +287,26 @@ class DSHWorker(Worker):
         # keeps its skills when it switches workers instead of silently losing
         # all of them — the `skill` tool is present either way, so the loss
         # shows up as the model just never using one.
+        # The profile's MCP row reads process.env.JINA_AUTH. If that is unset the
+        # header value is undefined, the row fails schema validation, and the
+        # WHOLE runtime refuses to boot -- a missing optional credential takes
+        # down bash and everything else with it. Derive it where possible and
+        # fall back to an empty string, which lets the profile load and confines
+        # the failure to the MCP connection.
+        if not env.get("JINA_AUTH"):
+            api_key = env.get("JINA_API_KEY", "")
+            env["JINA_AUTH"] = f"Bearer {api_key}" if api_key else ""
         env.setdefault("DSH_BUNDLED_SKILL_DIR", self._skill_dir)
+        # dsh defaults to the workspace-write sandbox, which strips capabilities.
+        # snap's snap-confine needs cap_dac_override, so on a host where gcloud
+        # is a snap (cc-tw is) EVERY snap binary fails inside it with
+        # "snap-confine is packaged without necessary permissions" -- and the
+        # agent burns a dozen tool calls diagnosing a permissions error that
+        # looks like a broken gcloud install. The other four workers all run
+        # unsandboxed (ClaudeCodeWorker passes --dangerously-skip-permissions),
+        # so this is parity, not a new exposure. Override per bot if that
+        # changes for some deployment.
+        env.setdefault("DSH_PERMISSION_MODE", self._permission_mode)
         # Claude Code sets CLAUDECODE in the environment it hands to children;
         # leaving it set makes nested CLIs think they are running inside CC.
         env.pop("CLAUDECODE", None)

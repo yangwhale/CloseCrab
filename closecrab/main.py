@@ -589,21 +589,29 @@ def main():
     db = _firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
 
     # Non-Claude workers: inject MEMORY.md into system prompt
-    # (Claude Code loads memory automatically; Gemini/OpenClaw do not)
+    # (Claude Code loads memory automatically; the others do not)
+    #
+    # dsh is deliberately NOT here. It has the same mechanism Claude Code does:
+    # dsh-agent-instructions reads $DSH_HOME/AGENTS.md (and CLAUDE.md by name)
+    # and renders it as a budgeted <system-reminder>. DSHWorker publishes the
+    # index there on every start, so injecting it again would put the same 20K
+    # in front of the model twice.
     if worker_type in ("gemini", "openclaw"):
         project_name = os.path.expanduser("~").replace("/", "-")
         memory_dir = Path.home() / ".claude" / "projects" / project_name / "memory"
         memory_index = memory_dir / "MEMORY.md"
+        _mem_read_tool, _mem_write_tool = "`read_file`", "`write_file` 或 `edit_file`"
         if memory_index.exists():
             try:
                 memory_content = memory_index.read_text(encoding="utf-8")
                 system_prompt += (
                     f"\n\n## Auto Memory（与其他 bot 共享）\n"
                     f"以下是持久化记忆索引，由所有 bot 共同维护。\n\n"
-                    f"**读取记忆**：用 `read_file` 读取 `{memory_dir}/` 下的具体文件。"
+                    f"**读取记忆**：用你的文件读取工具"
+                    f"（{_mem_read_tool}）读取 `{memory_dir}/` 下的具体文件。"
                     f"其中 `shared/` 子目录通过 GCS 在所有 bot 间实时共享。\n\n"
                     f"**写入记忆**：如果对话中产生了值得跨 session 保留的经验，"
-                    f"可以用 `write_file` 或 `edit_file` 写入 `{memory_dir}/shared/` 目录。"
+                    f"可以用 {_mem_write_tool} 写入 `{memory_dir}/shared/` 目录。"
                     f"文件格式与现有 topic 文件一致（纯 markdown，无 frontmatter）。"
                     f"写完后在 `{memory_index}` 的对应 section 里加一行索引。\n\n"
                     f"{memory_content}"

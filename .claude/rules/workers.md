@@ -301,6 +301,57 @@ JSON-RPC 没有 cancel。`interrupt()` 只能杀进程；杀完按上一条换�
   拿 `- id:` 加新 row 只会打一行 `patch: entry "X" not found` 然后继续跑，
   你会以为配好了。
 
+### 记忆：走 dsh 原生指令链，不走 system prompt 注入
+
+**dsh 有和 Claude Code 同一套机制**，`dsh-agent-instructions` 提供：
+
+| | dsh | Claude Code |
+|---|---|---|
+| 用户级 | `$DSH_HOME/AGENTS.md` | `~/.claude/CLAUDE.md` |
+| 项目级候选 | `['AGENTS.md', 'CLAUDE.md']` ← **默认就认 CLAUDE.md** | `CLAUDE.md` |
+| 本地覆盖 | `AGENTS.local.md` / `CLAUDE.local.md` | `CLAUDE.local.md` |
+| 项目根 | `.git` marker，从根逐层收敛到 cwd | 同 |
+| 呈现 | `<system-reminder>` durable message | 同 |
+| 动态 | 每次 `read`/`write`/`edit` 成功后重扫，增删改各补一条 | 同 |
+| 预算 | `maxBytes`（本 profile 65536），先丢宽泛的再截具体的 | — |
+
+所以 `main.py` 的 MEMORY.md 注入**不包含 dsh** —— `DSHWorker._refresh_shared_memory()`
+每次 `start()` 把索引写进 `$DSH_HOME/AGENTS.md`。两边都放 = 同一份 20K 在模型面前
+出现两次。
+
+`$DSH_HOME/AGENTS.md` 是**每主机一份不是每 bot 一份**（记忆索引本来就是共享的）；
+per-bot 的 CloseCrab system prompt 走 workspace 里那份 `AGENTS.md`。
+
+**dsh 仍然没有的**：Anthropic 那套按轮语义召回（CC 会按当前问题现推相关 memory 页）。
+索引在，详情页要模型自己想到去 `read`。⇒ **给 dsh 写记忆时，可执行的常量要写进
+索引行本身**，只放详情页对它等于不存在。实测：同一道 Hy3 AOT 题，索引里没有那几个
+常量时 38 次工具调用，写进索引后降到 38→（叠加下面沙箱那条）15 次。
+
+### 沙箱：必须关，否则 snap 装的命令全废
+
+dsh 默认 `sandbox: workspace-write`（bwrap/Landlock），**会剥掉 capability**。
+snap 的 `snap-confine` 需要 `cap_dac_override`，所以在 gcloud 是 snap 装的机器上
+（cc-tw 就是），dsh 里**每一个 snap 二进制都失败**：
+
+```
+snap-confine is packaged without necessary permissions and cannot continue
+required permitted capability cap_dac_override not found in current capabilities
+```
+
+坑在于它长得像「gcloud 装坏了」，agent 会花十几次调用去查 `getcap` / `capsh` /
+ADC / 往 docker 里挂配置。worker 因此设 `DSH_PERMISSION_MODE=danger-full-access`
+（构造参数 `permission_mode` 可覆盖）。**这是跟另外四个 worker 对齐** ——
+ClaudeCodeWorker 本来就带 `--dangerously-skip-permissions`，不是新增暴露。
+
+实测这一条把同一道 AOT 题从 38 次调用 / 495s 降到 **15 次 / 237s**。
+
+### 一个缺失的可选凭据会让整个 runtime 起不来
+
+profile 里 MCP 那行写 `Authorization: !!js process.env.JINA_AUTH`。这个变量没设时
+值是 `undefined`，**整行 schema 校验失败 → 插件树加载失败 → 连 bash 都没有**。
+worker 因此在 `_ensure_process()` 里从 `JINA_API_KEY` 推导，实在没有就填空串，
+让 profile 起得来、故障局限在 MCP 自己那条连接上。
+
 ### 事件映射
 
 `_TOOL_NAME_MAP` 把 dsh 的小写工具名映射成 Claude Code 名字（`bash`→`Bash`），
