@@ -293,19 +293,35 @@ def _shorten_model_name(raw: str) -> str:
         "claude-sonnet-4-6": "Sonnet 4.6",
         "claude-sonnet-4-5": "Sonnet 4.5",
         "claude-haiku-4-5": "Haiku 4.5",
+        "claude-sonnet-5": "Sonnet 5.0",
         # Gemini
+        "gemini-3.7-flash": "G37F",
+        "gemini-3.7-pro": "G37P",
+        "gemini-3.6-flash": "G36F",
         "gemini-3.5-flash": "G35F",
-        "gemini-3.5-flash-preview": "G35F-prev",
         "gemini-3.1-pro": "G31P",
         "gemini-3.1-flash": "G31F",
         "gemini-3.1-flash-lite": "G31FL",
-        "gemini-3.1-flash-lite-preview": "G31FL-prev",
         "gemini-3-flash": "G3F",
         "gemini-3-pro": "G3P",
         "gemini-2.5-pro": "G25P",
         "gemini-2.5-flash": "G25F",
+        "gemini-2.5-flash-lite": "G25FL",
     }
-    return _MAP.get(name, name)
+    hit = _MAP.get(name)
+    if hit:
+        return hit
+    # Fall back by normalizing the decorations providers keep adding, so a model
+    # the table has not caught up with still renders short instead of dumping a
+    # 30-character id onto the card. gemini-3.7-flash arrived as
+    # "litellm/gemini-3.7-flash" and showed raw for exactly this reason.
+    suffix = ""
+    base = name
+    if base.endswith("-preview"):
+        base, suffix = base[: -len("-preview")], "-prev"
+    base = re.sub(r"-\d{8}$", "", base)          # dated pins: -20251001
+    hit = _MAP.get(base)
+    return (hit + suffix) if hit else name
 
 
 def _extract_stop_and_rest(content: str) -> tuple[bool, str]:
