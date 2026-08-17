@@ -139,6 +139,9 @@ cat > "$PATCH" <<EOF
           - id: claude-sonnet-5
             contextWindow: 1000000
             maxOutput: 32000
+          - id: claude-haiku-4-5-20251001
+            contextWindow: 200000
+            maxOutput: 16000
           - id: gemini-3.7-flash
             contextWindow: 1000000
             maxOutput: 32000
@@ -147,6 +150,51 @@ cat > "$PATCH" <<EOF
   config:
     provider: litellm
     model: claude-opus-5
+
+# ── Model tiering ──────────────────────────────────────────────────
+# dsh has no named main/secondary/fast tier. Every consumer that opens an LLM
+# request routes on its own, so a tier is something you compose here.
+#
+# Two ways to get this wrong, both fatal at boot rather than degraded:
+#   * a patch REPLACES the row's whole config, so every original key has to be
+#     copied back. Dropping session-title-llm's required timeoutMs takes the
+#     entire plugin tree down -- the agent loses bash, not just titles.
+#   * the key names are per-plugin. compaction-basic does NOT take
+#     provider/model; it takes summarizationProvider/summarizationModel.
+# And a model only works here if it is also declared in the provider catalog
+# above: an undeclared one fails at call time as "subagent run failed".
+- id: session-title-llm
+  config:
+    targetWords: 5
+    targetCjkCharacters: 10
+    maxInputBytes: 4096
+    maxOutputTokens: 64
+    timeoutMs: 60000
+    provider: litellm
+    model: claude-haiku-4-5-20251001
+
+- id: compaction-basic
+  config:
+    summarizationProvider: litellm
+    summarizationModel: claude-sonnet-5
+
+- id: tool-subagent
+  config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: continuable
+    agentOptions:
+      provider: litellm
+      model: claude-sonnet-5
+
+- id: tool-subagent-fork
+  config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: one-shot
+    agentOptions:
+      provider: litellm
+      model: claude-haiku-4-5-20251001
 
 - insert:
     # Persistent session + streaming events over stdio. Without this the

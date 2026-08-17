@@ -87,6 +87,49 @@ settings.json 格式 (object):     ACP 格式 (array):
 ### System Prompt
 Gemini CLI 自动读取工作目录的 `GEMINI.md`。`_write_gemini_md()` 在 worker 启动时写入 `~/GEMINI.md`。
 
+
+### 模型分级与委派：dsh 没有「主/次/快」档位，是每个消费者各自路由
+
+`agent-default-model` 只有**一个进程级默认**（README 原话："owns one
+process-wide default"）。分级不是选档位，是**给每个会调 LLM 的消费者单独配**：
+
+| 消费者 | 配置 row | 键名 | 本仓库配的档 |
+|---|---|---|---|
+| 主 agent | `agent-default-model` | `provider` / `model` | opus-5 |
+| 会话起标题 | `session-title-llm` | `provider` / `model`（两个都省略则继承主请求） | haiku-4.5 |
+| 上下文压缩摘要 | `compaction-basic` | **`summarizationProvider` / `summarizationModel`** | sonnet-5 |
+| spawn 子 agent | `tool-subagent` | `agentOptions.{provider,model,maxTokens}` | sonnet-5 |
+| fork 子 agent | `tool-subagent-fork` | 同上 | haiku-4.5 |
+
+**三个必踩的坑**（我全踩了一遍）：
+
+1. patch 整体替换 config，`session-title-llm` 的 `timeoutMs` 是必填，漏了
+   **整棵插件树加载失败** —— agent 连 bash 都没有，不是「标题功能坏了」。
+2. `compaction-basic` **不收 `provider`/`model`**，报 `unknown key "provider"`。
+   它的键叫 `summarizationProvider` / `summarizationModel`。
+3. 模型必须同时在 `llm-pi-ai` 的 `models:` 目录里声明过，否则调用时报
+   `pi-ai provider "litellm" has no configured model "..."`，
+   而模型侧看到的只是一句 `subagent run failed`。
+
+网关账本实测（一个 session 内）：opus-5 42 次、sonnet-5 4 次、haiku-4.5 2 次
+—— 三档确实分开了。
+
+### 委派工具全清单（实跑验证过 10 个）
+
+| 工具 | 行为 | 实测 |
+|---|---|---|
+| `subagent` | spawn 新会话，`backgroundMode: continuable` → 默认后台，返回 `subagentId` | ✅ 算 1..100=5050 |
+| `subagent_fork` | fork，**继承父会话已完成的轮次**，one-shot → 默认前台 | ✅ 读出父会话里的暗号 |
+| `send_message` | 给可续话的后台子 agent 追派活 | ✅ 子 agent 回 `CHILD-ALIVE` |
+| `list_agents` | 列子 agent 及状态（running / ready） | ✅ |
+| `interrupt_agent` | 打断子 agent；随后推「未完成即被停止」通知 | ✅ 截在数数中途 |
+| `ralph` | 循环直到目标达成，`maxRounds` 默认 64 | ✅ 3 轮写满 3 行 |
+| `workflow` | worker-thread 并行，走 spawn provider | ✅ 三文件并行统计 |
+| `create_goal` / `get_goal` / `update_goal` | 目标状态机（phase / revision / armed） | ✅ active→complete，revision 2 |
+
+`maxDepth` 默认 3（0 禁止委派）。同一条 assistant 消息里的兄弟委派会在
+`maxParallelToolCalls` 池里并发，结果按模型顺序提交。
+
 ### 事件映射
 Gemini 工具名与 Claude 不同，`_TOOL_NAME_MAP` 负责映射（如 `run_shell_command` → `Bash`），确保 BotCore 和 Channel 层的进度展示一致。
 
@@ -150,6 +193,49 @@ OpenClaw CLI 自动读取工作目录下的 `AGENTS.md`。`_write_bootstrap_file
 - **Per-chunk**：`_THINKING_TAG_RE` 精确匹配 `</?(?:think|thinking|final|reasoning)>`（不匹配 `thinker`、`thinking_about` 等衍生词）
 - **Final text**：`_TRAILING_TAG_RE` 正则去除流式分割产生的残留部分标签
 - **只去标签不去内容**：模型可能将答案包在 thinking 标签中
+
+
+### 模型分级与委派：dsh 没有「主/次/快」档位，是每个消费者各自路由
+
+`agent-default-model` 只有**一个进程级默认**（README 原话："owns one
+process-wide default"）。分级不是选档位，是**给每个会调 LLM 的消费者单独配**：
+
+| 消费者 | 配置 row | 键名 | 本仓库配的档 |
+|---|---|---|---|
+| 主 agent | `agent-default-model` | `provider` / `model` | opus-5 |
+| 会话起标题 | `session-title-llm` | `provider` / `model`（两个都省略则继承主请求） | haiku-4.5 |
+| 上下文压缩摘要 | `compaction-basic` | **`summarizationProvider` / `summarizationModel`** | sonnet-5 |
+| spawn 子 agent | `tool-subagent` | `agentOptions.{provider,model,maxTokens}` | sonnet-5 |
+| fork 子 agent | `tool-subagent-fork` | 同上 | haiku-4.5 |
+
+**三个必踩的坑**（我全踩了一遍）：
+
+1. patch 整体替换 config，`session-title-llm` 的 `timeoutMs` 是必填，漏了
+   **整棵插件树加载失败** —— agent 连 bash 都没有，不是「标题功能坏了」。
+2. `compaction-basic` **不收 `provider`/`model`**，报 `unknown key "provider"`。
+   它的键叫 `summarizationProvider` / `summarizationModel`。
+3. 模型必须同时在 `llm-pi-ai` 的 `models:` 目录里声明过，否则调用时报
+   `pi-ai provider "litellm" has no configured model "..."`，
+   而模型侧看到的只是一句 `subagent run failed`。
+
+网关账本实测（一个 session 内）：opus-5 42 次、sonnet-5 4 次、haiku-4.5 2 次
+—— 三档确实分开了。
+
+### 委派工具全清单（实跑验证过 10 个）
+
+| 工具 | 行为 | 实测 |
+|---|---|---|
+| `subagent` | spawn 新会话，`backgroundMode: continuable` → 默认后台，返回 `subagentId` | ✅ 算 1..100=5050 |
+| `subagent_fork` | fork，**继承父会话已完成的轮次**，one-shot → 默认前台 | ✅ 读出父会话里的暗号 |
+| `send_message` | 给可续话的后台子 agent 追派活 | ✅ 子 agent 回 `CHILD-ALIVE` |
+| `list_agents` | 列子 agent 及状态（running / ready） | ✅ |
+| `interrupt_agent` | 打断子 agent；随后推「未完成即被停止」通知 | ✅ 截在数数中途 |
+| `ralph` | 循环直到目标达成，`maxRounds` 默认 64 | ✅ 3 轮写满 3 行 |
+| `workflow` | worker-thread 并行，走 spawn provider | ✅ 三文件并行统计 |
+| `create_goal` / `get_goal` / `update_goal` | 目标状态机（phase / revision / armed） | ✅ active→complete，revision 2 |
+
+`maxDepth` 默认 3（0 禁止委派）。同一条 assistant 消息里的兄弟委派会在
+`maxParallelToolCalls` 池里并发，结果按模型顺序提交。
 
 ### 事件映射
 `_map_tool_kind()` 根据 ACP 事件的 `kind` 字段（execute/read/write/edit/search/list/function）映射为 Claude Code 风格的工具名。`_TOOL_NAME_MAP` 处理 `function` 类型的细粒度映射。
@@ -351,6 +437,49 @@ profile 里 MCP 那行写 `Authorization: !!js process.env.JINA_AUTH`。这个�
 值是 `undefined`，**整行 schema 校验失败 → 插件树加载失败 → 连 bash 都没有**。
 worker 因此在 `_ensure_process()` 里从 `JINA_API_KEY` 推导，实在没有就填空串，
 让 profile 起得来、故障局限在 MCP 自己那条连接上。
+
+
+### 模型分级与委派：dsh 没有「主/次/快」档位，是每个消费者各自路由
+
+`agent-default-model` 只有**一个进程级默认**（README 原话："owns one
+process-wide default"）。分级不是选档位，是**给每个会调 LLM 的消费者单独配**：
+
+| 消费者 | 配置 row | 键名 | 本仓库配的档 |
+|---|---|---|---|
+| 主 agent | `agent-default-model` | `provider` / `model` | opus-5 |
+| 会话起标题 | `session-title-llm` | `provider` / `model`（两个都省略则继承主请求） | haiku-4.5 |
+| 上下文压缩摘要 | `compaction-basic` | **`summarizationProvider` / `summarizationModel`** | sonnet-5 |
+| spawn 子 agent | `tool-subagent` | `agentOptions.{provider,model,maxTokens}` | sonnet-5 |
+| fork 子 agent | `tool-subagent-fork` | 同上 | haiku-4.5 |
+
+**三个必踩的坑**（我全踩了一遍）：
+
+1. patch 整体替换 config，`session-title-llm` 的 `timeoutMs` 是必填，漏了
+   **整棵插件树加载失败** —— agent 连 bash 都没有，不是「标题功能坏了」。
+2. `compaction-basic` **不收 `provider`/`model`**，报 `unknown key "provider"`。
+   它的键叫 `summarizationProvider` / `summarizationModel`。
+3. 模型必须同时在 `llm-pi-ai` 的 `models:` 目录里声明过，否则调用时报
+   `pi-ai provider "litellm" has no configured model "..."`，
+   而模型侧看到的只是一句 `subagent run failed`。
+
+网关账本实测（一个 session 内）：opus-5 42 次、sonnet-5 4 次、haiku-4.5 2 次
+—— 三档确实分开了。
+
+### 委派工具全清单（实跑验证过 10 个）
+
+| 工具 | 行为 | 实测 |
+|---|---|---|
+| `subagent` | spawn 新会话，`backgroundMode: continuable` → 默认后台，返回 `subagentId` | ✅ 算 1..100=5050 |
+| `subagent_fork` | fork，**继承父会话已完成的轮次**，one-shot → 默认前台 | ✅ 读出父会话里的暗号 |
+| `send_message` | 给可续话的后台子 agent 追派活 | ✅ 子 agent 回 `CHILD-ALIVE` |
+| `list_agents` | 列子 agent 及状态（running / ready） | ✅ |
+| `interrupt_agent` | 打断子 agent；随后推「未完成即被停止」通知 | ✅ 截在数数中途 |
+| `ralph` | 循环直到目标达成，`maxRounds` 默认 64 | ✅ 3 轮写满 3 行 |
+| `workflow` | worker-thread 并行，走 spawn provider | ✅ 三文件并行统计 |
+| `create_goal` / `get_goal` / `update_goal` | 目标状态机（phase / revision / armed） | ✅ active→complete，revision 2 |
+
+`maxDepth` 默认 3（0 禁止委派）。同一条 assistant 消息里的兄弟委派会在
+`maxParallelToolCalls` 池里并发，结果按模型顺序提交。
 
 ### 事件映射
 
