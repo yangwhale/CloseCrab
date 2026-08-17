@@ -260,6 +260,12 @@ class DSHWorker(Worker):
         stderr_file = open(self._stderr_path, "wb")
 
         cmd = [self._dsh_bin, "--profile", self._profile]
+        # asyncio's StreamReader caps a single line at 64 KiB by default and
+        # raises once past it, which killed the read loop the first time a tool
+        # returned a large result (a compiler log). dsh frames one JSON-RPC
+        # message per line, so the cap has to clear the biggest tool result the
+        # agent will ever produce, not the biggest one seen so far.
+        line_limit = 64 * 1024 * 1024
         log.info(f"Spawning dsh: {' '.join(cmd)} (DSH_HOME={self._dsh_home})")
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -268,6 +274,7 @@ class DSHWorker(Worker):
             stderr=stderr_file,
             cwd=self._cwd,
             env=env,
+            limit=line_limit,
             start_new_session=True,   # own process group, so stop() can killpg
         )
         stderr_file.close()
@@ -296,7 +303,12 @@ class DSHWorker(Worker):
         assert self._proc and self._proc.stdout
         try:
             while True:
-                line = await self._proc.stdout.readline()
+                try:
+                    line = await self._proc.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError) as e:
+                    # One oversized line must not take the whole session down.
+                    log.error(f"dsh line over the reader limit, skipping it: {e}")
+                    continue
                 if not line:
                     break
                 line = line.strip()

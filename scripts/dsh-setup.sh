@@ -22,6 +22,12 @@ PROFILE="${DSH_PROFILE:-closecrab}"
 # round trip, but no tunnel to keep alive and it works from any host.
 LITELLM_URL="${LITELLM_BASE_URL:-https://litellm.higcp.com/v1}"
 DSH_PKG="@deepseek-ai/dsh@latest"
+# The MCP row needs a full Authorization header; the fleet stores the bare key.
+# Derive rather than ask for a second copy that can drift out of sync.
+if [[ -z "${JINA_AUTH:-}" && -n "${JINA_API_KEY:-}" ]]; then
+  JINA_AUTH="Bearer $JINA_API_KEY"
+  export JINA_AUTH
+fi
 CHECK_ONLY=0
 [[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
 

@@ -71,17 +71,17 @@ if [ -z "${KILO_SERVER_PASSWORD:-}" ]; then
     export KILO_SERVER_PASSWORD="$(cat "$KILO_PW_FILE")"
 fi
 
-# dsh worker 的凭据。dsh 的 cordis profile 里写的是 apiKeyEnv: LITELLM_KEY 和
-# process.env.JINA_AUTH —— 它只认这两个名字，缺了不会报错，只会在第一次调模型
-# 时失败。跟 KILO_SERVER_PASSWORD 一样，从文件读，文件不在就什么都不设，让
-# dsh worker 自己在日志里喊，而不是在这里把整个 bot 拖住。
-for _pair in "LITELLM_KEY:$HOME/.closecrab-litellm-key" "JINA_AUTH:$HOME/.closecrab-jina-auth"; do
-    _var="${_pair%%:*}"; _file="${_pair#*:}"
-    if [ -z "$(eval echo "\$$_var")" ] && [ -f "$_file" ]; then
-        export "$_var=$(cat "$_file")"
-    fi
-done
-unset _pair _var _file
+# dsh worker 的凭据。两个名字都是 dsh 的 cordis profile 里写死的, 缺了不报错,
+# 只在第一次调模型时失败。LITELLM_KEY 由 deploy.sh 从 Firestore config/secrets
+# 拉进 .zshenv (上面已 source)。JINA_AUTH 不单独存 —— 它就是 JINA_API_KEY 加个
+# Bearer 前缀, 存两份迟早对不上。
+if [ -n "${JINA_API_KEY:-}" ] && [ -z "${JINA_AUTH:-}" ]; then
+    export JINA_AUTH="Bearer $JINA_API_KEY"
+fi
+if [ -z "${LITELLM_KEY:-}" ]; then
+    echo "[$(date)] WARN: LITELLM_KEY 未设 —— worker_type=dsh 的 bot 调不到模型。" \
+         "跑 ./deploy.sh 从 Firestore 拉, 或手动 export。"
+fi
 
 # ── gcsfuse 挂载检测 ─────────────────────────────────────────
 # gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失

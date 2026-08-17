@@ -1261,7 +1261,19 @@ with open(path, 'w') as f:
     # 常驻 session、流式事件和 MCP。脚本幂等, 失败不阻断部署。
     # ------------------------------------------------------------------
     echo "[13/13] 安装 + 配置 DeepSeek Harness (dsh)..."
-    install_npm_bin "@deepseek-ai/dsh" "dsh" "DeepSeek Harness"
+    # dsh 要 Node ^22.19 || >=24。fleet 里有机器根本没装 node（gLinux 那台），
+    # deploy.sh 是 set -e，不先挡一道会把整个部署带崩。
+    if ! command -v node &>/dev/null; then
+        echo "  未装 node，跳过 dsh（worker_type=dsh 在这台机器上不可用）"
+    else
+        DSH_NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+        DSH_NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)"
+        if [[ "$DSH_NODE_MAJOR" -lt 22 || ( "$DSH_NODE_MAJOR" -eq 22 && "$DSH_NODE_MINOR" -lt 19 ) ]]; then
+            echo "  node $(node --version) 低于 dsh 要求的 22.19，跳过"
+        else
+            install_npm_bin "@deepseek-ai/dsh" "dsh" "DeepSeek Harness" || true
+        fi
+    fi
 
     local DSH_BIN=""
     if command -v dsh &>/dev/null; then

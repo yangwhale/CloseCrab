@@ -20,6 +20,9 @@ CC_SECRETS=(
     GEMINI_API_KEY
     GITHUB_PERSONAL_ACCESS_TOKEN
     JINA_API_KEY
+    # dsh worker 走 LiteLLM 网关取模型, 没有这把 key 它连不上任何模型。
+    # dsh 的 cordis profile 里 apiKeyEnv 写死的就是这个名字。
+    LITELLM_KEY
     TAVILY_API_KEY
 )
 
