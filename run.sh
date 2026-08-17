@@ -26,14 +26,22 @@ cd "$HOME"
 
 # 确保 claude binary 在 PATH 中（nohup/cron 等非交互环境不加载 .zshrc）
 # nvm 管理的 node 路径需要显式添加（nvm.sh 只在交互 shell 中加载）
+NVM_NODE_DIR=""
 if [ -d "$HOME/.nvm/versions/node" ]; then
     NVM_NODE_DIR="$(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -1)"
-    [ -n "$NVM_NODE_DIR" ] && export PATH="$NVM_NODE_DIR/bin:$PATH"
 fi
 # ~/.npm-global/bin: kilo/openclaw 等 npm 全局包. BotCore 进程通过 subprocess_exec
 # 启动 worker 时走 shutil.which (查 PATH), 必须加 (即便 deploy.sh 已 symlink 到
 # /usr/local/bin 作为兜底, 这里也加上确保两条路径都覆盖)
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:/usr/local/bin:/snap/bin:$PATH"
+
+# The nvm entry goes LAST so it wins. Prepending it before the block above put
+# ~/.local/bin ahead of it, and on gLinux that directory holds a node symlink
+# pointing at nvm's v20 — so the careful "pick the newest nvm version" above was
+# silently overridden and every node tool ran on v20. dsh needs >=22.19 and died
+# with `Promise.withResolvers is not a function`, which reads like a dsh bug
+# rather than a PATH ordering one. cc-tw has no such symlink, so it never showed.
+[ -n "$NVM_NODE_DIR" ] && export PATH="$NVM_NODE_DIR/bin:$PATH"
 
 # 第一个参数作为 bot name（必需）
 BOT_NAME="$1"
