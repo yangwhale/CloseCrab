@@ -1193,10 +1193,7 @@ class OpenClawWorker(Worker):
                             f"Drained {drained} stale messages "
                             "after interrupt"
                         )
-                    partial = self._clean_thinking_content(
-                        "".join(accumulated_text)
-                    )
-                    return partial or ""
+                    return ""
 
                 # 决定是否续杯：必须 prompt 干净结束 + 模型在本轮 yield 了
                 # + 续杯次数未到上限。session_state_err 已被早返回 cover；这

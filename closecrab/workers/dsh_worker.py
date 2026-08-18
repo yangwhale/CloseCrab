@@ -478,6 +478,11 @@ class DSHWorker(Worker):
                 if not fut.done():
                     fut.set_exception(RuntimeError("dsh runtime closed"))
             self._pending = {}
+            if self._notes is not None:
+                try:
+                    self._notes.put_nowait({"method": "_eof"})
+                except Exception:
+                    pass
 
     async def _rpc(self, method: str, params: dict, timeout: float = 60) -> Optional[dict]:
         if not self._proc or not self._proc.stdin:
@@ -697,21 +702,35 @@ class DSHWorker(Worker):
         turn_error = ""
 
         while True:
+            if self._interrupted:
+                log.info("dsh turn interrupted, returning empty string")
+                return ""
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 log.error(f"dsh turn exceeded {self._timeout}s")
-                return final_text or "".join(streamed) or "[Error] dsh timed out"
-            if self._interrupted:
-                return final_text or "".join(streamed) or "[已中断]"
+                return "" if self._interrupted else (final_text or "".join(streamed) or "[Error] dsh timed out")
             try:
                 msg = await asyncio.wait_for(self._notes.get(), timeout=min(remaining, 30))
             except asyncio.TimeoutError:
+                if self._interrupted:
+                    return ""
                 if not self.is_alive():
                     return final_text or f"[Error] dsh exited. stderr: {self._read_stderr_tail(600)}"
                 continue
 
+            if self._interrupted:
+                return ""
+
             method = msg.get("method")
             params = msg.get("params") or {}
+
+            if method == "_interrupted" or (method == "_eof" and self._interrupted):
+                log.info("dsh consume loop interrupted, returning empty string")
+                return ""
+            if method == "_eof":
+                if not self.is_alive():
+                    return final_text or f"[Error] dsh exited. stderr: {self._read_stderr_tail(600)}"
+                continue
 
             if not accepted:
                 if self._is_inbox_receipt(params, sid, message_id):
@@ -784,6 +803,8 @@ class DSHWorker(Worker):
                     log.debug(f"dsh turn/end: {reason}")
 
         self._usage["turns"] += 1
+        if self._interrupted:
+            return ""
         text = final_text or "".join(streamed)
         if text:
             return text
@@ -828,6 +849,11 @@ class DSHWorker(Worker):
         id, and the next send() reuses that id.
         """
         self._interrupted = True
+        if self._notes is not None:
+            try:
+                self._notes.put_nowait({"method": "_interrupted"})
+            except Exception:
+                pass
         if not self.is_alive():
             return True
         log.info("dsh interrupt: killing runtime, session id preserved for resume")

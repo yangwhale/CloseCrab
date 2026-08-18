@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("closecrab.channels.dingtalk")
 
 # 急刹车关键词 (复用)
-_STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
+_STOP_KEYWORDS = {"停", "停止", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
 _TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/context", "/sessions"}

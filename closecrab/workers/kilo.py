@@ -1169,8 +1169,8 @@ class KiloWorker(Worker):
                 continue
 
         if self._interrupted:
-            reply_text = self._turn_result or ""
-        elif self._turn_error:
+            return ""
+        if self._turn_error:
             reply_text = f"[Error] {self._turn_error}"
         elif post_task.done() and not post_task.cancelled():
             reply_text = post_task.result()

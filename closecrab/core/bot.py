@@ -596,9 +596,21 @@ class BotCore:
 
         @谁谁停 → 谁就停。每个 bot 只管自己的 worker。
         """
+        # 立即切断语音输出与 TTS 排队
+        try:
+            import sys
+            _sidecar_mod = sys.modules.get("closecrab.voice.discord_voice_sidecar")
+            if _sidecar_mod:
+                _sidecar_mod._tts_interrupted = True
+                src = getattr(_sidecar_mod, "_persistent_source", None)
+                if src:
+                    src.clear()
+        except Exception as e:
+            log.debug(f"Sidecar interrupt failed: {e}")
+
         interrupted = False
         for wk, worker in list(self._workers.items()):
-            if worker.is_busy:
+            if worker.is_busy or wk == user_key:
                 sid_before = worker.session_id
                 log.info(f"interrupt_worker: stopping worker {wk}, "
                          f"session_id={sid_before}, alive={worker.is_alive()}")

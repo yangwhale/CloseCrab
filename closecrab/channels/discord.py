@@ -60,7 +60,7 @@ def load_discord_style() -> str:
 
 
 # 急刹车关键词
-_STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
+_STOP_KEYWORDS = {"停", "停止", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 
 def _extract_stop_and_rest(content: str) -> tuple[bool, str]:

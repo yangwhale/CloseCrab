@@ -88,7 +88,7 @@ log = logging.getLogger("closecrab.channels.feishu")
 FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 
 # 急刹车关键词 (复用 Discord 的)
-_STOP_KEYWORDS = {"停", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
+_STOP_KEYWORDS = {"停", "停止", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
 _TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff", "/hlson", "/hlsoff"}
@@ -1969,7 +1969,8 @@ class FeishuChannel(Channel):
                 raw = evt.message.content or "{}"
                 try:
                     text = (json.loads(raw) if raw else {}).get("text", "")
-                    if text.startswith("/") or text.strip() in ("停止", "stop", "STOP"):
+                    is_stop, _ = _extract_stop_and_rest(text)
+                    if text.startswith("/") or is_stop:
                         return False
                 except Exception:
                     pass

@@ -927,8 +927,7 @@ class GeminiACPWorker(Worker):
                         break
                 if drained:
                     log.info(f"Drained {drained} stale messages after interrupt")
-                partial = "".join(accumulated_text).strip()
-                return partial or ""
+                return ""
 
             final_text = "".join(accumulated_text).strip()
             if not final_text:
