@@ -150,19 +150,24 @@ cat > "$PATCH" <<EOF
         api: openai-completions
         baseURL: $LITELLM_URL
         apiKeyEnv: LITELLM_KEY
+        defaultInput: [text, image]
         models:
           - id: claude-opus-5
             contextWindow: 1000000
             maxOutput: 32000
+            input: [text, image]
           - id: claude-sonnet-5
             contextWindow: 1000000
             maxOutput: 32000
+            input: [text, image]
           - id: claude-haiku-4-5-20251001
             contextWindow: 200000
             maxOutput: 16000
+            input: [text, image]
           - id: gemini-3.7-flash
             contextWindow: 1000000
             maxOutput: 32000
+            input: [text, image]
 
 - id: agent-default-model
   config:
