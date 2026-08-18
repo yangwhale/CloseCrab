@@ -1950,12 +1950,11 @@ class FeishuChannel(Channel):
             return None
 
     def _should_debounce_msg(self, data: P2ImMessageReceiveV1) -> bool:
-        """只对真人用户的纯文本消息防抖。
+        """只对真人用户的普通消息防抖，合并短时间内的多模态连发。
 
         跳过：
         - team bot（sender_type=app）：bot 互发不需要合并
-        - 非 text 类型（audio/file/image/post）：有附件下载/转写副作用，每条独立处理
-        - 合成事件（reaction → synthetic）：不走 _on_message_event，到不了这里
+        - 特殊控制命令（例如以 / 或 停止 开头的消息）：不防抖，立即冲刷处理
         """
         try:
             evt = data.event
@@ -1963,7 +1962,18 @@ class FeishuChannel(Channel):
                 return False
             if evt.sender.sender_type == "app":
                 return False
-            return evt.message.message_type == "text"
+            msg_type = evt.message.message_type
+            if msg_type not in ("text", "image", "media", "audio", "file", "post"):
+                return False
+            if msg_type == "text":
+                raw = evt.message.content or "{}"
+                try:
+                    text = (json.loads(raw) if raw else {}).get("text", "")
+                    if text.startswith("/") or text.strip() in ("停止", "stop", "STOP"):
+                        return False
+                except Exception:
+                    pass
+            return True
         except Exception:
             return False
 
@@ -1971,7 +1981,7 @@ class FeishuChannel(Channel):
         """Debouncer flush 回调：合并 items 后调用 _handle_message_async。
 
         - 1 条：直通
-        - N 条：拼接 text，用最后一条的 metadata 构造 synthetic event
+        - N 条：合并所有文本与多模态附件后统一 dispatch
         """
         if not items:
             return
@@ -1980,83 +1990,15 @@ class FeishuChannel(Channel):
             return
 
         try:
-            texts = []
-            for d in items:
-                try:
-                    raw = d.event.message.content or "{}"
-                    obj = json.loads(raw) if raw else {}
-                    t = obj.get("text", "")
-                    if t:
-                        texts.append(t)
-                except Exception:
-                    continue
-            merged_text = "\n\n".join(texts)
-            last = items[-1]
-            last_msg = last.event.message
-            last_sender = last.event.sender
-            log.info(
-                f"DEBOUNCE flush: merged {len(items)} msgs, text_len={len(merged_text)} "
-                f"chat={last_msg.chat_id} sender={last_sender.sender_id.open_id}"
-            )
-
-            synthetic_id = f"{last_msg.message_id}:debounced:{len(items)}"
-            mentions_list = []
-            if last_msg.mentions:
-                for m in last_msg.mentions:
-                    if m.id:
-                        mentions_list.append({
-                            "id": {"open_id": m.id.open_id},
-                            "key": m.key or "",
-                            "name": getattr(m, "name", "") or "",
-                        })
-
-            fake_data = {
-                "schema": "2.0",
-                "header": {
-                    "event_id": synthetic_id,
-                    "event_type": "im.message.receive_v1",
-                    "create_time": "0",
-                    "token": "",
-                    "app_id": self._app_id,
-                    "tenant_key": "",
-                },
-                "event": {
-                    "sender": {
-                        "sender_id": {"open_id": last_sender.sender_id.open_id},
-                        "sender_type": last_sender.sender_type,
-                        "tenant_key": "",
-                    },
-                    "message": {
-                        "message_id": last_msg.message_id,
-                        "root_id": getattr(last_msg, "root_id", "") or "",
-                        "parent_id": getattr(last_msg, "parent_id", "") or "",
-                        "create_time": last_msg.create_time or "0",
-                        "chat_id": last_msg.chat_id,
-                        "chat_type": last_msg.chat_type,
-                        "message_type": "text",
-                        "content": json.dumps({"text": merged_text}, ensure_ascii=False),
-                        "mentions": mentions_list,
-                    },
-                },
-            }
-            try:
-                synthetic_data = P2ImMessageReceiveV1(fake_data)
-                await self._handle_message_async(synthetic_data)
-            except Exception as e:
-                log.warning(
-                    f"debounced merge synthetic event construct failed: {e}, "
-                    f"falling back to per-item dispatch"
-                )
-                for item in items:
-                    try:
-                        await self._handle_message_async(item)
-                    except Exception as ee:
-                        log.error(f"per-item dispatch failed: {ee}", exc_info=True)
+            log.info(f"DEBOUNCE flush: merging {len(items)} multimodal messages")
+            await self._handle_message_async(items[-1], merged_items=items)
         except Exception as e:
-            log.error(f"debounced flush outer failed: {e}", exc_info=True)
+            log.error(f"debounced flush failed: {e}", exc_info=True)
             for item in items:
                 try:
                     await self._handle_message_async(item)
+                except Exception:
+                    pass
                 except Exception:
                     pass
 
@@ -3399,7 +3341,147 @@ class FeishuChannel(Channel):
 
         return result or ""
 
-    async def _handle_message_async(self, data: P2ImMessageReceiveV1):
+    async def _parse_single_message_content(self, message) -> str:
+        """解析单条消息内容（文本、语音、图片、视频、附件、富文本、位置）。"""
+        msg_type = getattr(message, "message_type", "") or ""
+        chat_id = getattr(message, "chat_id", "") or ""
+        content = ""
+        if msg_type == "text":
+            try:
+                content_json = json.loads(message.content)
+                content = content_json.get("text", "")
+            except (json.JSONDecodeError, TypeError):
+                content = message.content or ""
+            # 去掉 @bot 的 mention 占位符
+            if message.mentions:
+                for m in message.mentions:
+                    if m.key:
+                        content = content.replace(m.key, "").strip()
+
+        elif msg_type == "audio":
+            # DSH worker 原生支持多模态：直接透传音频附件，跳过 STT 预处理
+            if self._core and getattr(self._core, "_worker_type", None) == "dsh":
+                file_info = await self._download_attachment(message)
+                if file_info:
+                    path, fname = file_info
+                    content = f"[Attached file: {fname} (saved at {path})]"
+                else:
+                    if chat_id:
+                        await self._async_send_text(chat_id, "⚠️ 音频下载失败")
+                    return ""
+            else:
+                # 传统 worker：下载并 STT
+                voice_text = await self._process_audio(message)
+                if voice_text:
+                    if chat_id:
+                        await self._async_send_text(chat_id, f"🎤 语音识别: {voice_text}")
+                    content = voice_text
+                else:
+                    if chat_id:
+                        await self._async_send_text(chat_id, "⚠️ 语音识别失败")
+                    return ""
+
+        elif msg_type in ("file", "image", "media"):
+            # 文件、图片或视频附件：下载到 /tmp
+            file_info = await self._download_attachment(message)
+            if file_info:
+                path, fname = file_info
+                content = f"[Attached file: {fname} (saved at {path})]"
+            else:
+                if chat_id:
+                    await self._async_send_text(chat_id, "⚠️ 附件下载失败")
+                return ""
+
+        elif msg_type == "post":
+            # 富文本消息（图文混合、带格式文本等）
+            try:
+                post_json = json.loads(message.content) if message.content else {}
+                # 飞书 post 有 locale 包装: {"zh_cn": {"title": ..., "content": [...]}}
+                post_body = None
+                for locale in ("zh_cn", "en_us", "ja_jp"):
+                    if locale in post_json:
+                        post_body = post_json[locale]
+                        break
+                if not post_body and "content" in post_json:
+                    post_body = post_json  # 无 locale 包装
+
+                if not post_body:
+                    content = "(无法解析富文本消息)"
+                else:
+                    text_parts = []
+                    image_keys = []
+                    title = post_body.get("title", "")
+                    if title:
+                        text_parts.append(title)
+
+                    for paragraph in post_body.get("content", []):
+                        para_texts = []
+                        for elem in paragraph:
+                            tag = elem.get("tag", "")
+                            if tag == "text":
+                                para_texts.append(elem.get("text", ""))
+                            elif tag == "a":
+                                link_text = elem.get("text", "")
+                                href = elem.get("href", "")
+                                para_texts.append(f"{link_text}({href})" if href else link_text)
+                            elif tag == "at":
+                                # 跳过 @bot 自身
+                                uid = elem.get("user_id", "")
+                                if uid != self._bot_open_id:
+                                    para_texts.append(elem.get("text", f"@{uid}"))
+                            elif tag == "img":
+                                key = elem.get("image_key", "")
+                                if key:
+                                    image_keys.append(key)
+                        if para_texts:
+                            text_parts.append("".join(para_texts))
+
+                    # 下载嵌入的图片
+                    for img_key in image_keys:
+                        file_info = await self._download_resource_by_key(
+                            message.message_id, img_key, "image", ".jpg",
+                        )
+                        if file_info:
+                            path, fname = file_info
+                            text_parts.append(f"[Attached image: {fname} (saved at {path})]")
+                        else:
+                            text_parts.append(f"[Failed to download image: {img_key}]")
+
+                    content = "\n".join(text_parts)
+            except Exception as e:
+                log.error(f"Post message parse failed: {e}", exc_info=True)
+                content = "(富文本消息解析失败)"
+
+            # 去掉 @bot 的 mention 占位符
+            if message.mentions:
+                for m in message.mentions:
+                    if m.key:
+                        content = content.replace(m.key, "").strip()
+
+        elif msg_type == "location":
+            try:
+                loc_data = json.loads(message.content)
+                lat = loc_data.get("latitude", "")
+                lon = loc_data.get("longitude", "")
+                name = loc_data.get("name", "")
+                addr = loc_data.get("address", "")
+                content = f"[用户分享了位置] {name} {addr} (lat={lat}, lon={lon})"
+                log.info(f"Location message: {content}")
+            except Exception as e:
+                log.warning(f"Location parse failed: {e}")
+                content = "(位置消息解析失败)"
+
+        else:
+            log.info(f"Unsupported msg_type: {msg_type}")
+            return ""
+
+        return content
+
+    async def _handle_message_async(
+        self,
+        data: P2ImMessageReceiveV1,
+        merged_items: Optional[list] = None,
+    ):
         """异步处理飞书消息。"""
         try:
             event = data.event
@@ -3428,7 +3510,8 @@ class FeishuChannel(Channel):
             sender_type = sender.sender_type if sender else ""  # "user" or "app"
 
             log.info(f"MSG: sender={sender_open_id} type={sender_type} "
-                     f"chat={chat_id} chat_type={chat_type} msg_type={msg_type}")
+                     f"chat={chat_id} chat_type={chat_type} msg_type={msg_type} "
+                     f"merged_count={len(merged_items) if merged_items else 1}")
 
             # 忽略 bot 自身消息
             if sender_open_id == self._bot_open_id:
@@ -3465,7 +3548,12 @@ class FeishuChannel(Channel):
 
             # 群聊需要 @bot 或在 auto_respond_chats 中
             is_mentioned = False
-            if message.mentions:
+            if merged_items:
+                is_mentioned = any(
+                    any(m.id and m.id.open_id == self._bot_open_id for m in (it.event.message.mentions or []))
+                    for it in merged_items if it.event and it.event.message
+                )
+            elif message.mentions:
                 is_mentioned = any(
                     m.id and m.id.open_id == self._bot_open_id
                     for m in message.mentions
@@ -3476,132 +3564,17 @@ class FeishuChannel(Channel):
             if not is_team_msg and chat_type == "group" and not is_mentioned and not is_auto_chat:
                 return
 
-            # 解析消息内容
-            content = ""
-            if msg_type == "text":
-                try:
-                    content_json = json.loads(message.content)
-                    content = content_json.get("text", "")
-                except (json.JSONDecodeError, TypeError):
-                    content = message.content or ""
-                # 去掉 @bot 的 mention 占位符
-                if message.mentions:
-                    for m in message.mentions:
-                        if m.key:
-                            content = content.replace(m.key, "").strip()
-
-            elif msg_type == "audio":
-                # DSH worker 原生支持多模态：直接透传音频附件，跳过 STT 预处理
-                if self._core and getattr(self._core, "_worker_type", None) == "dsh":
-                    file_info = await self._download_attachment(message)
-                    if file_info:
-                        path, fname = file_info
-                        content = f"[Attached file: {fname} (saved at {path})]"
-                    else:
-                        await self._async_send_text(chat_id, "⚠️ 音频下载失败")
-                        return
-                else:
-                    # 传统 worker：下载并 STT
-                    voice_text = await self._process_audio(message)
-                    if voice_text:
-                        await self._async_send_text(chat_id, f"🎤 语音识别: {voice_text}")
-                        content = voice_text
-                    else:
-                        await self._async_send_text(chat_id, "⚠️ 语音识别失败")
-                        return
-
-            elif msg_type in ("file", "image", "media"):
-                # 文件、图片或视频附件：下载到 /tmp
-                file_info = await self._download_attachment(message)
-                if file_info:
-                    path, fname = file_info
-                    content = f"[Attached file: {fname} (saved at {path})]"
-                else:
-                    await self._async_send_text(chat_id, "⚠️ 附件下载失败")
-                    return
-
-            elif msg_type == "post":
-                # 富文本消息（图文混合、带格式文本等）
-                try:
-                    post_json = json.loads(message.content) if message.content else {}
-                    # 飞书 post 有 locale 包装: {"zh_cn": {"title": ..., "content": [...]}}
-                    post_body = None
-                    for locale in ("zh_cn", "en_us", "ja_jp"):
-                        if locale in post_json:
-                            post_body = post_json[locale]
-                            break
-                    if not post_body and "content" in post_json:
-                        post_body = post_json  # 无 locale 包装
-
-                    if not post_body:
-                        content = "(无法解析富文本消息)"
-                    else:
-                        text_parts = []
-                        image_keys = []
-                        title = post_body.get("title", "")
-                        if title:
-                            text_parts.append(title)
-
-                        for paragraph in post_body.get("content", []):
-                            para_texts = []
-                            for elem in paragraph:
-                                tag = elem.get("tag", "")
-                                if tag == "text":
-                                    para_texts.append(elem.get("text", ""))
-                                elif tag == "a":
-                                    link_text = elem.get("text", "")
-                                    href = elem.get("href", "")
-                                    para_texts.append(f"{link_text}({href})" if href else link_text)
-                                elif tag == "at":
-                                    # 跳过 @bot 自身
-                                    uid = elem.get("user_id", "")
-                                    if uid != self._bot_open_id:
-                                        para_texts.append(elem.get("text", f"@{uid}"))
-                                elif tag == "img":
-                                    key = elem.get("image_key", "")
-                                    if key:
-                                        image_keys.append(key)
-                            if para_texts:
-                                text_parts.append("".join(para_texts))
-
-                        # 下载嵌入的图片
-                        for img_key in image_keys:
-                            file_info = await self._download_resource_by_key(
-                                message.message_id, img_key, "image", ".jpg",
-                            )
-                            if file_info:
-                                path, fname = file_info
-                                text_parts.append(f"[Attached image: {fname} (saved at {path})]")
-                            else:
-                                text_parts.append(f"[Failed to download image: {img_key}]")
-
-                        content = "\n".join(text_parts)
-                except Exception as e:
-                    log.error(f"Post message parse failed: {e}", exc_info=True)
-                    content = "(富文本消息解析失败)"
-
-                # 去掉 @bot 的 mention 占位符（post 里 mention 也可能出现在 text 中）
-                if message.mentions:
-                    for m in message.mentions:
-                        if m.key:
-                            content = content.replace(m.key, "").strip()
-
-            elif msg_type == "location":
-                try:
-                    loc_data = json.loads(message.content)
-                    lat = loc_data.get("latitude", "")
-                    lon = loc_data.get("longitude", "")
-                    name = loc_data.get("name", "")
-                    addr = loc_data.get("address", "")
-                    content = f"[用户分享了位置] {name} {addr} (lat={lat}, lon={lon})"
-                    log.info(f"Location message: {content}")
-                except Exception as e:
-                    log.warning(f"Location parse failed: {e}")
-                    content = "(位置消息解析失败)"
-
+            # 解析消息内容（单条或合并多模态消息）
+            if merged_items:
+                extracted_parts = []
+                for it in merged_items:
+                    if it.event and it.event.message:
+                        part = await self._parse_single_message_content(it.event.message)
+                        if part:
+                            extracted_parts.append(part)
+                content = "\n\n".join(extracted_parts)
             else:
-                log.info(f"Unsupported msg_type: {msg_type}")
-                return
+                content = await self._parse_single_message_content(message)
 
             if not content:
                 return
