@@ -1007,7 +1007,7 @@ class BotCore:
                 state_dir=str(self._state_dir),
             )
         if self._worker_type == "dsh":
-            dsh_bin = shutil.which("dsh")
+            dsh_bin = os.environ.get("DSH_BIN") or shutil.which("dsh")
             if not dsh_bin:
                 npm_global = Path.home() / ".npm-global" / "bin" / "dsh"
                 if npm_global.exists():

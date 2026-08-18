@@ -1329,7 +1329,7 @@ class FeishuChannel(Channel):
                 if extra:
                     summary = (title + "\n" + "\n".join(extra)).strip() if title else "\n".join(extra)
                 return summary[:500]  # 卡片可能很长, 截断
-            elif mtype in ("image", "file", "audio"):
+            elif mtype in ("image", "file", "audio", "media"):
                 return f"[引用了一个 {mtype} 消息]"
             else:
                 return f"[引用了 {mtype} 类型消息, 无法提取文本]"
@@ -3491,17 +3491,27 @@ class FeishuChannel(Channel):
                             content = content.replace(m.key, "").strip()
 
             elif msg_type == "audio":
-                # 语音消息：下载并 STT
-                voice_text = await self._process_audio(message)
-                if voice_text:
-                    await self._async_send_text(chat_id, f"🎤 语音识别: {voice_text}")
-                    content = voice_text
+                # DSH worker 原生支持多模态：直接透传音频附件，跳过 STT 预处理
+                if self._core and getattr(self._core, "_worker_type", None) == "dsh":
+                    file_info = await self._download_attachment(message)
+                    if file_info:
+                        path, fname = file_info
+                        content = f"[Attached file: {fname} (saved at {path})]"
+                    else:
+                        await self._async_send_text(chat_id, "⚠️ 音频下载失败")
+                        return
                 else:
-                    await self._async_send_text(chat_id, "⚠️ 语音识别失败")
-                    return
+                    # 传统 worker：下载并 STT
+                    voice_text = await self._process_audio(message)
+                    if voice_text:
+                        await self._async_send_text(chat_id, f"🎤 语音识别: {voice_text}")
+                        content = voice_text
+                    else:
+                        await self._async_send_text(chat_id, "⚠️ 语音识别失败")
+                        return
 
-            elif msg_type in ("file", "image"):
-                # 文件附件：下载到 /tmp
+            elif msg_type in ("file", "image", "media"):
+                # 文件、图片或视频附件：下载到 /tmp
                 file_info = await self._download_attachment(message)
                 if file_info:
                     path, fname = file_info
@@ -5042,16 +5052,24 @@ class FeishuChannel(Channel):
             return data, ".png"
 
     async def _download_attachment(self, message) -> Optional[tuple[str, str]]:
-        """下载文件或图片附件。"""
+        """下载文件、图片、视频或音频附件。"""
         try:
             content_json = json.loads(message.content) if message.content else {}
             file_key = content_json.get("file_key", "")
             image_key = content_json.get("image_key", "")
-            file_name = content_json.get("file_name", "attachment")
+            file_name = content_json.get("file_name", "")
+            msg_type = getattr(message, "message_type", "") or ""
 
             if file_key:
                 resource_type = "file"
                 key = file_key
+                if not file_name:
+                    if msg_type == "media":
+                        file_name = "video.mp4"
+                    elif msg_type == "audio":
+                        file_name = "voice.ogg"
+                    else:
+                        file_name = "attachment"
             elif image_key:
                 resource_type = "image"
                 key = image_key
@@ -5081,10 +5099,18 @@ class FeishuChannel(Channel):
                 data, suffix = self._convert_image_to_jpeg(data)
                 file_name = Path(file_name).stem + suffix
             else:
-                suffix = Path(file_name).suffix or ".bin"
+                suffix = Path(file_name).suffix
+                if not suffix:
+                    if msg_type == "media":
+                        suffix = ".mp4"
+                    elif msg_type == "audio":
+                        suffix = ".ogg"
+                    else:
+                        suffix = ".bin"
 
+            prefix = "feishu_video_" if msg_type == "media" else ("feishu_audio_" if msg_type == "audio" else "feishu_")
             tmp = tempfile.NamedTemporaryFile(
-                delete=False, suffix=suffix, dir="/tmp", prefix="feishu_"
+                delete=False, suffix=suffix, dir="/tmp", prefix=prefix
             )
             tmp.write(data)
             tmp.close()
