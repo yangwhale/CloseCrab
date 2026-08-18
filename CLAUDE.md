@@ -53,6 +53,7 @@ scripts/sync-memory.sh --push|--pull
 scripts/send-to-discord.sh --channel <id> "<msg>"
 scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
 scripts/dsh-setup.sh [--check]               # 建 dsh worker 用的 cordis profile（幂等）
+                                             # 部署指南（含 LiteLLM 网关要求）见 docs/dsh-worker-deploy.md
 
 # 可观测性 / 备份
 python3 scripts/memory-audit.py --action-only         # 记忆体检（周一 cron）

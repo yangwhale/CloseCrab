@@ -394,6 +394,9 @@ Kilo server 是独立子进程，`_write_pid_file()` / `_kill_orphan_kilo()`
 
 ## DSHWorker（dsh_worker.py）
 
+> **要在新机器上部署、或搭 LiteLLM 网关** → 看 [`docs/dsh-worker-deploy.md`](../../docs/dsh-worker-deploy.md)。
+> 本节只讲代码与协议，部署步骤和排障速查在那份文档里。
+
 ### 为什么不用官方那两条现成的路
 
 dsh 有两个 Python 能碰到的入口，都不够用：
