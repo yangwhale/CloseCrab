@@ -19,6 +19,7 @@
 
 ### 4. 工具选择优先级
 
+- `read_multimodal` / `read_image` > `bash 脚本`（查看 PDF 文档、音视频或图片附件时必须优先使用 `read_multimodal` 或 `read_image` 原生多模态工具，严禁使用 python `pypdf`/`pydub`/`ffmpeg` 等脚本手动提取纯文本，原生多模态能保留排版、视觉与听觉全部信息）
 - `grep` > `read + 正则`（grep 有 ripgrep 加速）
 - `glob` > `bash find`
 - 内置工具 > MCP（MCP 多一次 IPC）
