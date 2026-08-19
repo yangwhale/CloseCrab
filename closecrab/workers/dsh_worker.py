@@ -343,9 +343,70 @@ class DSHWorker(Worker):
                  f"model={self._provider}/{self._model}, session={self._session_id}")
         return self._session_id
 
+    def _reap_orphans(self):
+        """Kill dsh runtimes this bot leaked in an earlier life.
+
+        The runtime is spawned with ``start_new_session=True`` so ``stop()``
+        can killpg it. The cost is that it leaves OUR process group: a
+        ``kill -9`` aimed at the bot's group never reaches it. Clean exits
+        (SIGTERM, exit 42) run ``BotCore.shutdown`` and stop it properly, but
+        a hard kill skips the ``finally`` and the runtime is reparented to
+        init and lives forever. 2026-08-17 left 17 of them holding 2.6 GB.
+
+        Identify by workspace, not by name: ``cwd`` is per bot, so this can
+        never touch another bot's live runtime. Only orphans (ppid 1) qualify
+        — anything with a living parent is somebody's working child.
+        """
+        if self._spawn_count:
+            return
+        mine = os.path.realpath(self._cwd)
+        killed = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    argv = [a for a in f.read().split(b"\0") if a]
+                # Match the binary itself, not a mention of it: a shell running
+                # `grep dsh ...` from this workspace would otherwise qualify.
+                if not any(os.path.basename(a) == b"dsh" for a in argv[:2]):
+                    continue
+                if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+                    continue
+                with open(f"/proc/{pid}/stat", "rb") as f:
+                    # ppid is field 4, but comm (field 2) may contain spaces
+                    ppid = int(f.read().rsplit(b")", 1)[1].split()[1])
+                if ppid != 1:
+                    continue
+                if os.path.realpath(f"/proc/{pid}/cwd") != mine:
+                    continue
+            except (OSError, ValueError, IndexError):
+                continue
+            try:
+                pgid = os.getpgid(pid)
+                # Never killpg our own group: that would take the bot down with
+                # the orphan. A real orphan always has its own group.
+                if pgid == os.getpgid(0):
+                    continue
+                os.killpg(pgid, 9)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    os.kill(pid, 9)
+                except (ProcessLookupError, PermissionError):
+                    continue
+            killed.append(pid)
+        if killed:
+            log.warning(f"Reaped {len(killed)} orphaned dsh runtime(s) from a "
+                        f"previous hard kill: {killed} (cwd={mine})")
+
     async def _ensure_process(self):
         if self._proc and self._proc.returncode is None:
             return
+
+        self._reap_orphans()
 
         if self._spawn_count and self._session_id and self._session_log_exists(self._session_id):
             # Respawn after an interrupt or crash: the old session's log is on
