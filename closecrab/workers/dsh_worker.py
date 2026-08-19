@@ -104,6 +104,34 @@ _PROGRESS_LABELS = {
 
 _DEFAULT_PROFILE = "closecrab"
 
+# A turn ends on silence, not on elapsed time: a turn that is streaming tokens
+# or running tools is working, however long it takes. Only the absence of both
+# means the runtime is wedged.
+#
+# _IDLE_TIMEOUT applies while nothing is outstanding. _TOOL_IDLE_TIMEOUT applies
+# while a tool call has not returned -- dsh runs tools itself and reports only
+# the call and the result, so a long ssh or build is legitimately silent in
+# between, and the shorter bound would kill it.
+_IDLE_TIMEOUT_SEC = 180.0
+_TOOL_IDLE_TIMEOUT_SEC = 20 * 60.0
+# Absolute ceiling regardless of activity, so a genuine event loop cannot run
+# forever. Must stay under BotCore._user_task_timeout (30 min) -- if the lock
+# evicts first, two turns overlap and the older one's idle status can cut the
+# newer one short.
+_TURN_HARD_CAP_SEC = 25 * 60.0
+# Longest single wait on the queue. Only bounds how fast the loop notices a
+# deadline it has already passed; the deadlines are the constants above.
+_POLL_CAP_SEC = 30.0
+
+
+def _now() -> float:
+    """Indirection so tests can drive turn timing without patching ``time``.
+
+    ``time.monotonic`` is what the event loop itself schedules on, so patching
+    the module wedges asyncio rather than the code under test.
+    """
+    return time.monotonic()
+
 
 class DSHWorker(Worker):
     """Persistent DeepSeek Harness worker over line-framed JSON-RPC on stdio."""
@@ -136,7 +164,12 @@ class DSHWorker(Worker):
             self._cwd = work_dir or str(Path.home())
         Path(self._cwd).mkdir(parents=True, exist_ok=True)
 
-        self._timeout = timeout
+        # The configured value is a *silence* budget, not a turn budget: a turn
+        # that keeps streaming or keeps tools running is never cut off by it.
+        # Callers pass BotCore's 600s, which is far more slack than a wedged
+        # runtime needs, so clamp it to something that still detects a hang.
+        self._idle_timeout = min(float(timeout or _IDLE_TIMEOUT_SEC),
+                                 _IDLE_TIMEOUT_SEC)
         self._system_prompt = system_prompt
         self._session_id: Optional[str] = session_id
         # Firestore may name the route as "provider/model" (kilo uses the same
@@ -757,21 +790,50 @@ class DSHWorker(Worker):
         """
         final_text = ""
         streamed: list[str] = []
-        deadline = time.monotonic() + self._timeout
+        started = _now()
+        last_activity = started
+        # Tool calls dsh has not reported a result for. Non-empty means the
+        # runtime is waiting on work it dispatched, so silence is expected.
+        tools_in_flight = 0
         # Nothing counts until our prompt is acknowledged; see _is_inbox_receipt.
         accepted = not message_id
         turn_error = ""
+
+        async def _abandon(reason: str) -> str:
+            """Give up on this turn and make sure nothing survives it.
+
+            Returning alone is not enough: the runtime keeps working on the old
+            prompt, and when it finally goes idle that status lands in the next
+            turn's queue and ends it early -- an empty reply out of nowhere.
+            Killing here costs the dsh-side history, which a respawn loses
+            anyway; the workspace and session id survive.
+            """
+            log.error(f"dsh turn abandoned: {reason}")
+            await self._kill_process()
+            self._initialized = False
+            partial = final_text or "".join(streamed)
+            return partial or f"[Error] dsh {reason}"
 
         while True:
             if self._interrupted:
                 log.info("dsh turn interrupted, returning empty string")
                 return ""
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                log.error(f"dsh turn exceeded {self._timeout}s")
-                return "" if self._interrupted else (final_text or "".join(streamed) or "[Error] dsh timed out")
+
+            now = _now()
+            if now - started >= _TURN_HARD_CAP_SEC:
+                return await _abandon(
+                    f"exceeded the {_TURN_HARD_CAP_SEC / 60:.0f}min hard cap")
+            idle_limit = _TOOL_IDLE_TIMEOUT_SEC if tools_in_flight else self._idle_timeout
+            idle_for = now - last_activity
+            if idle_for >= idle_limit:
+                return await _abandon(
+                    f"went silent for {idle_for:.0f}s "
+                    f"({tools_in_flight} tool(s) in flight, limit {idle_limit:.0f}s)")
+
+            wait_for = min(idle_limit - idle_for,
+                           _TURN_HARD_CAP_SEC - (now - started), _POLL_CAP_SEC)
             try:
-                msg = await asyncio.wait_for(self._notes.get(), timeout=min(remaining, 30))
+                msg = await asyncio.wait_for(self._notes.get(), timeout=max(wait_for, 1))
             except asyncio.TimeoutError:
                 if self._interrupted:
                     return ""
@@ -781,6 +843,9 @@ class DSHWorker(Worker):
 
             if self._interrupted:
                 return ""
+
+            # Any notification at all proves the runtime is alive and moving.
+            last_activity = _now()
 
             method = msg.get("method")
             params = msg.get("params") or {}
@@ -845,10 +910,12 @@ class DSHWorker(Worker):
                     except json.JSONDecodeError:
                         args = {"raw": args[:200]}
                 cc = self._cc_name(str(raw))
+                tools_in_flight += 1
                 await self._safe_callback(on_step, self._tool_event(cc, args), name="on_step")
                 await self._safe_callback(on_event, self._progress_label(cc, args), name="on_event")
                 await self._safe_callback(on_log, self._tool_log(cc, args), name="on_log")
             elif etype == "tool/result":
+                tools_in_flight = max(0, tools_in_flight - 1)
                 message = data.get("message") or {}
                 body = self._blocks_text(message.get("content") if isinstance(message, dict) else None)
                 if body:
