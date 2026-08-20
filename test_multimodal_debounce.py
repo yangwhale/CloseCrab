@@ -198,3 +198,47 @@ def test_parse_single_message_content():
         assert res_aud_stt2 == "这是识别出的语音"
 
     asyncio.run(run())
+
+
+def test_dsh_worker_attachment_packaging(tmp_path):
+    async def run():
+        import tempfile
+        from closecrab.workers.dsh_worker import DSHWorker
+
+        worker = DSHWorker.__new__(DSHWorker)
+        worker._lock = asyncio.Lock()
+        worker._started = True
+        worker._session_id = "test-session"
+        worker._interrupted = False
+        worker.is_alive = lambda: True
+        
+        # Create a dummy audio file
+        test_file = tmp_path / "test_voice.ogg"
+        test_file.write_bytes(b"dummy audio data")
+
+        called_params = []
+        async def mock_rpc(method, params, timeout=120):
+            called_params.append((method, params))
+            return {"messageId": "msg-123"}
+
+        worker._rpc = mock_rpc
+        worker._consume_turn = AsyncMock(return_value="done")
+
+        text = f"这是用户语音 [Attached file: test_voice.ogg (saved at {test_file})]"
+        resp = await worker.send(text)
+        assert resp == "done"
+
+        assert len(called_params) == 1
+        method, params = called_params[0]
+        assert method == "session/prompt"
+        assert params["sessionId"] == "test-session"
+        assert len(params["contentBlocks"]) == 2
+        assert params["contentBlocks"][0] == {"type": "text", "text": text}
+        assert params["contentBlocks"][1] == {
+            "type": "file",
+            "path": str(test_file),
+            "name": "test_voice.ogg",
+        }
+
+    asyncio.run(run())
+

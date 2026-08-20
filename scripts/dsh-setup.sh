@@ -126,6 +126,87 @@ for pkg in @deepseek-ai/dsh-sdk-jsonrpc-server @deepseek-ai/dsh-sdk-protocol; do
   fi
 done
 
+# Patch dsh-sdk-jsonrpc-server to support native multimodal file blocks
+python3 - "$PROFILE_DIR/node_modules/@deepseek-ai/dsh-sdk-jsonrpc-server/lib/index.js" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+if not p.exists():
+    sys.exit(0)
+code = p.read_text(encoding="utf-8")
+if 'node:fs/promises' not in code:
+    code = 'import * as fs from "node:fs/promises";\nimport { extname, basename } from "node:path";\n' + code
+
+old_prompt = """\tasync prompt(params) {
+\t\tconst rec = await this.getOrCreateSession(params.sessionId);
+\t\tif (this.ctx.agents.get(rec.handle.agent.id) !== rec.handle.agent) throw new Error(`session agent was disposed outside the server: ${params.sessionId}`);
+\t\tconst message = createUserMessage({
+\t\t\tcontent: params.contentBlocks,
+\t\t\tsource: { kind: "user" }
+\t\t});
+\t\trec.handle.agent.followup(message);
+\t\treturn { messageId: message.id };
+\t}"""
+
+new_prompt = """\tasync prompt(params) {
+\t\tconst rec = await this.getOrCreateSession(params.sessionId);
+\t\tif (this.ctx.agents.get(rec.handle.agent.id) !== rec.handle.agent) throw new Error(`session agent was disposed outside the server: ${params.sessionId}`);
+\t\tconst attachments = this.ctx.get("attachments");
+\t\tconst contentBlocks = [];
+\t\tconst extMimes = {
+\t\t\t".pdf": "application/pdf",
+\t\t\t".wav": "audio/wav",
+\t\t\t".ogg": "audio/ogg",
+\t\t\t".mp3": "audio/mpeg",
+\t\t\t".m4a": "audio/mp4",
+\t\t\t".flac": "audio/flac",
+\t\t\t".mp4": "video/mp4",
+\t\t\t".webm": "video/webm",
+\t\t\t".mov": "video/quicktime",
+\t\t\t".png": "image/png",
+\t\t\t".jpg": "image/jpeg",
+\t\t\t".jpeg": "image/jpeg",
+\t\t\t".webp": "image/webp",
+\t\t\t".gif": "image/gif"
+\t\t};
+\t\tfor (const block of (params.contentBlocks || [])) {
+\t\t\tif (block && block.type === "file" && block.path && attachments) {
+\t\t\t\ttry {
+\t\t\t\t\tconst ext = extname(block.path).toLowerCase();
+\t\t\t\t\tconst mediaType = block.mediaType || extMimes[ext] || "application/octet-stream";
+\t\t\t\t\tconst data = await fs.readFile(block.path);
+\t\t\t\t\tconst ref = await attachments.saveImage({
+\t\t\t\t\t\tdata,
+\t\t\t\t\t\tmediaType,
+\t\t\t\t\t\tname: block.name || basename(block.path)
+\t\t\t\t\t});
+\t\t\t\t\tcontentBlocks.push({
+\t\t\t\t\t\ttype: "image",
+\t\t\t\t\t\tattachment: ref
+\t\t\t\t\t});
+\t\t\t\t} catch (err) {
+\t\t\t\t\tcontentBlocks.push({
+\t\t\t\t\t\ttype: "text",
+\t\t\t\t\t\ttext: `[Failed to load attachment ${block.path}: ${err.message}]`
+\t\t\t\t\t});
+\t\t\t\t}
+\t\t\t} else {
+\t\t\t\tcontentBlocks.push(block);
+\t\t\t}
+\t\t}
+\t\tconst message = createUserMessage({
+\t\t\tcontent: contentBlocks,
+\t\t\tsource: { kind: "user" }
+\t\t});
+\t\trec.handle.agent.followup(message);
+\t\treturn { messageId: message.id };
+\t}"""
+
+if old_prompt in code:
+    code = code.replace(old_prompt, new_prompt)
+    p.write_text(code, encoding="utf-8")
+    print("  patched dsh-sdk-jsonrpc-server for native multimodal attachment support")
+PY
+
 # ── 3. the patch layer ─────────────────────────────────────────────
 # A patch REPLACES a row's whole `config` (no deep merge), and a bare `- id:`
 # for a row that does not exist yet only logs "entry not found" and carries on

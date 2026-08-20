@@ -54,6 +54,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -751,9 +752,22 @@ class DSHWorker(Worker):
                 await self._ensure_process()
 
             sid = self._session_id or ""
+            blocks: list[dict] = [{"type": "text", "text": text}]
+            # 扫描文本中的附件标记 [Attached file: <fname> (saved at <path>)]
+            # 把它作为 file block 传给 dsh-sdk-jsonrpc-server 自动存入 attachment store，
+            # 使得 Gemini 等多模态模型无需通过工具调用即可直接在第 1 轮感知音频/图片/视频。
+            for match in re.finditer(r"\[Attached file:\s*([^\]]+?)\s*\(saved at ([^)]+)\)\]", text):
+                fname, fpath = match.group(1).strip(), match.group(2).strip()
+                if os.path.exists(fpath):
+                    blocks.append({
+                        "type": "file",
+                        "path": fpath,
+                        "name": fname,
+                    })
+
             result = await self._rpc("session/prompt", {
                 "sessionId": sid,
-                "contentBlocks": [{"type": "text", "text": text}],
+                "contentBlocks": blocks,
             }, timeout=120)
             if result is None:
                 return f"[Error] dsh rejected the prompt. stderr: {self._read_stderr_tail(600)}"
