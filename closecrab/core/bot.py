@@ -834,6 +834,18 @@ class BotCore:
             "worker_type": self._worker_type,
         }
 
+    def supports_native_audio(self) -> bool:
+        """后端模型能否直接吃音频/视频附件。
+
+        worker_type 只说明了外壳（dsh 能透传附件），说明不了后端模型。
+        dsh 挂 Claude 时透传 ogg 会让 read_multimodal 直接失败，
+        所以音视频要看模型族：目前只有 Gemini 原生支持。
+        """
+        if self._worker_type not in ("dsh", "gemini"):
+            return False
+        model = (self._backbone_model or "").lower()
+        return "gemini" in model
+
     def get_context_usage(self, user_key: str) -> Optional[dict]:
         """返回指定用户 worker 的 context 使用情况。"""
         worker = self._workers.get(user_key)

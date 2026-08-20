@@ -132,7 +132,10 @@ def test_multimodal_aggregation_debouncer_flow():
 def test_parse_single_message_content():
     async def run():
         channel = FeishuChannel.__new__(FeishuChannel)
-        channel._core = MagicMock(_worker_type="dsh")
+        from closecrab.core.bot import BotCore
+        core = MagicMock(_worker_type="dsh", _backbone_model="gemini-3-pro")
+        core.supports_native_audio = BotCore.supports_native_audio.__get__(core)
+        channel._core = core
         channel._bot_open_id = "bot_self"
         channel._async_send_text = AsyncMock()
 
@@ -165,20 +168,33 @@ def test_parse_single_message_content():
         res_vid = await channel._parse_single_message_content(vid_msg)
         assert res_vid == "[Attached file: video.mp4 (saved at /tmp/feishu_vid_1.mp4)]"
 
-        # Audio on DSH
+        # Audio with a natively multimodal backbone: pass the file through
         aud_msg = MockMessage("m4", "c1", "audio", json.dumps({"file_key": "k3"}))
         res_aud = await channel._parse_single_message_content(aud_msg)
         assert res_aud == "[Attached file: voice.ogg (saved at /tmp/feishu_aud_1.ogg)]"
-
-        # Audio on non-DSH (classic STT)
-        channel._core._worker_type = "claude"
-        channel._process_audio = AsyncMock(return_value="这是识别出的语音")
-        res_aud_stt = await channel._parse_single_message_content(aud_msg)
-        assert res_aud_stt == "这是识别出的语音"
 
         # File
         file_msg = MockMessage("m5", "c1", "file", json.dumps({"file_key": "k4"}))
         res_file = await channel._parse_single_message_content(file_msg)
         assert res_file == "[Attached file: report.pdf (saved at /tmp/feishu_doc_1.pdf)]"
+
+        # dsh shell but Claude backbone: audio must fall back to STT
+        channel._core._backbone_model = "claude-opus-5"
+        channel._process_audio = AsyncMock(return_value="这是识别出的语音")
+        res_aud_stt = await channel._parse_single_message_content(aud_msg)
+        assert res_aud_stt == "这是识别出的语音"
+
+        # ... and a video attachment gets a do-not-read_multimodal warning
+        res_vid_warn = await channel._parse_single_message_content(vid_msg)
+        assert res_vid_warn.startswith(
+            "[Attached file: video.mp4 (saved at /tmp/feishu_vid_1.mp4)]"
+        )
+        assert "no native" in res_vid_warn
+
+        # Non-dsh worker also uses STT regardless of model name
+        channel._core._worker_type = "claude"
+        channel._core._backbone_model = "gemini-3-pro"
+        res_aud_stt2 = await channel._parse_single_message_content(aud_msg)
+        assert res_aud_stt2 == "这是识别出的语音"
 
     asyncio.run(run())

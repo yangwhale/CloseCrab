@@ -3360,8 +3360,9 @@ class FeishuChannel(Channel):
                         content = content.replace(m.key, "").strip()
 
         elif msg_type == "audio":
-            # DSH worker 原生支持多模态：直接透传音频附件，跳过 STT 预处理
-            if self._core and getattr(self._core, "_worker_type", None) == "dsh":
+            # 只有后端模型原生吃音频（Gemini）才透传附件；dsh 挂 Claude 时
+            # 透传会让 read_multimodal 失败，必须退回 STT。
+            if self._core and self._core.supports_native_audio():
                 file_info = await self._download_attachment(message)
                 if file_info:
                     path, fname = file_info
@@ -3388,6 +3389,18 @@ class FeishuChannel(Channel):
             if file_info:
                 path, fname = file_info
                 content = f"[Attached file: {fname} (saved at {path})]"
+                is_av = msg_type == "media" or Path(fname).suffix.lower() in (
+                    ".ogg", ".mp3", ".wav", ".m4a", ".flac", ".aac",
+                    ".mp4", ".webm", ".mov",
+                )
+                if is_av and self._core and \
+                        not self._core.supports_native_audio():
+                    content += (
+                        " [NOTE: the current backbone model has no native "
+                        "audio/video understanding — do NOT call "
+                        "read_multimodal on this file; tell the user the "
+                        "backend must be switched to a Gemini model first.]"
+                    )
             else:
                 if chat_id:
                     await self._async_send_text(chat_id, "⚠️ 附件下载失败")

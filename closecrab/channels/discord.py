@@ -1243,8 +1243,8 @@ class DiscordChannel(Channel):
                     or suffix.lower() in (".ogg", ".mp3", ".wav", ".m4a", ".webm", ".flac")
                     or (message.flags.value & 8192)
                 )
-                is_dsh = self._core and getattr(self._core, "_worker_type", None) == "dsh"
-                if is_voice and not is_dsh:
+                native_av = bool(self._core) and self._core.supports_native_audio()
+                if is_voice and not native_av:
                     log.info(f"Voice message detected, transcribing: {att.filename}")
                     transcribed = await asyncio.to_thread(self._stt.transcribe, tmp.name)
                     if transcribed:
