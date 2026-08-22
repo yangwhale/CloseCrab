@@ -8,7 +8,7 @@
 #       命中 -> stdout 打印 JSON {id, sender, text}，exit 0
 #       超时 -> exit 1（默认 900s，每 8s 轮询一次）
 #
-# 注意：发送者是真实姓名（"Forrest Xi"），不是 "You"。
+# 注意：发送者是真实姓名（Chat 里显示的那个全名），不是 "You"。
 #       不传对方显示名时，取「不等于自己」的第一条；自己的名字由 CHAT_SELF 指定，
 #       默认 "Chris Yang"。多轮对话必须每轮更新 baseline，否则会立刻返回旧消息。
 set -uo pipefail

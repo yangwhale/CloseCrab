@@ -32,6 +32,7 @@ performance trace。这三样 agent-browser 不提供。
 
 ```bash
 ab --where              # 当前目标机
+ab --use local          # 本机 cc-tw 的 Chrome（不走 ssh）
 ab --use bj | hk        # 切北京 glinux_bj / 香港 glinux（Chris 人在哪用哪台）
 AB_HOST=glinux ab ...   # 单次覆盖
 
@@ -45,6 +46,49 @@ ab get url
 ab eval 'document.title'         # 注意是 eval，不是 js
 ab skills get core --full        # 官方用法速查
 ```
+
+### 选 local 还是远端：看这页需不需要 SSO 登录
+
+| 页面 | 目标机 | 为什么 |
+|---|---|---|
+| 需要 SSO 的内部站点 | `bj` / `hk` | 只有那两台的 Chrome 是登录态的 |
+| **自己写的 HTML、GitHub Pages、公开网站** | **`local`** | 快一个数量级，而且窗口就在桌面上 |
+
+`local` 省掉 ssh 往返（远端每轮 60 s 起步），并且浏览器真的显示在
+Chrome Remote Desktop 那块桌面上 —— **Chris 和 agent 看的是同一个东西**。
+CDP 没通时 `ab` 会直接告诉你跑 `scripts/local-chrome.sh`（幂等，已在跑就返回）。
+
+> 起 Chrome 时 **`TMPDIR` 必须拨回 `/tmp`**。bot 进程里的 `TMPDIR` 是层层嵌套的
+> `/tmp/claude-.../claude-.../…`，Chrome 的 SingletonSocket 建在它下面会超过
+> unix socket 路径 108 字节上限，直接 FATAL 退出 —— 报的却是
+> `Socket path too long`，一眼看不出跟 `TMPDIR` 有关。`local-chrome.sh` 已处理。
+
+### 调试自己做的网页：ab 和 Playwright 分工，别只用一个
+
+两个都要，因为它们回答的是不同的问题：
+
+| | 用什么 | 干什么 |
+|---|---|---|
+| **「有没有坏」** | Playwright 脚本 | 多视口批量量尺寸、抓 console error、跟改前 backup 逐档对照。可重复、一条命令扫十几档 |
+| **「好不好」** | `ab --use local` | 像读者那样翻页面看版式、配色、节奏。这类问题脚本测不出来 |
+
+**只截局部元素会漏掉整体问题。** 截 `.toc`、截 `.badge`、截侧边栏，
+拼不出「这一段放错文档了」「这里太挤了」这种判断 —— 那要整页看。
+
+长文档别指望一张全页图（实测一个课件页 36,394 px 高，缩略到能塞进视野就没法读了）。
+正确做法是**滚动分页看**：
+
+```bash
+ab open <url>
+ab eval "window.scrollTo(0,0)"    && ab screenshot /tmp/pg1.png
+ab eval "window.scrollTo(0,2600)" && ab screenshot /tmp/pg2.png   # 按视口高递进
+```
+
+`snapshot -i` 的 350 token 是简单页面的数字；**内容密集的文档页实测约 18 KB**，
+翻版式时优先用截图，别顺手 snapshot。
+
+> `ab batch` 的子命令是按空格再切一次的，**带 `.` 或引号的 JS 表达式会被切坏**
+> （报 `SyntaxError: Unexpected token '.'`）。复杂 `eval` 分开单发，别塞进 batch。
 
 **一次多步，省往返**（最大的提速点）：
 
@@ -86,7 +130,7 @@ chat-poll wait <baseline> [超时秒] [对方显示名]   # 阻塞等对方回�
 BASE=$(chat-poll last)
 absend "第一句"
 BASE=$(chat-poll last)
-REPLY=$(chat-poll wait "$BASE" 300 "Forrest Xi")   # 阻塞
+REPLY=$(chat-poll wait "$BASE" 300 "对方显示名")     # 阻塞
 # ...读 REPLY，想好回什么...
 absend "回应"
 ```

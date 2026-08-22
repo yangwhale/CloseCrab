@@ -6,9 +6,17 @@
 #
 # 目标机切换（Chris 人在哪就用哪台）：
 #   ab --where            查看当前目标机
-#   ab --use bj           切到北京 glinux_bj（默认）
+#   ab --use local        本机 cc-tw 的 Chrome（不走 ssh，亚秒级）
+#   ab --use bj           切到北京 glinux_bj
 #   ab --use hk           切到香港 glinux
 #   AB_HOST=glinux ab ... 单次覆盖，不改默认
+#
+# local 和远端两台的分工：**看这个页面需不需要 SSO 登录**。
+#   需要 → bj / hk，那两台的 Chrome 是登录态的
+#   不需要（自己写的 HTML、GitHub Pages、公开网站）→ local
+# local 快一个数量级（省掉 ssh 往返），而且窗口就开在 Chrome Remote Desktop
+# 那块桌面上，Chris 和我看的是同一个东西。
+# 本机 Chrome 起不来时跑 scripts/local-chrome.sh 拉起来。
 #
 # 常用：
 #   ab snapshot -i              只列可交互元素（约 300 token，MCP 版要 15K+）
@@ -37,9 +45,10 @@ case "${1:-}" in
     exit 0 ;;
   --use)
     case "${2:-}" in
-      bj) echo glinux_bj > "$CONF" ;;
-      hk) echo glinux    > "$CONF" ;;
-      "") echo "用法: ab --use bj|hk" >&2; exit 2 ;;
+      local) echo local     > "$CONF" ;;
+      bj)    echo glinux_bj > "$CONF" ;;
+      hk)    echo glinux    > "$CONF" ;;
+      "") echo "用法: ab --use local|bj|hk" >&2; exit 2 ;;
       *)  echo "${2}" > "$CONF" ;;
     esac
     echo "已切到: $(cat "$CONF")"
@@ -47,6 +56,18 @@ case "${1:-}" in
 esac
 
 HOST="${AB_HOST:-$(cat "$CONF")}"
+
+# 本机：直接跑，不走 ssh。agent-browser 装在 ~/.npm-global（系统 npm prefix
+# 是 /usr/lib，没有写权限）。CDP 没通就先提示怎么拉起来，别让人对着
+# "connection refused" 猜。
+if [ "$HOST" = "local" ]; then
+  if ! curl -s --max-time 3 http://127.0.0.1:9222/json/version | grep -q Browser; then
+    echo "本机 Chrome 的 CDP (127.0.0.1:9222) 没响应。先跑：" >&2
+    echo "  $(dirname "$0")/local-chrome.sh" >&2
+    exit 1
+  fi
+  exec "$HOME/.npm-global/bin/agent-browser" --cdp 9222 "$@"
+fi
 
 args=""
 for a in "$@"; do args="$args $(printf '%q' "$a")"; done
