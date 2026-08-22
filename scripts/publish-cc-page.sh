@@ -5,10 +5,11 @@
 # becomes part of the publish workflow, not an afterthought.
 #
 # Usage:
-#   publish-cc-page.sh <local-html-path> [--to pages|assets|both] [--force]
+#   publish-cc-page.sh <local-html-path> [--to pages|assets|both] [--force] [--no-favicon]
 #
 # Defaults: --to both
-# --force: publish even if URL verification reports failures (use sparingly)
+# --force:      publish even if URL verification reports failures (use sparingly)
+# --no-favicon: don't inject the CloseCrab crab favicon when it's missing
 #
 # Exit codes:
 #   0 = published + remote matches local
@@ -21,19 +22,21 @@ set -u
 HTML=""
 TO="both"
 FORCE=0
+NO_FAVICON=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --to)    TO="${2:-both}"; shift 2 ;;
-    --force) FORCE=1; shift ;;
+    --force)      FORCE=1; shift ;;
+    --no-favicon) NO_FAVICON=1; shift ;;
     -h|--help)
-      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)      echo "Unknown flag: $1" >&2; exit 2 ;;
     *)       HTML="$1"; shift ;;
   esac
 done
 
-[ -n "$HTML" ]  || { echo "Usage: $0 <html-file> [--to pages|assets|both] [--force]" >&2; exit 2; }
+[ -n "$HTML" ]  || { echo "Usage: $0 <html-file> [--to pages|assets|both] [--force] [--no-favicon]" >&2; exit 2; }
 [ -f "$HTML" ]  || { echo "ERROR: $HTML not found" >&2; exit 2; }
 case "$TO" in pages|assets|both) ;; *) echo "ERROR: --to must be pages|assets|both" >&2; exit 2 ;; esac
 
@@ -46,6 +49,37 @@ GSUTIL_ENV=(
   "CLOUDSDK_CORE_ACCOUNT=$SA"
   "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE=false"
 )
+
+# ────────────────── Step 0: favicon ──────────────────
+# 每个页面都该带 CloseCrab 的 🦀。缺了就当场补进源文件（不是补进临时副本）——
+# 后面 Step 2/3 要拿本地字节数跟远端比，改副本会让那两步永远对不上。
+# 内联 SVG 而不是图片文件：图标由浏览器用本机 emoji 字体现画，
+# Mac 上是 Apple 那只红螃蟹。烤成 PNG 等于把某一家的字形钉死在所有平台。
+# 规范见 skills/page-style/SKILL.md。
+FAVICON_LINK="<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦀</text></svg>\">"
+if [ "$NO_FAVICON" -eq 1 ]; then
+  echo "━━━━ Step 0: favicon (skipped, --no-favicon) ━━━━"
+elif grep -qi 'rel="icon"\|rel='"'"'icon'"'"'' "$HTML"; then
+  echo "━━━━ Step 0: favicon ━━━━"
+  echo "  ✓ 已有 favicon，不动"
+else
+  echo "━━━━ Step 0: favicon ━━━━"
+  if grep -qi '</title>' "$HTML"; then
+    python3 - "$HTML" "$FAVICON_LINK" <<'PY'
+import re, sys
+path, link = sys.argv[1], sys.argv[2]
+s = open(path, encoding="utf-8").read()
+m = re.search(r'</title\s*>', s, re.I)          # 插在 </title> 之后
+i = m.end()                                     # 永远自成一行，别跟 </title> 挤在一起
+open(path, "w", encoding="utf-8").write(s[:i] + "\n" + link + "\n" + s[i:].lstrip("\n"))
+PY
+    echo "  ✚ 缺 favicon，已补进 $HTML（<title> 之后）"
+  else
+    echo "  ⚠ 缺 favicon，且找不到 </title> —— 没动文件，请手动加："
+    echo "    $FAVICON_LINK"
+  fi
+fi
+echo ""
 
 # ────────────────── Step 1: URL verification ──────────────────
 echo "━━━━ Step 1: URL verification ━━━━"
