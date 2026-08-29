@@ -78,7 +78,7 @@ python3 -c "from wiki_utils import WIKI_REPO, WIKI_CONTENT; print(WIKI_REPO, WIK
 | 变量 | 必填 | 作用 | 不设会怎样 |
 |---|---|---|---|
 | `WIKI_REPO` | ✅ | Wiki 仓库根目录 | 回落 `~/my-wiki`，整套工具静默失效 |
-| `WIKI_GCS` | — | 构建产物上传到哪个 GCS 路径 | **只构建不上传**（不会误发到别人的桶） |
+| `WIKI_GCS` | ✅（要发布的话） | 构建产物上传到哪个 GCS 路径 | 构建完**报错退出 1**，明说没上传（不猜桶，也不静默跳过） |
 | `WIKI_URL` | — | 站点公网地址，用于生成页面链接 | 链接留空 |
 | `CC_PAGES_URL_PREFIX` | — | 从 CC Pages HTML 反向录入时的来源链接 | 来源链接留空 |
 
@@ -299,7 +299,8 @@ bash build-and-sync.sh                                                 # Quartz 
 | 脚本跑完什么也没发生 | `WIKI_REPO` 回落到不存在的默认值 | 同上。**这是最常见的一个** |
 | MCP tool 不出现 | `~/.claude.json` 里没注册，或脚本路径不存在 | `python3 <那条路径> --help` 直接跑一下 |
 | 查什么都返回一堆无关页 | 见第五节，缺相关性下限 | 看返回结果的 `matched_terms`，如果只命中虚词就是这个问题 |
-| 构建了但网站没更新 | `WIKI_GCS` 没设，只构建没上传 | `echo $WIKI_GCS` |
+| 构建了但网站没更新 | `WIKI_GCS` 没设 —— 2026-08-29 前脚本没守卫，空串传给 gcloud 直接崩在 `Unacceptable pattern: ''`，而 ingest 只看到「构建成功」 | 现在会明确报错退出 1。先 `echo $WIKI_GCS` |
+| 页面 404，但 `curl` 看着是 302 | **IAP 对任何路径都回 302**，包括不存在的 —— 302 不能证明页面存在 | 别 curl，直接列桶：`gcloud storage ls gs://$WIKI_GCS_桶/…` |
 
 ---
 
@@ -342,4 +343,12 @@ bash build-and-sync.sh                                                 # Quartz 
 
 它们的共同点是**不报错**：系统看起来在正常运行，只是什么也没做。
 所以本项目的取向是 —— **配置缺失就响亮失败，不要兜底**
-（例：`tts_voice` 没配直接抛错，`WIKI_GCS` 没配就只构建不上传而不是发到别人桶里）。
+（例：`tts_voice` 没配直接抛错；`WIKI_GCS` 没配就构建完 `exit 1`，
+既不猜一个桶、也不静默跳过上传）。
+
+> `WIKI_GCS` 这条是 2026-08-29 补上的，而它本身就是上面那张表的第四行：
+> 脚本注释写着「没设就只构建不上传」，**但代码里根本没有那个守卫** ——
+> 空串一路传到 `gcloud storage rsync`，崩在一句 `Unacceptable pattern: ''`。
+> 而调用方（`/wiki ingest`）只看构建那段输出，于是**每次 ingest 都报成功、
+> 每次都没发布**，直到有人点开链接发现 404。
+> **教训：写在注释里的行为不算实现。** 声明了兜底/守卫，就要有一行代码对应它。
