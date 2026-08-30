@@ -300,6 +300,7 @@ bash build-and-sync.sh                                                 # Quartz 
 | MCP tool 不出现 | `~/.claude.json` 里没注册，或脚本路径不存在 | `python3 <那条路径> --help` 直接跑一下 |
 | 查什么都返回一堆无关页 | 见第五节，缺相关性下限 | 看返回结果的 `matched_terms`，如果只命中虚词就是这个问题 |
 | 构建了但网站没更新 | `WIKI_GCS` 没设 —— 2026-08-29 前脚本没守卫，空串传给 gcloud 直接崩在 `Unacceptable pattern: ''`，而 ingest 只看到「构建成功」 | 现在会明确报错退出 1。先 `echo $WIKI_GCS` |
+| 站点上有这页，git 里查无此文 | **发布 ≠ 存档** —— `build-and-sync.sh` 只构建 + 上传，完全不碰版本控制 | 脚本末尾现在会报 `content/` 有几项没提交（2026-08-30 加，此前积过六天） |
 | 页面 404，但 `curl` 看着是 302 | **IAP 对任何路径都回 302**，包括不存在的 —— 302 不能证明页面存在 | 别 curl，直接列桶：`gcloud storage ls gs://$WIKI_GCS_桶/…` |
 
 ---
