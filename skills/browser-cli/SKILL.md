@@ -1,6 +1,6 @@
 ---
 name: browser-cli
-description: Drive the already-logged-in Chrome on Chris's cloudtop from the command line (agent-browser over CDP), instead of chrome-devtools-mcp. Use for ANY interactive browser work on internal/SSO-gated sites — gHire, Buganizer UI, Google Chat, internal dashboards, form filling, clicking through a flow. ~40-50x cheaper than the MCP (350 tokens vs 15-20K per snapshot). Also provides multi-round Google Chat conversation: send a message and block waiting for the peer's reply. Trigger on "操作浏览器", "点开网页", "帮我填一下", "去 gHire", "给 X 发个 Chat 消息", "等他回复". Keep chrome-devtools-mcp only for Lighthouse / heap snapshot / performance trace.
+description: Drive the already-logged-in Chrome on Chris's cloudtop from the command line (agent-browser over CDP), instead of chrome-devtools-mcp. Use for ANY interactive browser work on internal/SSO-gated sites — gHire, Buganizer UI, Google Chat, internal dashboards, form filling, clicking through a flow. ~40-50x cheaper than the MCP (350 tokens vs 15-20K per snapshot). Also provides multi-round Google Chat conversation — send a message and block waiting for the peer's reply. Trigger on "操作浏览器", "点开网页", "帮我填一下", "去 gHire", "给 X 发个 Chat 消息", "等他回复". Keep chrome-devtools-mcp only for Lighthouse / heap snapshot / performance trace.
 ---
 
 # browser-cli — 命令行驱动浏览器
@@ -16,6 +16,27 @@ system prompt。
 
 **仍然用 chrome-devtools-mcp 的场景**：Lighthouse 审计、heap snapshot、
 performance trace。这三样 agent-browser 不提供。
+
+## 先确认 Chrome 在哪台机器
+
+`ab` 默认假设 Chrome 在**远程** cloudtop，每条命令都 ssh 过去。但 Chrome 也可能
+就跑在**本机** —— 这时 ssh 别名往往早就不通，`doctor.sh` 一路 FAIL，看起来像
+"工具坏了"，其实只是走错了路。
+
+先判断：
+
+```bash
+curl -s http://127.0.0.1:9222/json/version    # 有输出 = Chrome 在本机
+```
+
+本机就用 `abl`（直连，不走 ssh），远程才用 `ab`：
+
+```bash
+abl get url
+abl batch "open <url>" "get url" "eval document.title"
+```
+
+`abl` = `~/.claude/skills/browser-cli/scripts/ab.local`，已链到 `~/.local/bin/abl`。
 
 ## 前置检查
 

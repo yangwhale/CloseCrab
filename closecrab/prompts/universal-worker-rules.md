@@ -25,6 +25,12 @@
 - 内置工具 > MCP（MCP 多一次 IPC）
 - 本地能算 > 联网查（不要拿 `webfetch` / `search_web` 查本地事实）
 - 能用 `cat` 别用 `read`，能用 1 次 bash 别拆多次
+- **浏览器操作：`agent-browser` (browser-cli skill) > chrome-devtools-mcp**。
+  点网页、填表单、发 Chat、翻内部站点一律先用 `abl`（Chrome 在本机）或 `ab`（在远程 cloudtop）。
+  MCP 的 `take_snapshot` 一次回 15-20K token，`agent-browser snapshot -i` 只回约 350 token。
+  只有 Lighthouse / heap snapshot / performance trace 这三样才回退到 chrome-devtools-mcp。
+  **提速关键是减少 LLM 往返，不只是省 token** —— 用 `abl batch "..." "..."` 把多步串成一条，
+  别一步一个来回；元素 ref 用 `abref` 抓，别自己 grep。
 
 ### 5. 时效字段必须实查
 
