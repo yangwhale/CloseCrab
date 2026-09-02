@@ -190,8 +190,9 @@ def main():
             with open(filepath, "wb") as f:
                 f.write(video.video_bytes)
         elif video.uri:
-            # GCS URI — download with gsutil
-            subprocess.run(["gsutil", "cp", video.uri, filepath],
+            # GCS URI — download with gcloud storage (gsutil uses the default
+            # SA from gcloud config, not ADC, and 403s on ADC-only buckets)
+            subprocess.run(["gcloud", "storage", "cp", video.uri, filepath],
                            capture_output=True, check=True)
         else:
             print(f"Warning: video {i} has no content", file=sys.stderr)

@@ -119,9 +119,9 @@ else
     python3 "$SCRIPT_DIR/sync-to-gcs.py"
 
     echo ""
-    echo "[12/12] Uploading wiki-data via gsutil..."
-    gsutil -q cp "$WIKI_REPO/wiki-data/graph.json" "gs://${CC_PAGES_GCS_BUCKET:-}/cc-pages/wiki-data/graph.json" 2>/dev/null || true
-    gsutil -q cp "$WIKI_REPO/wiki-data/log.json" "gs://${CC_PAGES_GCS_BUCKET:-}/cc-pages/wiki-data/log.json" 2>/dev/null || true
+    echo "[12/12] Uploading wiki-data..."
+    gcloud storage cp "$WIKI_REPO/wiki-data/graph.json" "gs://${CC_PAGES_GCS_BUCKET:-}/cc-pages/wiki-data/graph.json" 2>/dev/null || true
+    gcloud storage cp "$WIKI_REPO/wiki-data/log.json" "gs://${CC_PAGES_GCS_BUCKET:-}/cc-pages/wiki-data/log.json" 2>/dev/null || true
 fi
 
 echo ""

@@ -1249,8 +1249,9 @@ sed -i 's|"YOUR_APP_ID"|"your-app-id"|' /tmp/control-board.html
 sed -i 's|initializeFirestore(app, {}, "closecrab")|initializeFirestore(app, {}, "your-database")|' /tmp/control-board.html
 
 # 3. 上传到 GCS
-gsutil -h "Content-Type:text/html; charset=utf-8" cp /tmp/control-board.html \
-  gs://YOUR_BUCKET/cc-pages/pages/control-board.html
+gcloud storage cp /tmp/control-board.html \
+  gs://YOUR_BUCKET/cc-pages/pages/control-board.html \
+  --content-type="text/html; charset=utf-8"
 ```
 
 > Firebase 配置值从 [Firebase Console → Project Settings → Your apps → Web app](https://console.firebase.google.com/) 获取。
@@ -1312,7 +1313,7 @@ Bot 生成的 HTML 报告、数据分析、Benchmark 结果通过域名发布。
 #### 1. 创建 GCS 桶
 
 ```bash
-gsutil mb -l asia-east1 gs://YOUR_BUCKET/
+gcloud storage buckets create gs://YOUR_BUCKET/ --location=asia-east1
 ```
 
 #### 2. 配置反代服务器

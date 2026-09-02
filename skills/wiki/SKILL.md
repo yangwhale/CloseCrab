@@ -253,7 +253,7 @@ bash "$WIKI_REPO"/scripts/build-and-sync.sh
 ```bash
 cd "$WIKI_REPO"
 npx quartz build
-gsutil -m rsync -r -d public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
+gcloud storage rsync -r --delete-unmatched-destination-objects public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
 ```
 
 **注意**: 构建前会自动删除 `~/package.json`（如果是空文件），避免干扰 Quartz。

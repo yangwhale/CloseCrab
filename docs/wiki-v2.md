@@ -52,7 +52,7 @@ Bot 不需要用户显式触发 `/wiki` 就能利用 Wiki：
  │                          │── ingest.py ─────────────►│ 保存 raw/
  │                          │── Edit 工具 ─────────────►│ 写 content/
  │                          │── build-and-sync.sh ─────►│ Quartz 构建
- │                          │                            │── gsutil → GCS
+ │                          │                            │── gcloud storage → GCS
  │◄── 新页面 URL ────────│                            │
 ```
 
@@ -331,7 +331,7 @@ bash ~/my-wiki-v2/scripts/build-and-sync.sh
 等价于：
 ```bash
 cd ~/my-wiki-v2 && npx quartz build
-gsutil -m rsync -r -d public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
+gcloud storage rsync -r --delete-unmatched-destination-objects public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
 ```
 
 ---
@@ -550,5 +550,5 @@ rm -rf ~/my-wiki-v2/public/ && npx quartz build
 
 ```bash
 # 手动同步到 GCS
-gsutil -m rsync -r -d ~/my-wiki-v2/public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
+gcloud storage rsync -r --delete-unmatched-destination-objects ~/my-wiki-v2/public/ gs://$GCS_BUCKET/cc-pages/wiki-v2/
 ```

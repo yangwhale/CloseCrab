@@ -3,7 +3,7 @@
 
 Strategy:
   - gcsfuse mounted → rsync to mount point (fast, no extra copy)
-  - gcsfuse NOT mounted → fallback to gsutil rsync (direct GCS upload)
+  - gcsfuse NOT mounted → fallback to `gcloud storage rsync` (direct GCS upload)
 
 raw/ is NOT synced (may contain large files, not needed for URL access).
 """
@@ -51,12 +51,18 @@ def sync_via_rsync(src: Path, dst: Path) -> bool:
     return True
 
 
-def sync_via_gsutil(src: Path, gcs_dst: str) -> bool:
-    """Sync via gsutil rsync directly to GCS."""
-    cmd = ["gsutil", "-m", "rsync", "-r", "-d", f"{src}/", f"{gcs_dst}/"]
+def sync_via_gcloud(src: Path, gcs_dst: str) -> bool:
+    """Sync via `gcloud storage rsync` directly to GCS.
+
+    Not gsutil: it authenticates as the default service account from
+    `gcloud config get account` rather than ADC, which fails on buckets that
+    only granted ADC (access_denied: Account restricted).
+    """
+    cmd = ["gcloud", "storage", "rsync", "-r",
+           "--delete-unmatched-destination-objects", f"{src}/", f"{gcs_dst}/"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"  gsutil error: {result.stderr}", file=sys.stderr)
+        print(f"  gcloud storage error: {result.stderr}", file=sys.stderr)
         return False
     lines = result.stderr.strip().split("\n") if result.stderr else []
     op_lines = [l for l in lines if "Operation completed" in l]
@@ -85,7 +91,7 @@ def sync():
     if use_gcsfuse:
         print(f"Using gcsfuse mount: {GCS_ROOT}")
     else:
-        print(f"gcsfuse not mounted, using gsutil → {GCS_BUCKET}")
+        print(f"gcsfuse not mounted, using gcloud storage → {GCS_BUCKET}")
 
     for dir_name in SYNC_DIRS:
         src = WIKI_REPO / dir_name
@@ -97,7 +103,7 @@ def sync():
         if use_gcsfuse:
             sync_via_rsync(src, GCS_ROOT / dir_name)
         else:
-            sync_via_gsutil(src, f"{GCS_BUCKET}/{dir_name}")
+            sync_via_gcloud(src, f"{GCS_BUCKET}/{dir_name}")
 
     print("Sync complete.")
     url_prefix = os.environ.get("CC_PAGES_URL_PREFIX", "")

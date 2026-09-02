@@ -21,13 +21,12 @@ PRIVATE_REPO="${PRIVATE_REPO:-$HOME/my-private}"
 DBS=(closecrab closecrab-public)
 KEEP_WEEKS=8
 
-# /snap/bin 必须在里面 —— 本机 gcloud/gsutil 是 snap 装的，cron 的默认 PATH 没有它。
+# /snap/bin 必须在里面 —— 本机 gcloud 是 snap 装的，cron 的默认 PATH 没有它。
 # 首版我照着"想当然"写了 $HOME/google-cloud-sdk/bin，那个目录根本不存在，
 # 结果 export 静默失败而 JSON 快照照常成功，日志看起来"跑了"。
 # 用 env -i 最小环境实跑才暴露出来。
 export PATH="/snap/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 command -v gcloud >/dev/null || { echo "[FATAL] PATH 里没有 gcloud，当前 PATH=$PATH"; exit 3; }
-command -v gsutil >/dev/null || { echo "[FATAL] PATH 里没有 gsutil"; exit 3; }
 TS=$(TZ='Asia/Hong_Kong' date +%Y%m%d-%H%M)
 say() { echo "[$(TZ='Asia/Hong_Kong' date '+%F %T %Z')] $*"; }
 
@@ -53,9 +52,9 @@ while read -r d; do
     # 只处理 8 位纯数字开头的，避开手工放的其它目录
     [[ "$day" =~ ^[0-9]{8}$ ]] || continue
     if [[ "$day" < "$CUTOFF" ]]; then
-        gsutil -m rm -r "$d" >/dev/null 2>&1 && say "清理旧 export $name"
+        gcloud storage rm -r "$d" >/dev/null 2>&1 && say "清理旧 export $name"
     fi
-done < <(gsutil ls "$BUCKET/" 2>/dev/null)
+done < <(gcloud storage ls "$BUCKET/" 2>/dev/null)
 
 # ── 3. 脱敏 JSON 快照 → 私有仓库 ──────────────────────────────────
 if [ -d "$PRIVATE_REPO/.git" ]; then

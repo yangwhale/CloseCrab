@@ -44,11 +44,16 @@ BASENAME=$(basename "$HTML")
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFIER="$SCRIPT_DIR/verify-page-urls.sh"
 BUCKET="gs://chris-pgp-host-asia/cc-pages"
-SA="604327164091-compute@developer.gserviceaccount.com"
-GSUTIL_ENV=(
-  "CLOUDSDK_CORE_ACCOUNT=$SA"
-  "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE=false"
-)
+# 用 gcloud storage，不用 gsutil：gsutil 走 `gcloud config get account` 的默认
+# 服务账号而不是 ADC，在只授权了 ADC 的桶上直接 access_denied: Account restricted。
+#
+# 原来这里钉了个 SA 并强制关掉 client certificate，那是 gsutil 时代绕 CAA 的写法。
+# 在 gcloud storage 下两个都是坏的：那个 SA 本机从没 activate 过
+# （"does not have any valid credentials"），而关掉 client certificate 会让
+# corp 身份刷 token 时被 CAA 拦住。默认什么都不覆盖，走当前登录身份最稳。
+# 需要用别的身份时显式设 CC_PUBLISH_SA。
+GCS_ENV=()
+[ -n "${CC_PUBLISH_SA:-}" ] && GCS_ENV+=("CLOUDSDK_CORE_ACCOUNT=$CC_PUBLISH_SA")
 
 # ────────────────── Step 0: favicon ──────────────────
 # 每个页面都该带 CloseCrab 的 🦀。缺了就当场补进源文件（不是补进临时副本）——
@@ -114,10 +119,9 @@ upload_one() {
   local subdir="$1"
   local dest="$BUCKET/$subdir/$BASENAME"
   echo "  → $dest"
-  env "${GSUTIL_ENV[@]}" gsutil \
-    -h "Cache-Control:no-cache, max-age=0" \
-    -h "Content-Type:text/html; charset=utf-8" \
-    cp "$HTML" "$dest" 2>&1 | tail -2
+  env ${GCS_ENV[@]+"${GCS_ENV[@]}"} gcloud storage cp "$HTML" "$dest" \
+    --cache-control="no-cache, max-age=0" \
+    --content-type="text/html; charset=utf-8" 2>&1 | tail -2
 }
 
 case "$TO" in
@@ -133,7 +137,7 @@ echo "GCS object check:"
 for sub in pages assets; do
   case "$TO" in
     "$sub"|both)
-      REMOTE_SIZE=$(env "${GSUTIL_ENV[@]}" gsutil ls -l "$BUCKET/$sub/$BASENAME" 2>/dev/null \
+      REMOTE_SIZE=$(env ${GCS_ENV[@]+"${GCS_ENV[@]}"} gcloud storage ls -l "$BUCKET/$sub/$BASENAME" 2>/dev/null \
                     | awk '/^ *[0-9]/{print $1}' | head -1)
       if [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ]; then
         printf "  \033[32m✓\033[0m %s/%s  GCS size=%s\n" "$sub" "$BASENAME" "$REMOTE_SIZE"

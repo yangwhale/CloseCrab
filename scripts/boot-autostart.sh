@@ -82,7 +82,7 @@ ensure_gcsfuse() {
     if gcsfuse --implicit-dirs "$bucket" "$mnt" 2>&1 | sed 's/^/      /'; then
         log "OK    gcsfuse 已挂载"
     else
-        log "FAIL  gcsfuse 挂载失败（发布会退回 gsutil，不致命）"
+        log "FAIL  gcsfuse 挂载失败（发布会退回 gcloud storage，不致命）"
     fi
 }
 

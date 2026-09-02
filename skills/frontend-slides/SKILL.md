@@ -1115,7 +1115,7 @@ pip install python-pptx  # Usually pre-installed
 2. **Generate PPTX** — Write a Python script using `python-pptx` to recreate the layout
 3. **Preview** — `libreoffice --headless --convert-to pdf --outdir /tmp/preview file.pptx`
 4. **Iterate** — Fix issues, re-generate, re-preview
-5. **Upload** — `gsutil cp file.pptx gs://...` for reliable delivery
+5. **Upload** — `gcloud storage cp file.pptx gs://...` for reliable delivery
 
 ### CRITICAL: Text Must Be Inside Shapes
 

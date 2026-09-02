@@ -1,0 +1,21 @@
+#!/bin/bash
+# abl — 固定打本机 Chrome 的 agent-browser，不走 ssh。
+# 远端那两台是给 SSO 站点用的登录态 Chrome；本机这台看公开页面 / 自己写的 HTML，
+# 省掉一整趟 ssh 往返（实测每轮 60s 起步）。
+set -e
+
+if ! curl -s --max-time 3 http://127.0.0.1:9222/json/version | grep -q Browser; then
+  echo "本机 Chrome 的 CDP (127.0.0.1:9222) 没响应。先跑：" >&2
+  echo "  $(dirname "$(readlink -f "$0")")/local-chrome.sh" >&2
+  exit 1
+fi
+
+# agent-browser 可能装在 nvm 下，也可能在 ~/.npm-global，按序找第一个能用的。
+for c in "$(command -v agent-browser 2>/dev/null)" \
+         "$HOME/.npm-global/bin/agent-browser" \
+         "$HOME/.nvm/versions/node/v24.19.0/bin/agent-browser"; do
+  [ -n "$c" ] && [ -x "$c" ] && exec "$c" --cdp 9222 "$@"
+done
+
+echo "找不到 agent-browser，装一个：npm i -g agent-browser" >&2
+exit 1

@@ -48,7 +48,7 @@ _工具优先级 / 批处理 / 并发 / Memory 纪律等通用工具使用规则
 ### 发布四步走
 
 1. **写 HTML** 到 `$CC_PAGES_WEB_ROOT/pages/{topic}-{YYYYMMDD-HHmmss}.html`
-2. **上传确认** — 用 `gcloud storage cp` 或 `gsutil cp` 显式上传到 GCS。**不要信任 gcsfuse 自动同步**，它可能延迟数分钟甚至丢失写入，用户点链接会 404
+2. **上传确认** — 用 `gcloud storage cp` 显式上传到 GCS（**不要用 `gsutil`**：它认 `gcloud config get account` 的默认服务账号而不是 ADC，在只授权 ADC 的桶上会 `access_denied: Account restricted`）。**也不要信任 gcsfuse 自动同步**，它可能延迟数分钟甚至丢失写入，用户点链接会 404
 3. **截 OG 图** — 用 Playwright 或 Chrome MCP 截图 1200×630 保存到 `$CC_PAGES_WEB_ROOT/assets/og-{topic}.png`
 4. **发链接** — 聊天里发 `$CC_PAGES_URL_PREFIX/pages/{filename}`
 
