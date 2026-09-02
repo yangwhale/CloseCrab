@@ -58,12 +58,20 @@ def sync_via_gcloud(src: Path, gcs_dst: str) -> bool:
     `gcloud config get account` rather than ADC, which fails on buckets that
     only granted ADC (access_denied: Account restricted).
     """
+    # PROCESS_COUNT=1: 多进程并发时每个 worker 都去取 CAA 客户端证书，
+    # 并发下大量失败成 `[SSL] PEM lib`。单进程慢些但几乎无噪声。
+    # 失败的对象只是被跳过、命令照样非零退出，所以要重试到真正干净为止。
+    env = {**os.environ, "CLOUDSDK_STORAGE_PROCESS_COUNT": "1"}
     cmd = ["gcloud", "storage", "rsync", "-r",
            "--delete-unmatched-destination-objects", f"{src}/", f"{gcs_dst}/"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  gcloud storage error: {result.stderr}", file=sys.stderr)
-        return False
+    for attempt in range(1, 6):
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if result.returncode == 0:
+            break
+        if attempt == 5:
+            print(f"  gcloud storage error: {result.stderr}", file=sys.stderr)
+            return False
+        print(f"  attempt {attempt} had failed objects, retrying...")
     lines = result.stderr.strip().split("\n") if result.stderr else []
     op_lines = [l for l in lines if "Operation completed" in l]
     if op_lines:
