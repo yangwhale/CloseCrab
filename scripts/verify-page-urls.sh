@@ -37,6 +37,15 @@ classify_url() {
   if printf '%s\n' "$matches" | grep -qiE '(og:image|twitter:image)'; then
     echo "social-meta"; return
   fi
+  # XML namespace identifiers are not fetchable resources. They look like URLs
+  # and some (w3.org/2000/svg) even 400 on HEAD, but nothing ever requests them.
+  # The inline crab favicon this toolchain injects contains one, so without this
+  # branch publish-cc-page.sh fails on markup it wrote itself.
+  case "$u" in
+    http://www.w3.org/*|https://www.w3.org/*|http://purl.org/*|https://purl.org/*|\
+    http://schema.org/*|https://schema.org/*|http://ogp.me/*|https://ogp.me/*)
+      echo "xmlns"; return ;;
+  esac
   # everything else: real content link
   echo "content"
 }
@@ -56,6 +65,11 @@ while IFS= read -r url; do
   case "$ctx" in
     preconnect)
       printf "  \033[90m─\033[0m  SKIP  %s  (preconnect/dns-prefetch)\n" "$clean"
+      SKIP=$((SKIP+1))
+      continue
+      ;;
+    xmlns)
+      printf "  \033[90m─\033[0m  SKIP  %s  (XML namespace, not a fetchable URL)\n" "$clean"
       SKIP=$((SKIP+1))
       continue
       ;;
