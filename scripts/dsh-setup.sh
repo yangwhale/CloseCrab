@@ -245,6 +245,10 @@ cat > "$PATCH" <<EOF
             contextWindow: 200000
             maxOutput: 16000
             input: [text, image]
+          - id: gemini-3.8-flash
+            contextWindow: 1000000
+            maxOutput: 32000
+            input: [text, image]
           - id: gemini-3.7-flash
             contextWindow: 1000000
             maxOutput: 32000

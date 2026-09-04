@@ -325,6 +325,12 @@ MODEL_PRESETS = {
         "gemini": None,
         "dsh":    "claude-sonnet-5",
     },
+    "gemini-3.8-flash": {
+        "claude": None,
+        "kilo":   "google-vertex/gemini-3.8-flash",
+        "gemini": "gemini-3.8-flash",
+        "dsh":    "gemini-3.8-flash",
+    },
     "gemini-3.7-flash": {
         "claude": None,
         "kilo":   "google-vertex/gemini-3.7-flash",

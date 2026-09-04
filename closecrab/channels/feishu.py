@@ -295,6 +295,7 @@ def _shorten_model_name(raw: str) -> str:
         "claude-haiku-4-5": "Haiku 4.5",
         "claude-sonnet-5": "Sonnet 5.0",
         # Gemini
+        "gemini-3.8-flash": "G38F",
         "gemini-3.7-flash": "G37F",
         "gemini-3.7-pro": "G37P",
         "gemini-3.6-flash": "G36F",
