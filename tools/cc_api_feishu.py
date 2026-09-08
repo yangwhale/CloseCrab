@@ -18,7 +18,9 @@ def _check_key(request, body=None):
         key = body.get("key", request.headers.get("X-API-Key", ""))
     else:
         key = request.headers.get("X-API-Key", request.query.get("key", ""))
-    return key == _API_KEY
+    # 兼容 iOS 字体或键盘把大写 I 输成小写 l 的情况 (UIxg vs Ulxg)
+    alt_key = _API_KEY.replace("UI", "Ul") if _API_KEY.startswith("UI") else _API_KEY
+    return key in (_API_KEY, alt_key)
 
 
 async def api_send(request):
