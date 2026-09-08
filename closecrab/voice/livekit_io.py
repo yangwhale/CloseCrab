@@ -337,6 +337,14 @@ class _CloseCrabStream(llm.LLMStream):
         )
 
         # ── Barge-in: 新消息到达时中断旧 TTS ─────────────────────────
+        # 记录到 Gemini Live 结构化交付日志
+        try:
+            from .gemini_live_bridge import get_bridge
+            bridge = get_bridge()
+            bridge._log_delivery("👤 [我说了啥 (来自语音通话)]", combined)
+        except Exception:
+            pass
+
         # 绕过 LiveKit TTS 后，中断机制需要手动触发：
         # 设 _tts_interrupted 停止当前 _do_speak + 清空队列 + 清 buffer
         from .discord_voice_sidecar import stream_speak_text
@@ -414,6 +422,11 @@ class _CloseCrabStream(llm.LLMStream):
         async def on_tool_use_voice(tool_name: str, tool_input: dict) -> None:
             # LiveKit TTS 管线已绕过，tool hint 走 LiveKit 旧管线会跟 sidecar TTS 冲突。
             # 飞书 broadcast hint 仍正常工作（走 Gemini TTS），这里只跳过 Discord 播出。
+            try:
+                from .gemini_live_bridge import get_bridge
+                get_bridge()._log_delivery("🛠️ [它干了啥/调了工具]", f"{tool_name}({tool_input})")
+            except Exception:
+                pass
             log.debug(f"voice progressive: tool={tool_name} (skipped, bypass mode)")
             return
 
@@ -455,6 +468,11 @@ class _CloseCrabStream(llm.LLMStream):
                     log.warning(f"Push voice result to feishu failed: {e}")
 
             # 💬 回显到 Discord 语音房文字频道 (🎤 path 不走 _stream_speak, 需单独处理)
+            try:
+                from .gemini_live_bridge import get_bridge
+                get_bridge()._log_delivery("🤖 [它回了啥 (文字/语音)]", text_for_feishu)
+            except Exception:
+                pass
             try:
                 from .discord_voice_sidecar import _sidecar_bot, _sidecar_loop, _target_voice_channel_id
                 if _sidecar_bot and _sidecar_loop and _target_voice_channel_id:

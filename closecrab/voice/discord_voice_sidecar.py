@@ -246,7 +246,7 @@ def set_feishu_bridge(feishu_channel, feishu_loop, open_id: str, chat_id: str = 
     log.info("飞书大脑桥已注册 (open_id=%s… chat_id=%s…) → Discord 语音可全双工",
              open_id[:8] if open_id else "?", chat_id[:8] if chat_id else "?")
 _listen_restart_n = 0       # 录音自动重启计数 (上限保护)
-_LISTEN_AUTOSTART = False    # 2026-06-10: 关闭自动收音, DAVE 接收路径 crash loop, 改用 Zello PTT 收音
+_LISTEN_AUTOSTART = True     # 自动收音开启 (收到音频转 OGG 直推飞书)
 _autostart_done = False      # 本进程内自动收音只起一次 (尊重之后的 /stoplisten)
 _receive_probe_installed = False  # decrypt_rtp ssrc 探针只挂一次
 _dave_backend_installed = False    # dave-py 后端替换只装一次
@@ -1723,6 +1723,11 @@ def _get_stt_sink_class():
                     del self._pcm[: len(self._pcm) - cap]
             _stt_ab_record_pcm(mono)
             _funasr_ab_feed(mono)
+            try:
+                from .gemini_live_bridge import feed_discord_pcm
+                feed_discord_pcm(mono)
+            except Exception:
+                pass
 
         def pop_frame(self):
             """取一帧 20ms mono PCM bytes, 不足一帧返回 None。"""
@@ -1987,7 +1992,7 @@ def stt_ab_get_dir():
 
 # ─── FunASR WebSocket 流式 STT (标准全套: VAD + 2pass + Punc + ITN) ──
 _funasr_ws = None
-_funasr_is_primary = True
+_funasr_is_primary = False  # 停用 FunASR，完全切换到 Gemini Live 双向流
 _funasr_last_feed = 0.0
 _funasr_feeding = False
 _funasr_flush_started = False
@@ -2412,7 +2417,7 @@ class DaveSessionAdapter:
                 pass
 
     def get_serialized_key_package(self) -> bytes:
-        return self._sess.get_marshalled_key_package()
+        return self._sess.get_marshalled_key_package() or b""
 
     def set_external_sender(self, data):
         self._sess.set_external_sender(bytes(data))
@@ -3174,6 +3179,11 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         log.warning("Discord 语音 sidecar 已开启但缺 token，跳过")
         return None
     vch = cfg.get("voice_channel_id", "")
+    try:
+        from .gemini_live_bridge import get_bridge
+        get_bridge()
+    except Exception as e:
+        log.warning("提前预热 Gemini Live Bridge 失败: %s", e)
     thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
     if thread is not None:
         # 后台验证：15s 后检查是否真的连上了语音频道，没连上就清除持久化标记
