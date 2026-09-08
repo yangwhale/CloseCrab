@@ -227,6 +227,22 @@ cat > "$PATCH" <<EOF
 - id: llm-pi-ai
   config:
     providers:
+      google-vertex:
+        api: google-vertex
+        defaultInput: [text, image]
+        models:
+          - id: gemini-3.8-flash
+            contextWindow: 1000000
+            maxOutput: 32000
+            input: [text, image]
+          - id: gemini-3.7-flash
+            contextWindow: 1000000
+            maxOutput: 32000
+            input: [text, image]
+          - id: gemini-3.1-flash-lite
+            contextWindow: 1000000
+            maxOutput: 32000
+            input: [text, image]
       litellm:
         api: openai-completions
         baseURL: $LITELLM_URL

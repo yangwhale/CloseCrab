@@ -282,7 +282,7 @@ class DSHWorker(Worker):
         $DSH_HOME/.credentials.yaml layer is watched and hot-published, which
         is the only layer a long-lived process can actually update.
         """
-        if self._provider != "vertex":
+        if self._provider not in ("vertex", "google-vertex"):
             return False
         try:
             out = subprocess.run(["gcloud", "auth", "print-access-token"],
@@ -368,7 +368,7 @@ class DSHWorker(Worker):
         self._write_agents_md()
         await self._ensure_process()
         self._started = True
-        if self._provider == "vertex" and (
+        if self._provider in ("vertex", "google-vertex") and (
                 self._token_task is None or self._token_task.done()):
             self._token_task = asyncio.create_task(self._token_refresh_loop())
         self._start_time = time.monotonic()
