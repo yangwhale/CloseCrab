@@ -128,6 +128,9 @@ _ensure_cron_daemon() {
 FAIL_COUNT=0
 
 while true; do
+    # 每轮都重读 .zshenv：secrets 轮换（如 GEMINI_API_KEY）后，exit-42 只重启
+    # python 子进程，run.sh 自己的 env 不会更新，子进程继承的还是轮换前的旧值。
+    [ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv"
     _ensure_cron_daemon
     python3 -m closecrab --bot "$BOT_NAME" "$@"
     EXIT_CODE=$?
