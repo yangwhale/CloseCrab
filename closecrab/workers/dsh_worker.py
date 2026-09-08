@@ -458,6 +458,8 @@ class DSHWorker(Worker):
 
         env = os.environ.copy()
         env["DSH_HOME"] = self._dsh_home
+        env.setdefault("GOOGLE_CLOUD_PROJECT", env.get("GCLOUD_PROJECT", "gpu-launchpad-playground"))
+        env.setdefault("GOOGLE_CLOUD_LOCATION", "global")
         # dsh reads the model credential from this variable name because the
         # profile's provider entry declares apiKeyEnv: LITELLM_KEY.
         env.setdefault("LITELLM_KEY", env.get("LITELLM_MASTER_KEY", ""))
