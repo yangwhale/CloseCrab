@@ -632,13 +632,26 @@ class GeminiLiveBridge:
             # 平衡延迟用的，而这个场景明确不要低延迟，宁可多等半秒换整句完整。
             # 上限别再往上抬 —— 文档说 2000ms+ 就是「用户说完了半天没反应」。
             #
-            # prefix_padding_ms 是**往前回看**多少音频，防止 VAD 触发前就已经出口
-            # 的第一个音节被切掉（文档: "A value of 0 may cause the beginning of
-            # words to be clipped."）。中文首字被吃掉整句就散架了，给足 300ms。
+            # prefix_padding_ms **不是「往前回看多少音频」** —— 这里原先写的是那个
+            # 意思，是错的（2026-09-11 订正）。官方字段说明原话：
+            #   "The required duration of detected speech before start-of-speech
+            #    is committed. The lower this value, the more sensitive the
+            #    start-of-speech detection is and shorter speech can be
+            #    recognized. However, this also increases the probability of
+            #    false positives."
+            # 也就是说它是个**触发门槛**：要连续听到这么久的人声才认定「开始说话」。
+            # 往上调 = 更迟钝，不是更安全。官方示例给的是 20ms，我们这 300ms 是
+            # 它的 15 倍。
+            #
+            # 保留 300ms 的理由是**实测它不掉字**：2026-09-11 用去掉前导静音的
+            # 音频（模拟 Discord 突然开始的流）A/B 过 300 / 20 / 加 ALL_INPUT /
+            # 全默认四种，八次转录一字不差。所以这个值目前不是嫌疑人 ——
+            # 但真要动它，方向是往下调不是往上调。
             #
             # end_of_speech_sensitivity 取 LOW = 更不容易判定「他说完了」，
-            # 跟上面加长静默是同向的。start 那侧**故意不设**，保持默认的灵敏 ——
-            # 调低会漏掉开口瞬间，那是在解决问题的反方向上。
+            # 跟上面加长静默是同向的。start 那侧**故意不设**：官方枚举写明
+            # `START_SENSITIVITY_UNSPECIFIED` 的默认就是 `START_SENSITIVITY_HIGH`，
+            # 即最灵敏 —— 显式设 LOW 会漏掉开口瞬间，是反方向。
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     disabled=False,
