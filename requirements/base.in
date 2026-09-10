@@ -11,7 +11,10 @@
 # ---- Core ----
 google-cloud-firestore
 google-cloud-speech
-google-genai
+google-genai       # **必须 >= 2.x**：语音桥用 AudioTranscriptionConfig 的
+                   # custom_vocabulary（1.x 没这个字段）和 language_codes
+                   # （1.x 有字段，但 SDK 自己 raise 掉了）。降到 1.x 会在
+                   # Live 握手那一步炸，不是启动时炸 —— 只有语音坏，文字照常
 fastapi
 uvicorn
 python-dotenv

@@ -70,6 +70,43 @@ _THINKING_LEVELS = ("minimal", "low", "medium", "high")
 _DEFAULT_THINKING = "low"
 _THINKING_FILE = "/tmp/gemini-live-thinking.txt"
 
+# ---- 语音识别偏置：语言提示 + 自定义词表 ----
+#
+# 这两个字段都挂在 `AudioTranscriptionConfig` 上（官方 WebSockets API reference →
+# AudioTranscriptionConfig）：
+#   languageCodes[]    "BCP-47 language codes providing hints about the languages
+#                       present in the audio. If omitted or empty, defaults to
+#                       automatic language detection."
+#   customVocabulary[] "A list of custom vocabulary phrases to bias the speech
+#                       recognition model toward recognizing specific terms
+#                       (product names, proper nouns, jargon)."
+#
+# **两个字段都要 google-genai >= 2.x。** 1.75.0 里 `custom_vocabulary` 根本不存在，
+# 而 `language_codes` 存在却被 SDK **自己**挡掉 —— `_live_converters.py` 里一句
+# 裸 `raise ValueError('language_codes parameter is not supported in Gemini API.')`，
+# 网络包都没发出去。我先前照着那句报错在这里写过「这条路堵死」，那个结论是错的：
+# 堵的是客户端那道保守闸门，不是服务端。2.22.0 上用**生产完整配置**实测，
+# 两个字段单给、合给都握手成功。
+#
+# 为什么要它：2026-09-11 实测「TPU 和 GPU 有什么区别」被转成韩语
+# 「"TPO"와 "TPO"의 구별」，上一句被转成德语。**这是整句语种判错，不是听错一个词**，
+# 而且主模型自己也跟着答成了 TPE/TPO 两种塑料 —— 错在理解那一层，不只是转写难看。
+# 思考档位救不了这个：思考发生在听懂之后，前面错了只会让它更自信地答错。
+_LANGUAGE_CODES = ("cmn-Hans-CN", "en-US")
+
+# 词表默认值写在代码里，`_VOCAB_FILE` 只是覆盖用。**故意不做成必填** ——
+# 这跟 `feedback_no-silent-fallback-config` 不冲突：那条针对的是「缺了就静默降级
+# 到一个错的值」，而这里缺文件时退回的就是这份经过考虑的默认值，且默认值可见。
+#
+# 只放**真正常说、而且通用词表里偏冷门**的词。塞太多没有好处：偏置是有代价的，
+# 把常用词也塞进去等于把先验摊平。
+_DEFAULT_VOCAB = (
+    "TPU", "GPU", "MoE", "HBM", "MFU",
+    "巴尼", "bunny", "wiki", "MaxText", "SGLang", "vLLM",
+    "Firestore", "Gemini", "Claude", "token", "prompt",
+)
+_VOCAB_FILE = "/tmp/gemini-live-vocab.txt"
+
 # 兼容老代码里对 MODEL_NAME 的引用（日志用）。真正生效的是 current_model()。
 MODEL_NAME = _DEFAULT_MODEL
 
@@ -331,6 +368,30 @@ def current_thinking() -> str:
     return _DEFAULT_THINKING
 
 
+def current_vocab() -> tuple:
+    """读当前的自定义词表。一行一个词，`#` 开头是注释，空文件 = 显式关掉偏置。
+
+    **返回 tuple 不是 list**，因为它要进配置指纹参与相等比较 —— list 不可哈希，
+    而且可变对象存进指纹之后被人改一下，指纹会跟着变，看起来像"配置自己变了"。
+
+    跟另外三个 `current_xxx()` 的差别：那三个有白名单，越界就退回默认；词表**没有
+    合法值集合**，任何字符串都可能是用户真要偏置的词。所以这里唯一的过滤是去空行
+    和注释 —— 不猜、不纠正。
+    """
+    try:
+        with open(_VOCAB_FILE, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return _DEFAULT_VOCAB
+    words = tuple(
+        w for w in (line.strip() for line in raw.splitlines())
+        if w and not w.startswith("#")
+    )
+    # 文件存在但没有有效词 → 尊重它，返回空（= 不做偏置）。
+    # 这跟"文件不存在"是两件事，不能都退回默认：前者是用户明确说"别偏了"。
+    return words
+
+
 def _is_gemini_3(model: str) -> bool:
     """3.x 用 thinking_level，2.5 用 thinking_budget —— 两套字段不能混着传。
 
@@ -542,15 +603,16 @@ class GeminiLiveBridge:
         persona = current_persona()
         model = current_model()
         thinking = current_thinking()
+        vocab = current_vocab()
         self._thinking = thinking  # 延迟日志要标是哪一档测出来的
         log.info(
-            "本次建连使用声音: %s (%s)｜模型: %s｜思考: %s",
-            voice, _VOICES[voice], model, thinking,
+            "本次建连使用声音: %s (%s)｜模型: %s｜思考: %s｜词表: %d 个词",
+            voice, _VOICES[voice], model, thinking, len(vocab),
         )
         # 指纹**必须取自这三个局部变量**，不能事后再调一次 current_*()：
         # 那样中间有个窗口，期间改了文件就会让指纹记成新值、连接却用的旧值，
         # 之后永远比不出差异 —— 改动被静默吞掉，比不检测还糟。
-        self._cfg_fp = (voice, persona, model, thinking)
+        self._cfg_fp = (voice, persona, model, thinking, vocab)
         return types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
             # ---- 识别质量：让它多攒一点上下文再解析 ----
@@ -630,21 +692,21 @@ class GeminiLiveBridge:
                 types.Tool(function_declarations=[_TOOL_ASK_OWNER]),
                 types.Tool(google_search=types.GoogleSearch()),
             ],
-            # 这里不能加 language_codes。SDK 的 pydantic 模型有这个字段、本地构造
-            # 也不报错, 但走 API key 的 Gemini API 后端直接拒绝（实测）:
-            #   "language_codes parameter is not supported in Gemini API."
-            # 连接会在握手阶段挂掉并进入 3 秒一次的无限重连。
+            # 输入侧带上语言提示和词表（常量与来龙去脉见 `_LANGUAGE_CODES` 那一段）。
             #
-            # 别指望换 Vertex 就能锁语言 —— 官方文档明说原生音频模型这条路是堵的:
+            # 别跟 `speech_config` 的语言设置搞混，那是**输出**侧的，官方明说原生
+            # 音频模型不支持指定输出语言:
             #   "Native audio output models automatically choose the appropriate
             #    language and don't support explicitly setting the language code."
-            # （我先前在这里写过「该字段仅 Vertex AI 路径可用」，那是推测不是实测，已撤。）
-            #
-            # input_audio_transcription 本身也不是识别质量的正解 —— Vertex 文档把它
-            # 定性为对话的 "side channel"，并指路: 真要拿转写当目的，用专门的
-            # gemini-3.5-transcribe-live-preview（带自动语种检测+code-switching+
-            # 自定义词表偏置，但它只出文本、不对话）。
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            # 这里改的是**输入**识别，是另一个字段、另一条链路。
+            input_audio_transcription=types.AudioTranscriptionConfig(
+                language_codes=list(_LANGUAGE_CODES),
+                # 空 tuple 要传 None 而不是 []。文档对 languageCodes 写的是
+                # "If omitted or empty, defaults to..."，但 customVocabulary 没给
+                # 空列表的语义 —— 不确定的时候就别发那个字段，别赌服务端怎么理解。
+                custom_vocabulary=list(vocab) or None,
+            ),
+            # 输出侧**不加词表**：那是模型自己说的话，它不需要被偏置去认自己。
             output_audio_transcription=types.AudioTranscriptionConfig(),
             # 服务端会**周期性重置 WebSocket**，官方原话: 连接寿命约 10 分钟，
             # 断开时报 ABORTED —— 也就是日志里那句
@@ -795,8 +857,12 @@ class GeminiLiveBridge:
                 # 已经 0.6s 没帧，再确认下行也静了 _OUT_QUIET_S，才是双方都没在
                 # 说话的空档，此时掐断谁都不会被打断。
                 if self._cfg_fp is not None and time.monotonic() - self._last_out_at > _OUT_QUIET_S:
+                    # ⚠️ 这个元组的**长度和顺序必须跟 `_build_config` 里那个一致**。
+                    # 少一维就永远不相等 —— 症状不是"改动不生效"，而是**每个空档都
+                    # 重连一次**，看起来像网络在抖。加维度时两处一起改。
                     now_fp = (
-                        current_voice(), current_persona(), current_model(), current_thinking()
+                        current_voice(), current_persona(), current_model(),
+                        current_thinking(), current_vocab(),
                     )
                     if now_fp != self._cfg_fp:
                         if now_fp[2] != self._cfg_fp[2]:
@@ -808,6 +874,10 @@ class GeminiLiveBridge:
                             reason = f"声音 {self._cfg_fp[0]} → {now_fp[0]}"
                         elif now_fp[3] != self._cfg_fp[3]:
                             reason = f"思考档位 {self._cfg_fp[3]} → {now_fp[3]}"
+                        elif now_fp[4] != self._cfg_fp[4]:
+                            reason = (
+                                f"词表 {len(self._cfg_fp[4])} → {len(now_fp[4])} 个词"
+                            )
                         else:
                             reason = "persona 已更新"
                         raise _ConfigChanged(reason)

@@ -38,10 +38,10 @@ _M = glb._DEFAULT_MODEL
 
 @pytest.fixture(autouse=True)
 def _no_ambient_config(monkeypatch, tmp_path_factory):
-    """把**三个** /tmp 配置文件全指向不存在的路径，让每条用例都从默认值起跑。
+    """把**四个** /tmp 配置文件全指向不存在的路径，让每条用例都从默认值起跑。
 
-    指纹是 (voice, persona, model, thinking) 四元组，`_send_loop` 每一维都会去
-    读文件。只要 /tmp 里躺着一份别人写的，全部用例的结果就跟着那份文件变 ——
+    指纹是 (voice, persona, model, thinking, vocab) 五元组，`_send_loop` 每一维
+    都会去读文件。只要 /tmp 里躺着一份别人写的，全部用例的结果就跟着那份文件变 ——
     这不是假想：2026-09-10 为了 A/B 往 `/tmp/gemini-live-thinking.txt` 写了个
     `high`，三条**跟思考档位毫无关系**的用例当场变红。测试读环境状态就是这个
     下场，而且红得莫名其妙，会让人去改本来没错的代码。
@@ -53,16 +53,20 @@ def _no_ambient_config(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(glb, "_MODEL_FILE", str(d / "absent-model.txt"))
     monkeypatch.setattr(glb, "_THINKING_FILE", str(d / "absent-thinking.txt"))
     monkeypatch.setattr(glb, "_VOICE_FILE", str(d / "absent-voice.txt"))
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(d / "absent-vocab.txt"))
 
 
 def _bridge(cfg_fp, last_out_ago=99.0):
     """造一个不建连的桥，直接摆好 _send_loop 要读的那两个状态。
 
-    指纹允许只传前三维（声音/人格/模型）—— 这里自动补上第四维思考档位。
-    下面那批用例关心的是前三维，补一下比每处都抄一遍 _DEFAULT_THINKING 清楚。
+    指纹允许只传前三维（声音/人格/模型）—— 后面几维自动补默认值。下面那批用例
+    关心的是前三维，补一下比每处都抄一遍默认常量清楚。
+
+    **补的必须是「文件不存在时 `current_xxx()` 会返回的那个值」**，不是随便一个
+    看着合理的值 —— 补错了指纹当场不等，用例会以「配置变了」的名义假绿。
     """
     if cfg_fp is not None and len(cfg_fp) == 3:
-        cfg_fp = (*cfg_fp, glb._DEFAULT_THINKING)
+        cfg_fp = (*cfg_fp, glb._DEFAULT_THINKING, glb._DEFAULT_VOCAB)
     b = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
     b._running = True
     b._audio_queue = asyncio.Queue()
@@ -257,7 +261,9 @@ def test_thinking_level_absent_on_25(monkeypatch):
 def test_cfg_fp_records_the_model_actually_used(monkeypatch):
     """指纹必须记下这次真用的模型，否则切回来时比不出差异、改动被静默吞掉。"""
     _, b = _cfg(monkeypatch, _M25)
-    assert b._cfg_fp == ("Erinome", "p", _M25, glb._DEFAULT_THINKING)
+    assert b._cfg_fp == (
+        "Erinome", "p", _M25, glb._DEFAULT_THINKING, glb._DEFAULT_VOCAB,
+    )
 
 
 # ── 过期 session handle 的识别 ────────────────────────────────────────────
@@ -726,3 +732,124 @@ def test_tool_before_speech_survives():
         text = _persona_text(name)
         assert "顺序不能反" in text, f"{name} 丢了先调工具再开口的纪律"
         assert "先动手，再开口" in text, f"{name} 丢了那句总结"
+
+
+# ------------------------------------------------------- 语音识别偏置（词表）
+#
+# 2026-09-11 实测「TPU 和 GPU 有什么区别」被转成韩语「"TPO"와 "TPO"의 구별」，
+# 上一句被转成德语 —— **整句语种判错**，而且主模型跟着答成了 TPE/TPO 两种塑料，
+# 所以错在**听懂**那一层，不只是转写难看。思考档位救不了它（思考发生在听懂
+# 之后），能改的只有输入侧的识别偏置：`languageCodes` + `customVocabulary`。
+
+
+def test_vocab_defaults_when_file_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(tmp_path / "absent.txt"))
+    assert glb.current_vocab() == glb._DEFAULT_VOCAB
+
+
+def test_vocab_file_overrides_and_strips_noise(monkeypatch, tmp_path):
+    f = tmp_path / "v.txt"
+    f.write_text("# 注释\n\n  TPU  \nMaxText\n\n", encoding="utf-8")
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(f))
+    assert glb.current_vocab() == ("TPU", "MaxText")
+
+
+def test_empty_vocab_file_means_off_not_default(monkeypatch, tmp_path):
+    """负向 —— 「文件存在但没有有效词」跟「文件不存在」是两件事。
+
+    退回默认的话这个功能就**关不掉**：想验证偏置到底有没有效果，
+    唯一的对照组就是空词表。少了这条，把 `except OSError` 那个分支挪到
+    函数末尾当兜底也一样能过全部其他用例。
+    """
+    f = tmp_path / "v.txt"
+    f.write_text("# 全是注释\n\n", encoding="utf-8")
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(f))
+    assert glb.current_vocab() == ()
+
+
+def test_vocab_is_a_tuple_so_it_can_live_in_the_fingerprint(monkeypatch, tmp_path):
+    """指纹要能相等比较、要能哈希。返回 list 的话这里过不了，
+    而症状会跑到八竿子打不着的地方去。"""
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(tmp_path / "absent.txt"))
+    v = glb.current_vocab()
+    assert isinstance(v, tuple)
+    hash(v)
+
+
+def test_biasing_fields_reach_the_wire(monkeypatch, tmp_path):
+    """两个字段都要真进 config 的**输入**侧。"""
+    f = tmp_path / "v.txt"
+    f.write_text("TPU\nGPU\n", encoding="utf-8")
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(f))
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    cfg = bridge._build_config()
+
+    tr = cfg.input_audio_transcription
+    assert list(tr.language_codes) == list(glb._LANGUAGE_CODES)
+    assert list(tr.custom_vocabulary) == ["TPU", "GPU"]
+    assert bridge._cfg_fp[4] == ("TPU", "GPU"), "没进指纹 = 改了词表永远不会重连"
+
+
+def test_output_side_is_not_biased(monkeypatch, tmp_path):
+    """负向 —— 输出侧转录的是模型自己说的话，不需要偏置去认自己。
+
+    真给它挂上不会报错，只会白花钱、并且把「输入/输出是两条链路」这件事
+    在代码里抹平 —— 下一个人就会以为改输出侧能治识别。
+    """
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(tmp_path / "absent.txt"))
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    cfg = bridge._build_config()
+    assert cfg.output_audio_transcription.custom_vocabulary is None
+    assert not cfg.output_audio_transcription.language_codes
+
+
+def test_empty_vocab_sends_none_not_empty_list(monkeypatch, tmp_path):
+    """空词表要发 `None`（= 不发这个字段），不是 `[]`。
+
+    文档给 `languageCodes` 明说了「omitted or empty」等价，但**没有**给
+    `customVocabulary` 定义空列表的语义。不确定的时候别赌服务端怎么理解。
+    """
+    f = tmp_path / "v.txt"
+    f.write_text("", encoding="utf-8")
+    monkeypatch.setattr(glb, "_VOCAB_FILE", str(f))
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    cfg = bridge._build_config()
+    assert cfg.input_audio_transcription.custom_vocabulary is None
+
+
+def test_vocab_change_triggers_reconnect(monkeypatch):
+    monkeypatch.setattr(glb, "current_voice", lambda: "Erinome")
+    monkeypatch.setattr(glb, "current_persona", lambda: "p")
+    monkeypatch.setattr(glb, "current_vocab", lambda: ("TPU", "GPU"))
+    b = _bridge(cfg_fp=("Erinome", "p", _M))  # 第五维补的是 _DEFAULT_VOCAB
+    with pytest.raises(glb._ConfigChanged):
+        _run_send_loop(b)
+
+
+def test_send_loop_fingerprint_has_the_same_arity_as_build_config(monkeypatch, tmp_path):
+    """**这条是给一个我真犯过的错装的护栏。**
+
+    `_build_config` 和 `_send_loop` 各自拼一次指纹。给指纹加一维时只改了前者，
+    后者还在拼旧的 —— 元组长度不同就永远不相等，于是**每 0.6 秒的空档都重连
+    一次**。症状不是「改动不生效」，是看起来像网络在抖，很难往这边想。
+
+    所以这里不比字段、只比一件事：拿 `_build_config` 亲自算出来的指纹喂给
+    `_send_loop`，它必须认为「没变」。
+    """
+    for name in ("_MODEL_FILE", "_THINKING_FILE", "_VOICE_FILE", "_VOCAB_FILE"):
+        monkeypatch.setattr(glb, name, str(tmp_path / f"absent-{name}.txt"))
+
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    bridge._build_config()
+
+    b = _bridge(cfg_fp=bridge._cfg_fp)
+    assert len(b._cfg_fp) == 5, "指纹维数变了？两处拼指纹的地方都要跟着改"
+    # 超时 = 一直没抛 _ConfigChanged = 两处指纹对得上。
+    # **超时值必须大于 `_IDLE_GAP_S`**，否则循环还没走到比对那一步就被掐了，
+    # 这条会变成一个永远绿的空测试 —— 变异测试第一次跑就是这么发现的。
+    with pytest.raises(asyncio.TimeoutError):
+        _run_send_loop(b, timeout=glb._IDLE_GAP_S * 4)
