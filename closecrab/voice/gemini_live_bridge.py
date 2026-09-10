@@ -106,52 +106,21 @@ def _tidy(text: str) -> str:
 
 # ---------------------------------------------------------------- 工具调用
 #
+# 只有一个工具：ask_<bot>。**2026-09-10 删掉了 run_shell。**
+# 它最后的用途只剩「换自己的声音」，而声音已经定下来不再换了 —— 留着就是一个
+# 没有正当用途、却是全场唯一能改坏东西的工具。想换声音让 bot 本体去 echo 那个
+# 文件（`_VOICE_FILE`），它有完整的名单和判断力，语音助手不需要这个能力。
+#
 # gemini-3.1-flash-live-preview 的 function calling 是**同步**的 —— 官方对比表原话:
 #   "Not supported. Function calling is sequential only. The model will not
 #    start responding until you've sent the tool response."
-# 也就是说从它发起调用到我们回 tool response 这段时间，用户那头是**完全静音**的。
-# 这条约束直接决定了下面两个常量的取值：不是技术上能跑多久，而是人能忍多久。
+# 从它发起调用到我们回 tool response 这段时间，用户那头是**完全静音**的。
+# 这条约束就是 `_ask_owner` 必须 fire-and-forget 的全部理由 —— 现在没有任何
+# 工具会真的去等一件事做完，所以超时/截断那两个常量也一并删了。
 # （2.5 Flash Live 支持 NON_BLOCKING，可以边跑边说话；3.1 换来的是更低延迟和
 #  8 倍的输出上限。要挂慢工具再考虑换回 2.5。）
-_TOOL_TIMEOUT_S = 15
-
-# 语音场景下让模型念一屏日志既没用又烧 token，而且 128K 上下文经不起几轮全量日志。
-_TOOL_OUTPUT_LIMIT = 2000
 
 # BOT_NAME 定义在文件顶部（LOG_FILE 要用它拼路径，必须先于它）。
-
-# 换声音用的两个路径。**定义在这儿而不是下面那节「声音」里**，纯粹因为
-# run_shell 的描述要拼它们，而工具声明比声音那节早。语义说明在 `_VOICES` 那节。
-_VOICE_FILE = "/tmp/gemini-live-voice.txt"
-_VOICE_LIST_FILE = "/tmp/gemini-live-voices.txt"
-
-_TOOL_RUN_SHELL = types.FunctionDeclaration(
-    name="run_shell",
-    description=(
-        "在这台 Linux 机器上执行一条 bash 命令并返回输出。"
-        f"命令必须能在 {_TOOL_TIMEOUT_S} 秒内跑完，超时会被强制终止。"
-        "\n\n"
-        "**只用来换你自己的声音，别拿它查东西** —— 查状态、看日志、查进程、"
-        f"看时间、看 GPU/TPU 一律用 ask_{BOT_NAME} 派出去。\n"
-        f"换声音：`echo <名字> > {_VOICE_FILE}`，约 0.2 秒生效，不用叫用户等。\n"
-        f"不知道有哪些名字、或者用户让你推荐一个，就先 `cat {_VOICE_LIST_FILE}` "
-        "看清单（30 个，带性格标签）。名字必须照抄，写错会静默退回默认声音。\n"
-        # 破坏性动作的禁令**只写在这一处**（原先 persona 的 run_shell 和「边界」
-        # 两节各写了一遍）。写在工具描述里而不是 persona 里，是因为它约束的就是
-        # 这一个工具 —— 唯一能改坏东西的那个。
-        "**删文件、杀进程、重启服务、改线上配置 —— 一律不做，用户直接让你做也不做。**"
-    ),
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "command": types.Schema(
-                type=types.Type.STRING,
-                description="要执行的完整 bash 命令，例如 `df -h /` 或 `nvidia-smi --query-gpu=name --format=csv`",
-            ),
-        },
-        required=["command"],
-    ),
-)
 
 # 工具名带上 bot 名字（ask_bunny / ask_jarvis）。语音场景下模型是**听着**自己
 # 在调什么，`ask_bunny` 比 `delegate_to_owner` 好理解得多，也更不容易乱调。
@@ -247,50 +216,19 @@ _VOICES = {
 # 之前**根本没设** speech_config，用的是服务端默认那个 —— 无趣就无趣在这儿。
 _DEFAULT_VOICE = "Zubenelgenubi"
 
-# 当前声音写在文件里（`_VOICE_FILE`，定义在工具那节）而不是常量里，是为了
-# **不用重启就能换**。桥每次建连都重读它，而 `_send_loop` 会在双方都不说话的
-# 空档发现文件变了、主动断一次连（搜 `_ConfigChanged`）—— 所以 echo 完通常
-# 一两秒就生效，不用等服务端那轮十来分钟的重置。
+# 当前声音写在文件里而不是常量里，是为了**不用重启就能换**。桥每次建连都重读它，
+# 而 `_send_loop` 会在双方都不说话的空档发现文件变了、主动断一次连
+# （搜 `_ConfigChanged`）—— 所以 echo 完通常一两秒就生效。
 #
-# 30 个名字**不进 prompt**，落到磁盘上（`_VOICE_LIST_FILE`）让模型要用的时候自己去 cat。
+# **换声音是运维动作，不是语音助手的能力**（2026-09-10）。原先助手手上有
+# run_shell，唯一正当用途就是往这个文件里写名字，为此 persona 还抄了一张 30 个
+# 名字的表（420 字符、占那份 prompt 的 12%），一天用不上一次。声音定下来之后
+# 那张表连同工具一起删了 —— 要换，人说一声，bot 本体 echo 一下就行：
 #
-# 原先这张表是抄在 persona 里的（420 字符，占那份文件 12%），而它一天也用不上
-# 一次。**注意别以为「挪进工具描述」就省了** —— Live API 的 setup 里
-# system_instruction 和 function_declarations 是同一个包一起发的，换个地方写
-# 一个 token 都不少。真要省只有一条路：**从常驻上下文里拿掉，改成按需读**。
+#     echo Aoede > /tmp/gemini-live-voice.txt
 #
-# 顺带解决了双份真相：以前 Python 有 `_VOICES`、markdown 有一份手抄的，
-# 加声音要改两处，漏一处就是模型推荐了一个白名单外的名字然后被静默退回默认。
-
-# 性别只用于生成上面那份清单（挑声音时有用），不参与任何校验逻辑。
-_FEMALE_VOICES = frozenset(
-    {
-        "Zephyr", "Autonoe", "Kore", "Erinome", "Leda", "Laomedeia",
-        "Achernar", "Aoede", "Callirrhoe", "Despina", "Vindemiatrix",
-        "Sulafat", "Gacrux",
-    }
-)
-
-
-def write_voice_list() -> None:
-    """把 `_VOICES` 渲染成一份人读的清单落盘，供模型按需 `cat`。
-
-    每次 `start()` 都重写：`_VOICES` 是唯一真相，改了它清单自动跟上。
-    写失败只记日志不抛 —— 换声音是个可有可无的功能，不该拖垮语音桥。
-    """
-    female = [f"{n}({d})" for n, d in _VOICES.items() if n in _FEMALE_VOICES]
-    male = [f"{n}({d})" for n, d in _VOICES.items() if n not in _FEMALE_VOICES]
-    text = (
-        f"可用的声音一共 {len(_VOICES)} 个。换声音："
-        f"echo <名字> > {_VOICE_FILE}（约 0.2 秒生效，写错会退回 {_DEFAULT_VOICE}）\n\n"
-        f"女声（{len(female)}）—— " + " ".join(female) + "\n\n"
-        f"男声（{len(male)}）—— " + " ".join(male) + "\n"
-    )
-    try:
-        with open(_VOICE_LIST_FILE, "w", encoding="utf-8") as f:
-            f.write(text)
-    except OSError as e:
-        log.warning("声音清单写不出去（换声音功能会瞎，其余不受影响）: %s", e)
+# 名字从下面的 `_VOICES` 里挑，写错了会静默退回 `_DEFAULT_VOICE`。
+_VOICE_FILE = "/tmp/gemini-live-voice.txt"
 
 
 # 哪些断线说明「手上这个 resume handle 已经是死的」。
@@ -392,7 +330,6 @@ _PERSONA_FALLBACK = (
     f"**默认把所有事情都用 ask_{BOT_NAME} 派给 {BOT_NAME}**（发出去就返回，"
     f"它自己会开口说结果）。**先调工具再说话** —— 先说完容易就觉得办完了、"
     f"这轮工具一次没发；调完再说一句你听懂了什么、一句你派了什么。"
-    f"run_shell 只用来换自己的声音，别拿它查东西。"
 )
 
 
@@ -509,7 +446,6 @@ class GeminiLiveBridge:
         if self._running:
             return
         self._running = True
-        write_voice_list()  # 清单落盘，模型要推荐声音时自己去 cat（见 _VOICE_LIST_FILE）
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="gemini-live-bridge")
         self._thread.start()
         self._log_delivery("SYSTEM", "Gemini Live Bridge 启动，连接目标: " + current_model())
@@ -644,9 +580,10 @@ class GeminiLiveBridge:
             #
             # ⚠️ 必须是**两个独立的 Tool 对象**，不要塞进同一个。实测把
             # google_search 和 function_declarations 合进一个 Tool 之后，问
-            # 「搜一下 X 最新版本」它会去调 run_shell —— 路由错乱。分开就正常。
+            # 「搜一下 X 最新版本」它会去调那个 shell 工具（当时还在）—— 路由错乱。
+            # 分开就正常。工具后来删了，但这条约束跟工具是谁无关，别再合回去。
             tools=[
-                types.Tool(function_declarations=[_TOOL_RUN_SHELL, _TOOL_ASK_OWNER]),
+                types.Tool(function_declarations=[_TOOL_ASK_OWNER]),
                 types.Tool(google_search=types.GoogleSearch()),
             ],
             # 这里不能加 language_codes。SDK 的 pydantic 模型有这个字段、本地构造
@@ -935,16 +872,14 @@ class GeminiLiveBridge:
     async def _handle_tool_call(self, session, call):
         """执行一次工具调用并把结果回传。**无论如何都要回一条 response。**
 
-        模型在同步等我们（见 `_TOOL_TIMEOUT_S` 的注释），这期间用户听到的是死寂。
+        模型在同步等我们（见文件上方「工具调用」那节），这期间用户听到的是死寂。
         任何一条没回的 response 都不是「这个工具失败了」，而是「这轮对话永久卡住」——
         所以下面的 try 兜的是**整个函数**，出错也要把错误当结果发回去让它继续说话。
         """
         args = dict(call.args or {})
         self._log_delivery("🛠️ [调工具]", f"{call.name}({args})")
         try:
-            if call.name == "run_shell":
-                result = await self._run_shell(args.get("command", ""))
-            elif call.name == _ASK_OWNER_TOOL:
+            if call.name == _ASK_OWNER_TOOL:
                 result = await self._ask_owner(args.get("task", ""))
             else:
                 result = {"error": f"未知工具 {call.name}"}
@@ -965,57 +900,11 @@ class GeminiLiveBridge:
         finally:
             self._tasks.discard(asyncio.current_task())
 
-    async def _run_shell(self, command: str) -> dict:
-        """跑一条 bash 命令，返回给模型的结构化结果。
-
-        stderr 合并进 stdout：语音场景下模型只需要「发生了什么」，
-        分两路反而让它更容易漏掉报错。
-        """
-        if not command.strip():
-            return {"error": "命令为空"}
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=os.path.expanduser("~"),
-            # 独立进程组，超时才杀得干净 —— 见下面 TimeoutError 分支。
-            start_new_session=True,
-        )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TOOL_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            # **必须杀整个进程组，不能只 proc.kill()。** 我们起的是 `/bin/sh -c`，
-            # 它 fork 出来的孙进程会继承 stdout 那根管道；只杀 sh 的话孙进程还活着
-            # 攥着管道，而 asyncio 的 Process.wait() 要等管道关闭才返回 ——
-            # 于是这里会一路挂到命令自然结束。
-            # 2026-09-08 实测 `sleep 60` + 15s 超时：单杀 sh 实际耗时 60s 且漏一个
-            # 孤儿进程；杀整组 2s 收口、零残留。返回值两种写法完全一样，
-            # 只有耗时不同 —— 光看返回内容的测试抓不到这个。
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # 刚好在超时那一瞬自己退了
-            # 收尾的 wait 也要有死期，绝不无限等。
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                log.warning("命令进程组 kill 后仍未收口: %s", command[:80])
-            return {"error": f"命令超过 {_TOOL_TIMEOUT_S} 秒未结束，已终止"}
-        text = out.decode("utf-8", "replace").strip()
-        truncated = len(text) > _TOOL_OUTPUT_LIMIT
-        if truncated:
-            text = text[:_TOOL_OUTPUT_LIMIT] + "\n…（输出过长已截断）"
-        return {
-            "exit_code": proc.returncode,
-            "output": text or "(无输出)",
-            "truncated": truncated,
-        }
-
     async def _ask_owner(self, task: str) -> dict:
         """把一件事交给本 bot 的大脑去办。**发出去就返回，绝不等结果。**
 
         为什么必须是 fire-and-forget：3.1 的 function calling 是同步的
-        （见 `_TOOL_TIMEOUT_S` 的注释），我们等多久用户就静音多久。而派给 bunny 的
+        （见文件上方「工具调用」那节），我们等多久用户就静音多久。而派给 bunny 的
         活按定义就是「要好几分钟」的活 —— 阻塞等于让用户对着死寂的麦克风坐五分钟。
 
         结果怎么回到用户耳朵里：走的是一条**本来就存在、只是没人接上**的回路 ——
@@ -1075,6 +964,12 @@ class GeminiLiveBridge:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         except asyncio.TimeoutError:
             log.warning("inbox-send 30 秒未收口，放弃等待: %s", task[:60])
+            # **杀整个进程组，不是 proc.kill()。** 起的是 `/bin/sh -c`，它 fork 的
+            # 孙进程会继承 stdout 那根管道；只杀 sh 的话孙进程还攥着管道活着，而
+            # asyncio 的 Process.wait() 要等管道关闭才返回 —— 于是一路挂到命令
+            # 自然结束。2026-09-08 在当时那个 shell 工具上实测过：单杀 sh 60 秒
+            # 才收口还漏一个孤儿，杀整组 2 秒零残留。**返回值两种写法一模一样，
+            # 只有耗时不同 —— 光看返回内容的测试抓不到这个。**
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):

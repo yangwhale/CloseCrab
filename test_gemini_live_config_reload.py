@@ -470,61 +470,75 @@ def test_promised_dispatch_regex_ignores_normal_chat():
         assert not glb._PROMISED_DISPATCH_RE.search(phrase), f"误报: {phrase}"
 
 
-# ---------------------------------------------------------------- 声音清单
+# ------------------------------------------------------------ 只剩一个工具
 #
-# 30 个声音名从 persona 里搬到磁盘（2026-09-10）。搬家的理由不是省 token ——
-# setup 里 system_instruction 和 function_declarations 一起发，挪个地方一分不省。
-# 理由是**从常驻上下文里彻底拿掉**，改成模型要用时自己 cat；顺带把两份手抄的
-# 名单收敛成 `_VOICES` 一个真相。
+# 2026-09-10 删掉了 run_shell。它最后的正当用途只剩「换自己的声音」，而声音定了
+# 就不换了 —— 于是它变成一个没有用途、却是全场唯一能改坏东西的工具。
+# 30 个声音名同时从所有 prompt 里消失：那不是需要长期驻留在上下文里的东西。
+#
+# 下面全是**负向测试**：它们不验证任何功能，只钉死「这些东西不许回来」。
 
 
-def test_female_voices_are_all_real_voices():
-    """性别表必须是 _VOICES 的子集 —— 拼错一个名字，清单里就少一行还不报错。"""
-    unknown = glb._FEMALE_VOICES - set(glb._VOICES)
-    assert not unknown, f"性别表里有 _VOICES 中不存在的名字: {unknown}"
+def test_run_shell_is_gone_for_good():
+    """负向：这个工具不许以任何形式复活。"""
+    assert not hasattr(glb, "_TOOL_RUN_SHELL"), "run_shell 的声明又回来了"
+    assert not hasattr(glb, "_run_shell"), "模块级 _run_shell 又回来了"
+    assert not hasattr(glb.GeminiLiveBridge, "_run_shell"), "_run_shell 方法又回来了"
 
 
-def test_voice_list_file_covers_every_voice(tmp_path, monkeypatch):
-    """清单必须涵盖全部 30 个，一个不漏 —— 漏掉的那个模型永远不会推荐。"""
-    target = tmp_path / "voices.txt"
-    monkeypatch.setattr(glb, "_VOICE_LIST_FILE", str(target))
-    glb.write_voice_list()
-    text = target.read_text(encoding="utf-8")
-    for name in glb._VOICES:
-        assert name in text, f"清单漏了 {name}"
-    assert glb._VOICE_FILE in text, "清单里得写清楚往哪个文件写"
+def test_only_one_function_declaration_reaches_the_model():
+    """正向：真正发给服务端的那份 setup 里，function 有且只有 ask_<bot> 一个。
+
+    **光看常量删干净了不算数** —— 决定模型手上有什么的是 `_build_config()`
+    里那份列表，不是模块里还剩几个常量。
+    """
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    cfg = bridge._build_config()
+    declared = [f.name for t in cfg.tools if t.function_declarations for f in t.function_declarations]
+    assert declared == [glb._ASK_OWNER_TOOL], f"注册的 function 不止一个: {declared}"
+    # google_search 走服务端，不占 function calling 通道 —— 它该还在。
+    assert any(t.google_search is not None for t in cfg.tools), "联网搜索被误删了"
 
 
-def test_voice_list_write_failure_is_not_fatal(monkeypatch):
-    """写不出去只能记日志，不能抛 —— 换声音是附属功能，不该拖垮语音桥。"""
-    monkeypatch.setattr(glb, "_VOICE_LIST_FILE", "/proc/nonexistent-dir/voices.txt")
-    glb.write_voice_list()  # 不抛就算过
+def test_no_voice_name_appears_in_any_prompt_source():
+    """负向：30 个声音名不许出现在**任何一份**送进上下文的文本里。
+
+    三个来源都要查（漏一个就等于没删）：persona 文件、兜底人格、工具描述。
+    """
+    persona_dir = pathlib.Path(glb.__file__).parent / "personas"
+    sources = {p.name: p.read_text(encoding="utf-8") for p in persona_dir.glob("*.md")}
+    sources["_PERSONA_FALLBACK"] = glb._PERSONA_FALLBACK
+    sources["ask_owner.description"] = glb._TOOL_ASK_OWNER.description
+    for where, text in sources.items():
+        listed = [n for n in glb._VOICES if n in text]
+        assert not listed, f"{where} 里又出现了声音名: {listed}"
 
 
-def test_persona_no_longer_carries_the_voice_table():
-    """负向：那张表不许再回到 persona 里（回来就等于又有了两份真相）。"""
-    persona = (
-        pathlib.Path(glb.__file__).parent / "personas" / "bunny.md"
-    ).read_text(encoding="utf-8")
-    listed = [n for n in glb._VOICES if n in persona]
-    assert not listed, f"persona 里又出现了声音名: {listed}"
+def test_voices_table_survives_as_the_validation_whitelist():
+    """正向：名单本身要留着 —— 它是 `current_voice()` 唯一的校验依据。
+
+    删名字容易删过头：表没了，写错的声音名就会被原样发给服务端。
+    """
+    assert glb._DEFAULT_VOICE in glb._VOICES
+    assert len(glb._VOICES) >= 30
 
 
-def test_run_shell_description_points_at_the_list_file():
-    """run_shell 的描述得自带换声音的完整用法，否则名单搬走就成了断链。"""
-    desc = glb._TOOL_RUN_SHELL.description
-    assert glb._VOICE_LIST_FILE in desc, "没告诉模型去哪儿读清单"
-    assert glb._VOICE_FILE in desc, "没告诉模型往哪儿写"
-    # 负向：那句「适合查系统状态/进程/GPU」的旧定位不许回来 —— 它跟
-    # persona 的「只用来换声音」直接打架。
-    assert "适合查系统状态" not in desc
+def test_personas_do_not_promise_shell_access():
+    """负向：persona 不许再教模型「自己跑一条命令」—— 那个能力已经没有了。"""
+    persona_dir = pathlib.Path(glb.__file__).parent / "personas"
+    for p in persona_dir.glob("*.md"):
+        text = p.read_text(encoding="utf-8")
+        assert "run_shell" not in text, f"{p.name} 里还写着 run_shell"
+        assert "自己跑" not in text, f"{p.name} 里还在教它自己跑命令"
 
 
-def test_destructive_prohibition_lives_in_exactly_one_place():
-    """禁令只许有一份 —— 原先 persona 的两节各写一遍，改一处漏一处。"""
-    desc = glb._TOOL_RUN_SHELL.description
-    assert "杀进程" in desc, "唯一那份禁令不见了"
-    persona = (
-        pathlib.Path(glb.__file__).parent / "personas" / "bunny.md"
-    ).read_text(encoding="utf-8")
-    assert "杀进程" not in persona, "persona 里又抄了一份禁令"
+def test_destructive_prohibition_moved_into_persona():
+    """禁令原先挂在 run_shell 的工具描述上，工具删了就没人管了 —— 必须搬进 persona。
+
+    这条最容易在删代码时一起蒸发：删的人只看到「工具没了，禁令也没用了」。
+    """
+    persona_dir = pathlib.Path(glb.__file__).parent / "personas"
+    for name in ("bunny.md", "_default.md"):
+        text = (persona_dir / name).read_text(encoding="utf-8")
+        assert "杀进程" in text, f"{name} 里没有那条禁令"
