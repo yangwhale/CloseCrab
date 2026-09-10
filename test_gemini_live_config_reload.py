@@ -12,6 +12,7 @@
 """
 import asyncio
 import inspect
+import pathlib
 import time
 
 import pytest
@@ -467,3 +468,63 @@ def test_promised_dispatch_regex_ignores_normal_chat():
         "这个我自己就能说，不用查。",
     ):
         assert not glb._PROMISED_DISPATCH_RE.search(phrase), f"误报: {phrase}"
+
+
+# ---------------------------------------------------------------- 声音清单
+#
+# 30 个声音名从 persona 里搬到磁盘（2026-09-10）。搬家的理由不是省 token ——
+# setup 里 system_instruction 和 function_declarations 一起发，挪个地方一分不省。
+# 理由是**从常驻上下文里彻底拿掉**，改成模型要用时自己 cat；顺带把两份手抄的
+# 名单收敛成 `_VOICES` 一个真相。
+
+
+def test_female_voices_are_all_real_voices():
+    """性别表必须是 _VOICES 的子集 —— 拼错一个名字，清单里就少一行还不报错。"""
+    unknown = glb._FEMALE_VOICES - set(glb._VOICES)
+    assert not unknown, f"性别表里有 _VOICES 中不存在的名字: {unknown}"
+
+
+def test_voice_list_file_covers_every_voice(tmp_path, monkeypatch):
+    """清单必须涵盖全部 30 个，一个不漏 —— 漏掉的那个模型永远不会推荐。"""
+    target = tmp_path / "voices.txt"
+    monkeypatch.setattr(glb, "_VOICE_LIST_FILE", str(target))
+    glb.write_voice_list()
+    text = target.read_text(encoding="utf-8")
+    for name in glb._VOICES:
+        assert name in text, f"清单漏了 {name}"
+    assert glb._VOICE_FILE in text, "清单里得写清楚往哪个文件写"
+
+
+def test_voice_list_write_failure_is_not_fatal(monkeypatch):
+    """写不出去只能记日志，不能抛 —— 换声音是附属功能，不该拖垮语音桥。"""
+    monkeypatch.setattr(glb, "_VOICE_LIST_FILE", "/proc/nonexistent-dir/voices.txt")
+    glb.write_voice_list()  # 不抛就算过
+
+
+def test_persona_no_longer_carries_the_voice_table():
+    """负向：那张表不许再回到 persona 里（回来就等于又有了两份真相）。"""
+    persona = (
+        pathlib.Path(glb.__file__).parent / "personas" / "bunny.md"
+    ).read_text(encoding="utf-8")
+    listed = [n for n in glb._VOICES if n in persona]
+    assert not listed, f"persona 里又出现了声音名: {listed}"
+
+
+def test_run_shell_description_points_at_the_list_file():
+    """run_shell 的描述得自带换声音的完整用法，否则名单搬走就成了断链。"""
+    desc = glb._TOOL_RUN_SHELL.description
+    assert glb._VOICE_LIST_FILE in desc, "没告诉模型去哪儿读清单"
+    assert glb._VOICE_FILE in desc, "没告诉模型往哪儿写"
+    # 负向：那句「适合查系统状态/进程/GPU」的旧定位不许回来 —— 它跟
+    # persona 的「只用来换声音」直接打架。
+    assert "适合查系统状态" not in desc
+
+
+def test_destructive_prohibition_lives_in_exactly_one_place():
+    """禁令只许有一份 —— 原先 persona 的两节各写一遍，改一处漏一处。"""
+    desc = glb._TOOL_RUN_SHELL.description
+    assert "杀进程" in desc, "唯一那份禁令不见了"
+    persona = (
+        pathlib.Path(glb.__file__).parent / "personas" / "bunny.md"
+    ).read_text(encoding="utf-8")
+    assert "杀进程" not in persona, "persona 里又抄了一份禁令"

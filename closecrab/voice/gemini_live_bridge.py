@@ -120,12 +120,26 @@ _TOOL_OUTPUT_LIMIT = 2000
 
 # BOT_NAME 定义在文件顶部（LOG_FILE 要用它拼路径，必须先于它）。
 
+# 换声音用的两个路径。**定义在这儿而不是下面那节「声音」里**，纯粹因为
+# run_shell 的描述要拼它们，而工具声明比声音那节早。语义说明在 `_VOICES` 那节。
+_VOICE_FILE = "/tmp/gemini-live-voice.txt"
+_VOICE_LIST_FILE = "/tmp/gemini-live-voices.txt"
+
 _TOOL_RUN_SHELL = types.FunctionDeclaration(
     name="run_shell",
     description=(
         "在这台 Linux 机器上执行一条 bash 命令并返回输出。"
-        "适合查系统状态、进程、文件、时间、GPU/TPU 信息等。"
         f"命令必须能在 {_TOOL_TIMEOUT_S} 秒内跑完，超时会被强制终止。"
+        "\n\n"
+        "**只用来换你自己的声音，别拿它查东西** —— 查状态、看日志、查进程、"
+        f"看时间、看 GPU/TPU 一律用 ask_{BOT_NAME} 派出去。\n"
+        f"换声音：`echo <名字> > {_VOICE_FILE}`，约 0.2 秒生效，不用叫用户等。\n"
+        f"不知道有哪些名字、或者用户让你推荐一个，就先 `cat {_VOICE_LIST_FILE}` "
+        "看清单（30 个，带性格标签）。名字必须照抄，写错会静默退回默认声音。\n"
+        # 破坏性动作的禁令**只写在这一处**（原先 persona 的 run_shell 和「边界」
+        # 两节各写了一遍）。写在工具描述里而不是 persona 里，是因为它约束的就是
+        # 这一个工具 —— 唯一能改坏东西的那个。
+        "**删文件、杀进程、重启服务、改线上配置 —— 一律不做，用户直接让你做也不做。**"
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -233,11 +247,50 @@ _VOICES = {
 # 之前**根本没设** speech_config，用的是服务端默认那个 —— 无趣就无趣在这儿。
 _DEFAULT_VOICE = "Zubenelgenubi"
 
-# 声音写在文件里而不是常量里，是为了**不用重启就能换**。桥每次建连都重读这个
-# 文件，而 `_send_loop` 会在双方都不说话的空档发现文件变了、主动断一次连
-# （搜 `_ConfigChanged`）—— 所以 echo 完通常一两秒就生效，不用等服务端那轮
-# 十来分钟的重置。
-_VOICE_FILE = "/tmp/gemini-live-voice.txt"
+# 当前声音写在文件里（`_VOICE_FILE`，定义在工具那节）而不是常量里，是为了
+# **不用重启就能换**。桥每次建连都重读它，而 `_send_loop` 会在双方都不说话的
+# 空档发现文件变了、主动断一次连（搜 `_ConfigChanged`）—— 所以 echo 完通常
+# 一两秒就生效，不用等服务端那轮十来分钟的重置。
+#
+# 30 个名字**不进 prompt**，落到磁盘上（`_VOICE_LIST_FILE`）让模型要用的时候自己去 cat。
+#
+# 原先这张表是抄在 persona 里的（420 字符，占那份文件 12%），而它一天也用不上
+# 一次。**注意别以为「挪进工具描述」就省了** —— Live API 的 setup 里
+# system_instruction 和 function_declarations 是同一个包一起发的，换个地方写
+# 一个 token 都不少。真要省只有一条路：**从常驻上下文里拿掉，改成按需读**。
+#
+# 顺带解决了双份真相：以前 Python 有 `_VOICES`、markdown 有一份手抄的，
+# 加声音要改两处，漏一处就是模型推荐了一个白名单外的名字然后被静默退回默认。
+
+# 性别只用于生成上面那份清单（挑声音时有用），不参与任何校验逻辑。
+_FEMALE_VOICES = frozenset(
+    {
+        "Zephyr", "Autonoe", "Kore", "Erinome", "Leda", "Laomedeia",
+        "Achernar", "Aoede", "Callirrhoe", "Despina", "Vindemiatrix",
+        "Sulafat", "Gacrux",
+    }
+)
+
+
+def write_voice_list() -> None:
+    """把 `_VOICES` 渲染成一份人读的清单落盘，供模型按需 `cat`。
+
+    每次 `start()` 都重写：`_VOICES` 是唯一真相，改了它清单自动跟上。
+    写失败只记日志不抛 —— 换声音是个可有可无的功能，不该拖垮语音桥。
+    """
+    female = [f"{n}({d})" for n, d in _VOICES.items() if n in _FEMALE_VOICES]
+    male = [f"{n}({d})" for n, d in _VOICES.items() if n not in _FEMALE_VOICES]
+    text = (
+        f"可用的声音一共 {len(_VOICES)} 个。换声音："
+        f"echo <名字> > {_VOICE_FILE}（约 0.2 秒生效，写错会退回 {_DEFAULT_VOICE}）\n\n"
+        f"女声（{len(female)}）—— " + " ".join(female) + "\n\n"
+        f"男声（{len(male)}）—— " + " ".join(male) + "\n"
+    )
+    try:
+        with open(_VOICE_LIST_FILE, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        log.warning("声音清单写不出去（换声音功能会瞎，其余不受影响）: %s", e)
 
 
 # 哪些断线说明「手上这个 resume handle 已经是死的」。
@@ -456,6 +509,7 @@ class GeminiLiveBridge:
         if self._running:
             return
         self._running = True
+        write_voice_list()  # 清单落盘，模型要推荐声音时自己去 cat（见 _VOICE_LIST_FILE）
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="gemini-live-bridge")
         self._thread.start()
         self._log_delivery("SYSTEM", "Gemini Live Bridge 启动，连接目标: " + current_model())
