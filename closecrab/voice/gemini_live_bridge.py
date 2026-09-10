@@ -160,8 +160,11 @@ _TOOL_ASK_OWNER = types.FunctionDeclaration(
         f"「请{BOT_NAME}帮忙…」「跟{BOT_NAME}说…」都算。"
         f"点名本身就是指令，哪怕内容只有「继续」两个字，也必须原样转过去。"
         f"用户点名要找的是 {BOT_NAME}，不是你 —— 你替它答就是答错人。\n"
-        f"**调之前先开口说两句**：一句复述你听懂了什么，一句说你要派什么。"
-        f"说完直接调，不用等用户点头。"
+        f"**先调这个工具，再开口说话。顺序不能反。** 你把话说完这一轮就结束了，"
+        f"工具再也调不出去 —— 说「我让{BOT_NAME}去查」并不等于派活，"
+        f"调这个工具才是派活。只说不调，用户听着像办了，其实什么都没发生。\n"
+        f"调完（立刻返回，不用等）再说两句：一句复述你听懂了什么，"
+        f"一句说你已经派了什么。不用等用户点头。"
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -179,6 +182,28 @@ _TOOL_ASK_OWNER = types.FunctionDeclaration(
         },
         required=["task"],
     ),
+)
+
+# ---- 「说了要派，其实没派」检测器 ----
+#
+# 2026-09-10 踩过一次，而且是**静默**踩的：prompt 里写成「先开口说两句、再调工具」，
+# 模型照做了 —— 说完两句，这一轮就 turn_complete 了，工具调用永远发不出去。
+# 用户听到的是「行，我让巴尼去查」，听感上事情办妥了，实际什么都没发生。
+#
+# prompt 已经改成「先调工具再说话」，但**prompt 压不住 prompt**（web channel 那边
+# 也是这个结论，见 rules/channels.md）。所以在收流这一层加一道确定性检查：
+# 一轮里模型嘴上承诺了派活、却没有任何 tool_call —— 就往交付日志里打一条 ⚠️。
+# 它不改变行为，只是把「静默失败」变成「日志里查得到」。
+_BOT_SPOKEN_ALIASES = {
+    "bunny": ("巴尼", "bunny", "邦尼"),
+    "tianmaojingling": ("天猫精灵", "精灵"),
+}
+_SPOKEN_NAMES = _BOT_SPOKEN_ALIASES.get(BOT_NAME, (BOT_NAME,))
+# 「我让巴尼…」「交给巴尼」「派给巴尼去查」—— 动词 + 名字，中间容忍几个字。
+_PROMISED_DISPATCH_RE = re.compile(
+    r"(?:让|叫|请|派给|交给|转给|问问?|告诉|通知)[^。，、！？\s]{0,4}(?:"
+    + "|".join(re.escape(n) for n in _SPOKEN_NAMES)
+    + ")"
 )
 
 # ---------------------------------------------------------------- 声音
@@ -306,7 +331,8 @@ _PERSONA_FALLBACK = (
     f"你是 {BOT_NAME} 的语音控制助理。用中文口语化地说话，别念稿子。"
     f"用户是在听不是在看屏幕，口述结论不要念原始输出。"
     f"**默认把所有事情都用 ask_{BOT_NAME} 派给 {BOT_NAME}**（发出去就返回，"
-    f"它自己会开口说结果），派之前先说一句你听懂了什么、一句你要派什么。"
+    f"它自己会开口说结果）。**先调工具再说话** —— 说完话这一轮就结束了，"
+    f"工具就调不出去了；调完再说一句你听懂了什么、一句你派了什么。"
     f"run_shell 只用来换自己的声音，别拿它查东西。"
 )
 
@@ -752,6 +778,8 @@ class GeminiLiveBridge:
     async def _recv_loop(self, session):
         """双向接收循环：在外层保持循环调用 receive()，确保每个 turn 结束后自动接听下一轮。"""
         current_reply = []
+        # 本轮有没有真的发出过工具调用（见 _PROMISED_DISPATCH_RE 上方那段注释）。
+        turn_called_tool = False
         while self._running:
             async for resp in session.receive():
                 d = resp.model_dump(exclude_none=True)
@@ -800,6 +828,7 @@ class GeminiLiveBridge:
 
                 # 2. 它干了啥 / 思考过程 / 工具调用
                 if resp.tool_call:
+                    turn_called_tool = True
                     for call in resp.tool_call.function_calls or []:
                         # **不要在这里 await 执行。** 这个循环是唯一在消费服务端消息的
                         # 地方 —— 卡住它，音频回放（_play_gemini_audio）和后续的
@@ -826,8 +855,21 @@ class GeminiLiveBridge:
                     full_reply = _tidy("".join(current_reply))
                     if full_reply:
                         self._log_delivery("🤖 [它回了啥]", full_reply)
+                        if not turn_called_tool and _PROMISED_DISPATCH_RE.search(
+                            full_reply
+                        ):
+                            # 说了要派、却没调工具。用户以为办了，其实没有。
+                            log.warning(
+                                "口头承诺派活但本轮没有 tool_call: %s", full_reply[:200]
+                            )
+                            self._log_delivery(
+                                "⚠️ [只说没派]",
+                                f"这轮嘴上说要交给 {BOT_NAME}，但没发出 "
+                                f"{_ASK_OWNER_TOOL} —— 用户听着像办了，实际没派出去",
+                            )
                         self._log_delivery("DIVIDER", "-" * 60)
                     current_reply.clear()
+                    turn_called_tool = False
                     break
 
     async def _handle_tool_call(self, session, call):

@@ -433,3 +433,37 @@ def test_bridge_defaults_to_per_bot_log():
     """Bridge 不传 log_path 时用的就是那个 per-bot 路径（别只测常量、不测用法）。"""
     sig = inspect.signature(glb.GeminiLiveBridge.__init__)
     assert sig.parameters["log_path"].default == glb.LOG_FILE
+
+
+# ---- 「说了要派，其实没派」检测器 ----
+#
+# 回归的是 2026-09-10 那次自伤：prompt 写成「先开口说两句、再调工具」，
+# 模型说完两句就 turn_complete，ask_<bot> 永远发不出去。用户听到
+# 「行，我让巴尼去查」，以为办了，日志里连一条工具调用都没有。
+
+
+def test_tool_description_says_call_before_speaking():
+    """工具描述必须要求先调工具再说话 —— 反过来写会让这一轮直接结束。"""
+    desc = glb._TOOL_ASK_OWNER.description
+    assert "先调这个工具，再开口说话" in desc
+    # 负向：那句害人的旧措辞不许回来
+    assert "调之前先开口说两句" not in desc
+
+
+def test_promised_dispatch_regex_catches_real_failure():
+    """命中那句真实的失败原话（日志原文，只把名字换成本机 bot 的叫法）。"""
+    name = glb._SPOKEN_NAMES[0]
+    real = f"你是想了解不同大模型的能力现状对吧？行，我让{name}去查一下它们的最新进展。"
+    assert glb._PROMISED_DISPATCH_RE.search(real), "没抓到真实失败句"
+    for phrase in (f"这个交给{name}", f"我叫{name}看一眼", f"转给{name}"):
+        assert glb._PROMISED_DISPATCH_RE.search(phrase), f"漏抓: {phrase}"
+
+
+def test_promised_dispatch_regex_ignores_normal_chat():
+    """负向：普通闲聊不能误报，否则日志里全是狼来了。"""
+    for phrase in (
+        "嗯，听得非常清楚！怎么了，有什么需要帮忙的吗？",
+        "我让你久等了，不好意思。",
+        "这个我自己就能说，不用查。",
+    ):
+        assert not glb._PROMISED_DISPATCH_RE.search(phrase), f"误报: {phrase}"
