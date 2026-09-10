@@ -37,16 +37,22 @@ _M = glb._DEFAULT_MODEL
 
 
 @pytest.fixture(autouse=True)
-def _default_model(monkeypatch, tmp_path_factory):
-    """指纹现在是三元组，`_send_loop` 会读 current_model()。/tmp 里若躺着一份
-    别人写的 model 文件，全部用例的结果都跟着变 —— 所以把文件路径指向不存在的
-    地方，让它落回默认。
+def _no_ambient_config(monkeypatch, tmp_path_factory):
+    """把**三个** /tmp 配置文件全指向不存在的路径，让每条用例都从默认值起跑。
 
-    **钉的是路径不是函数**：钉函数的话，下面那几条「测 current_model 本身」的
+    指纹是 (voice, persona, model, thinking) 四元组，`_send_loop` 每一维都会去
+    读文件。只要 /tmp 里躺着一份别人写的，全部用例的结果就跟着那份文件变 ——
+    这不是假想：2026-09-10 为了 A/B 往 `/tmp/gemini-live-thinking.txt` 写了个
+    `high`，三条**跟思考档位毫无关系**的用例当场变红。测试读环境状态就是这个
+    下场，而且红得莫名其妙，会让人去改本来没错的代码。
+
+    **钉的是路径不是函数**：钉函数的话，下面那几条「测 current_xxx 本身」的
     用例就把自己要测的东西给 mock 掉了。
     """
-    missing = tmp_path_factory.mktemp("nomodel") / "absent.txt"
-    monkeypatch.setattr(glb, "_MODEL_FILE", str(missing))
+    d = tmp_path_factory.mktemp("noambient")
+    monkeypatch.setattr(glb, "_MODEL_FILE", str(d / "absent-model.txt"))
+    monkeypatch.setattr(glb, "_THINKING_FILE", str(d / "absent-thinking.txt"))
+    monkeypatch.setattr(glb, "_VOICE_FILE", str(d / "absent-voice.txt"))
 
 
 def _bridge(cfg_fp, last_out_ago=99.0):
@@ -640,3 +646,83 @@ def test_latency_line_is_parsable_and_labels_the_level():
     assert 1.8 < float(kv["ttfa"]) < 2.2
     assert 2.8 < float(kv["total"]) < 3.2
     assert bridge._turn_t0 is None, "结算完必须清掉起点，否则下一轮会重复计一次"
+
+
+# ------------------------------------------------------------------ AutoMod
+#
+# 2026-09-10 第二次改 persona 的方向：从「无条件转发」改成「每轮自己判断」。
+#
+# 为什么改：把 thinking_level 抬到 high 之后实测三轮，模型花了 787～902 个思考
+# token，而三轮的结论**全是同一个动作 —— 转给巴尼**。判断权被 prompt 拿走了，
+# 那些 token 就是纯浪费。AutoMod 把判断权还回去。
+#
+# 下面这几条锁的不是措辞，是**改这份 persona 的人最容易一起弄丢的东西**。
+# persona 是自由文本，没有编译器 —— 一句话删掉，行为悄悄就变了。
+
+_PERSONAS = ("bunny.md", "_default.md")
+
+
+def _persona_text(name):
+    return (pathlib.Path(glb.__file__).parent / "personas" / name).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_automod_is_actually_in_both_personas():
+    """两份都要有。只改 bunny.md 的话，以后给别的 bot 建桥会拿到相反的规则。"""
+    for name in _PERSONAS:
+        assert "AutoMod" in _persona_text(name), f"{name} 没有 AutoMod 那一节"
+
+
+def test_unconditional_dispatch_rule_is_gone():
+    """负向 —— 旧规则必须删干净，不能跟 AutoMod 并存。
+
+    这条比「有没有写 AutoMod」重要得多：两套相反的规则同时躺在一份 prompt 里，
+    模型不会报错，它只会**每轮随机挑一套**。那种 bug 从日志上看就是「时好时坏」，
+    根本查不出来。
+    """
+    dead = ("默认答案永远是", "你不是一个助手，你是一个转换器", "几乎所有事")
+    for name in _PERSONAS:
+        text = _persona_text(name)
+        for phrase in dead:
+            assert phrase not in text, f"{name} 里还留着旧的无条件转发规则: {phrase}"
+
+
+def test_named_dispatch_survives_automod():
+    """点名转发是**硬规则**，不参与 AutoMod 判断。
+
+    删它的后果不是「多答几句」：语音频道里用户分不清是谁在说话，
+    助手替巴尼答了，巴尼那边根本不知道有人叫过它 —— 跨轮次的任务就断了。
+    所以不只要求这条还在，还要求**明说它凌驾于 AutoMod 之上**。
+    """
+    text = _persona_text("bunny.md")
+    assert "用户一提「巴尼」" in text
+    assert "AutoMod 在这条面前不算数" in text, "没写清点名转发不受 AutoMod 管"
+
+    default = _persona_text("_default.md")
+    assert "AutoMod 不算数" in default
+
+
+def test_automod_pins_the_line_at_machine_access():
+    """判据必须是「要不要看这台机器」，不能是「难不难」。
+
+    「难的转、简单的自己答」听着合理，实际会让它自己回答「现在几点」「哪个进程
+    在跑」—— 那些问题都很简单，而它手上没有任何能看这台机器的工具，只能编。
+    """
+    for name in _PERSONAS:
+        text = _persona_text(name)
+        assert "没有任何能看这台机器的工具" in text, f"{name} 没说清它看不到机器"
+        assert "拿不准" in text, f"{name} 没有「拿不准就转」的兜底"
+
+
+def test_tool_before_speech_survives():
+    """负向 —— 先调工具再开口的纪律不能被 AutoMod 冲掉。
+
+    它是为了压住一个实测过的失败：模型说完「我让巴尼去查」就以为办完了，
+    工具一次都没发。`_PROMISED_DISPATCH_RE` 那个检测器就是为这个失败装的，
+    它假设「决定转的时候一定先调工具」仍然是 persona 的本意。
+    """
+    for name in _PERSONAS:
+        text = _persona_text(name)
+        assert "顺序不能反" in text, f"{name} 丢了先调工具再开口的纪律"
+        assert "先动手，再开口" in text, f"{name} 丢了那句总结"
