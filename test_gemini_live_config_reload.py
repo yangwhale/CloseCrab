@@ -50,7 +50,13 @@ def _default_model(monkeypatch, tmp_path_factory):
 
 
 def _bridge(cfg_fp, last_out_ago=99.0):
-    """造一个不建连的桥，直接摆好 _send_loop 要读的那两个状态。"""
+    """造一个不建连的桥，直接摆好 _send_loop 要读的那两个状态。
+
+    指纹允许只传前三维（声音/人格/模型）—— 这里自动补上第四维思考档位。
+    下面那批用例关心的是前三维，补一下比每处都抄一遍 _DEFAULT_THINKING 清楚。
+    """
+    if cfg_fp is not None and len(cfg_fp) == 3:
+        cfg_fp = (*cfg_fp, glb._DEFAULT_THINKING)
     b = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
     b._running = True
     b._audio_queue = asyncio.Queue()
@@ -245,7 +251,7 @@ def test_thinking_level_absent_on_25(monkeypatch):
 def test_cfg_fp_records_the_model_actually_used(monkeypatch):
     """指纹必须记下这次真用的模型，否则切回来时比不出差异、改动被静默吞掉。"""
     _, b = _cfg(monkeypatch, _M25)
-    assert b._cfg_fp == ("Erinome", "p", _M25)
+    assert b._cfg_fp == ("Erinome", "p", _M25, glb._DEFAULT_THINKING)
 
 
 # ── 过期 session handle 的识别 ────────────────────────────────────────────
@@ -542,3 +548,95 @@ def test_destructive_prohibition_moved_into_persona():
     for name in ("bunny.md", "_default.md"):
         text = (persona_dir / name).read_text(encoding="utf-8")
         assert "杀进程" in text, f"{name} 里没有那条禁令"
+
+
+# ---------------------------------------------------------- 思考档位 A/B
+#
+# 2026-09-10 把 thinking_level 从写死的 "low" 改成跟声音/模型同一个套路：写文件、
+# 进配置指纹、空档自动重连。目的是能在**同一个会话里**来回切档做对比，
+# 而不是改一次代码重启一次 —— 重启会换 session，两组数就不可比了。
+
+
+def test_thinking_levels_match_the_official_list():
+    """四档是查官方 Live 文档确认的，别照 SDK 枚举抄。
+
+    SDK 的 ThinkingLevel 对所有 Gemini 3 通用，而**哪个模型认哪几档是逐模型定的**
+    （3-pro-preview 只认 low/high）。这里钉死 3.1 Flash Live 那一份。
+    """
+    assert glb._THINKING_LEVELS == ("minimal", "low", "medium", "high")
+    assert glb._DEFAULT_THINKING in glb._THINKING_LEVELS
+
+
+def test_thinking_level_reads_from_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(glb, "_THINKING_FILE", str(tmp_path / "t.txt"))
+    assert glb.current_thinking() == glb._DEFAULT_THINKING  # 文件不存在 → 默认
+    (tmp_path / "t.txt").write_text("  HIGH \n", encoding="utf-8")
+    assert glb.current_thinking() == "high", "要能容忍大小写和空白"
+
+
+def test_bogus_thinking_level_falls_back(tmp_path, monkeypatch):
+    """负向：白名单外的值必须退回默认。
+
+    透传出去的后果跟声音名写错一样 —— 握手阶段被拒，然后 3 秒一次无限重连，
+    日志里只有一句语焉不详的连接失败。
+    """
+    monkeypatch.setattr(glb, "_THINKING_FILE", str(tmp_path / "t.txt"))
+    (tmp_path / "t.txt").write_text("ultra", encoding="utf-8")
+    assert glb.current_thinking() == glb._DEFAULT_THINKING
+
+
+def test_thinking_level_reaches_the_wire_and_the_fingerprint(tmp_path, monkeypatch):
+    """光能读出来不算数 —— 得真进 config，而且进指纹才会触发热重连。"""
+    monkeypatch.setattr(glb, "_THINKING_FILE", str(tmp_path / "t.txt"))
+    (tmp_path / "t.txt").write_text("high", encoding="utf-8")
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    cfg = bridge._build_config()
+    # SDK 会把字符串收敛成 ThinkingLevel 枚举（值是大写的 "HIGH"）。
+    # 比 `.value.lower()` 而不是比字符串 —— 否则这条会因为大小写假红。
+    assert cfg.thinking_config.thinking_level.value.lower() == "high"
+    assert bridge._cfg_fp[3] == "high", "没进指纹 = 改了文件永远不会重连"
+
+
+def test_thinking_field_is_not_sent_to_gemini_25(tmp_path, monkeypatch):
+    """负向：2.5 走 thinking_budget，传 thinking_level 会被握手拒掉。"""
+    monkeypatch.setattr(glb, "_MODEL_FILE", str(tmp_path / "m.txt"))
+    (tmp_path / "m.txt").write_text("gemini-2.5-flash-native-audio-preview-12-2025", encoding="utf-8")
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._resume_handle = None
+    cfg = bridge._build_config()
+    assert cfg.thinking_config is None
+
+
+def test_latency_is_not_logged_without_an_anchor():
+    """负向：没有计时起点就一条都不许记。
+
+    没起点的轮次（工具结果回来后接着说、重连后第一条）量出来的数对不上语义，
+    混进均值里就是**看不出来的错**——数字还是那么好看，只是没意义了。
+    """
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._turn_t0 = None
+    logged = []
+    bridge._log_delivery = lambda tag, msg: logged.append((tag, msg))
+    bridge._log_turn_latency(object())
+    assert logged == []
+
+
+def test_latency_line_is_parsable_and_labels_the_level():
+    """正向：记出来的那行要带档位、能被脚本解析 —— 不然事后没法分组对比。"""
+    import time as _t
+    bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    bridge._thinking = "high"
+    bridge._turn_t0 = _t.monotonic() - 3.0
+    bridge._turn_first_audio_at = _t.monotonic() - 1.0
+    logged = []
+    bridge._log_delivery = lambda tag, msg: logged.append((tag, msg))
+    bridge._log_turn_latency(object())
+    assert len(logged) == 1
+    tag, msg = logged[0]
+    assert "延迟" in tag
+    kv = dict(p.split("=", 1) for p in msg.split())
+    assert kv["level"] == "high"
+    assert 1.8 < float(kv["ttfa"]) < 2.2
+    assert 2.8 < float(kv["total"]) < 3.2
+    assert bridge._turn_t0 is None, "结算完必须清掉起点，否则下一轮会重复计一次"

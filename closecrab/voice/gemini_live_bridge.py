@@ -57,6 +57,19 @@ _DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 # 跟 _VOICE_FILE 同一个套路：写文件换模型，不用改代码也不用重启。
 _MODEL_FILE = "/tmp/gemini-live-model.txt"
 
+# 思考档位。**四个值是查官方 Live 文档确认的**，不是照 SDK 枚举抄的 ——
+# SDK 的 `ThinkingLevel` 对所有 Gemini 3 通用，而具体哪个模型认哪几档是**逐模型**
+# 定的（例：3-pro-preview 只认 low/high，3.1-flash-lite-image 只认 minimal/high）。
+# 3.1 Flash Live 的原话:
+#   "Uses thinkingLevel to control thinking depth with settings like minimal,
+#    low, medium, and high. Defaults to minimal to optimize for lowest latency."
+_THINKING_LEVELS = ("minimal", "low", "medium", "high")
+
+# 默认 low 而不是官方的 minimal：minimal 等于几乎不思考，听不清的时候它没有余地
+# 去推「这句话到底该是什么」。抬一档的代价是回话前多顿一下。
+_DEFAULT_THINKING = "low"
+_THINKING_FILE = "/tmp/gemini-live-thinking.txt"
+
 # 兼容老代码里对 MODEL_NAME 的引用（日志用）。真正生效的是 current_model()。
 MODEL_NAME = _DEFAULT_MODEL
 
@@ -300,6 +313,24 @@ def current_model() -> str:
     return _DEFAULT_MODEL
 
 
+def current_thinking() -> str:
+    """读当前该用哪一档思考。白名单外一律退回默认，理由同 current_voice()。
+
+    **只对 Gemini 3.x 有意义** —— 2.5 走的是 thinking_budget，传这个字段会在
+    握手阶段被拒。调用方（`_build_config`）负责分流，这里只管读。
+    """
+    try:
+        with open(_THINKING_FILE, encoding="utf-8") as f:
+            level = f.read().strip().lower()
+    except OSError:
+        return _DEFAULT_THINKING
+    if level in _THINKING_LEVELS:
+        return level
+    if level:
+        log.warning("思考档位 %r 不在 %s 里，退回 %s", level, _THINKING_LEVELS, _DEFAULT_THINKING)
+    return _DEFAULT_THINKING
+
+
 def _is_gemini_3(model: str) -> bool:
     """3.x 用 thinking_level，2.5 用 thinking_budget —— 两套字段不能混着传。
 
@@ -424,6 +455,14 @@ class GeminiLiveBridge:
         # 本次连接**实际用的**声音 + persona。由 _build_config 写入，_send_loop
         # 拿它跟磁盘上的当前值比，不一样就主动断连让新配置生效。
         self._cfg_fp: Optional[tuple] = None
+        # 延迟测量。**锚点是「Discord 不再给包」那一刻**（`_send_loop` 发
+        # audio_stream_end 的时候），不是「用户说完话」—— 后者我们根本不知道，
+        # 服务端 VAD 还要再等 silence_duration_ms 才认定说完。所以这里量出来的
+        # 是**端到端体感延迟**，包含了那段 VAD 等待。绝对值没有意义，
+        # 拿来横向比不同思考档位才有意义 —— 两边的 VAD 配置是一样的。
+        self._turn_t0: Optional[float] = None
+        self._turn_first_audio_at: Optional[float] = None
+        self._thinking = _DEFAULT_THINKING
         # 最后一次把 Gemini 的音频喂进 Discord 播放器的时刻。**只服务于换配置重连** ——
         # 上行没帧不代表没在说话，Gemini 独白时用户本来就不出声，这时候断连会把
         # 它的话拦腰截断。有这个时间戳才能分清「双方都静了」和「轮到它说」。
@@ -502,11 +541,16 @@ class GeminiLiveBridge:
         voice = current_voice()
         persona = current_persona()
         model = current_model()
-        log.info("本次建连使用声音: %s (%s)｜模型: %s", voice, _VOICES[voice], model)
+        thinking = current_thinking()
+        self._thinking = thinking  # 延迟日志要标是哪一档测出来的
+        log.info(
+            "本次建连使用声音: %s (%s)｜模型: %s｜思考: %s",
+            voice, _VOICES[voice], model, thinking,
+        )
         # 指纹**必须取自这三个局部变量**，不能事后再调一次 current_*()：
         # 那样中间有个窗口，期间改了文件就会让指纹记成新值、连接却用的旧值，
         # 之后永远比不出差异 —— 改动被静默吞掉，比不检测还糟。
-        self._cfg_fp = (voice, persona, model)
+        self._cfg_fp = (voice, persona, model, thinking)
         return types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
             # ---- 识别质量：让它多攒一点上下文再解析 ----
@@ -550,7 +594,7 @@ class GeminiLiveBridge:
             # 就开着**），所以那条路径下什么都不传，用服务端默认。传错字段的后果
             # 跟 language_codes 一样是握手被拒。
             **(
-                {"thinking_config": types.ThinkingConfig(thinking_level="low")}
+                {"thinking_config": types.ThinkingConfig(thinking_level=thinking)}
                 if _is_gemini_3(model)
                 else {}
             ),
@@ -741,13 +785,19 @@ class GeminiLiveBridge:
                 if stream_open:
                     await session.send_realtime_input(audio_stream_end=True)
                     stream_open = False
+                    # 延迟计时起点。一轮里可能发多次（说一句停一下再说），
+                    # 每次都覆盖 —— 最后那次才是真正等回话的起点。
+                    self._turn_t0 = time.monotonic()
+                    self._turn_first_audio_at = None
                     self._log_delivery("SYSTEM", "帧流暂停 → 已发 audio_stream_end")
                 # 声音/persona 只能在建连时定死，中途改不了。所以「让改动生效」=
                 # 「重连一次」。这里是**唯一安全的下手点**：走到这个分支说明上行
                 # 已经 0.6s 没帧，再确认下行也静了 _OUT_QUIET_S，才是双方都没在
                 # 说话的空档，此时掐断谁都不会被打断。
                 if self._cfg_fp is not None and time.monotonic() - self._last_out_at > _OUT_QUIET_S:
-                    now_fp = (current_voice(), current_persona(), current_model())
+                    now_fp = (
+                        current_voice(), current_persona(), current_model(), current_thinking()
+                    )
                     if now_fp != self._cfg_fp:
                         if now_fp[2] != self._cfg_fp[2]:
                             # 换模型 = 换后端 session。**旧 handle 必须扔**，它是
@@ -756,6 +806,8 @@ class GeminiLiveBridge:
                             reason = f"模型 {self._cfg_fp[2]} → {now_fp[2]}（已弃用旧 handle）"
                         elif now_fp[0] != self._cfg_fp[0]:
                             reason = f"声音 {self._cfg_fp[0]} → {now_fp[0]}"
+                        elif now_fp[3] != self._cfg_fp[3]:
+                            reason = f"思考档位 {self._cfg_fp[3]} → {now_fp[3]}"
                         else:
                             reason = "persona 已更新"
                         raise _ConfigChanged(reason)
@@ -839,6 +891,8 @@ class GeminiLiveBridge:
                         if part.text and part.text.strip():
                             self._log_delivery("🧠 [它在思考/干了啥]", part.text.strip())
                         if part.inline_data and part.inline_data.data:
+                            if self._turn_t0 is not None and self._turn_first_audio_at is None:
+                                self._turn_first_audio_at = time.monotonic()
                             # 24kHz mono PCM 转换并推送到 Discord 语音
                             self._play_gemini_audio(part.inline_data.data)
 
@@ -849,6 +903,7 @@ class GeminiLiveBridge:
                         current_reply.append(text_chunk)
 
                 if sc.get("turn_complete"):
+                    self._log_turn_latency(resp)
                     full_reply = _tidy("".join(current_reply))
                     if full_reply:
                         self._log_delivery("🤖 [它回了啥]", full_reply)
@@ -868,6 +923,37 @@ class GeminiLiveBridge:
                     current_reply.clear()
                     turn_called_tool = False
                     break
+
+    def _log_turn_latency(self, resp):
+        """一轮结束时记一行可解析的延迟。**没有起点就什么都不记。**
+
+        为什么会没有起点：这一轮可能根本不是用户说话触发的（工具结果回来后
+        模型接着说、或者重连后的第一条）。那种轮次量出来的数只会污染均值 ——
+        宁可少一条样本，也不要一条对不上语义的样本。
+
+        `thoughts` 是服务端报的思考 token 数，只有开了思考才有。它跟延迟是**两条
+        独立证据**：延迟里混着网络和 VAD 等待，思考 token 是纯粹「它想了多少」。
+        两个一起看才分得清「慢是因为想得多」还是「慢是因为别的」。
+        """
+        t0 = self._turn_t0
+        if t0 is None:
+            return
+        self._turn_t0 = None
+        now = time.monotonic()
+        ttfa = (self._turn_first_audio_at - t0) if self._turn_first_audio_at else None
+        thoughts = None
+        try:
+            um = getattr(resp, "usage_metadata", None)
+            if um is not None:
+                thoughts = getattr(um, "thoughts_token_count", None)
+        except Exception:  # noqa: BLE001 — 纯观测，绝不能因为取不到字段炸掉主循环
+            pass
+        parts = [f"level={self._thinking}"]
+        parts.append(f"ttfa={ttfa:.2f}" if ttfa is not None else "ttfa=n/a")
+        parts.append(f"total={now - t0:.2f}")
+        if thoughts is not None:
+            parts.append(f"thoughts={thoughts}")
+        self._log_delivery("⏱️ [延迟]", " ".join(parts))
 
     async def _handle_tool_call(self, session, call):
         """执行一次工具调用并把结果回传。**无论如何都要回一条 response。**
