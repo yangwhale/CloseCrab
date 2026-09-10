@@ -268,6 +268,11 @@ _DAVE_PY_BACKEND_ENABLED = True  # 2026-06-06: 重新启用 dave-py per-SSRC Dec
 _FEC_ENABLED = False
 
 _LISTEN_RESTART_MAX = 8      # 录音崩溃后最多自动重启次数
+# 这个预算防的是「录音一起来就崩」的死循环，**不是**一天累计只准重启 8 次。
+# 录音连续正常这么久就把预算还回去 —— 否则一次掉线重连烧掉几次配额后，
+# 机器人会在某个未来时刻悄悄变成「能说不能听」，而且日志里一句错都不再打。
+_LISTEN_HEALTHY_RESET_S = 60.0
+_listen_ok_since: float | None = None   # 录音连续正常的起点 (time.monotonic)
 
 # 单声道 20ms 帧 @ 48kHz/16-bit: 喂给 AudioInput 的基本单位。
 _MONO_FRAME_MS = 20
@@ -2802,7 +2807,7 @@ async def _ssrc_infer_loop(period: float = 0.3):
     """后台守护: ① 录音被 corrupted stream 冲垮时自动重启; ② ssrc 自动推断兜底
     (频道唯一真人时, 把传输层实收的未映射 ssrc 直接 _add_ssrc, 不靠 speaking 事件)。
     含诊断日志 (dave ready/epoch + ssrc_map + hits + 实收 ssrc), 便于现场定位。"""
-    global _stt_sink, _listen_restart_n
+    global _stt_sink, _listen_restart_n, _listen_ok_since
     log.info("ssrc 推断 + 录音守护循环已启动")
     diag_n = 0
     _diag_last: tuple = ()
@@ -2811,6 +2816,15 @@ async def _ssrc_infer_loop(period: float = 0.3):
             await asyncio.sleep(period)
             # 录音被冲垮后自动重启 (新 sink), 等 ssrc 映射好就能正常收
             if _listen_active and _listen_vc is not None and not _listen_vc.is_recording():
+                _listen_ok_since = None
+                # 掉线重连期间**一次都不要试**。这个守护 0.3 秒一轮，而 voice 握手
+                # 要一秒多 —— 不挡的话它会在那个窗口里连开五六枪，每枪都被
+                # start_recording 以 "not connected to a voice channel" 顶回来，
+                # 白白把崩溃重启的配额烧光。2026-09-08 就是这么哑的：13:00:19
+                # 掉线，1.2 秒内失败 5 次撞满 8 次上限；13:00:51 重连成功后守护
+                # 已被自己的计数器锁死，此后只能说不能听，日志里一句错都没有。
+                if not _listen_vc.is_connected():
+                    continue
                 if _listen_restart_n < _LISTEN_RESTART_MAX:
                     _listen_restart_n += 1
                     try:
@@ -2821,7 +2835,23 @@ async def _ssrc_infer_loop(period: float = 0.3):
                         log.info("录音已自动重启 (第 %d 次)", _listen_restart_n)
                     except Exception:
                         log.exception("录音自动重启失败")
+                elif _listen_restart_n == _LISTEN_RESTART_MAX:
+                    # 只喊一次，别刷屏。没这行的话「预算耗尽」是完全静默的。
+                    _listen_restart_n += 1
+                    log.error("录音重启已达上限 %d 次，放弃自动恢复 —— "
+                              "机器人从现在起只能说不能听，需要 /listen 或重启进程",
+                              _LISTEN_RESTART_MAX)
                 continue
+            # 录着且连着 —— 稳定够久就把重启预算还回去 (见 _LISTEN_HEALTHY_RESET_S)。
+            if _listen_active and _listen_vc is not None and _listen_restart_n:
+                _now = time.monotonic()
+                if _listen_ok_since is None:
+                    _listen_ok_since = _now
+                elif _now - _listen_ok_since >= _LISTEN_HEALTHY_RESET_S:
+                    log.info("录音连续正常 %.0f 秒，重启预算复位 (原 %d/%d)",
+                             _now - _listen_ok_since, _listen_restart_n, _LISTEN_RESTART_MAX)
+                    _listen_restart_n = 0
+                    _listen_ok_since = None
             sink = _stt_sink
             if sink is None:
                 continue

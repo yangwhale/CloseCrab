@@ -63,6 +63,26 @@ def test_human_sender_bypasses(sender):
     assert _should(item(from_bot=sender)) is False
 
 
+@pytest.mark.parametrize("sender", ["bunny-voice", "jarvis-voice", "BUNNY-VOICE"])
+def test_voice_sender_bypasses(sender):
+    """语音转交也是真人在说话。
+
+    合并两句会让两个回答揉成一段 TTS 念出去，用户分不清哪句答的是哪个问题 ——
+    语音没有滚动条可以回看。
+    """
+    assert _should(item(from_bot=sender)) is False
+
+
+@pytest.mark.parametrize("sender", ["voice", "devoice", "voicebot", "bunny_voice"])
+def test_non_voice_senders_still_debounce(sender):
+    """negative: 只有 `-voice` **后缀**才算语音源。
+
+    没有这条，把判据写成 `"voice" in from_bot` 之类的宽松匹配也能让上面那条
+    过 —— 而那会顺手把普通 bot 拖出合并路径，白白多烧 cold start。
+    """
+    assert _should(item(from_bot=sender)) is True
+
+
 # ── 合并行为（端到端过一遍真的 debouncer） ──────────────────────────────────
 
 def test_three_simultaneous_tasks_become_one_flush():

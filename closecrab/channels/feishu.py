@@ -98,6 +98,12 @@ _TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "
 # voice mode 下「带标签的段落才念」，不带标签的（链接/列表/表格/纯展示文本）只给眼睛看。
 _RE_VOICE_EMOTION_TAG = re.compile(r"\[[a-z][a-z _-]*\](?!\()")
 
+# inbox sender 带这个后缀 = 语音助理替真人转交的，不是 bot-to-bot 派活。
+# 两者处理方式完全不同（见 _on_inbox_message_impl 里的 is_voice_src 分支）：
+# bot 派活是工单，语音转交是**真人在说话**，要按 voice 用户消息对待。
+# 后缀由 gemini_live_bridge._ask_owner 写死（env BOT_NAME = f"{BOT_NAME}-voice"）。
+_VOICE_SENDER_SUFFIX = "-voice"
+
 # Model 简写 map (chris 的约定: O/S/H + 版本数字)
 # 用于 /model 命令: `/model O46` 等价于 `/model claude-opus-4-6`
 # self-restart 冷却锁（秒）：boot 后这段时间内拒绝模型自重启，防无限循环。
@@ -768,7 +774,12 @@ class FeishuChannel(Channel):
         if ins.startswith("[system:restart]") or ins.startswith("✅ 任务完成:"):
             return False
         # 真人经 inbox 说话走的是聊天路径，合并会打乱对话节奏
-        if (item.get("from_bot") or "").lower() in {"chris", "chrisya"}:
+        from_bot = (item.get("from_bot") or "").lower()
+        if from_bot in {"chris", "chrisya"}:
+            return False
+        # 语音转交同样是真人在说话。合并两句会让两个回答揉成一段 TTS 念出来，
+        # 用户分不清哪句答的是哪个问题 —— 语音没有滚动条可以回看。
+        if from_bot.endswith(_VOICE_SENDER_SUFFIX):
             return False
         return True
 
@@ -2254,6 +2265,23 @@ class FeishuChannel(Channel):
         if description:
             instruction += f"\n\n{description}"
 
+        # 语音助理转交 = 真人在说话，按 voice 用户消息处理（不是 bot-to-bot 工单）。
+        is_voice_src = bool(inbox_from) and inbox_from.endswith(_VOICE_SENDER_SUFFIX)
+
+        # 把用户原话**作为一条独立消息**留在窗口里，再开始干活。
+        # Why: 进度卡片处理完会被 _finalize_progress_card 删掉，原话如果只存在于
+        # 卡片里就跟着一起蒸发 —— 用户翻聊天记录只看到我的回复、看不到自己问了啥。
+        # 真人打字时飞书自己会留档，语音这条没人替它留，只能我们补发。
+        # 失败不阻断：留档是体验问题，不该让活儿干不成。
+        if is_voice_src:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, self._send_text, chat_id, f"🎙️ {instruction}",
+                )
+            except Exception as e:
+                log.warning(f"voice-src transcript echo failed: {e}")
+
         # 发送进度卡片
         _start_time = asyncio.get_running_loop().time()
         _progress_card_id: list = [None]
@@ -2338,9 +2366,14 @@ class FeishuChannel(Channel):
         _anim_task[0] = asyncio.create_task(_card_update_loop_inbox())
 
         # 构造消息送入 Claude
-        sender_tag = f"Inbox · {inbox_from}" if inbox_from else "Inbox"
-        # inbox 是 bot-to-bot, 始终文字模式 (无 TTS), 显式贴 [channel: text] 保持对称
-        content = f"[channel: text]\n[from: {sender_tag}]\n{instruction}"
+        # 语音转交按真人 voice 消息构造：不贴 Inbox 来源头（那会让模型把它当工单，
+        # 回出 "已完成，结果如下" 的汇报腔），只标 [channel: voice] 让整段走口语。
+        if is_voice_src:
+            content = f"[channel: voice]\n[from: 语音频道]\n{instruction}"
+        else:
+            sender_tag = f"Inbox · {inbox_from}" if inbox_from else "Inbox"
+            # bot-to-bot 始终文字模式 (无 TTS), 显式贴 [channel: text] 保持对称
+            content = f"[channel: text]\n[from: {sender_tag}]\n{instruction}"
         metadata = {
             "chat_id": chat_id,
             "on_progress": on_progress,
@@ -2375,7 +2408,18 @@ class FeishuChannel(Channel):
             await reply_fn(result)
             if voice_file:
                 asyncio.create_task(self._send_voice_file(chat_id, voice_file))
-            if voice_text:
+            # 语音来源：念**整段**，不是只念末尾摘要。
+            # 之前这里两条路共用 voice_text，语音用户听到的只有最后两三句，
+            # 前面全部内容有嘴说不出来。voice 模式下正文本身就是口语稿
+            # （system prompt 禁 markdown），整段送 TTS 才是对的。
+            # _send_voice_summary 内部的 _keep_tagged_paragraphs_for_tts 会
+            # 丢掉表格/代码块并给漏标签的段落补 [casually]，所以整段传安全。
+            # 兜底：模型只写了 <voice-summary> 没写正文时，退回念摘要。
+            if is_voice_src:
+                spoken = result.strip() or (voice_text or "")
+                if spoken:
+                    asyncio.create_task(self._send_voice_summary(chat_id, spoken))
+            elif voice_text:
                 asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
 
         # Inbox 回执允许 ~8000 字（firestore_inbox.mark_done 还会冸底到 10000）。
@@ -2391,7 +2435,10 @@ class FeishuChannel(Channel):
             # 自己给自己发的 inbox（watch-task 的 notify_bot 就是本 bot）不写回执：
             # 回执绕一圈落回自己的收件箱，被渲染成「XXX 回报」卡片，把原文和刚
             # 发出去的回复又贴一遍。发送者就是自己时没有第二个人需要被通知。
-            if inbox_from != self._bot_name:
+            # 语音转交同理，而且更彻底：`<bot>-voice` 根本不是一个在跑的 bot，
+            # 没人监听那个收件箱，回执只会在 Firestore 里堆成永不消费的死信。
+            # 用户已经听到 TTS 了，回执没有任何收件人。
+            if inbox_from != self._bot_name and not is_voice_src:
                 await loop.run_in_executor(
                     None, self._inbox.send_to, inbox_from,
                     f"✅ 任务完成: {summary}\n结果: {result_summary}",
