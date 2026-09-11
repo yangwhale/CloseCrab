@@ -50,6 +50,17 @@ except ImportError:
 
 log = logging.getLogger("closecrab.discord_voice_sidecar")
 
+# 收音链路的故障是**静默**的: py-cord 在 voice/receive/reader.py 里把 DAVE 解密
+# 异常整个吞掉, 只 `_log.debug("Ignoring exception while decoding DAVE packet")`,
+# 然后塞一帧静音接着跑 —— 表现是「音质变差」, 日志里一个字都没有。
+# 这个开关只在排查时打开 (VOICE_RX_DEBUG=1), 平时不开: DEBUG 级别下每个 20ms
+# 的 RTP 包都会打一行, 一分钟三千行, 会把 bot.log 冲垮。
+if os.environ.get("VOICE_RX_DEBUG") == "1":
+    for _n in ("discord.voice.receive.reader", "discord.opus",
+               "discord.voice.receive.router"):
+        logging.getLogger(_n).setLevel(logging.DEBUG)
+    log.warning("VOICE_RX_DEBUG=1: py-cord 收音链路已开 DEBUG (日志量很大, 排查完请关掉)")
+
 # ─── 语音 buffer 落盘 + 重播 ──────────────────────────────────────────────
 # Chris 2026-06-01: 好不容易生成的音频别播完就丢, 整段存成一个文件; 点重播就把
 # 这个文件重新 streaming 到同一个 Discord 语音入口 (暂停/继续复用 vc.pause/resume)。
@@ -1775,6 +1786,13 @@ def _get_stt_sink_class():
             self._pcm = bytearray()  # 所有说话人 mono PCM 混入同一条流(本步单人)
             self._last_name = "?"
             self._hits = 0  # write 被调次数 (诊断: 验证 receive 真有包进来)
+            # 全零帧计数。**这是区分「网络丢包」和「解密失败」的关键刻度。**
+            # py-cord 对真丢包走的是 FEC/PLC 补偿 (opus.py PacketDecoder._decode_packet
+            # 里那条 FakePacket 分支), 补出来的是有能量的近似音, 不会是精确的零。
+            # 精确零只有两个来源: ① 对端真的发了 opus 静音帧 (说完话时会连发几个);
+            # ② reader.py:315 —— DAVE 解密抛异常, 被 except 吞掉后塞 OPUS_SILENCE,
+            #    只打一条 DEBUG 日志。②就是「有声但咯楞」的机制, 而且完全静默。
+            self._zeros = 0
 
         def write(self, data, user):
             pcm = getattr(data, "pcm", None)
@@ -1786,8 +1804,14 @@ def _get_stt_sink_class():
                 mono = audioop.tomono(pcm, 2, 0.5, 0.5)  # 48kHz stereo → mono (标准混合)
             except Exception:
                 return
+            try:
+                is_zero = audioop.max(mono, 2) == 0
+            except Exception:
+                is_zero = False
             with self._lock:
                 self._hits += 1
+                if is_zero:
+                    self._zeros += 1
                 self._pcm.extend(mono)
                 self._last_name = name
                 cap = _MONO_FRAME_BYTES * 100
@@ -1818,6 +1842,11 @@ def _get_stt_sink_class():
         def hits(self) -> int:
             with self._lock:
                 return self._hits
+
+        def zeros(self) -> int:
+            """收到的全零帧数。跟 hits 一起看才有意义 —— 看的是**占比**。"""
+            with self._lock:
+                return self._zeros
 
         def cleanup(self):
             self.finished = True  # 不往 audio_data 写, 覆写成空操作
@@ -3154,15 +3183,25 @@ async def _ssrc_infer_loop(period: float = 0.3):
                 with _seen_ssrcs_lock:
                     seen = set(_seen_ssrcs)
                 cur_hits = sink.hits()
+                cur_zeros = sink.zeros() if hasattr(sink, "zeros") else -1
                 # 诊断: 每 10 轮(~3s)打一次, hits / map / 实收 ssrc 一变化立即打
                 cur_diag = (cur_hits, tuple(sorted(cur_map.items())), tuple(sorted(seen)))
                 changed = cur_diag != _diag_last
                 diag_n += 1
                 if changed or diag_n % 10 == 0:
+                    # 解密账本: davey 自己数成功/失败/passthrough。**这是唯一能把
+                    # 「零帧是对端发的静音」和「零帧是解密失败被吞了」分开的证据** ——
+                    # py-cord 那条 except 只打 DEBUG, 从 bot.log 里看不出任何异常。
+                    try:
+                        dstats = dave.get_decryption_stats() if dave else None
+                    except Exception:
+                        dstats = "<读取失败>"
                     log.info(
-                        "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 实收ssrc=%s%s",
+                        "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s "
+                        "实收ssrc=%s 解密账=%s%s",
                         diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
-                        cur_map, cur_hits, sorted(seen), "  <<变化" if changed else "",
+                        cur_map, cur_hits, cur_zeros, sorted(seen), dstats,
+                        "  <<变化" if changed else "",
                     )
                     _diag_last = cur_diag
                 # ── 「连着但聋」自愈: DAVE 掉出 MLS 树后强制重建语音连接 ──
