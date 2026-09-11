@@ -714,9 +714,10 @@ class GeminiLiveBridge:
             #     不是转写丢了 —— 单独复测数过服务端回的音频字节，是 0。
             #     3.1 同样 39 次一次都没有。语音里这是最坏的失败（用户听到的是
             #     死机），persona 里已加对称自检「调了工具这一轮必须出声」。
-            #     ⚠️ 但**这条是 prompt 压 prompt，压不死** —— 上面那个
-            #     「说了要派其实没派」的检测器就是同一个病的另一半，
-            #     对称的那道检查（派了却没出声）还没做。
+            #     ⚠️ 但**那条是 prompt 压 prompt，压不死**，所以另外补了一道
+            #     确定性检查：turn_complete 时「调了工具 + 一声没出」就打
+            #     ⚠️ [干完活没出声]（跟「说了要派其实没派」是同一个病的两半）。
+            #     压不住至少日志里查得到。见 test_voice_silent_completion.py。
             #  3. **它会用工具去落实一个记忆里的答案。** 3.1 有一次「搜版本号再写
             #     进文件」，一个搜索都没发，直接 echo 一个背出来的版本号进文件，
             #     还宣称是最新版。轨迹上看它"用了工具"，实际没查 —— 所以
@@ -935,6 +936,15 @@ class GeminiLiveBridge:
         current_reply = []
         # 本轮有没有真的发出过工具调用（见 _PROMISED_DISPATCH_RE 上方那段注释）。
         turn_called_tool = False
+        # 下面三个是「干完活没出声」那道检测器用的，都是**每轮清零的局部量**。
+        # 本来想直接读 self._turn_first_audio_at，读完它的赋值条件才发现不行：
+        # 那个字段的更新挂着 `self._turn_t0 is not None`，而 _turn_t0 在
+        # turn_complete 那一刻就被 _log_turn_latency 清掉了 —— 工具结果回来后
+        # 模型接着说的那些轮次根本不会更新它，读到的是上一轮的陈旧值。
+        # 判「这一轮有没有出过声」必须用本轮自己的账，不能借别人的。
+        turn_had_audio = False          # 本轮往 Discord 推过音频没有
+        turn_interrupted = False        # 本轮被用户插话打断过没有
+        turn_tool_tasks: list = []      # 本轮甩出去的工具任务，用来判「还没跑完」
         while self._running:
             async for resp in session.receive():
                 d = resp.model_dump(exclude_none=True)
@@ -976,6 +986,7 @@ class GeminiLiveBridge:
                 # 的话那几秒会继续播完，表现就是「我喊了停停停，它还在那儿说」。
                 # 打断这件事必须两边都做：服务端停止生成 + 客户端丢弃待播音频。
                 if sc.get("interrupted"):
+                    turn_interrupted = True
                     self._drop_pending_audio()
                     # 被打断的半句不能跟下一轮拼在一起，否则日志里是两句话的残骸。
                     current_reply.clear()
@@ -988,15 +999,16 @@ class GeminiLiveBridge:
                         # **不要在这里 await 执行。** 这个循环是唯一在消费服务端消息的
                         # 地方 —— 卡住它，音频回放（_play_gemini_audio）和后续的
                         # turn_complete 全都停摆。甩出去异步跑，跑完自己回 response。
-                        self._tasks.add(
-                            asyncio.create_task(self._handle_tool_call(session, call))
-                        )
+                        _t = asyncio.create_task(self._handle_tool_call(session, call))
+                        self._tasks.add(_t)
+                        turn_tool_tasks.append(_t)
 
                 if resp.server_content and resp.server_content.model_turn:
                     for part in resp.server_content.model_turn.parts:
                         if part.text and part.text.strip():
                             self._log_delivery("🧠 [它在思考/干了啥]", part.text.strip())
                         if part.inline_data and part.inline_data.data:
+                            turn_had_audio = True
                             if self._turn_t0 is not None and self._turn_first_audio_at is None:
                                 self._turn_first_audio_at = time.monotonic()
                             # 24kHz mono PCM 转换并推送到 Discord 语音
@@ -1026,8 +1038,54 @@ class GeminiLiveBridge:
                                 f"{_ASK_OWNER_TOOL} —— 用户听着像办了，实际没派出去",
                             )
                         self._log_delivery("DIVIDER", "-" * 60)
+                    elif turn_called_tool and not turn_had_audio:
+                        # ── 上面那道的**镜像**：工具调了，一个字没说。
+                        #
+                        # 两道检测器是同一个病的两半：
+                        #   「只说没派」 = 嘴动了手没动 → 用户以为办了，其实没办
+                        #   「干完活没出声」 = 手动了嘴没动 → 事办了，用户以为死机了
+                        # 后者在语音场景里更糟 —— 用户听到的是一片安静，跟连接断了
+                        # 长得一模一样，他会把整句话重说一遍。
+                        #
+                        # **不是假想出来的风险，是量出来的。** 2026-09-11 的工具对比台
+                        # （scripts/live-tool-bench.py，13 例 × 2 模型 × 3 遍）里，
+                        # 2.5 native-audio 有 6/39 次跑完工具后**完全不出声**，
+                        # 全部集中在两道 jina 搜索题上。当时怀疑是转写投递的时序问题，
+                        # 专门写了个探针数 inline_data 的字节数 —— **0 字节**，
+                        # 它是真的什么都没生成。3.1 是 0/39。
+                        #
+                        # persona 里已经写了「调了工具就必须开口」，但**那是 prompt
+                        # 压 prompt，压不死**。所以这里补一道确定性的：压不住至少查得到。
+                        #
+                        # 三个必须排除的**正当沉默**，否则这行会变成没人看的噪音：
+                        #   1. 被打断 —— 用户插话本来就该闭嘴
+                        #   2. 工具还没跑完 —— 结果回来后模型会在下一轮接着说
+                        #   3. 本轮压根没调工具 —— 那是纯空轮，跟这个病无关
+                        # 第 2 条是查日志确认过的：真实轨迹里 tool_call 和它的口头
+                        # 答复落在**同一个 turn** 里（13:36:53 调用 → 13:37:04 才
+                        # turn_complete），所以「turn_complete 时工具还挂着」确实
+                        # 是异常态，不是常态。
+                        if turn_interrupted:
+                            pass
+                        elif any(not t.done() for t in turn_tool_tasks):
+                            self._log_delivery(
+                                "SYSTEM", "本轮无输出，但工具还在跑，等结果回来再说"
+                            )
+                        else:
+                            log.warning(
+                                "本轮调了工具却没有任何输出（音频和转写都是空的）"
+                            )
+                            self._log_delivery(
+                                "⚠️ [干完活没出声]",
+                                "这轮工具调过了、也跑完了，但一个字都没说出口 —— "
+                                "用户那头听到的是一片安静，会以为没听见或者挂了",
+                            )
+                            self._log_delivery("DIVIDER", "-" * 60)
                     current_reply.clear()
                     turn_called_tool = False
+                    turn_had_audio = False
+                    turn_interrupted = False
+                    turn_tool_tasks = []
                     break
 
     def _log_turn_latency(self, resp):
