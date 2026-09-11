@@ -245,6 +245,39 @@ _PROMISED_DISPATCH_RE = re.compile(
     + ")"
 )
 
+# 句号级切分。零宽 lookbehind 做 split 在 3.7+ 才允许，本机 3.11，没问题。
+_SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?…])")
+# 「征求同意」的标志词。句末问号盖不住的那部分靠它 —— 转写经常把问号吞掉。
+_PROPOSAL_HINTS = ("要不要", "用不用", "需不需要", "需要我", "你想让我", "我可以")
+
+
+def _promised_dispatch(reply: str) -> bool:
+    """这段回话里有没有**承诺**把活派出去。
+
+    为什么不直接拿 `_PROMISED_DISPATCH_RE` 判：它只认「动词 + 名字」，
+    分不清**承诺**和**提议**。2026-09-11 的工具体检
+    （`scripts/live-bridge-toolcheck.py`，10 例 × 5 遍）抓到一次误报 ——
+    模型答完问题末尾加了一句「想准点儿的话，我让巴尼去查查具体数据？」。
+    那是在征求同意，用户还没点头，不派活**完全正确**，却被记成了静默失败。
+
+    误报比漏报更贵：这行警告的全部价值在于「出现了就一定有事」。
+    掺进正常轮次之后没人会再看它，真出事那次跟着一起被忽略 ——
+    这跟当初给「干完活没出声」留三个正当沉默豁免是同一个道理。
+
+    所以按句判，并且跳过两类提议句：句末是问号的，和带征求同意标志词的
+    （转写吞标点是常事，光看问号不够）。**只要有一句是陈述的承诺就算数** ——
+    「行，我让巴尼去查了。你还想聊别的吗？」不能因为末句是问句就放过。
+    """
+    for sent in _SENT_SPLIT_RE.split(reply):
+        if not _PROMISED_DISPATCH_RE.search(sent):
+            continue
+        if sent.rstrip().endswith(("？", "?")):
+            continue
+        if any(h in sent for h in _PROPOSAL_HINTS):
+            continue
+        return True
+    return False
+
 # ---------------------------------------------------------------- 声音
 #
 # 原生音频模型能用 TTS 那套全部 30 个预置声音，官方原话:
@@ -1025,9 +1058,7 @@ class GeminiLiveBridge:
                     full_reply = _tidy("".join(current_reply))
                     if full_reply:
                         self._log_delivery("🤖 [它回了啥]", full_reply)
-                        if not turn_called_tool and _PROMISED_DISPATCH_RE.search(
-                            full_reply
-                        ):
+                        if not turn_called_tool and _promised_dispatch(full_reply):
                             # 说了要派、却没调工具。用户以为办了，其实没有。
                             log.warning(
                                 "口头承诺派活但本轮没有 tool_call: %s", full_reply[:200]

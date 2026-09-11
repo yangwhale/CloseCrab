@@ -488,6 +488,33 @@ def test_promised_dispatch_regex_ignores_normal_chat():
         assert not glb._PROMISED_DISPATCH_RE.search(phrase), f"误报: {phrase}"
 
 
+def test_promised_dispatch_ignores_a_proposal():
+    """负向 —— **征求同意不是承诺**，这行警告不能对着提议句响。
+
+    真实误报，2026-09-11 的工具体检（`scripts/live-bridge-toolcheck.py`，
+    10 例 × 5 遍）从模型嘴里抓出来的原话：它答完问题末尾补了一句
+    「想准点儿的话，我让巴尼去查查具体数据？」—— 用户还没点头，这时候
+    **不派活才是对的**，却被记成了「说了要派其实没派」。
+
+    误报比漏报贵：这行的全部价值在于「响了就一定有事」，掺进正常轮次
+    就没人看了，真出事那次会跟着一起被忽略。
+    """
+    name = glb._SPOKEN_NAMES[0]
+    for phrase in (
+        f"想准点儿的话，我让{name}去查查具体数据？",
+        f"要不要我让{name}去看一眼",          # 转写把问号吞了，靠标志词兜
+        f"需要我叫{name}帮你跑一遍吗？",
+    ):
+        assert not glb._promised_dispatch(phrase), f"把提议当成承诺了: {phrase}"
+
+
+def test_promised_dispatch_still_fires_when_a_question_follows():
+    """正向 —— 别把豁免做过头：陈述句里的承诺，不能因为**后面**跟了个问句就放过。"""
+    name = glb._SPOKEN_NAMES[0]
+    real = f"行，我让{name}去查一下它们的最新进展。你还想聊点别的吗？"
+    assert glb._promised_dispatch(real), "承诺句被后面的问句盖住了"
+
+
 # ------------------------------------------------------------ 只剩一个工具
 #
 # 2026-09-10 删掉了 run_shell。它最后的正当用途只剩「换自己的声音」，而声音定了
