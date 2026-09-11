@@ -1761,6 +1761,7 @@ def _get_stt_sink_class():
                 if len(self._pcm) > cap:
                     del self._pcm[: len(self._pcm) - cap]
             _stt_ab_record_pcm(mono)
+            _utterance_feed(mono)   # 语音回归语料：逐句落盘，与下面喂 bridge 那条互不影响
             _funasr_ab_feed(mono)
             try:
                 from .gemini_live_bridge import feed_discord_pcm
@@ -1956,6 +1957,86 @@ def _stt_ab_record_pcm(mono_48k: bytes):
         _stt_ab_pcm_buf.extend(mono_48k)
         if len(_stt_ab_pcm_buf) > _STT_AB_MAX_PCM:
             del _stt_ab_pcm_buf[:len(_stt_ab_pcm_buf) - _STT_AB_MAX_PCM]
+
+
+# ─── 语音回归语料：把每一句原始音频单独存下来 ──────────────────────────
+#
+# 这是从 sink 劈出来的第三条支路，跟喂 Gemini Live 的那条完全独立 —— 目的是拿到
+# 「真实链路里那一份字节」：Discord Opus 解码 → 48kHz stereo → tomono 之后的样子。
+# 手机另录一份是测不出问题的，编解码这一段就丢了。
+#
+# **句子边界不用能量 VAD，用包间隔。** Discord 只在有人按住麦时才发 Opus 包，
+# 不说话就整个静默不发 —— 所以「超过 _UTT_GAP 秒没有新包」本身就是最干净的
+# 断句信号，比在解码后的波形上再算一遍能量既准又便宜。
+#
+# 旧的 _stt_ab_* 那套是绑在 Chirp3 final transcript 回调上的，那条链路已经下线，
+# 所以它只攒不落盘 —— 缓冲区一直在转，一个文件都没写出来过。这里不去动它。
+_UTT_GAP = float(os.environ.get("VOICE_CORPUS_GAP", "1.0"))   # 静默多久算一句说完
+_UTT_MIN_SEC = float(os.environ.get("VOICE_CORPUS_MIN", "0.35"))  # 短于此判为杂音
+_UTT_ENABLED = os.environ.get("VOICE_CORPUS", os.environ.get("STT_AB_DEBUG", "")) == "1"
+_utt_buf = bytearray()
+_utt_lock = threading.Lock()
+_utt_last_ts = 0.0
+_utt_seq = 0
+_utt_dir = ""
+_utt_thread = None
+
+
+def _utterance_feed(mono_48k: bytes):
+    """收音支路：攒当前这句，并确保后台冲刷线程活着。"""
+    global _utt_last_ts, _utt_thread
+    if not _UTT_ENABLED:
+        return
+    import time as _t
+    with _utt_lock:
+        _utt_buf.extend(mono_48k)
+        _utt_last_ts = _t.monotonic()
+        if _utt_thread is None or not _utt_thread.is_alive():
+            _utt_thread = threading.Thread(
+                target=_utterance_flush_loop, daemon=True, name="voice-corpus-flush")
+            _utt_thread.start()
+
+
+def _utterance_flush_loop():
+    import time as _t
+    while True:
+        _t.sleep(0.2)
+        with _utt_lock:
+            idle = _t.monotonic() - _utt_last_ts
+            if not _utt_buf or idle < _UTT_GAP:
+                continue
+            pcm = bytes(_utt_buf)
+            _utt_buf.clear()
+        _utterance_write(pcm)
+
+
+def _utterance_write(pcm: bytes):
+    global _utt_seq, _utt_dir
+    import time as _t, wave, json as _json
+    dur = len(pcm) / 96000.0          # 48kHz * 2 bytes
+    if dur < _UTT_MIN_SEC:
+        return
+    if not _utt_dir:
+        _utt_dir = os.path.expanduser(
+            _t.strftime("~/voice-regression/audio/%Y%m%d-%H%M%S"))
+        os.makedirs(_utt_dir, exist_ok=True)
+        log.info("[语料] 本轮录音目录: %s", _utt_dir)
+    _utt_seq += 1
+    path = os.path.join(_utt_dir, f"{_utt_seq:03d}.wav")
+    try:
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            wf.writeframes(pcm)
+        # 时间戳单独存一份，之后好跟 gemini-live-delivery 日志按时间对齐
+        with open(path[:-4] + ".json", "w") as f:
+            _json.dump({"seq": _utt_seq, "dur_sec": round(dur, 2),
+                        "wall": _t.strftime("%Y-%m-%d %H:%M:%S"),
+                        "epoch": _t.time()}, f, ensure_ascii=False)
+        log.info("[语料] 第 %d 句已存: %s (%.1fs)", _utt_seq, path, dur)
+    except Exception:
+        log.exception("[语料] WAV 写入失败 seq=%d", _utt_seq)
 
 
 def _stt_ab_save_utterance(chirp3_text: str, chirp3_t: float):
