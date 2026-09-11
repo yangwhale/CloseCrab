@@ -15,6 +15,7 @@
 用法:
   BOT_NAME=bunny scripts/voice-corpus-push.py            # 盯最新一轮录音
   BOT_NAME=bunny scripts/voice-corpus-push.py --max-age 7200
+  BOT_NAME=bunny scripts/voice-corpus-push.py --asr gemini,chirp --gemini-key-from-bot
 """
 from __future__ import annotations
 
@@ -90,6 +91,143 @@ def wav_seconds(wav: str) -> float:
         return 0.0
 
 
+# ─── ASR 支路：同一份 wav 顺手转成文字 ──────────────────────────────────
+#
+# 为什么塞进这个进程、而不是再起一个：这条链路的全部价值就在于**跟音频并排看**。
+# 「这段我自己听着挺清楚，机器却识别错了」这句判断，只有两样东西贴在同一条
+# 消息里才做得出来 —— 分成两个进程推，时间戳一错位就对不上是哪一句了。
+#
+# 代价是转写的往返会把字幕推迟（Gemini 实测 1.7–11.7s，Chirp 1.1–1.6s），
+# 但音频消息是先发的，实时监听那半点不受影响。
+#
+# **失败一律写进消息正文，不吞。** 跟下面「到点退出要说一声」同源：
+# 静悄悄地没有字幕，跟「识别出来就是空的」长得一模一样。
+_ASR_ENGINES = ("gemini", "chirp")
+
+
+def _repo_on_path():
+    """让脚本能 import closecrab.* —— 复用生产那份 prompt 和词表。"""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+
+
+def gemini_key_from_bot(bot: str) -> str:
+    """从跑着的 bot 进程里取 GEMINI_API_KEY。
+
+    **这不是兜底，是显式换一个来源。** 交互 shell 会从 ~/.claude/settings.json
+    继承一把**已经失效**的 key，脚本照着环境变量跑会全程 `API key not valid` ——
+    比没有 key 更难查，因为它长得像模型侧的问题。bot 进程手里那把是活的。
+    """
+    pids = subprocess.run(["pgrep", "-f", f"closecrab --bot {bot}"],
+                          capture_output=True, text=True).stdout.split()
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                for line in f.read().split(b"\0"):
+                    if line.startswith(b"GEMINI_API_KEY="):
+                        return line.split(b"=", 1)[1].decode()
+        except OSError:
+            continue
+    sys.exit(f"--gemini-key-from-bot: 在 {bot} 的进程里没找到 GEMINI_API_KEY")
+
+
+_genai_client = None
+
+
+def asr_gemini(wav: str, model: str, api_key: str) -> str:
+    global _genai_client
+    from google import genai
+    from google.genai import types as gt
+
+    _repo_on_path()
+    # 用生产 STT 那份 prompt 本体，不手抄 —— 抄一份就等于又开了一路配置，
+    # 那边改了这边不知道，量出来的「效果」就不是生产的效果了。
+    from closecrab.voice.gemini_stt import _DEFAULT_PROMPT
+
+    with open(wav, "rb") as f:
+        data = f.read()
+    # Client 必须留住引用。写成 `genai.Client(...).models.generate_content(...)`
+    # 那个临时 Client 会在请求发出前被回收，报的是
+    # `Cannot send a request, as the client has been closed` —— 长得像网络问题。
+    if _genai_client is None:
+        _genai_client = genai.Client(api_key=api_key)
+    r = _genai_client.models.generate_content(
+        model=model,
+        contents=[_DEFAULT_PROMPT, gt.Part.from_bytes(data=data, mime_type="audio/wav")],
+        config=gt.GenerateContentConfig(
+            thinking_config=gt.ThinkingConfig(thinking_level="MINIMAL")),
+    )
+    return (r.text or "").strip()
+
+
+# **chirp_3 已经不能用了**，2026-09-12 实测（project gpu-launchpad-playground）：
+#     asia-southeast1 chirp_3 → 403 "no longer generally available"（批量与流式同报）
+#     us-central1 / global    → 400 "model does not exist in the location"
+# 能跑通普通话的只剩 chirp_2（asia-southeast1 与 us-central1 都行，输出一致）。
+#
+# ⚠️ 这不只是本脚本的事：`chirp_stt.py` 默认 chirp_3、`livekit_io.py` 的
+# `STT_MODEL` 默认也是 chirp_3，而 jarvis 的 `livekit.stt_provider` 正是
+# `chirp3_stream` —— 那条 STT 现在是**整条失效**，不是「偶尔识别不准」。
+# 流式那条单独验过（StreamingRecognize 同一个 403），不是只有批量接口的事。
+_CHIRP_MODEL = os.environ.get("CHIRP_MODEL", "chirp_2")
+
+
+def asr_chirp(wav: str, language: str = "cmn-Hans-CN") -> str:
+    from google.api_core import client_options as gapic_options
+    from google.cloud import speech_v2
+    from google.cloud.speech_v2.types import cloud_speech
+
+    _repo_on_path()
+    from closecrab.voice.chirp_phrases import default_phrases
+
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project:
+        raise RuntimeError("chirp 需要 GOOGLE_CLOUD_PROJECT")
+    # Chirp 3 + 普通话目前只在 asia-southeast1，且非 global 区必须显式改端点。
+    location = os.environ.get("CHIRP_LOCATION", "asia-southeast1")
+    client = speech_v2.SpeechClient(client_options=gapic_options.ClientOptions(
+        api_endpoint=f"{location}-speech.googleapis.com"))
+
+    with wave.open(wav) as wf:
+        pcm = wf.readframes(wf.getnframes())
+        rate, ch = wf.getframerate(), wf.getnchannels()
+
+    phrases = [cloud_speech.PhraseSet.Phrase(
+        **({"value": v} if b is None else {"value": v, "boost": float(b)}))
+        for v, b in default_phrases()]
+    cfg = cloud_speech.RecognitionConfig(
+        explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+            encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=rate, audio_channel_count=ch),
+        language_codes=[language],
+        model=_CHIRP_MODEL,
+        features=cloud_speech.RecognitionFeatures(enable_automatic_punctuation=True),
+        adaptation=cloud_speech.SpeechAdaptation(phrase_sets=[
+            cloud_speech.SpeechAdaptation.AdaptationPhraseSet(
+                inline_phrase_set=cloud_speech.PhraseSet(phrases=phrases, boost=10.0))]),
+    )
+    resp = client.recognize(request=cloud_speech.RecognizeRequest(
+        recognizer=f"projects/{project}/locations/{location}/recognizers/_",
+        config=cfg, content=pcm))
+    return " ".join(r.alternatives[0].transcript
+                    for r in resp.results if r.alternatives).strip()
+
+
+def transcribe(wav: str, engines: list, model: str, api_key: str) -> list:
+    """返回 [(引擎名, 显示文本, 耗时秒)]；任何一路失败只影响它自己那行。"""
+    out = []
+    for name in engines:
+        t0 = time.monotonic()
+        try:
+            text = asr_gemini(wav, model, api_key) if name == "gemini" else asr_chirp(wav)
+            out.append((name, text or "（识别为空）", time.monotonic() - t0))
+        except Exception as e:
+            out.append((name, f"⚠️ 失败 {type(e).__name__}: {e}"[:200],
+                        time.monotonic() - t0))
+    return out
+
+
 class Sender:
     def __init__(self, bot: str, to: str | None):
         from google.cloud import firestore
@@ -148,9 +286,26 @@ def main():
     ap.add_argument("--max-age", type=float, default=4 * 3600, help="跑多久自己退出(秒)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="启动时把已存在的文件标记为已推（避免重启后刷屏）")
+    ap.add_argument("--asr", default="",
+                    help=f"顺手转写并附在音频后面，逗号分隔：{'/'.join(_ASR_ENGINES)}")
+    ap.add_argument("--asr-model", default="gemini-3-flash-preview",
+                    help="gemini 那一路用的模型（默认跟生产 GeminiSTT 一致）")
+    ap.add_argument("--gemini-key-from-bot", action="store_true",
+                    help="从跑着的 bot 进程取 key，绕开 shell 里那把失效的")
     args = ap.parse_args()
     if not args.bot:
         sys.exit("身份必须显式确定：传 --bot 或设 BOT_NAME")
+
+    engines = [e.strip() for e in args.asr.split(",") if e.strip()]
+    bad = [e for e in engines if e not in _ASR_ENGINES]
+    if bad:
+        sys.exit(f"--asr 不认识：{bad}，可选 {list(_ASR_ENGINES)}")
+    api_key = ""
+    if "gemini" in engines:
+        api_key = (gemini_key_from_bot(args.bot) if args.gemini_key_from_bot
+                   else os.environ.get("GEMINI_API_KEY", ""))
+        if not api_key:
+            sys.exit("gemini 转写要 key：设 GEMINI_API_KEY 或加 --gemini-key-from-bot")
 
     os.makedirs(args.root, exist_ok=True)
     sender = Sender(args.bot, args.to)
@@ -160,18 +315,22 @@ def main():
         print(f"启动时跳过 {len(seen)} 个已有文件")
 
     deadline = time.monotonic() + args.max_age
-    print(f"盯着 {args.root}，每 {args.interval}s 扫一次，{args.max_age/3600:.1f}h 后自动退出")
+    print(f"盯着 {args.root}，每 {args.interval}s 扫一次，{args.max_age/3600:.1f}h 后自动退出"
+          + (f"，转写: {'+'.join(engines)}" if engines else ""))
     while time.monotonic() < deadline:
         for wav in find_new(args.root, seen):
             seen.add(wav)
             sec = wav_seconds(wav)
             ogg = to_ogg(wav)
             rel = os.path.relpath(wav, args.root)
-            if ogg and sender.audio(ogg, int(sec * 1000)):
-                sender.text(f"⬆️ {rel} · {sec:.1f}s")
-            else:
-                sender.text(f"⚠️ {rel} · {sec:.1f}s 录到了但推送失败，文件在本地")
-            print(f"pushed {rel} ({sec:.1f}s)")
+            ok = bool(ogg) and sender.audio(ogg, int(sec * 1000))
+            head = (f"⬆️ {rel} · {sec:.1f}s" if ok
+                    else f"⚠️ {rel} · {sec:.1f}s 录到了但推送失败，文件在本地")
+            # 转写放在音频之后：音频先到，字幕晚几秒跟上，实时监听不受影响。
+            lines = [f"{n}({t:.1f}s): {txt}" for n, txt, t in
+                     transcribe(wav, engines, args.asr_model, api_key)]
+            sender.text("\n".join([head] + lines))
+            print(f"pushed {rel} ({sec:.1f}s)" + (f" {lines}" if lines else ""))
         time.sleep(args.interval)
 
     # **到点退出必须说一声。** 2026-09-11 栽在这上面：默认 4h 的死期正好在一次
