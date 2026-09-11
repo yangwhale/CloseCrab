@@ -260,6 +260,11 @@ _DAVE_UNREADY_GRACE_S = float(os.environ.get("DAVE_UNREADY_GRACE_S", "25"))
 # 所以不设「重试上限」: 上限意味着某个时刻起彻底放弃, 而这个 bug 的全部危害就是
 # 静默地永远聋下去 (2026-09-11 的四小时失聪、13:00 那次撞满重启配额, 都是这么来的)。
 _DAVE_REJOIN_COOLDOWN_S = float(os.environ.get("DAVE_REJOIN_COOLDOWN_S", "60"))
+# 开机自启后判定「语音到底起没起来」的观察窗。必须**大于**一次 py-cord 语音握手
+# 超时 (20s) 加上至少两轮心跳重试 (30s/轮), 否则量到的是「还没轮到重试」而不是
+# 「连不上」。取 180s: 实测 bunny 那次在第 3 次重试 (约 3 分钟) 上恢复。
+_BOOT_VERIFY_TIMEOUT = float(os.environ.get("VOICE_BOOT_VERIFY_TIMEOUT", "180"))
+_BOOT_VERIFY_POLL = float(os.environ.get("VOICE_BOOT_VERIFY_POLL", "5"))
 _dave_unready_since = None   # ready 首次转 False 的 monotonic 时刻
 _dave_last_rejoin = 0.0      # 上次强制重连的 monotonic 时刻
 _dave_rejoin_n = 0           # 强制重连累计次数 (只用于日志)
@@ -3417,15 +3422,33 @@ def maybe_start_discord_voice_sidecar(bot_name: str) -> threading.Thread | None:
         log.warning("提前预热 Gemini Live Bridge 失败: %s", e)
     thread = _spawn_sidecar_thread(bot_name, cfg["token"], cfg.get("guild_id", ""), vch)
     if thread is not None:
-        # 后台验证：15s 后检查是否真的连上了语音频道，没连上就清除持久化标记
+        # 后台验证：轮询到连上为止；连不上只大声报错，**不改配置**。
+        #
+        # 原来这里是 `sleep(15)` + 没连上就 `_persist_sidecar_enabled(False)`。
+        # 两个问题叠在一起，把偶发故障变成了永久故障：
+        #   1. 15s 比 py-cord 自己的语音握手超时 (20s) 还短 —— 第一次握手都没跑完
+        #      就判了死刑，而心跳要 30s 后才发起第二次重试。
+        #   2. 清掉持久化标记不影响本进程 (心跳照样每 30s 重连)，只影响**下次重启**
+        #      —— 那次重启 sidecar 线程根本不会被拉起，日志里一行错都没有。
+        # 2026-09-11 jarvis 和天猫精灵就是这么一起消失的：一次握手超时 → 标记被清 →
+        # 重启后 Discord 语音静默不存在，只能人工 /discordon。
+        #
+        # 「这次没连上」和「这个 bot 不该连」是两回事。前者归心跳管，它会一直重试；
+        # 后者是配置问题 (缺 token / 频道号错)，在上面就已经显式返回了。
         import threading as _th
 
         def _verify():
             import time
-            time.sleep(15)
-            if not is_voice_connected():
-                log.warning("开机自启 sidecar 15s 后仍未连上语音频道，清除持久化标记")
-                _persist_sidecar_enabled(bot_name, False)
+            deadline = time.monotonic() + _BOOT_VERIFY_TIMEOUT
+            while time.monotonic() < deadline:
+                if is_voice_connected():
+                    return
+                time.sleep(_BOOT_VERIFY_POLL)
+            log.error(
+                "开机自启 sidecar %ds 仍未连上语音频道 (bot=%s)；"
+                "心跳会继续每 30s 重试，持久化标记保持不变",
+                _BOOT_VERIFY_TIMEOUT, bot_name,
+            )
 
         _th.Thread(target=_verify, daemon=True, name="sidecar-boot-verify").start()
     return thread
