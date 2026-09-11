@@ -262,6 +262,8 @@ _LISTEN_AUTOSTART = True     # 自动收音开启 (收到音频转 OGG 直推飞
 _autostart_done = False      # 本进程内自动收音只起一次 (尊重之后的 /stoplisten)
 _receive_probe_installed = False  # decrypt_rtp ssrc 探针只挂一次
 _dave_backend_installed = False    # dave-py 后端替换只装一次
+_ssrc_rotate_patched = False       # SSRC 换号清理补丁只挂一次
+_ssrc_rotations = 0                # 换号次数, 进诊断日志 —— 频繁换号本身就是信号
 
 # ── 「连着但聋」自愈 (DAVE 掉出 MLS 树) ─────────────────────────────────────
 # ready 连续为 False 这么久 → 判定这条语音连接已经废了, 强制整条重建。
@@ -3185,6 +3187,88 @@ def _install_dave_py_backend():
         log.exception("dave-py 后端替换失败 —— 保持 davey (发送不受影响, 接收仍乱码)")
 
 
+def _retire_ssrc(vc, user_id: int, old: int, new: int) -> None:
+    """清掉某用户旧 SSRC 的残留：反向表条目 + 解码器 + speaking 计时器。
+
+    单独拆出来是为了能脱离 py-cord 直接单测 —— 挂钩子那半段没法在单测里跑。
+
+    每一步各自 try：清理是尽力而为，任何一步失败都不该挡住新号写入。宁可留下
+    一点垃圾，也不能因为清理抛异常把 speaking 事件整条打断 —— 那会让新号根本
+    进不了映射表，症状从「有点卡」升级成「完全听不见」。
+    """
+    global _ssrc_rotations
+    _ssrc_rotations += 1
+    try:
+        vc._ssrc_to_id.pop(old, None)
+    except Exception:
+        log.debug("SSRC 轮换: 清反向表失败 old=%s", old, exc_info=True)
+    reader = getattr(vc, "_reader", None)
+    if reader is not None:
+        try:
+            reader.packet_router.destroy_decoder(old)
+        except Exception:
+            log.debug("SSRC 轮换: 销毁解码器失败 old=%s", old, exc_info=True)
+        try:
+            reader.speaking_timer.drop_ssrc(old)
+        except Exception:
+            log.debug("SSRC 轮换: 清 speaking 计时器失败 old=%s", old, exc_info=True)
+    log.warning("SSRC 轮换: uid=%s %s → %s，已清旧号残留 (累计 %d 次)",
+                user_id, old, new, _ssrc_rotations)
+
+
+def _install_ssrc_rotation_patch():
+    """同一个人换 SSRC 时，把旧号连同它的解码器一起清掉 (只挂一次, 进程级)。
+
+    **SSRC 是流的身份证，不是人的。** 它是 32 位随机数, 写在每个 RTP 包头上,
+    由语音网关另一条 WebSocket 单独通知 (op 5 speaking 带 user_id + ssrc)。同一
+    个人重连一次就换一个号 —— 换号完全不产生任何「旧号作废」的通知。
+
+    py-cord 2.8.1 的记账有两处漏：
+
+    1. ``_add_ssrc`` 覆盖 ``_id_to_ssrc[uid]``, 但 ``_ssrc_to_id[旧号]`` 没人删,
+       那条映射会一直挂着。
+    2. 更要命的是**旧号的解码器不销毁**。销毁只发生在网关明确推 client_disconnect
+       的时候 —— 而换号根本不推那个。于是旧解码器继续活着, 抱着过期的抖动缓冲
+       往同一个混音池里吐数据, 和新号的活流交错。听感就是断断续续。
+
+    RFC 3550 本身是有超时概念的 (一个源连续若干个 RTCP 周期没数据就判定离开),
+    py-cord 一行都没实现, 纯事件驱动。所以这个洞不会自愈, 只能补。
+
+    2026-09-11 19:21 的现场: ssrc_map 里 Chris 从 10664 变成 10769, 同时实收
+    ssrc=[10664, 10769, 129012848, 1332456855, 2936393238], 失败 52 / 成功 308。
+    """
+    global _ssrc_rotate_patched
+    if _ssrc_rotate_patched:
+        return
+    try:
+        # 走 discord.voice —— 顶层 `discord.VoiceClient` 是同一个类的别名, 但 2.7
+        # 起访问它会吐 DeprecationWarning, 3.0 直接没了。
+        from discord.voice import VoiceClient
+    except Exception:
+        log.exception("SSRC 轮换补丁: 导入 VoiceClient 失败 (换号残留不会被清)")
+        return
+    if getattr(VoiceClient, "_cc_ssrc_rotate", False):
+        _ssrc_rotate_patched = True
+        return
+    try:
+        _orig_add_ssrc = VoiceClient._add_ssrc
+
+        def _add_ssrc_rotating(self, user_id: int, ssrc: int) -> None:
+            old = self._id_to_ssrc.get(user_id)
+            # 只在**确实换号**时清理。同一个号被反复通报是常态 (每次开口都推一条
+            # speaking), 那种情况下清解码器等于每说一句就把自己的音频掐一次。
+            if old is not None and old != ssrc:
+                _retire_ssrc(self, user_id, old, ssrc)
+            return _orig_add_ssrc(self, user_id, ssrc)
+
+        VoiceClient._add_ssrc = _add_ssrc_rotating
+        VoiceClient._cc_ssrc_rotate = True
+        _ssrc_rotate_patched = True
+        log.info("SSRC 轮换补丁已挂载 (换号即清旧解码器)")
+    except Exception:
+        log.exception("SSRC 轮换补丁挂载失败 (换号残留不会被清, 症状=断断续续)")
+
+
 def _install_receive_probe():
     """挂 decrypt_rtp ssrc 探针 (只挂一次, 进程级)。
 
@@ -3604,10 +3688,10 @@ async def _ssrc_infer_loop(period: float = 0.3):
                     # 不传 uid 会 TypeError。uid 从 ssrc_map 拿，正好只有在场的人。
                     dstats = _decryption_ledger(dave, cur_map.values())
                     log.info(
-                        "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s "
+                        "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s 换号=%s "
                         "实收ssrc=%s 解密账=%s 失败原因=%s 包形状=%s%s",
                         diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
-                        cur_map, cur_hits, cur_zeros, sorted(seen), dstats,
+                        cur_map, cur_hits, cur_zeros, _ssrc_rotations, sorted(seen), dstats,
                         _dave_fail_summary(), _dave_shape_summary(),
                         "  <<变化" if changed else "",
                     )
@@ -3969,6 +4053,8 @@ def _spawn_sidecar_thread(
         # 声明 0 会被 voice gateway 以 close code 4017 拒绝，连放音都连不上。
         # 挂接收路径专用的 decrypt_rtp ssrc 探针 (只挂一次, 不碰发送路径)。
         _install_receive_probe()
+        # 换号清理: 必须在任何 speaking 事件之前挂上, 否则第一次换号就漏掉。
+        _install_ssrc_rotation_patch()
         # 把 DAVE 后端从 davey 换成 dave-py (解密能出真 PCM)。这条线同时碰发送加密,
         # encrypt_opus 已做明文回落兜底; 一键回滚 = _DAVE_PY_BACKEND_ENABLED=False。
         _install_dave_py_backend()
