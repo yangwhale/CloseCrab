@@ -480,6 +480,68 @@ _dave_fail_reasons: "collections.Counter[str]" = collections.Counter()
 _dave_shape_stats: "collections.Counter[str]" = collections.Counter()
 
 
+# Opus TOC 分桶：**发送端到底用了什么模式和带宽**。
+#
+# 起因：2026-09-11 Chris 说回放「码率低、失真」。测下来全天 10 份录音在
+# 12 kHz 以上一律 0.000% 能量，一份例外都没有 —— 明确的硬墙。
+#
+# 12 kHz 这个数字**有两个都说得通的来源**，不能靠「听起来像常识」二选一：
+#   ① Opus superwideband（RFC 6716 表 2：config 12-13 = Hybrid/SWB）
+#   ② 某处 24 kHz 的重采样中间层（奈奎斯特恰好也是 12 kHz）
+# ② 已经用读代码排除了：录音支路是 `tomono(48kHz stereo)` 直接落盘
+# （`_utterance_write` 写 `setframerate(48000)`），中间没有任何 ratecv。
+#
+# 但排除②不等于证明①。真正的判据在**每个 Opus 包的第一个字节**：
+# TOC 的高 5 位就是 config number，RFC 6716 表 2 把它一一对应到
+# 模式 × 带宽 × 帧长。这是发送端自己声明的，不是我们从波形上反推的。
+#
+# 只在 DAVE 解密成功后记 —— 那时候才是真正的 Opus 明文。
+_opus_toc_stats: "collections.Counter[str]" = collections.Counter()
+
+# RFC 6716 §3.1 表 2。写成区间查表而不是 if-else 链，是为了跟 RFC 里那张表
+# 逐行对得上，改错了一眼能看出来。
+_OPUS_TOC_TABLE = [
+    (0, 3, "SILK", "NB 4kHz"),
+    (4, 7, "SILK", "MB 6kHz"),
+    (8, 11, "SILK", "WB 8kHz"),
+    (12, 13, "Hybrid", "SWB 12kHz"),
+    (14, 15, "Hybrid", "FB 20kHz"),
+    (16, 19, "CELT", "NB 4kHz"),
+    (20, 23, "CELT", "WB 8kHz"),
+    (24, 27, "CELT", "SWB 12kHz"),
+    (28, 31, "CELT", "FB 20kHz"),
+]
+
+
+def _record_opus_toc(plain: bytes | None) -> None:
+    """记一帧 Opus 的 TOC：模式 / 带宽 / 声道。空包和异常一律忽略。
+
+    这条路在每个音频包上跑，所以刻意做成纯查表 + 一次加锁，不做任何解析。
+    """
+    if not plain:
+        return
+    try:
+        toc = plain[0]
+        cfg = toc >> 3
+        stereo = bool(toc & 0x04)
+        mode = bandwidth = "?"
+        for lo, hi, m, bw in _OPUS_TOC_TABLE:
+            if lo <= cfg <= hi:
+                mode, bandwidth = m, bw
+                break
+        key = f"{mode}/{bandwidth}/{'立体声' if stereo else '单声道'}/cfg{cfg}"
+        with _dave_fail_lock:
+            _opus_toc_stats[key] += 1
+    except Exception:
+        pass
+
+
+def _opus_toc_summary(top: int = 4) -> str:
+    with _dave_fail_lock:
+        items = _opus_toc_stats.most_common(top)
+    return " ".join(f"{k}×{n}" for k, n in items) or "-"
+
+
 class DavePyDecryptFailed(Exception):
     """dave-py 的 Decryptor 返回了 None。
 
@@ -3316,6 +3378,8 @@ def _install_receive_probe():
                             plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
                             _record_dave_result(True, packet.extended, raw_payload,
                                                 padded=padded)
+                            # 解开之后才是真 Opus，TOC 只有在这里读才作数
+                            _record_opus_toc(plain)
                         except Exception as exc:
                             # **这一行就是「有声但咯楞」的制造现场。** 解密失败被吞掉,
                             # 换成一帧静音接着跑 —— 上层完全看不出异常, 只听得出卡顿。
@@ -3689,10 +3753,10 @@ async def _ssrc_infer_loop(period: float = 0.3):
                     dstats = _decryption_ledger(dave, cur_map.values())
                     log.info(
                         "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s 换号=%s "
-                        "实收ssrc=%s 解密账=%s 失败原因=%s 包形状=%s%s",
+                        "实收ssrc=%s 解密账=%s 失败原因=%s 包形状=%s Opus模式=%s%s",
                         diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
                         cur_map, cur_hits, cur_zeros, _ssrc_rotations, sorted(seen), dstats,
-                        _dave_fail_summary(), _dave_shape_summary(),
+                        _dave_fail_summary(), _dave_shape_summary(), _opus_toc_summary(),
                         "  <<变化" if changed else "",
                     )
                     _diag_last = cur_diag
