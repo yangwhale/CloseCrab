@@ -48,6 +48,21 @@ def find_new(root: str, seen: set) -> list:
     return sorted(out)
 
 
+# 这里的码率不是为了「听得清」, 是为了**别把自己加的失真也算进去**。
+# 语料的用途是让人判断「Discord 那头收到的到底是什么声音」, 我们这一次转码
+# 是第二代有损编码, 它加的伪影会被误读成链路问题。
+#
+# 2026-09-11 实测 (同一段 12.9s 语音, 对齐后分段 SNR, 只统计有声段):
+#     24k 15.4 dB | 32k 17.5 dB | 48k 20.2 dB | 64k 22.0 dB | 96k 26.2 dB | 128k 29.1 dB
+# 原来写的 32k 只有 17.5 dB —— 这个档位本身就在制造可听的金属味。96k 到 26 dB,
+# 文件也才 180 KB 量级, 对一条几十秒的语音消息完全不是问题, 所以取 96k。
+#
+# 注意**提高码率不会把带宽拉宽**: 源流被 Discord 那头的 Opus 编码器限死在
+# superwideband (12 kHz 硬墙, 全天 10 份录音无一例外)。这里换档只影响
+# 我们自己叠上去的那一层失真。
+_OGG_BITRATE = "96k"
+
+
 def to_ogg(wav: str) -> str:
     """转成飞书语音消息要的 opus/ogg。转失败返回空串，不抛。"""
     ogg = wav[:-4] + ".ogg"
@@ -55,7 +70,7 @@ def to_ogg(wav: str) -> str:
         return ogg
     r = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", wav,
-         "-c:a", "libopus", "-b:a", "32k", "-ar", "48000", "-ac", "1", ogg],
+         "-c:a", "libopus", "-b:a", _OGG_BITRATE, "-ar", "48000", "-ac", "1", ogg],
         capture_output=True)
     if r.returncode != 0 or not os.path.exists(ogg):
         print(f"[转码失败] {wav}: {r.stderr.decode()[:200]}", file=sys.stderr)
