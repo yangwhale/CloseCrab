@@ -21,8 +21,10 @@ import signal
 import sys
 import threading
 import time
+import urllib.parse
 from typing import Optional
 
+import httpx  # google-genai 自己就依赖它，不是新增依赖
 from google import genai
 from google.genai import types
 
@@ -217,6 +219,73 @@ _TOOL_ASK_OWNER = types.FunctionDeclaration(
         required=["task"],
     ),
 )
+
+# ---------------------------------------------------------------- 联网搜索
+#
+# 2026-09-12 加的第二个工具，起因是 Chris 一句「怎么感觉生产 bridge 并没有集成
+# 你说的那些工具」。他是对的：09-11 那台覆盖性对比台（`scripts/live-tool-bench.py`）
+# 配了六个工具，但那六个**只活在脚本里**，生产这边从来只有 ask_<bot> 一个。
+#
+# 为什么是 function declaration 而不是 MCP：`types.Tool(mcp_servers=[...])` 在
+# Live 这条链路上**静默失效**（握手过、模型看不见，详见 `_build_config` 里那段）。
+# 那次发现之后我绕过去了，一直没回头把它做成一个真的函数声明 —— 这不是决策，
+# 是漏了。
+#
+# ⚠️ **它和内置 google_search 是有取舍的，不是纯增益。**
+#   - 内置 google_search 在服务端跑，不占 function calling 通道 → **不静音**。
+#   - 这个走我们自己的通道 → 3.1 同步阻塞，实测 jina 一次 5.3s，
+#     用户那头就是 5 秒死寂（比模型思考的停顿难受得多）。
+# 而对比台第 1 条结论正好说：**只要摆一个普通的搜索函数在那儿，两个模型三遍
+# 全部自发选它**，哪怕内置搜索也挂着、prompt 一个字没提。也就是说加了它，
+# 流量会主动从「不静音」那条路挪到「静音」这条路上来。
+# 所以描述里必须把边界写死：**只在需要具体来源/链接/网页原文时用**，
+# 一般时事常识走你自带的搜索；而且**调之前先出一声**，让那 5 秒有个交代。
+# 真发现它抢路，第一手是改这段描述，不是删工具。
+_SEARCH_WEB_TOOL = "search_web"
+
+_TOOL_SEARCH_WEB = types.FunctionDeclaration(
+    name=_SEARCH_WEB_TOOL,
+    description=(
+        "联网搜一下，拿回**带链接的结果列表**（标题 + 网址 + 摘要）。"
+        "\n\n"
+        "**什么时候用它：** 用户要出处、要链接、要「你从哪看到的」；"
+        "或者你想确认一个具体网页上写了什么。\n"
+        "**什么时候别用：** 一般的时事、常识、天气、汇率这类 —— "
+        "你自己就能联网查，那条路不占用工具通道，用户听不到停顿。\n"
+        f"**什么时候该派活而不是自己搜：** 要读这台机器上的文件、跑命令、"
+        f"看日志、做深度调研 —— 那些是 {BOT_NAME} 的活，调 {_ASK_OWNER_TOOL}。\n"
+        "\n"
+        "⚠️ **这个工具会等结果，大概五秒，这五秒用户完全听不到你的声音。**"
+        "所以**先说一句「我搜一下啊」再调它**，别让人对着死寂坐五秒。\n"
+        "⚠️ 拿回来的是**摘要不是全文**。摘要里没写的别替它补，"
+        "宁可说「搜到的几条里没细讲」。"
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "搜索词。**写成搜索引擎吃的样子**，别把用户整句话原样丢进来 —— "
+                    "关键词 + 限定词就行（「天星小轮 八号风球 停航」）。"
+                    "用户说的是中文就用中文搜，专有名词保留英文原文。"
+                ),
+            ),
+        },
+        required=["query"],
+    ),
+)
+
+# s.jina.ai 就是 Jina 的搜索端点，返回 JSON。`X-Respond-With: no-content` 让它
+# **只回标题/网址/摘要、不回网页正文** —— 正文对语音场景是纯负担：既让这 5 秒
+# 变成 15 秒，又给模型一堆它念不出来的东西。
+_JINA_SEARCH_URL = "https://s.jina.ai/"
+# 超时卡在 10s。比实测的 5.3s 留一倍余量，但绝不能没有上限 —— 上面说过，
+# 这条路上的每一秒都是用户听到的死寂，超时了宁可回一句「没搜着」让它继续说话。
+_JINA_TIMEOUT_S = 10.0
+_JINA_MAX_RESULTS = 5
+_JINA_DESC_CHARS = 200
+
 
 # ---- 「说了要派，其实没派」检测器 ----
 #
@@ -758,8 +827,12 @@ class GeminiLiveBridge:
             #  4. **服务端偶发 `APIError 1011 Internal error occurred`**（2/39），
             #     握手完就断，跟模型无关。重连逻辑本来就有，这里只是备个案：
             #     看到 1011 不用去查配置。
+            # 两个自己的函数放同一个 Tool 里没问题（上面那条「必须分开」说的是
+            # google_search 不要跟 function_declarations 混，不是函数之间要拆）。
+            # search_web 是 2026-09-12 加的，它跟内置 google_search 的分工写在
+            # 声明那儿（`_TOOL_SEARCH_WEB`），一句话：**内置那条不静音、优先走**。
             tools=[
-                types.Tool(function_declarations=[_TOOL_ASK_OWNER]),
+                types.Tool(function_declarations=[_TOOL_ASK_OWNER, _TOOL_SEARCH_WEB]),
                 types.Tool(google_search=types.GoogleSearch()),
             ],
             # 输入侧带上语言提示和词表（常量与来龙去脉见 `_LANGUAGE_CODES` 那一段）。
@@ -1162,6 +1235,8 @@ class GeminiLiveBridge:
         try:
             if call.name == _ASK_OWNER_TOOL:
                 result = await self._ask_owner(args.get("task", ""))
+            elif call.name == _SEARCH_WEB_TOOL:
+                result = await self._search_web(args.get("query", ""))
             else:
                 result = {"error": f"未知工具 {call.name}"}
         except Exception as e:
@@ -1180,6 +1255,72 @@ class GeminiLiveBridge:
             log.warning("回传工具结果失败: %s", e)
         finally:
             self._tasks.discard(asyncio.current_task())
+
+    async def _search_web(self, query: str) -> dict:
+        """联网搜一次，回一份压扁的结果列表。**这个是真的会等**。
+
+        跟 `_ask_owner` 正好相反：那个必须 fire-and-forget，这个非等不可 ——
+        搜索的价值就在结果本身，派出去不看结果等于没搜。代价写在工具描述里了：
+        这几秒用户是听不到声音的（3.1 的 function calling 同步，见文件上方那节）。
+
+        **绝不抛异常，任何情况都回一个 dict。** 上层 `_handle_tool_call` 虽然
+        兜了 try，但那条路回的是「执行异常: …」这种给不了模型任何交代的话。
+        这里自己分门别类回：超时就说超时，没 key 就说没配 —— 模型能照着这句话
+        跟用户解释，而不是干巴巴一句失败。
+
+        为什么截成 5 条 × 200 字：这是**念给人听的**，不是喂给 agent 读的。
+        十条全文塞回去，模型要么念半天要么自己挑，两种都不如直接只给前几条。
+        """
+        query = (query or "").strip()
+        if not query:
+            return {"error": "搜索词是空的，没法搜"}
+
+        key = os.environ.get("JINA_API_KEY", "")
+        if not key:
+            # 明说是配置缺失，别让模型以为是「网上没有」。
+            # （run.sh 从 .zshenv 带进来，见 run.sh 里 JINA_AUTH 那段。）
+            return {"error": "这台机器上没配搜索的凭据，搜不了"}
+
+        url = _JINA_SEARCH_URL + "?q=" + urllib.parse.quote(query)
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            # 只要标题/网址/摘要，不要网页正文。理由见 _JINA_SEARCH_URL 那段注释。
+            "X-Respond-With": "no-content",
+        }
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=_JINA_TIMEOUT_S) as client:
+                resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+        except httpx.TimeoutException:
+            log.warning("搜索超时 (%.1fs): %s", _JINA_TIMEOUT_S, query)
+            return {"error": f"搜索超过 {_JINA_TIMEOUT_S:.0f} 秒没回来，这次没搜着"}
+        except Exception as e:
+            log.warning("搜索失败: %s (%s)", e, query)
+            return {"error": f"搜索出错: {type(e).__name__}"}
+
+        items = payload.get("data") or []
+        results = [
+            {
+                "title": (it.get("title") or "")[:120],
+                "url": it.get("url") or "",
+                "summary": (it.get("description") or "")[:_JINA_DESC_CHARS],
+            }
+            for it in items[:_JINA_MAX_RESULTS]
+        ]
+        log.info(
+            "搜索 %.1fs 回 %d 条（原始 %d）: %s",
+            time.monotonic() - t0,
+            len(results),
+            len(items),
+            query,
+        )
+        if not results:
+            # 「一条都没有」和「出错了」是两回事，模型得能分清楚。
+            return {"query": query, "results": [], "note": "一条都没搜着"}
+        return {"query": query, "results": results}
 
     async def _ask_owner(self, task: str) -> dict:
         """把一件事交给本 bot 的大脑去办。**发出去就返回，绝不等结果。**

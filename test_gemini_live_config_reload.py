@@ -531,17 +531,27 @@ def test_run_shell_is_gone_for_good():
     assert not hasattr(glb.GeminiLiveBridge, "_run_shell"), "_run_shell 方法又回来了"
 
 
-def test_only_one_function_declaration_reaches_the_model():
-    """正向：真正发给服务端的那份 setup 里，function 有且只有 ask_<bot> 一个。
+def test_the_declared_functions_are_exactly_the_intended_two():
+    """正向：真正发给服务端的那份 setup 里，function 就是白名单里那两个。
 
     **光看常量删干净了不算数** —— 决定模型手上有什么的是 `_build_config()`
     里那份列表，不是模块里还剩几个常量。
+
+    这条原来叫「有且只有 ask_<bot> 一个」，2026-09-12 加 `search_web` 时改成
+    白名单。**改的是名单不是强度**：写死成一个集合，任何新工具都必须先来改这行
+    才能进生产 —— 09-10 删掉 run_shell 之后最怕的就是它某天悄悄回来。
     """
     bridge = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
     bridge._resume_handle = None
     cfg = bridge._build_config()
-    declared = [f.name for t in cfg.tools if t.function_declarations for f in t.function_declarations]
-    assert declared == [glb._ASK_OWNER_TOOL], f"注册的 function 不止一个: {declared}"
+    declared = {f.name for t in cfg.tools if t.function_declarations for f in t.function_declarations}
+    assert declared == {glb._ASK_OWNER_TOOL, glb._SEARCH_WEB_TOOL}, (
+        f"生产工具集变了，是有意的吗: {sorted(declared)}"
+    )
+    # 能跑命令的东西一律不许回来（09-10 删的理由：唯一能改坏东西、且没有正当用途）。
+    assert not any(
+        k in n for n in declared for k in ("shell", "bash", "exec", "command")
+    ), f"跑命令的工具又出现了: {sorted(declared)}"
     # google_search 走服务端，不占 function calling 通道 —— 它该还在。
     assert any(t.google_search is not None for t in cfg.tools), "联网搜索被误删了"
 
@@ -555,6 +565,7 @@ def test_no_voice_name_appears_in_any_prompt_source():
     sources = {p.name: p.read_text(encoding="utf-8") for p in persona_dir.glob("*.md")}
     sources["_PERSONA_FALLBACK"] = glb._PERSONA_FALLBACK
     sources["ask_owner.description"] = glb._TOOL_ASK_OWNER.description
+    sources["search_web.description"] = glb._TOOL_SEARCH_WEB.description
     for where, text in sources.items():
         listed = [n for n in glb._VOICES if n in text]
         assert not listed, f"{where} 里又出现了声音名: {listed}"
@@ -880,3 +891,175 @@ def test_send_loop_fingerprint_has_the_same_arity_as_build_config(monkeypatch, t
     # 这条会变成一个永远绿的空测试 —— 变异测试第一次跑就是这么发现的。
     with pytest.raises(asyncio.TimeoutError):
         _run_send_loop(b, timeout=glb._IDLE_GAP_S * 4)
+
+
+# ---------------------------------------------------------------- 联网搜索工具
+#
+# 2026-09-12 加的 `search_web`。这批测试压两件事：
+#   1. 它**确实被声明进了生产配置**（这一整件事的起因就是「你说的工具生产里没有」，
+#      所以第一条护栏必须是「声明在不在」，而不是「函数能不能跑」）；
+#   2. 它**任何情况下都回 dict、不抛异常** —— 抛出去的后果不是「搜索失败」，
+#      是模型在同步等一条永远不来的 tool response，那一轮对话永久卡住。
+
+
+def _fresh_bridge(monkeypatch, tmp_path):
+    """拿生产那份 `_build_config()` 本体，不手抄。"""
+    for name in ("_MODEL_FILE", "_THINKING_FILE", "_VOICE_FILE", "_VOCAB_FILE"):
+        monkeypatch.setattr(glb, name, str(tmp_path / f"absent-{name}.txt"))
+    b = glb.GeminiLiveBridge.__new__(glb.GeminiLiveBridge)
+    b._resume_handle = None
+    return b
+
+
+def test_search_web_is_actually_declared_in_production_config(monkeypatch, tmp_path):
+    """正向 —— 生产配置里必须真有 search_web，而且 google_search 仍是独立 Tool。
+
+    「我给它加了工具」和「那个工具出现在握手里」是两回事，中间隔着一次
+    `_build_config`。09-11 那台对比台配了六个工具、生产一个都没有，
+    就是因为没有任何东西盯着这条线。
+    """
+    cfg = _fresh_bridge(monkeypatch, tmp_path)._build_config()
+    declared = [
+        fd.name for t in cfg.tools for fd in (t.function_declarations or [])
+    ]
+    assert glb._SEARCH_WEB_TOOL in declared, f"search_web 没进配置: {declared}"
+    assert glb._ASK_OWNER_TOOL in declared, "把派活工具挤掉了"
+
+    # 内置搜索必须**单独**一个 Tool。合进去过一次，路由就乱（见 _build_config 注释）。
+    with_search = [t for t in cfg.tools if t.google_search is not None]
+    assert len(with_search) == 1, "内置 google_search 不见了或者不止一个"
+    assert not with_search[0].function_declarations, "又把它们合回同一个 Tool 了"
+
+
+def test_search_web_refuses_empty_query_without_network(monkeypatch):
+    """负向 —— 空搜索词就地回错，**不许发请求**。
+
+    这条不只是省一次网络往返：空词发出去 jina 会回一堆无关结果，
+    模型拿着它就开始一本正经地念，比直接说「没搜着」坏得多。
+
+    **这条第一版是假绿的，变异测试当场抓出来的。** 原来写的是「把 AsyncClient
+    换成一个抛异常的东西，然后断言回了 error」—— 可 `_search_web` 顶着一个
+    `except Exception`（它必须不抛，见下面那条），于是「压根没发请求」和
+    「发了、炸了」在外面长得**一模一样**：两条路都回 error。把短路删掉，测试照绿。
+    所以改成记账：请求发没发是个事实，用事实断言，不要用它的副作用。
+    """
+    tried = []
+
+    def _spy(*a, **kw):
+        tried.append(1)
+        raise AssertionError("空搜索词竟然真去发请求了")
+
+    monkeypatch.setattr(glb.httpx, "AsyncClient", _spy)
+    out = asyncio.run(glb.GeminiLiveBridge._search_web(None, "   "))
+    assert not tried, "空搜索词没短路，请求真发出去了"
+    assert "error" in out
+
+
+def test_search_web_says_it_is_a_config_problem_when_key_is_missing(monkeypatch):
+    """负向 —— 没凭据要说成「配置缺失」，不能说成「网上没有」。
+
+    两者对用户是完全不同的结论：一个该去修机器，一个该换个问法。
+    模型只能照着这句话解释，所以这句话的措辞本身就是行为的一部分。
+    """
+    monkeypatch.delenv("JINA_API_KEY", raising=False)
+    out = asyncio.run(glb.GeminiLiveBridge._search_web(None, "天星小轮 停航"))
+    assert "error" in out
+    assert "凭据" in out["error"], f"错话说得不对: {out}"
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """够用的 httpx.AsyncClient 替身：记下请求，回一份固定 payload。"""
+
+    last_url = None
+    last_headers = None
+    payload = {"data": []}
+    raises = None
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, headers=None):
+        type(self).last_url = url
+        type(self).last_headers = headers
+        if type(self).raises:
+            raise type(self).raises
+        return _FakeResp(type(self).payload)
+
+
+def test_search_web_truncates_to_what_a_person_can_listen_to(monkeypatch):
+    """正向 —— 结果要截到「念得完」的量：最多 5 条、摘要最多 200 字。
+
+    这是给耳朵的，不是给 agent 读的。不截的话模型要么念三分钟、
+    要么自己挑一条却不说自己挑过 —— 后者更糟。
+    """
+    monkeypatch.setenv("JINA_API_KEY", "fake-key-not-a-secret")
+    _FakeClient.raises = None
+    _FakeClient.payload = {
+        "data": [
+            {"title": f"标题{i}", "url": f"https://e.example/{i}", "description": "长" * 500}
+            for i in range(10)
+        ]
+    }
+    monkeypatch.setattr(glb.httpx, "AsyncClient", _FakeClient)
+
+    out = asyncio.run(glb.GeminiLiveBridge._search_web(None, "天星小轮 八号风球"))
+    assert len(out["results"]) == glb._JINA_MAX_RESULTS, f"没截条数: {len(out['results'])}"
+    assert all(
+        len(r["summary"]) <= glb._JINA_DESC_CHARS for r in out["results"]
+    ), "摘要没截长度"
+    # 搜索词必须真的进了 URL（编码后）。写错这一步的表现是「每次都搜同一个东西」。
+    assert "%E5%A4%A9%E6%98%9F" in _FakeClient.last_url, _FakeClient.last_url
+    # 只要摘要不要正文 —— 这个头没带上，那 5 秒会变成十几秒。
+    assert _FakeClient.last_headers.get("X-Respond-With") == "no-content"
+
+
+def test_search_web_tells_empty_apart_from_broken(monkeypatch):
+    """正向 —— 「一条都没搜着」不能长得跟「出错了」一样。
+
+    两者模型该说的话不同：前者换个词再来，后者别再试了。
+    合并成一个 error 会让它对着一次真实的空结果反复重试，每次静音五秒。
+    """
+    monkeypatch.setenv("JINA_API_KEY", "fake-key-not-a-secret")
+    _FakeClient.raises = None
+    _FakeClient.payload = {"data": []}
+    monkeypatch.setattr(glb.httpx, "AsyncClient", _FakeClient)
+
+    out = asyncio.run(glb.GeminiLiveBridge._search_web(None, "zzzz 不存在的东西"))
+    assert "error" not in out, "把空结果说成了出错"
+    assert out["results"] == []
+
+
+@pytest.mark.parametrize(
+    "exc", [glb.httpx.ReadTimeout("slow"), RuntimeError("something else")]
+)
+def test_search_web_never_raises(monkeypatch, exc):
+    """负向 —— 炸了也得回 dict。
+
+    **抛出去的后果不是「这次搜索失败」**：模型在同步等这条 tool response
+    （3.1 的 function calling 是阻塞的），等不到就永远不开口，用户听到的是死机。
+    所以超时和意外异常两条路都要压。
+    """
+    monkeypatch.setenv("JINA_API_KEY", "fake-key-not-a-secret")
+    _FakeClient.raises = exc
+    monkeypatch.setattr(glb.httpx, "AsyncClient", _FakeClient)
+
+    out = asyncio.run(glb.GeminiLiveBridge._search_web(None, "随便搜点啥"))
+    _FakeClient.raises = None
+    assert isinstance(out, dict) and "error" in out
