@@ -22,7 +22,9 @@ python-dotenv
 # ---- Channels ----
 py-cord            # Discord
 PyNaCl             # Discord 语音 RTP 传输层加密 (py-cord[voice] extra, 缺了语音连不上)
-davey              # Discord 语音 DAVE E2EE 原生实现 (py-cord[voice] extra, 缺了被 4017 拒)
+davey              # Discord 语音 DAVE E2EE **发送端** (py-cord[voice] extra, 缺了被 4017 拒)
+dave.py            # Discord 语音 DAVE E2EE **接收端** — py-cord 只封了发送, 收音要靠它
+                   #   (discord_voice_sidecar.py:2325 懒导入; 缺了不报错, 静默降级成"能说不能听")
 lark-oapi          # 飞书 / Lark
 dingtalk-stream    # 钉钉
 
