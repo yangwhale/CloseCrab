@@ -263,6 +263,14 @@ _DAVE_REJOIN_COOLDOWN_S = float(os.environ.get("DAVE_REJOIN_COOLDOWN_S", "60"))
 _dave_unready_since = None   # ready 首次转 False 的 monotonic 时刻
 _dave_last_rejoin = 0.0      # 上次强制重连的 monotonic 时刻
 _dave_rejoin_n = 0           # 强制重连累计次数 (只用于日志)
+# 有人正在重建语音连接 —— 其它自愈路径这一轮全部让开。
+# 不是性能优化, 是正确性: 重连中途 vc.is_connected() 本来就是 False, 别的自愈看见
+# 会当成故障也去重连, 把正在进行的握手掐断。2026-09-11 02:50:27 实测: 守护循环刚
+# 断开准备重连, 心跳 (30s 一轮) 正好撞上, 于是
+#   02:50:30 我这条握手完成 → 02:50:31 心跳 Terminating voice handshake
+#   → ClientConnectionResetError: Cannot write to closing transport
+# 两个自愈单看都对, 合在一起互相击落。
+_voice_reconnecting = False
 
 # ── DAVE 后端总开关 (rollback 用) ──────────────────────────────────────────
 # True = 把 py-cord 的 DAVE 后端从 davey 换成 dave-py (接收路径能解出真文本)。
@@ -433,7 +441,7 @@ async def _voice_heartbeat(interval: float = 30.0):
     is_voice_connected=False 就回退飞书 ogg，Discord 静音。这个心跳就是兜底。
 
     """
-    global _autostart_done
+    global _autostart_done, _voice_reconnecting
     while True:
         try:
             await asyncio.sleep(interval)
@@ -444,8 +452,16 @@ async def _voice_heartbeat(interval: float = 30.0):
                 continue
             vc = bot.guilds[0].voice_client
             if vc is None or not vc.is_connected():
+                # 守护循环那边正在重建连接 —— 现在的「掉线」是它制造的中间态,
+                # 插一脚进去只会把它的握手掐断 (见 _voice_reconnecting 那段注释)。
+                if _voice_reconnecting:
+                    continue
                 log.warning("检测到 voice 掉线，尝试自动 rejoin 常驻频道…")
-                vc = await _ensure_connected()
+                _voice_reconnecting = True
+                try:
+                    vc = await _ensure_connected()
+                finally:
+                    _voice_reconnecting = False
                 if vc is not None:
                     log.info("voice 自动 rejoin 成功")
                 else:
@@ -2816,6 +2832,52 @@ def _install_receive_probe():
         log.exception("opus _decode_packet FEC+兜底挂载失败")
 
 
+def _live_voice_client():
+    """py-cord 眼里当前真正活着的那条语音连接。**这是单一来源。**
+
+    模块全局 ``_listen_vc`` 只是守护循环手里的一份拷贝。每次重连
+    (``ch.connect()``) 都会造一个新的 VoiceClient 挂到 ``guild.voice_client``,
+    **没有任何代码回写 _listen_vc** —— 于是它成了指向尸体的悬空引用, 而所有
+    自愈逻辑都在看它。表现就是「重连之后只能说不能听, 直到进程重启」。
+    """
+    bot = _sidecar_bot
+    if bot is None or not bot.guilds:
+        return None
+    vc = bot.guilds[0].voice_client
+    return vc if vc is not None and vc.is_connected() else None
+
+
+def _channel_human_ids(vc) -> set:
+    """当前语音频道里的真人 uid 集合 (排除自己和所有 bot)。
+
+    voice_states 里会混入其它队友 bot (如 tianmaojingling), py-cord 还可能
+    "Skipping member" 根本解析不出它们 —— 解析不出的一律不算真人。
+    """
+    ids = set()
+    ch = getattr(vc, "channel", None)
+    if ch is None:
+        return ids
+    bot_id = None
+    try:
+        bot_id = vc.guild.me.id
+    except Exception:
+        pass
+    for m in (getattr(ch, "members", None) or []):
+        if not getattr(m, "bot", False) and m.id != bot_id:
+            ids.add(m.id)
+    for uid in (getattr(ch, "voice_states", None) or {}).keys():
+        if uid == bot_id:
+            continue
+        try:
+            m = ch.guild.get_member(uid)
+        except Exception:
+            m = None
+        if m is None or getattr(m, "bot", False):
+            continue
+        ids.add(uid)
+    return ids
+
+
 async def _force_dave_rejoin(reason: str) -> bool:
     """强制重建整条 Discord 语音连接: 停录 → 断开 → 重连 → 重新开录。
 
@@ -2826,46 +2888,59 @@ async def _force_dave_rejoin(reason: str) -> bool:
        照守护循环里「录音被冲垮后重启」那条路自己换 sink 重新 start_recording。
     """
     global _listen_vc, _stt_sink, _listen_restart_n, _listen_ok_since, _dave_rejoin_n
+    global _voice_reconnecting
     _dave_rejoin_n += 1
     log.warning("强制重连语音 (第 %d 次): %s", _dave_rejoin_n, reason)
     old = _listen_vc
+    # 整个动作期间挂牌, 否则 30 秒一轮的心跳会在这中间看见「掉线」也去重连,
+    # 两条握手互相 Terminating。**必须 try/finally**, 中途抛异常留下这个牌子
+    # 就等于把心跳这条自愈永久关掉了。
+    _voice_reconnecting = True
     try:
-        if old is not None and old.is_recording():
-            old.stop_recording()
-    except Exception:
-        log.exception("重连前停录音失败 (继续断开)")
-    try:
-        if old is not None:
-            await old.disconnect(force=True)
-    except Exception:
-        log.exception("重连前断开失败 (继续重连)")
-    # 给 Discord 一点时间把「bot 离开频道」这件事广播出去 —— 逼出成员变更才是
-    # 整个动作的意义所在, 断完立刻回去有概率被当成同一个会话。
-    await asyncio.sleep(1.5)
-    vc = await _ensure_connected()
-    if vc is None:
-        log.error("强制重连语音失败: 连不回频道, 等下一轮冷却后再试")
-        return False
-    _listen_vc = vc
-    _listen_restart_n = 0
-    _listen_ok_since = None
-    try:
-        sink = _get_stt_sink_class()()
-        sink.vc = vc
-        _stt_sink = sink
-        vc.start_recording(sink, _on_recording_done)
-    except Exception:
-        log.exception("强制重连后重新开录失败 (守护循环下一轮会再试)")
-        return False
-    log.info("强制重连语音完成, 已重新开录")
-    return True
+        try:
+            if old is not None and old.is_recording():
+                old.stop_recording()
+        except Exception:
+            log.exception("重连前停录音失败 (继续断开)")
+        try:
+            if old is not None:
+                await old.disconnect(force=True)
+        except Exception:
+            log.exception("重连前断开失败 (继续重连)")
+        # 给 Discord 一点时间把「bot 离开频道」这件事广播出去 —— 逼出成员变更才是
+        # 整个动作的意义所在, 断完立刻回去有概率被当成同一个会话。
+        await asyncio.sleep(1.5)
+        vc = await _ensure_connected()
+        if vc is None:
+            # 手里那条已经断了、也没连回来。**必须把 _listen_vc 清掉**: 留着它
+            # 守护循环会一路 `not is_connected() → continue` 空转到进程结束,
+            # 而心跳只看 guild.voice_client, 不会发现这边聋了。清成 None 之后
+            # 守护下一轮会去认领 py-cord 那条活着的连接。
+            _listen_vc = None
+            log.error("强制重连语音失败: 连不回频道, 已清空句柄等守护下一轮认领")
+            return False
+        _listen_vc = vc
+        _listen_restart_n = 0
+        _listen_ok_since = None
+        try:
+            sink = _get_stt_sink_class()()
+            sink.vc = vc
+            _stt_sink = sink
+            vc.start_recording(sink, _on_recording_done)
+        except Exception:
+            log.exception("强制重连后重新开录失败 (守护循环下一轮会再试)")
+            return False
+        log.info("强制重连语音完成, 已重新开录")
+        return True
+    finally:
+        _voice_reconnecting = False
 
 
 async def _ssrc_infer_loop(period: float = 0.3):
     """后台守护: ① 录音被 corrupted stream 冲垮时自动重启; ② ssrc 自动推断兜底
     (频道唯一真人时, 把传输层实收的未映射 ssrc 直接 _add_ssrc, 不靠 speaking 事件)。
     含诊断日志 (dave ready/epoch + ssrc_map + hits + 实收 ssrc), 便于现场定位。"""
-    global _stt_sink, _listen_restart_n, _listen_ok_since
+    global _stt_sink, _listen_restart_n, _listen_ok_since, _listen_vc
     global _dave_unready_since, _dave_last_rejoin
     log.info("ssrc 推断 + 录音守护循环已启动")
     diag_n = 0
@@ -2874,6 +2949,33 @@ async def _ssrc_infer_loop(period: float = 0.3):
         while True:
             await asyncio.sleep(period)
             try:
+                # ── 手里的句柄是死的, 而 py-cord 有一条活的 → 认领它 ──────────
+                # 每次重连都新造一个 VoiceClient 挂到 guild.voice_client, 而
+                # _voice_heartbeat 的 rejoin **从不回写 _listen_vc**。于是重连之后
+                # 守护还攥着上一条断掉的连接: 它不在录音 → 下面那个分支
+                # `not is_connected() → continue` → 每 0.3 秒空转一次, 直到进程结束。
+                # 心跳那边只看 guild.voice_client, 看到的是新连接, 一切正常。
+                # **两边都没错, 但没人负责把新连接交给守护** —— 这就是「掉线重连过一次
+                # 以后只能说不能听」的成因, 2026-09-11 02:50 实测钉在这个状态五分钟。
+                # 条件写得很窄 (自己这条确实断了 + 那条确实连着) 是故意的: 握手途中
+                # guild.voice_client 会短暂指向半成品, 急着认领会在没建好的连接上开录。
+                if (_listen_active and not _voice_reconnecting
+                        and (_listen_vc is None or not _listen_vc.is_connected())):
+                    live = _live_voice_client()
+                    if live is not None and live is not _listen_vc:
+                        log.warning("守护手里的语音连接已失效, 认领 py-cord 当前那条并重新开录")
+                        _listen_vc = live
+                        _listen_restart_n = 0
+                        _listen_ok_since = None
+                        try:
+                            new_sink = _get_stt_sink_class()()
+                            new_sink.vc = live
+                            _stt_sink = new_sink
+                            live.start_recording(new_sink, _on_recording_done)
+                            log.info("已在新的语音连接上恢复收音")
+                        except Exception:
+                            log.exception("认领新连接后开录失败 (下一轮再试)")
+                        continue
                 # 录音被冲垮后自动重启 (新 sink), 等 ssrc 映射好就能正常收
                 if _listen_active and _listen_vc is not None and not _listen_vc.is_recording():
                     _listen_ok_since = None
@@ -2960,8 +3062,14 @@ async def _ssrc_infer_loop(period: float = 0.3):
                 # 为什么不走「再 reinit 一次重发 key package」那条轻的路: 02:42:25 那次
                 # 正是刚 reinit 完、key package 刚发出去就再没下文。重放同一个动作没有
                 # 任何理由会有不同结果。**成员变更是目前唯一被证实能把树建回来的事件。**
-                if _listen_active and vc is not None and dave is not None:
-                    if getattr(dave, "ready", False) or not vc.is_connected():
+                #
+                # **必须有真人在场才算故障。** 房间里只有 bot 自己时根本没有 MLS
+                # 群要建, ready=False 是空闲态的正常值 —— 实测 Chris 不在的那一小时
+                # 里 (诊断#620 / #4610 / #8610) 它一直是 False。不加这条判据, bot
+                # 会在没人的时候每 60 秒把语音连接掐断重连一次, 比原来的病还糟。
+                if _listen_active and vc is not None and dave is not None and not _voice_reconnecting:
+                    if (getattr(dave, "ready", False) or not vc.is_connected()
+                            or not _channel_human_ids(vc)):
                         _dave_unready_since = None
                     else:
                         _now = time.monotonic()
@@ -2983,32 +3091,11 @@ async def _ssrc_infer_loop(period: float = 0.3):
                     if vc is not None and dave is not None and getattr(dave, "ready", False):
                         known = set(cur_map.keys())
                         unknown = seen - known
-                        bot_id = None
-                        try:
-                            bot_id = vc.guild.me.id
-                        except Exception:
-                            pass
-                        human_ids = set()
-                        ch = getattr(vc, "channel", None)
-                        if ch is not None:
-                            for m in (getattr(ch, "members", None) or []):
-                                if not getattr(m, "bot", False) and m.id != bot_id:
-                                    human_ids.add(m.id)
-                            for uid in (getattr(ch, "voice_states", None) or {}).keys():
-                                if uid == bot_id:
-                                    continue
-                                # voice_states 里会混入其它队友 bot (如 tianmaojingling),
-                                # py-cord 还可能 "Skipping member" 解析不出它们。无法解析的
-                                # 成员或 .bot=True 一律不算真人 —— 否则会被算进"未映射真人",
-                                # 让 len(unmapped_humans)>1, 唯一真人的 ssrc 永远绑不上 →
-                                # decrypt_rtp 兜底每帧塞 OPUS_SILENCE → RMS=0 → VAD 永不断句。
-                                try:
-                                    m = ch.guild.get_member(uid)
-                                except Exception:
-                                    m = None
-                                if m is None or getattr(m, "bot", False):
-                                    continue
-                                human_ids.add(uid)
+                        # 解析不出的成员或 .bot=True 一律不算真人 —— 否则会被算进
+                        # "未映射真人", 让 len(unmapped_humans)>1, 唯一真人的 ssrc
+                        # 永远绑不上 → decrypt_rtp 兜底每帧塞 OPUS_SILENCE → RMS=0
+                        # → VAD 永不断句。判据细节见 _channel_human_ids。
+                        human_ids = _channel_human_ids(vc)
                         # 唯一未映射的真人 → 唯一未映射的 ssrc。比「频道全局唯一真人」更
                         # 鲁棒: 房里有 2 人但一人已映射时, 剩下的实收 ssrc 必属另一人。
                         mapped_uids = set(cur_map.values())
