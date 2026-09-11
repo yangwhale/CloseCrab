@@ -186,8 +186,8 @@ def test_shape_separates_success_from_failure():
     s._record_dave_result(True, False, bytes.fromhex("dead" "fafa"))
     s._record_dave_result(False, True, bytes.fromhex("dead" "0001"), ValueError("x"))
     line = s._dave_shape_summary()
-    assert "无扩展头/尾fafa/成功×1" in line, line
-    assert "有扩展头/尾0001/失败×1" in line, line
+    assert "无扩展头/无填充/尾fafa/成功×1" in line, line
+    assert "有扩展头/无填充/尾0001/失败×1" in line, line
 
 
 def test_shape_summary_keeps_both_sides_visible():
@@ -289,3 +289,60 @@ def test_missing_decryptor_raises_not_zeros():
     except ValueError:
         return
     raise AssertionError("查不到 decryptor 时静默返回了，不许这样")
+
+
+# ─── RTP 尾部填充 ────────────────────────────────────────────────────────────
+#
+# 病因：DAVE 的「我是加密帧」标记在**帧尾**，RTP 填充盖在它上面，marker 就
+# 找不着了 → UnencryptedWhenPassthroughDisabled → 换成静音帧 → 咯楞。
+# py-cord 解析了 packet.padding 却从不切，因为它那条路直接喂 Opus，Opus 忍得了。
+
+def test_padding_is_stripped_when_p_bit_set():
+    """P 位置起 + 合法长度 → 按最后一个字节切掉。
+
+    观测到的真实形态：末 17 字节全是 0x11（0x11 = 17，含它自己）。
+    """
+    body = b"DAVEFRAME\xfa\xfa"
+    pkt = body + bytes([0x11]) * 0x11
+    assert s._strip_rtp_padding(True, pkt) == body
+
+
+def test_no_strip_when_p_bit_clear():
+    """**护栏**：P 位没置起就一个字节都不许动。
+
+    这是「不猜」那条线。尾部有一串相同字节的合法密文是可能存在的，
+    按形状猜着切会把好帧切坏 —— 而切坏的表现同样是一帧静音，
+    跟没切时一模一样，等于给自己埋一个查不出来的雷。
+    """
+    pkt = b"CIPHER" + bytes([0x11]) * 0x11
+    assert s._strip_rtp_padding(False, pkt) == pkt
+
+
+def test_pad_len_zero_does_not_wipe_payload():
+    """**护栏**：pad_len=0 是非法值，而且踩 Python 的 `x[:-0] == b''` 陷阱。
+
+    不挡这一下，一个畸形包会让整帧变成空字节 —— 下游看到的是「解密出 0 字节」，
+    完全不像「填充算错了」。
+    """
+    pkt = b"CIPHERTEXT\x00"
+    assert s._strip_rtp_padding(True, pkt) == pkt
+
+
+def test_pad_len_longer_than_payload_is_ignored():
+    """**护栏**：越界说明 P 位不可信，原样放行比切坏强。"""
+    pkt = b"\x05\xff"          # 说填了 255 字节，实际只有 2 字节
+    assert s._strip_rtp_padding(True, pkt) == pkt
+
+
+def test_empty_payload_is_safe():
+    assert s._strip_rtp_padding(True, b"") == b""
+
+
+def test_shape_key_records_padding_flag():
+    """填充这一维要进分桶 —— 不然改完还是不知道是不是它治好的。"""
+    _reset_reasons()
+    s._record_dave_result(True, True, b"\xfa\xfa", padded=True)
+    s._record_dave_result(True, True, b"\xfa\xfa", padded=False)
+    line = s._dave_shape_summary()
+    assert "有扩展头/有填充/尾fafa/成功×1" in line, line
+    assert "有扩展头/无填充/尾fafa/成功×1" in line, line

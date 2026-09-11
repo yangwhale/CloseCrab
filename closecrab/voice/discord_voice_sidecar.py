@@ -371,12 +371,54 @@ _dave_fail_reasons: "collections.Counter[str]" = collections.Counter()
 _dave_shape_stats: "collections.Counter[str]" = collections.Counter()
 
 
+class DavePyDecryptFailed(Exception):
+    """dave-py 的 Decryptor 返回了 None。
+
+    单独立一个类型是为了在账本的「失败原因」栏里跟 davey 的 `DecryptionFailed`
+    区分开 —— 两个后端并排比时，混成一个 `Exception` 就分不清是谁在报。
+    """
+
+
+def _strip_rtp_padding(padding: bool, payload: bytes) -> bytes:
+    """P 位置起时切掉 RTP 尾部填充，再交给 DAVE。
+
+    RTP 头第一个字节的 **P 位**（`0b00100000`）表示「这个包尾部有填充」，
+    最后一个字节写着填了多少字节（**含它自己**，RFC 3550 §5.1）。
+
+    **py-cord 解析了 `packet.padding` 但从来不切** —— `packets/rtp.py:100`
+    只赋了个值，全仓库没有第二处引用。它原来那条路把 payload 直接喂 Opus
+    解码器，Opus 能容忍尾巴上的垃圾，所以不切也没人发现。**DAVE 容忍不了**：
+    它的「我是加密帧」标记压在**帧尾**，填充盖在标记上面，marker 就找不着了，
+    于是报 `UnencryptedWhenPassthroughDisabled` —— 字面意思正是
+    「尾部没找到标记」。
+
+    实测失败帧的末 16 字节全是同一个值，而那个值恰好是填充长度
+    （`0x11`→17 个 0x11，`0x2f`→47 个 0x2f）—— PKCS#7 式填充的教科书形态。
+    **密文不可能长成这样**，这是判定的关键证据。
+
+    只在 P 位置起时动手，长度还要落在合法区间。**不做「尾部有连续相同字节
+    就切」的猜测** —— 那会把恰好如此的合法密文切坏，而切坏的表现同样是一帧
+    静音，两种病因在日志里长得一模一样，等于自己给自己埋雷。
+    """
+    if not padding or not payload:
+        return payload
+    pad_len = payload[-1]
+    if pad_len < 1 or pad_len > len(payload):
+        return payload          # 越界 = P 位不可信，原样放行比切坏强
+    return payload[:-pad_len]
+
+
 def _record_dave_result(
-    ok: bool, extended: bool, payload: bytes | None, exc: BaseException | None = None
+    ok: bool,
+    extended: bool,
+    payload: bytes | None,
+    exc: BaseException | None = None,
+    padded: bool = False,
 ) -> None:
     tail = payload[-2:].hex() if payload and len(payload) >= 2 else "??"
     key = (
         f"{'有扩展头' if extended else '无扩展头'}"
+        f"/{'有填充' if padded else '无填充'}"
         f"/尾{tail}/{'成功' if ok else '失败'}"
     )
     with _dave_fail_lock:
@@ -2834,7 +2876,21 @@ class DaveSessionAdapter:
                     st.decrypt_attempts)
             except Exception:
                 log.exception("[DAVE深诊] 取 stats 失败")
-        return b"\xf8\xff\xfe"  # Opus 静音帧: 不被 py-cord 过滤，解码出静音替代丢帧空洞
+        # **抛，不要返回静音帧。**
+        #
+        # 这个 adapter 冒充的是 davey，而 davey 失败时是**抛异常**的
+        # (`DecryptionFailed`)。原来这里返回一帧 Opus 静音，是想「不留空洞」，
+        # 结果把 davey 的契约破坏了：调用方 (py-cord 的 `decrypt_rtp` 和我们
+        # 自己的 `_probed`) 都是靠捕获异常来判失败的，收到 bytes 就当成功。
+        #
+        # 后果不是少一行日志 —— 是**两个账本互相矛盾**：探针侧打「失败 0」，
+        # dave-py 自己的 stats 打「fail=29」。当时我按探针那栏得出「dave-py
+        # 零失败」，差点据此判定官方库的病因，实际两边差着 29 帧。
+        #
+        # 静音替代照做，只是挪到调用方 —— 那里本来就有这段逻辑，而且是
+        # davey 路径和 dave-py 路径共用的一份。
+        raise DavePyDecryptFailed(
+            f"dave-py decrypt 返回 None (第{n}次, in={len(bytes(data))}B)")
 
     # ── 发 (发送路径!!): 任何异常回落明文, 绝不崩 TTS ──
     def encrypt_opus(self, data):
@@ -3014,12 +3070,18 @@ def _install_receive_probe():
                 dave = getattr(state, "dave_session", None)
                 if dave is not None and getattr(dave, "ready", False):
                     raw_payload = self._decryptor_rtp(packet)
+                    # RTP 尾部填充必须在 DAVE 之前切掉 —— 它盖在帧尾的
+                    # 「我是加密帧」标记上面。py-cord 解析了 P 位却从不切，
+                    # 因为它原来那条路直接喂 Opus，而 Opus 忍得了。
+                    padded = bool(getattr(packet, "padding", False))
+                    raw_payload = _strip_rtp_padding(padded, raw_payload)
                     uid = state.ssrc_user_map.get(packet.ssrc)
                     if uid:
                         try:
                             import davey as _davey_mod
                             plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
-                            _record_dave_result(True, packet.extended, raw_payload)
+                            _record_dave_result(True, packet.extended, raw_payload,
+                                                padded=padded)
                         except Exception as exc:
                             # **这一行就是「有声但咯楞」的制造现场。** 解密失败被吞掉,
                             # 换成一帧静音接着跑 —— 上层完全看不出异常, 只听得出卡顿。
@@ -3028,7 +3090,8 @@ def _install_receive_probe():
                             # 成功那条也要记 —— **失败计数单独看是没有信息的**。
                             # 「165 帧失败」既可能是全体失败也可能是一半失败,
                             # 只有跟成功帧的形状并排放着才判得出差异在哪。
-                            _record_dave_result(False, packet.extended, raw_payload, exc)
+                            _record_dave_result(False, packet.extended, raw_payload, exc,
+                                                padded=padded)
                             plain = None
                         packet.decrypted_data = plain if plain else OPUS_SILENCE
                     else:
