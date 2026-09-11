@@ -289,6 +289,31 @@ _dave_rejoin_n = 0           # 强制重连累计次数 (只用于日志)
 # 两个自愈单看都对, 合在一起互相击落。
 _voice_reconnecting = False
 
+# ── 「树是好的、可就是没声」自愈 (第二条判据) ───────────────────────────────
+# 上面那条只看 `dave.ready`。2026-09-11 18:10 那次双向不通，**ready 一直是 True、
+# epoch=1**，所以上面那条永远为假、一次都没触发过 —— 不是自愈坏了，是它监视的是
+# 「树建没建起来」，而这次树好好的，坏的是别处：ssrc 对不上。
+#
+#   ssrc_map={10468:bunny, 10616:Chris}   实收ssrc=[10356, 770909262, ...]
+#   hits=0
+#
+# 映射表里那两个门牌号一个都没实收到，10356 是 Chris 换掉的旧号。包进来了，认不出
+# 是谁发的，全被当陌生人丢掉，一帧 PCM 都到不了 sink。
+#
+# **判据不能是「hits 长时间不涨」** —— 没人说话时它本来就不涨，那样会在安静的房间
+# 里每分钟掐一次线，比原来的病还糟（上面 `_channel_human_ids` 那条判据就是为了躲
+# 同一个坑加的）。要的是一个「此刻确实该有声音」的独立信号。
+#
+# 用 Discord 的 **speaking 事件**（voice websocket op 5）：它由服务端下发，说明
+# 「这个人开始发音频了」，跟我们的 UDP 收没收到、解没解得开完全无关。于是：
+#
+#   服务端说他在说话  +  过了宽限期 hits 一帧没涨  →  这条路是聋的
+#
+# 宽限期取 5 秒: 人说一个字就够 20 帧，5 秒还是 0 帧不可能是抖动。
+_DEAF_GRACE_S = float(os.environ.get("VOICE_DEAF_GRACE_S", "5"))
+_speak_start_ts = 0.0        # 最近一次真人被通报「开始说话」的 monotonic 时刻
+_speak_start_hits = None     # 那一刻 sink.hits() 的值; None = 没有待判的说话事件
+
 # ── DAVE 后端总开关 (rollback 用) ──────────────────────────────────────────
 # True = 把 py-cord 的 DAVE 后端从 davey 换成 dave-py (接收路径能解出真文本)。
 # 为什么换: davey 不暴露逐 MLS-epoch 的 key-ratchet API, 接收端无法按 epoch 正确驱动
@@ -3258,6 +3283,60 @@ def _channel_human_ids(vc) -> set:
     return ids
 
 
+def _note_speaking(member, state, hits: int, now: float) -> bool:
+    """服务端通报「某人开始说话」时，记下时刻和当时的 hits。
+
+    返回是否真的记了 —— 只为让测试能直接断言过滤逻辑，调用方不看返回值。
+
+    过滤掉三类不算数的通报：
+      - `member is None`：py-cord 查不到成员时会传 None，无从判断是不是 bot。
+      - `member.bot`：**bot 自己发音也会被通报**。不滤掉的话 bunny 每次 TTS
+        都会给自己记一笔「有人在说话」，然后因为自己的声音进不来 hits 而误判聋，
+        在完全健康的连接上每 5 秒重连一次。
+      - `speaking=0`（停止说话）：那是结束通报，不是开始。
+
+    `state` 可能是 `SpeakingState` 也可能是**裸整数** —— Discord 下发的是位域
+    (voice|priority = 5)，`try_enum` 认不出组合值时就原样返回 int。另外
+    **`bool(SpeakingState.none)` 是 True**（标准 Enum 成员恒真），拿 `if state`
+    判会把「停止说话」当成「开始说话」，所以必须取整数值。
+    """
+    global _speak_start_ts, _speak_start_hits
+    if member is None or getattr(member, "bot", False):
+        return False
+    try:
+        flags = int(state)
+    except (TypeError, ValueError):
+        return False
+    if flags == 0:
+        return False
+    _speak_start_ts = now
+    _speak_start_hits = hits
+    return True
+
+
+def _deaf_verdict(now: float, hits: int) -> bool:
+    """服务端说有人在说话，宽限期过完 hits 一帧没涨 → 这条接收路是聋的。
+
+    hits 一涨立刻销案（`_speak_start_hits = None`），所以正常说话不会积累出误判；
+    没有待判的说话事件时也恒为 False —— 安静的房间不算故障。
+
+    **销案值用 `None` 不用 `-1`** 是故意的：`-1` 会让下面那句比较变成
+    `hits > -1`，对任何真实 hits 都成立，于是「没有待判事件」这条护栏即使被
+    删掉行为也不变 —— 一条删了没人发现的护栏等于没有。`None` 让它变成
+    TypeError，删掉就有测试变红。
+    """
+    global _speak_start_hits
+    if _speak_start_hits is None:
+        return False
+    if hits > _speak_start_hits:
+        _speak_start_hits = None        # 声音进来了，销案
+        return False
+    if now - _speak_start_ts < _DEAF_GRACE_S:
+        return False                     # 还在宽限期内，再等等
+    _speak_start_hits = None             # 判过一次就销案，交给冷却限流
+    return True
+
+
 async def _force_dave_rejoin(reason: str) -> bool:
     """强制重建整条 Discord 语音连接: 停录 → 断开 → 重连 → 重新开录。
 
@@ -3477,6 +3556,28 @@ async def _ssrc_infer_loop(period: float = 0.3):
                                     "DAVE ready 连续 %.0f 秒为 False (MLS 树没建起来, "
                                     "这条连接收不到也发不出加密音频)" % _bad_for)
                                 continue
+
+                # ── 第二条判据: 树是好的, 可就是一帧都进不来 ──────────────
+                # 上面那条只在 ready=False 时动手。2026-09-11 18:10 那次
+                # ready=True epoch=1 却双向不通 (ssrc 对不上, 见 _DEAF_GRACE_S
+                # 处的现场记录), 上面那条一次都没触发 —— 它监视的是树, 不是声音。
+                #
+                # 这条改看结果: **服务端说有人在说话, 宽限期过完 hits 一帧没涨**。
+                # speaking 事件走 voice websocket, 跟 UDP 收没收到、解没解得开
+                # 完全无关, 所以它能把「真聋了」和「没人说话」分开 —— 后者根本
+                # 不会有这个事件, 判据恒为假。
+                if (_listen_active and vc is not None and not _voice_reconnecting
+                        and vc.is_connected()):
+                    if _deaf_verdict(time.monotonic(), cur_hits):
+                        _now = time.monotonic()
+                        if _now - _dave_last_rejoin >= _DAVE_REJOIN_COOLDOWN_S:
+                            _dave_last_rejoin = _now
+                            await _force_dave_rejoin(
+                                "服务端通报有人在说话, %.0f 秒内 hits 一帧没涨 "
+                                "(树是好的但这条接收路是聋的; ssrc_map=%s 实收=%s)"
+                                % (_DEAF_GRACE_S, cur_map, sorted(seen)))
+                            continue
+
                 # ssrc 自动推断兜底: 频道唯一真人时, 传输层实收但未映射的 ssrc 必是那个真人
                 try:
                     if vc is not None and dave is not None and getattr(dave, "ready", False):
@@ -3574,6 +3675,23 @@ def _build_bot(bot_name: str, guild_id: str = "", voice_channel_id: str = ""):
                 )
             except Exception:
                 log.exception("slash 命令注册失败 (guild=%s)", guild_id)
+
+    @bot.listen()
+    async def on_member_speaking_state_update(member, ssrc, state):
+        """「连着但聋」自愈的证据源 —— 服务端说这个人开始发音频了。
+
+        用 `@bot.listen()` 不是 `@bot.event`：后者是**覆盖**，会把同名的其它
+        处理器顶掉；listen 是追加，多个可以共存。
+
+        只记时刻和当时的 hits，判定在守护循环里做 —— 这里是 py-cord 的语音
+        接收线程回调，越轻越好，而且判定要跟宽限期一起看，本来就不该在事件里做。
+        """
+        try:
+            sink = _stt_sink
+            hits = sink.hits() if sink is not None else 0
+            _note_speaking(member, state, hits, time.monotonic())
+        except Exception:
+            log.debug("speaking 事件记账失败 (不影响主链路)", exc_info=True)
 
     @bot.event
     async def on_application_command_error(ctx, error):

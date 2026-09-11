@@ -346,3 +346,102 @@ def test_shape_key_records_padding_flag():
     line = s._dave_shape_summary()
     assert "有扩展头/有填充/尾fafa/成功×1" in line, line
     assert "有扩展头/无填充/尾fafa/成功×1" in line, line
+
+
+# ── 「连着但聋」第二条判据 ────────────────────────────────────────────────
+# 现场（2026-09-11 18:10）：ready=True epoch=1，双向不通，ssrc_map 里的门牌号
+# 一个都没实收到，hits=0。老判据只看 ready，永远不触发。
+
+
+class _Member:
+    def __init__(self, bot=False):
+        self.bot = bot
+
+
+class _State:
+    """SpeakingState 的替身。注意 **标准 Enum 成员恒真**，所以 none(0) 也是
+    truthy —— 这正是 `_note_speaking` 必须取 int 而不能 `if state` 的原因。"""
+    def __init__(self, value):
+        self.value = value
+
+    def __int__(self):
+        return self.value
+
+    def __bool__(self):
+        return True
+
+
+def _clear_speak():
+    s._speak_start_ts = 0.0
+    s._speak_start_hits = None
+
+
+def test_no_speaking_event_is_never_deaf():
+    """**护栏**：安静的房间不算故障。
+
+    没有这条，判据退化成「hits 长时间不涨」，会在没人说话时每分钟把语音连接
+    掐断重连一次 —— 比原来的病还糟。
+    """
+    _clear_speak()
+    assert s._deaf_verdict(now=1e9, hits=0) is False
+
+
+def test_speaking_then_no_hits_is_deaf():
+    _clear_speak()
+    assert s._note_speaking(_Member(), _State(1), hits=100, now=1000.0) is True
+    assert s._deaf_verdict(now=1000.0 + s._DEAF_GRACE_S - 0.1, hits=100) is False
+    assert s._deaf_verdict(now=1000.0 + s._DEAF_GRACE_S + 0.1, hits=100) is True
+
+
+def test_hits_growing_clears_the_case():
+    """声音进来了就销案 —— 说一句话不该留下一个待判的故障。"""
+    _clear_speak()
+    s._note_speaking(_Member(), _State(1), hits=100, now=1000.0)
+    assert s._deaf_verdict(now=1000.1, hits=101) is False
+    # 销案之后哪怕过了宽限期也不该再判
+    assert s._deaf_verdict(now=1000.0 + s._DEAF_GRACE_S + 5, hits=101) is False
+
+
+def test_bot_speaking_is_ignored():
+    """**护栏**：bot 自己发 TTS 也会被服务端通报。
+
+    不滤掉的话，bunny 每说一句话就给自己记一笔「有人在说话」，而自己的声音
+    永远不会进 hits —— 于是在一条完全健康的连接上每 5 秒重连一次。
+    """
+    _clear_speak()
+    assert s._note_speaking(_Member(bot=True), _State(1), hits=0, now=1000.0) is False
+    assert s._deaf_verdict(now=1e9, hits=0) is False
+
+
+def test_speaking_stop_is_ignored():
+    """**护栏**：speaking=0 是「说完了」，不是「开始说」。
+
+    `bool(SpeakingState.none)` 是 True，用 `if state` 判会把每次说话结束都
+    当成新的说话开始，宽限期后必然误判聋。
+    """
+    _clear_speak()
+    assert s._note_speaking(_Member(), _State(0), hits=0, now=1000.0) is False
+    assert s._deaf_verdict(now=1e9, hits=0) is False
+
+
+def test_unknown_member_is_ignored():
+    """member 解析不出来时无从判断是不是 bot，宁可漏判不可误判。"""
+    _clear_speak()
+    assert s._note_speaking(None, _State(1), hits=0, now=1000.0) is False
+    assert s._deaf_verdict(now=1e9, hits=0) is False
+
+
+def test_bitfield_speaking_state_is_accepted():
+    """Discord 下发的是位域，voice|priority=5 不是枚举成员，try_enum 会原样
+    返回裸 int —— 认不出就漏判，那次真聋了也不会自愈。"""
+    _clear_speak()
+    assert s._note_speaking(_Member(), 5, hits=0, now=1000.0) is True
+
+
+def test_verdict_fires_only_once_per_event():
+    """判过一次就销案，限流交给冷却 —— 否则守护每 0.3 秒一轮会连着判几十次。"""
+    _clear_speak()
+    s._note_speaking(_Member(), _State(1), hits=0, now=1000.0)
+    late = 1000.0 + s._DEAF_GRACE_S + 1
+    assert s._deaf_verdict(now=late, hits=0) is True
+    assert s._deaf_verdict(now=late + 1, hits=0) is False
