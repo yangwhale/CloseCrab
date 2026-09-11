@@ -285,7 +285,21 @@ _voice_reconnecting = False
 # + Encryptor, 正好补上 ratchet API。
 # ⚠️ 这条线**同时碰发送加密** (client.py:_get_voice_packet 调 session.encrypt_opus),
 # 故换错会哑掉 TTS。万一发送坏了: 把这个置 False + 重启即回滚到纯 davey 稳定版。
-_DAVE_PY_BACKEND_ENABLED = True  # 2026-06-06: 重新启用 dave-py per-SSRC Decryptor (跟 endcord 一致)
+#
+# 2026-09-11 关掉, 回到官方 davey。理由是上面那条「davey 不暴露 ratchet API」的
+# 前提**今天已经不成立**:
+#   - davey 0.1.6 的 DaveSession 直接给 decrypt(user_id, media_type, data),
+#     ratchet 在库内部按 user_id 自己管, 不需要调用方逐 epoch 驱动 ——
+#     缺的不是能力, 是当年那个版本没把它包进去。
+#   - py-cord 2.8.1 的接收器 (voice/receive/reader.py:290 decrypt_rtp) 本来就
+#     调 dave.decrypt 解每个 RTP 包。**接收在上游已经是原生支持的了。**
+# 而这个 monkeypatch 的代价现在看得见: 递钥匙胚子 / 收欢迎信 / 提交这一整套 MLS
+# 握手全走第三方实现, 屋里的真人用官方实现。bunny 今天整天 epoch=None ——
+# 一个 MLS 组都没进去过, 三次强制重连也没改变 (04:08 / 04:37 / 06:31)。
+# 先证伪这条: 关掉补丁看 epoch 会不会变成数字。
+#
+# 坏了就 `export DAVE_PY_BACKEND=1` 重启回滚, 不必改代码。
+_DAVE_PY_BACKEND_ENABLED = os.environ.get("DAVE_PY_BACKEND", "0") == "1"
 
 # ── Opus FEC 丢包恢复开关 ──────────────────────────────────────────────
 # True = 检测 RTP 序列号 gap 时用 decode(fec=True) 恢复丢失帧。
