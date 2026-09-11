@@ -22,9 +22,13 @@ python-dotenv
 # ---- Channels ----
 py-cord            # Discord
 PyNaCl             # Discord 语音 RTP 传输层加密 (py-cord[voice] extra, 缺了语音连不上)
-davey              # Discord 语音 DAVE E2EE **发送端** (py-cord[voice] extra, 缺了被 4017 拒)
-dave.py            # Discord 语音 DAVE E2EE **接收端** — py-cord 只封了发送, 收音要靠它
-                   #   (discord_voice_sidecar.py:2325 懒导入; 缺了不报错, 静默降级成"能说不能听")
+davey              # Discord 语音 DAVE E2EE **收发都靠它** (py-cord[voice] extra, 缺了被 4017 拒)
+                   #   2026-09-11 定案: 官方库就够了, 收发双向都由它扛。
+dave.py            # 应急后备, 默认不启用 (DAVE_PY_BACKEND=1 才接管)。
+                   #   历史: 06~09 月一度是唯一能收音的实现, 但那个判断错了 ——
+                   #   真因是 RTP 尾部填充没切, 跟用哪个库无关。整段编年史在
+                   #   discord_voice_sidecar.py 的 _DAVE_PY_BACKEND_ENABLED 注释里。
+                   #   留着是因为语音链路脆, 一键回滚比重新装包快。
 lark-oapi          # 飞书 / Lark
 dingtalk-stream    # 钉钉
 
