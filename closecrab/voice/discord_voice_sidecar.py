@@ -2814,109 +2814,130 @@ async def _ssrc_infer_loop(period: float = 0.3):
     try:
         while True:
             await asyncio.sleep(period)
-            # 录音被冲垮后自动重启 (新 sink), 等 ssrc 映射好就能正常收
-            if _listen_active and _listen_vc is not None and not _listen_vc.is_recording():
-                _listen_ok_since = None
-                # 掉线重连期间**一次都不要试**。这个守护 0.3 秒一轮，而 voice 握手
-                # 要一秒多 —— 不挡的话它会在那个窗口里连开五六枪，每枪都被
-                # start_recording 以 "not connected to a voice channel" 顶回来，
-                # 白白把崩溃重启的配额烧光。2026-09-08 就是这么哑的：13:00:19
-                # 掉线，1.2 秒内失败 5 次撞满 8 次上限；13:00:51 重连成功后守护
-                # 已被自己的计数器锁死，此后只能说不能听，日志里一句错都没有。
-                if not _listen_vc.is_connected():
-                    continue
-                if _listen_restart_n < _LISTEN_RESTART_MAX:
-                    _listen_restart_n += 1
-                    try:
-                        new_sink = _get_stt_sink_class()()
-                        new_sink.vc = _listen_vc
-                        _stt_sink = new_sink
-                        _listen_vc.start_recording(new_sink, _on_recording_done)
-                        log.info("录音已自动重启 (第 %d 次)", _listen_restart_n)
-                    except Exception:
-                        log.exception("录音自动重启失败")
-                elif _listen_restart_n == _LISTEN_RESTART_MAX:
-                    # 只喊一次，别刷屏。没这行的话「预算耗尽」是完全静默的。
-                    _listen_restart_n += 1
-                    log.error("录音重启已达上限 %d 次，放弃自动恢复 —— "
-                              "机器人从现在起只能说不能听，需要 /listen 或重启进程",
-                              _LISTEN_RESTART_MAX)
-                continue
-            # 录着且连着 —— 稳定够久就把重启预算还回去 (见 _LISTEN_HEALTHY_RESET_S)。
-            if _listen_active and _listen_vc is not None and _listen_restart_n:
-                _now = time.monotonic()
-                if _listen_ok_since is None:
-                    _listen_ok_since = _now
-                elif _now - _listen_ok_since >= _LISTEN_HEALTHY_RESET_S:
-                    log.info("录音连续正常 %.0f 秒，重启预算复位 (原 %d/%d)",
-                             _now - _listen_ok_since, _listen_restart_n, _LISTEN_RESTART_MAX)
-                    _listen_restart_n = 0
-                    _listen_ok_since = None
-            sink = _stt_sink
-            if sink is None:
-                continue
-            vc = getattr(sink, "vc", None)
-            st = getattr(vc, "_connection", None) if vc else None
-            dave = getattr(st, "dave_session", None)
-            # ssrc_user_map: ssrc→uid (state.py 属性, 是 _id_to_ssrc 的逆)。
-            smap = getattr(st, "ssrc_user_map", None)
-            cur_map = dict(smap) if smap else {}
-            with _seen_ssrcs_lock:
-                seen = set(_seen_ssrcs)
-            cur_hits = sink.hits()
-            # 诊断: 每 10 轮(~3s)打一次, hits / map / 实收 ssrc 一变化立即打
-            cur_diag = (cur_hits, tuple(sorted(cur_map.items())), tuple(sorted(seen)))
-            changed = cur_diag != _diag_last
-            diag_n += 1
-            if changed or diag_n % 10 == 0:
-                log.info(
-                    "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 实收ssrc=%s%s",
-                    diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
-                    cur_map, cur_hits, sorted(seen), "  <<变化" if changed else "",
-                )
-                _diag_last = cur_diag
-            # ssrc 自动推断兜底: 频道唯一真人时, 传输层实收但未映射的 ssrc 必是那个真人
             try:
-                if vc is not None and dave is not None and getattr(dave, "ready", False):
-                    known = set(cur_map.keys())
-                    unknown = seen - known
-                    bot_id = None
-                    try:
-                        bot_id = vc.guild.me.id
-                    except Exception:
-                        pass
-                    human_ids = set()
-                    ch = getattr(vc, "channel", None)
-                    if ch is not None:
-                        for m in (getattr(ch, "members", None) or []):
-                            if not getattr(m, "bot", False) and m.id != bot_id:
-                                human_ids.add(m.id)
-                        for uid in (getattr(ch, "voice_states", None) or {}).keys():
-                            if uid == bot_id:
-                                continue
-                            # voice_states 里会混入其它队友 bot (如 tianmaojingling),
-                            # py-cord 还可能 "Skipping member" 解析不出它们。无法解析的
-                            # 成员或 .bot=True 一律不算真人 —— 否则会被算进"未映射真人",
-                            # 让 len(unmapped_humans)>1, 唯一真人的 ssrc 永远绑不上 →
-                            # decrypt_rtp 兜底每帧塞 OPUS_SILENCE → RMS=0 → VAD 永不断句。
-                            try:
-                                m = ch.guild.get_member(uid)
-                            except Exception:
-                                m = None
-                            if m is None or getattr(m, "bot", False):
-                                continue
-                            human_ids.add(uid)
-                    # 唯一未映射的真人 → 唯一未映射的 ssrc。比「频道全局唯一真人」更
-                    # 鲁棒: 房里有 2 人但一人已映射时, 剩下的实收 ssrc 必属另一人。
-                    mapped_uids = set(cur_map.values())
-                    unmapped_humans = human_ids - mapped_uids
-                    if unknown and len(unmapped_humans) == 1:
-                        hid = next(iter(unmapped_humans))
-                        for s in unknown:
-                            vc._add_ssrc(hid, s)
-                            log.info("🔧 自动推断 ssrc: user=%s ssrc=%s (唯一未映射真人)", hid, s)
+                # 录音被冲垮后自动重启 (新 sink), 等 ssrc 映射好就能正常收
+                if _listen_active and _listen_vc is not None and not _listen_vc.is_recording():
+                    _listen_ok_since = None
+                    # 掉线重连期间**一次都不要试**。这个守护 0.3 秒一轮，而 voice 握手
+                    # 要一秒多 —— 不挡的话它会在那个窗口里连开五六枪，每枪都被
+                    # start_recording 以 "not connected to a voice channel" 顶回来，
+                    # 白白把崩溃重启的配额烧光。2026-09-08 就是这么哑的：13:00:19
+                    # 掉线，1.2 秒内失败 5 次撞满 8 次上限；13:00:51 重连成功后守护
+                    # 已被自己的计数器锁死，此后只能说不能听，日志里一句错都没有。
+                    if not _listen_vc.is_connected():
+                        continue
+                    if _listen_restart_n < _LISTEN_RESTART_MAX:
+                        _listen_restart_n += 1
+                        try:
+                            new_sink = _get_stt_sink_class()()
+                            new_sink.vc = _listen_vc
+                            _stt_sink = new_sink
+                            _listen_vc.start_recording(new_sink, _on_recording_done)
+                            log.info("录音已自动重启 (第 %d 次)", _listen_restart_n)
+                        except Exception:
+                            log.exception("录音自动重启失败")
+                    elif _listen_restart_n == _LISTEN_RESTART_MAX:
+                        # 只喊一次，别刷屏。没这行的话「预算耗尽」是完全静默的。
+                        _listen_restart_n += 1
+                        log.error("录音重启已达上限 %d 次，放弃自动恢复 —— "
+                                  "机器人从现在起只能说不能听，需要 /listen 或重启进程",
+                                  _LISTEN_RESTART_MAX)
+                    continue
+                # 录着且连着 —— 稳定够久就把重启预算还回去 (见 _LISTEN_HEALTHY_RESET_S)。
+                if _listen_active and _listen_vc is not None and _listen_restart_n:
+                    _now = time.monotonic()
+                    if _listen_ok_since is None:
+                        _listen_ok_since = _now
+                    elif _now - _listen_ok_since >= _LISTEN_HEALTHY_RESET_S:
+                        log.info("录音连续正常 %.0f 秒，重启预算复位 (原 %d/%d)",
+                                 _now - _listen_ok_since, _listen_restart_n, _LISTEN_RESTART_MAX)
+                        _listen_restart_n = 0
+                        _listen_ok_since = None
+                sink = _stt_sink
+                if sink is None:
+                    continue
+                vc = getattr(sink, "vc", None)
+                st = getattr(vc, "_connection", None) if vc else None
+                dave = getattr(st, "dave_session", None)
+                # ssrc_user_map: ssrc→uid (state.py 属性, 是 _id_to_ssrc 的逆)。
+                smap = getattr(st, "ssrc_user_map", None)
+                # **不能直接 dict(smap)。** 这个 map 由 py-cord 的语音接收线程
+                # 增删，掉线重连那一刻正好在重建它 —— 拷到一半被改就是
+                # RuntimeError: dictionary changed size during iteration。
+                # 这是 2026-09-11 那次「只能说不能听」最可能的起爆点。
+                # 上面那层 except 已经保证它不会再带走整个守护，这里再退一步：
+                # 拷失败就当这一轮没读到，下一轮 0.3 秒后自然重来。
+                try:
+                    cur_map = dict(smap) if smap else {}
+                except RuntimeError:
+                    cur_map = {}
+                with _seen_ssrcs_lock:
+                    seen = set(_seen_ssrcs)
+                cur_hits = sink.hits()
+                # 诊断: 每 10 轮(~3s)打一次, hits / map / 实收 ssrc 一变化立即打
+                cur_diag = (cur_hits, tuple(sorted(cur_map.items())), tuple(sorted(seen)))
+                changed = cur_diag != _diag_last
+                diag_n += 1
+                if changed or diag_n % 10 == 0:
+                    log.info(
+                        "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 实收ssrc=%s%s",
+                        diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
+                        cur_map, cur_hits, sorted(seen), "  <<变化" if changed else "",
+                    )
+                    _diag_last = cur_diag
+                # ssrc 自动推断兜底: 频道唯一真人时, 传输层实收但未映射的 ssrc 必是那个真人
+                try:
+                    if vc is not None and dave is not None and getattr(dave, "ready", False):
+                        known = set(cur_map.keys())
+                        unknown = seen - known
+                        bot_id = None
+                        try:
+                            bot_id = vc.guild.me.id
+                        except Exception:
+                            pass
+                        human_ids = set()
+                        ch = getattr(vc, "channel", None)
+                        if ch is not None:
+                            for m in (getattr(ch, "members", None) or []):
+                                if not getattr(m, "bot", False) and m.id != bot_id:
+                                    human_ids.add(m.id)
+                            for uid in (getattr(ch, "voice_states", None) or {}).keys():
+                                if uid == bot_id:
+                                    continue
+                                # voice_states 里会混入其它队友 bot (如 tianmaojingling),
+                                # py-cord 还可能 "Skipping member" 解析不出它们。无法解析的
+                                # 成员或 .bot=True 一律不算真人 —— 否则会被算进"未映射真人",
+                                # 让 len(unmapped_humans)>1, 唯一真人的 ssrc 永远绑不上 →
+                                # decrypt_rtp 兜底每帧塞 OPUS_SILENCE → RMS=0 → VAD 永不断句。
+                                try:
+                                    m = ch.guild.get_member(uid)
+                                except Exception:
+                                    m = None
+                                if m is None or getattr(m, "bot", False):
+                                    continue
+                                human_ids.add(uid)
+                        # 唯一未映射的真人 → 唯一未映射的 ssrc。比「频道全局唯一真人」更
+                        # 鲁棒: 房里有 2 人但一人已映射时, 剩下的实收 ssrc 必属另一人。
+                        mapped_uids = set(cur_map.values())
+                        unmapped_humans = human_ids - mapped_uids
+                        if unknown and len(unmapped_humans) == 1:
+                            hid = next(iter(unmapped_humans))
+                            for s in unknown:
+                                vc._add_ssrc(hid, s)
+                                log.info("🔧 自动推断 ssrc: user=%s ssrc=%s (唯一未映射真人)", hid, s)
+                except Exception:
+                    log.exception("ssrc 自动推断失败")
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                log.exception("ssrc 自动推断失败")
+                # **这条 except 是整个守护活下去的唯一保障。**
+                # 2026-09-11 05:20 HKT 实测：voice WS 报 1006 掉线的同一秒，
+                # 这个循环抛了一个没人接的异常，任务当场死掉。它一死，上面
+                # 「录音被冲垮 → 自动重启」那条路就再没人走 —— bot 从那一刻起
+                # **只能说不能听，持续四小时，日志里一句 ERROR 都没有**。
+                # 静默是最坏的部分：出站 TTS 一切正常，看着像活得好好的。
+                # 循环体里任何一处抛异常都不该带走整个守护，宁可这一轮白跑。
+                log.exception("ssrc/录音守护本轮出错，跳过继续下一轮")
     except asyncio.CancelledError:
         log.info("ssrc 推断循环已取消")
         raise
