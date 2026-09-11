@@ -115,7 +115,11 @@ def test_ledger_survives_a_throwing_session():
     class _Boom:
         def get_decryption_stats(self, uid, media_type=None):
             raise RuntimeError("no group")
-    assert "RuntimeError" in s._decryption_ledger(_Boom(), [7])
+    line = s._decryption_ledger(_Boom(), [7])
+    assert "RuntimeError" in line
+    # **异常正文必须一起打**：只有类型名的话，`<ValueError>` 分不清
+    # 「这人不在 MLS 组里」和「参数传错了」，而这两件事下一步动作相反。
+    assert "no group" in line, f"异常正文丢了: {line}"
 
 
 def test_ledger_without_dave():

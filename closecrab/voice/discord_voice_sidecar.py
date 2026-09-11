@@ -1771,7 +1771,10 @@ def _decryption_ledger(dave, uids) -> str:
         try:
             st = dave.get_decryption_stats(int(uid))
         except Exception as exc:
-            out.append(f"{uid}:<{type(exc).__name__}>")
+            # **带上异常正文**。上一版只打类型名，日志里就是一句光秃秃的
+            # `<ValueError>` —— 看不出是「这人不在组里」还是「参数传错了」，
+            # 而这两件事的下一步动作完全相反。截断是因为它只进日志。
+            out.append(f"{uid}:<{type(exc).__name__}: {str(exc)[:60]}>")
             continue
         if st is None:
             out.append(f"{uid}:无记录")
