@@ -34,6 +34,7 @@
 
 import asyncio
 import audioop  # 3.12 可用 (3.13 PEP 594 移除, 届时换 numpy/scipy 重采样)
+import collections
 from dataclasses import dataclass
 import logging
 import os
@@ -335,6 +336,31 @@ _MONO_FRAME_BYTES = _MONO_FRAME_SAMPLES * 2            # 1920
 # 在 reader 里被丢弃前不会建 decoder, 所以旧的 decoders.keys() 推断已失效。
 _seen_ssrcs_lock = threading.Lock()
 _seen_ssrcs: set = set()
+
+# DAVE 解密失败的**原因**计数。
+#
+# 为什么非要单独记一份：`_probed` 里那个 `except Exception: plain = None` 会把
+# 失败的包换成一帧静音接着跑（跟 py-cord reader.py:315 是同一个套路，只不过这条
+# 是我们自己写的）。davey 的 get_decryption_stats 只给出「失败了多少次」，
+# **给不出为什么** —— 而「密钥轮换没跟上」和「包本身损坏」这两种下一步动作完全
+# 不同。不记原因就只能盯着一个失败计数干瞪眼。
+#
+# 按原因字符串分桶而不是只留最后一条：失败往往是混合的，只看最后一条会把偶发的
+# 那种当成主因。
+_dave_fail_lock = threading.Lock()
+_dave_fail_reasons: "collections.Counter[str]" = collections.Counter()
+
+
+def _record_dave_failure(exc: BaseException) -> None:
+    with _dave_fail_lock:
+        _dave_fail_reasons[f"{type(exc).__name__}: {str(exc)[:60]}"] += 1
+
+
+def _dave_fail_summary(top: int = 3) -> str:
+    """失败原因 Top-N，进诊断日志。没有失败就返回 '-'（别打噪音）。"""
+    with _dave_fail_lock:
+        items = _dave_fail_reasons.most_common(top)
+    return " | ".join(f"{r}×{n}" for r, n in items) or "-"
 
 
 def _load_sidecar_config(bot_name: str) -> dict | None:
@@ -2918,7 +2944,11 @@ def _install_receive_probe():
                         try:
                             import davey as _davey_mod
                             plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
-                        except Exception:
+                        except Exception as exc:
+                            # **这一行就是「有声但咯楞」的制造现场。** 解密失败被吞掉,
+                            # 换成一帧静音接着跑 —— 上层完全看不出异常, 只听得出卡顿。
+                            # 至少要把原因记下来, 否则只剩一个失败计数, 判不了病因。
+                            _record_dave_failure(exc)
                             plain = None
                         packet.decrypted_data = plain if plain else OPUS_SILENCE
                     else:
@@ -3221,16 +3251,17 @@ async def _ssrc_infer_loop(period: float = 0.3):
                 if changed or diag_n % 10 == 0:
                     # 解密账本: davey 自己数成功/失败/passthrough。**这是唯一能把
                     # 「零帧是对端发的静音」和「零帧是解密失败被吞了」分开的证据** ——
-                    # py-cord 那条 except 只打 DEBUG, 从 bot.log 里看不出任何异常。
+                    # 失败的包会被换成一帧静音继续跑, 上层一个异常都看不到。
                     # **按 user_id 逐个取** —— davey 的账本是 per-user 的
                     # (get_decryption_stats(user_id, media_type=audio))，
                     # 不传 uid 会 TypeError。uid 从 ssrc_map 拿，正好只有在场的人。
                     dstats = _decryption_ledger(dave, cur_map.values())
                     log.info(
                         "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s "
-                        "实收ssrc=%s 解密账=%s%s",
+                        "实收ssrc=%s 解密账=%s 失败原因=%s%s",
                         diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
                         cur_map, cur_hits, cur_zeros, sorted(seen), dstats,
+                        _dave_fail_summary(),
                         "  <<变化" if changed else "",
                     )
                     _diag_last = cur_diag

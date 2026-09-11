@@ -124,3 +124,47 @@ def test_ledger_survives_a_throwing_session():
 
 def test_ledger_without_dave():
     assert s._decryption_ledger(None, [7]) == "-"
+
+
+# ─── 解密失败原因 ────────────────────────────────────────────────────────────
+#
+# davey 的账本只说「失败了多少次」，说不出为什么。而「密钥轮换没跟上」和
+# 「包本身损坏」这两种原因，下一步动作完全不同 —— 所以原因必须单独记。
+
+def _reset_reasons():
+    with s._dave_fail_lock:
+        s._dave_fail_reasons.clear()
+
+
+def test_no_failures_prints_nothing_noisy():
+    """**护栏**：一次没失败时必须是 '-'，不能打一串空壳。
+
+    诊断行每 3 秒一条，长期挂着。这里多几个字符，日志里就多几万行噪音。
+    """
+    _reset_reasons()
+    assert s._dave_fail_summary() == "-"
+
+
+def test_reasons_are_bucketed_by_message():
+    """按原因分桶，不是只留最后一条。
+
+    失败常常是混合的：偶发一条 CorruptPacket 混在大量 KeyRatchet 里。
+    只留最后一条会把偶发的那个当成主因，正好指错方向。
+    """
+    _reset_reasons()
+    for _ in range(5):
+        s._record_dave_failure(ValueError("no key ratchet for generation 3"))
+    s._record_dave_failure(RuntimeError("bad tag"))
+    line = s._dave_fail_summary()
+    assert "ValueError: no key ratchet for generation 3×5" in line
+    assert "RuntimeError: bad tag×1" in line
+    # 多的排前面 —— 主因要一眼看到
+    assert line.index("ValueError") < line.index("RuntimeError")
+
+
+def test_summary_is_capped():
+    """原因种类可能很多，诊断行不许无限长。"""
+    _reset_reasons()
+    for i in range(10):
+        s._record_dave_failure(ValueError(f"reason {i}"))
+    assert s._dave_fail_summary(top=3).count("×") == 3
