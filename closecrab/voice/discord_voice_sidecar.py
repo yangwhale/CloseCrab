@@ -351,9 +351,38 @@ _dave_fail_lock = threading.Lock()
 _dave_fail_reasons: "collections.Counter[str]" = collections.Counter()
 
 
-def _record_dave_failure(exc: BaseException) -> None:
+# 「成败 × 包形状」分桶。
+#
+# 实测失败原因**只有一种**：`DecryptionFailed(UnencryptedWhenPassthroughDisabled)`
+# —— davey 认为这一帧根本没被 DAVE 加密。可是同一个人同一句话里另有 121 帧解开了，
+# 所以「对端没加密」讲不通，更可能是**我们递进去的字节不对**。
+#
+# 两个候选差异，一次量两个，因为它们互相能证伪：
+#
+#   ① RTP 扩展头。Discord 只在一部分包上带扩展头（音量指示那些）。若失败整齐地
+#      落在带扩展头那一栏，病因就定死了。
+#   ② 帧尾两字节。DAVE 的「这是加密帧」标记在**帧尾**，不在帧头 —— 所以
+#      `UnencryptedWhenPassthroughDisabled` 的字面意思就是「尾部没找到标记」。
+#      成功帧与失败帧的尾字节一比，立刻能看出是**整类帧不带标记**（协议/版本问题）
+#      还是**帧被截断了**（`reader.py:430` 那句来路不明的 `return result[8:]`）。
+#
+# 不写死期望值（比如「标记应该是 0xFAFA」）—— 只把实际观察到的分布打出来，
+# 让数据自己说话。写死期望值等于把待验证的假设塞进了测量工具本身。
+_dave_shape_stats: "collections.Counter[str]" = collections.Counter()
+
+
+def _record_dave_result(
+    ok: bool, extended: bool, payload: bytes | None, exc: BaseException | None = None
+) -> None:
+    tail = payload[-2:].hex() if payload and len(payload) >= 2 else "??"
+    key = (
+        f"{'有扩展头' if extended else '无扩展头'}"
+        f"/尾{tail}/{'成功' if ok else '失败'}"
+    )
     with _dave_fail_lock:
-        _dave_fail_reasons[f"{type(exc).__name__}: {str(exc)[:60]}"] += 1
+        _dave_shape_stats[key] += 1
+        if exc is not None:
+            _dave_fail_reasons[f"{type(exc).__name__}: {str(exc)[:60]}"] += 1
 
 
 def _dave_fail_summary(top: int = 3) -> str:
@@ -361,6 +390,17 @@ def _dave_fail_summary(top: int = 3) -> str:
     with _dave_fail_lock:
         items = _dave_fail_reasons.most_common(top)
     return " | ".join(f"{r}×{n}" for r, n in items) or "-"
+
+
+def _dave_shape_summary(top: int = 6) -> str:
+    """包形状 Top-N，进诊断日志。一个都没有就返回 '-'。
+
+    top 给到 6 是因为**至少要能同时看到成功桶和失败桶** —— 只打 3 个的话，
+    失败占多数时会把成功那栏整个挤掉，而这个测量的全部意义就在于两栏对比。
+    """
+    with _dave_fail_lock:
+        items = _dave_shape_stats.most_common(top)
+    return " ".join(f"{k}×{n}" for k, n in items) or "-"
 
 
 def _load_sidecar_config(bot_name: str) -> dict | None:
@@ -2944,11 +2984,16 @@ def _install_receive_probe():
                         try:
                             import davey as _davey_mod
                             plain = dave.decrypt(uid, _davey_mod.MediaType.audio, raw_payload)
+                            _record_dave_result(True, packet.extended, raw_payload)
                         except Exception as exc:
                             # **这一行就是「有声但咯楞」的制造现场。** 解密失败被吞掉,
                             # 换成一帧静音接着跑 —— 上层完全看不出异常, 只听得出卡顿。
                             # 至少要把原因记下来, 否则只剩一个失败计数, 判不了病因。
-                            _record_dave_failure(exc)
+                            #
+                            # 成功那条也要记 —— **失败计数单独看是没有信息的**。
+                            # 「165 帧失败」既可能是全体失败也可能是一半失败,
+                            # 只有跟成功帧的形状并排放着才判得出差异在哪。
+                            _record_dave_result(False, packet.extended, raw_payload, exc)
                             plain = None
                         packet.decrypted_data = plain if plain else OPUS_SILENCE
                     else:
@@ -3258,10 +3303,10 @@ async def _ssrc_infer_loop(period: float = 0.3):
                     dstats = _decryption_ledger(dave, cur_map.values())
                     log.info(
                         "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s "
-                        "实收ssrc=%s 解密账=%s 失败原因=%s%s",
+                        "实收ssrc=%s 解密账=%s 失败原因=%s 包形状=%s%s",
                         diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
                         cur_map, cur_hits, cur_zeros, sorted(seen), dstats,
-                        _dave_fail_summary(),
+                        _dave_fail_summary(), _dave_shape_summary(),
                         "  <<变化" if changed else "",
                     )
                     _diag_last = cur_diag

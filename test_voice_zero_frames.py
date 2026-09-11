@@ -134,6 +134,11 @@ def test_ledger_without_dave():
 def _reset_reasons():
     with s._dave_fail_lock:
         s._dave_fail_reasons.clear()
+        s._dave_shape_stats.clear()
+
+
+def _fail(exc):
+    s._record_dave_result(False, False, b"\x00\x00", exc)
 
 
 def test_no_failures_prints_nothing_noisy():
@@ -153,8 +158,8 @@ def test_reasons_are_bucketed_by_message():
     """
     _reset_reasons()
     for _ in range(5):
-        s._record_dave_failure(ValueError("no key ratchet for generation 3"))
-    s._record_dave_failure(RuntimeError("bad tag"))
+        _fail(ValueError("no key ratchet for generation 3"))
+    _fail(RuntimeError("bad tag"))
     line = s._dave_fail_summary()
     assert "ValueError: no key ratchet for generation 3×5" in line
     assert "RuntimeError: bad tag×1" in line
@@ -166,5 +171,45 @@ def test_summary_is_capped():
     """原因种类可能很多，诊断行不许无限长。"""
     _reset_reasons()
     for i in range(10):
-        s._record_dave_failure(ValueError(f"reason {i}"))
+        _fail(ValueError(f"reason {i}"))
     assert s._dave_fail_summary(top=3).count("×") == 3
+
+
+# ─── 包形状（成败 × 扩展头 × 帧尾） ──────────────────────────────────────────
+#
+# 失败计数单独看没有信息量：「165 帧失败」既可能是全体失败也可能是一半失败。
+# 只有把成功帧和失败帧的形状并排放着，才判得出差异到底在哪一维。
+
+def test_shape_separates_success_from_failure():
+    """成功和失败必须分桶，不能混成一个总数。"""
+    _reset_reasons()
+    s._record_dave_result(True, False, bytes.fromhex("dead" "fafa"))
+    s._record_dave_result(False, True, bytes.fromhex("dead" "0001"), ValueError("x"))
+    line = s._dave_shape_summary()
+    assert "无扩展头/尾fafa/成功×1" in line, line
+    assert "有扩展头/尾0001/失败×1" in line, line
+
+
+def test_shape_summary_keeps_both_sides_visible():
+    """**护栏**：失败占绝对多数时，成功那栏不许被 top-N 挤掉。
+
+    这个测量的全部意义就是两栏对比 —— 只剩失败栏的话，等于退回到那个
+    没有信息量的失败计数，还白白让人以为自己在看对比。
+    """
+    _reset_reasons()
+    for i in range(5):                       # 5 种不同形状的失败，数量都更多
+        for _ in range(10):
+            s._record_dave_result(False, True, bytes([i, i]), ValueError("x"))
+    s._record_dave_result(True, False, b"\xfa\xfa")   # 唯一一次成功
+    assert "成功" in s._dave_shape_summary(), "成功桶被挤掉了，对比就没了"
+
+
+def test_shape_tolerates_short_payload():
+    """**护栏**：payload 可能是 None 或不足两字节（解密前就崩了）。
+
+    诊断工具自己抛异常会连累 `_probed`，那是主收音路径 —— 宁可打 '??'。
+    """
+    _reset_reasons()
+    s._record_dave_result(False, False, None, ValueError("x"))
+    s._record_dave_result(False, False, b"\x01", ValueError("x"))
+    assert "尾??" in s._dave_shape_summary()
