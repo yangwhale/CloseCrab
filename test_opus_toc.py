@@ -90,3 +90,34 @@ def test_summary_lists_most_common_first():
     s = sc._opus_toc_summary()
     assert s.startswith("Hybrid/FB 20kHz/单声道/cfg15×3")
     assert "cfg12×1" in s
+
+
+# ── 码率统计 ──────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _clean_bytes():
+    sc._opus_bytes_total = 0
+    sc._opus_frames_total = 0
+    yield
+    sc._opus_bytes_total = 0
+    sc._opus_frames_total = 0
+
+
+def test_bitrate_math():
+    """80 字节/帧 × 8 bit × 50 帧/秒 = 32 kbps。"""
+    for _ in range(10):
+        sc._record_opus_toc(bytes([15 << 3]) + b"\x00" * 79)   # 共 80 字节
+    assert "均80B/帧≈32kbps" in sc._opus_toc_summary()
+
+
+def test_empty_payload_does_not_pollute_bitrate():
+    """空包不计帧 —— 否则均值被 0 字节拉下来，码率会虚低。"""
+    sc._record_opus_toc(bytes([15 << 3]) + b"\x00" * 79)
+    for bad in (None, b""):
+        sc._record_opus_toc(bad)
+    assert sc._opus_frames_total == 1
+    assert "均80B/帧≈32kbps" in sc._opus_toc_summary()
+
+
+def test_no_rate_suffix_when_no_frames():
+    assert sc._opus_toc_summary() == "-"

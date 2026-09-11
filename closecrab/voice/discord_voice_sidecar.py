@@ -513,11 +513,22 @@ _OPUS_TOC_TABLE = [
 ]
 
 
+# 实际码率。TOC 只说「编码器允许多宽」，说不出「它真花了多少比特」——
+# 2026-09-11 那次就是栽在这上面：TOC 报 fullband 20 kHz，可波形在 12 kHz
+# 有个 22 dB 的坎。带宽档位是**上限**不是实际投入，两者要分开量。
+#
+# Discord 是 20 ms 一帧、50 帧/秒，所以 kbps = 平均载荷字节 × 8 × 50 / 1000。
+# 只统计有效载荷（DAVE 解密后的 Opus 明文），不含 RTP 头和加密开销。
+_opus_bytes_total = 0
+_opus_frames_total = 0
+
+
 def _record_opus_toc(plain: bytes | None) -> None:
-    """记一帧 Opus 的 TOC：模式 / 带宽 / 声道。空包和异常一律忽略。
+    """记一帧 Opus 的 TOC（模式/带宽/声道）和载荷大小。空包和异常一律忽略。
 
     这条路在每个音频包上跑，所以刻意做成纯查表 + 一次加锁，不做任何解析。
     """
+    global _opus_bytes_total, _opus_frames_total
     if not plain:
         return
     try:
@@ -532,6 +543,8 @@ def _record_opus_toc(plain: bytes | None) -> None:
         key = f"{mode}/{bandwidth}/{'立体声' if stereo else '单声道'}/cfg{cfg}"
         with _dave_fail_lock:
             _opus_toc_stats[key] += 1
+            _opus_bytes_total += len(plain)
+            _opus_frames_total += 1
     except Exception:
         pass
 
@@ -539,7 +552,13 @@ def _record_opus_toc(plain: bytes | None) -> None:
 def _opus_toc_summary(top: int = 4) -> str:
     with _dave_fail_lock:
         items = _opus_toc_stats.most_common(top)
-    return " ".join(f"{k}×{n}" for k, n in items) or "-"
+        n, b = _opus_frames_total, _opus_bytes_total
+    if not items:
+        return "-"
+    # 平均值单独打出来，不要只打 kbps —— 静音帧只有几个字节，会把均值拉低，
+    # 看得到字节数才判得出「码率低」是真低还是被静音帧稀释的。
+    rate = f" 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps" if n else ""
+    return " ".join(f"{k}×{c}" for k, c in items) + rate
 
 
 class DavePyDecryptFailed(Exception):
