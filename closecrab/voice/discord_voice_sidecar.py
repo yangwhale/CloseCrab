@@ -251,6 +251,19 @@ _autostart_done = False      # 本进程内自动收音只起一次 (尊重之�
 _receive_probe_installed = False  # decrypt_rtp ssrc 探针只挂一次
 _dave_backend_installed = False    # dave-py 后端替换只装一次
 
+# ── 「连着但聋」自愈 (DAVE 掉出 MLS 树) ─────────────────────────────────────
+# ready 连续为 False 这么久 → 判定这条语音连接已经废了, 强制整条重建。
+# 25 秒的余量: 正常一次 MLS 握手 (key package → proposals → commit) 实测 <100ms,
+# 25 秒够容忍任何抖动, 又不至于让人对着麦克风白说半分钟。
+_DAVE_UNREADY_GRACE_S = float(os.environ.get("DAVE_UNREADY_GRACE_S", "25"))
+# 两次强制重连之间的最短间隔。**兼作限流** —— 对端一直不搭理时这就是唯一的刹车,
+# 所以不设「重试上限」: 上限意味着某个时刻起彻底放弃, 而这个 bug 的全部危害就是
+# 静默地永远聋下去 (2026-09-11 的四小时失聪、13:00 那次撞满重启配额, 都是这么来的)。
+_DAVE_REJOIN_COOLDOWN_S = float(os.environ.get("DAVE_REJOIN_COOLDOWN_S", "60"))
+_dave_unready_since = None   # ready 首次转 False 的 monotonic 时刻
+_dave_last_rejoin = 0.0      # 上次强制重连的 monotonic 时刻
+_dave_rejoin_n = 0           # 强制重连累计次数 (只用于日志)
+
 # ── DAVE 后端总开关 (rollback 用) ──────────────────────────────────────────
 # True = 把 py-cord 的 DAVE 后端从 davey 换成 dave-py (接收路径能解出真文本)。
 # 为什么换: davey 不暴露逐 MLS-epoch 的 key-ratchet API, 接收端无法按 epoch 正确驱动
@@ -2803,11 +2816,57 @@ def _install_receive_probe():
         log.exception("opus _decode_packet FEC+兜底挂载失败")
 
 
+async def _force_dave_rejoin(reason: str) -> bool:
+    """强制重建整条 Discord 语音连接: 停录 → 断开 → 重连 → 重新开录。
+
+    **只重建 Discord 这一侧, 不碰 AgentSession。** 两个理由:
+    ① Gemini 那条链路 (AgentSession/LLM/TTS) 跟 Discord 的 MLS 树毫无关系,
+       没有理由跟着重来; ② ``_start_agent_session`` 根本不是幂等的 —— 每次都
+       新造一个 AgentSession 覆盖全局, 旧的直接泄漏。所以这里绕开 _activate_listen,
+       照守护循环里「录音被冲垮后重启」那条路自己换 sink 重新 start_recording。
+    """
+    global _listen_vc, _stt_sink, _listen_restart_n, _listen_ok_since, _dave_rejoin_n
+    _dave_rejoin_n += 1
+    log.warning("强制重连语音 (第 %d 次): %s", _dave_rejoin_n, reason)
+    old = _listen_vc
+    try:
+        if old is not None and old.is_recording():
+            old.stop_recording()
+    except Exception:
+        log.exception("重连前停录音失败 (继续断开)")
+    try:
+        if old is not None:
+            await old.disconnect(force=True)
+    except Exception:
+        log.exception("重连前断开失败 (继续重连)")
+    # 给 Discord 一点时间把「bot 离开频道」这件事广播出去 —— 逼出成员变更才是
+    # 整个动作的意义所在, 断完立刻回去有概率被当成同一个会话。
+    await asyncio.sleep(1.5)
+    vc = await _ensure_connected()
+    if vc is None:
+        log.error("强制重连语音失败: 连不回频道, 等下一轮冷却后再试")
+        return False
+    _listen_vc = vc
+    _listen_restart_n = 0
+    _listen_ok_since = None
+    try:
+        sink = _get_stt_sink_class()()
+        sink.vc = vc
+        _stt_sink = sink
+        vc.start_recording(sink, _on_recording_done)
+    except Exception:
+        log.exception("强制重连后重新开录失败 (守护循环下一轮会再试)")
+        return False
+    log.info("强制重连语音完成, 已重新开录")
+    return True
+
+
 async def _ssrc_infer_loop(period: float = 0.3):
     """后台守护: ① 录音被 corrupted stream 冲垮时自动重启; ② ssrc 自动推断兜底
     (频道唯一真人时, 把传输层实收的未映射 ssrc 直接 _add_ssrc, 不靠 speaking 事件)。
     含诊断日志 (dave ready/epoch + ssrc_map + hits + 实收 ssrc), 便于现场定位。"""
     global _stt_sink, _listen_restart_n, _listen_ok_since
+    global _dave_unready_since, _dave_last_rejoin
     log.info("ssrc 推断 + 录音守护循环已启动")
     diag_n = 0
     _diag_last: tuple = ()
@@ -2885,6 +2944,40 @@ async def _ssrc_infer_loop(period: float = 0.3):
                         cur_map, cur_hits, sorted(seen), "  <<变化" if changed else "",
                     )
                     _diag_last = cur_diag
+                # ── 「连着但聋」自愈: DAVE 掉出 MLS 树后强制重建语音连接 ──
+                # dave.ready = has_established_group() and encryptor.has_key_ratchet()。
+                # 它为 False 就是**这一路音频既解不开也加不了密**。要命的是出站 TTS
+                # 照发不误 (py-cord 不拦), 所以从外面看它活得好好的 —— 跟四小时失聪
+                # 那次是同一类静默故障, 只是病灶换了一层。
+                #
+                # 触发场景 (2026-09-11 实测两次, 相隔 8 分钟, 02:34:03 与 02:42:25):
+                # Discord 下发 session_description → py-cord reinit_dave_session() 把
+                # MLS 会话整个 reset 并重发 key package → **对端再没回 proposals**。
+                # 树是空的, ready 从此钉死 False。Chris 那边表现为「必须退出语音频道
+                # 再进来才听得到 bunny」—— 他手动重进能好, 是因为成员变更逼 Discord
+                # 重发 proposals 把树建回来, 这也正是这里要模拟的事。
+                #
+                # 为什么不走「再 reinit 一次重发 key package」那条轻的路: 02:42:25 那次
+                # 正是刚 reinit 完、key package 刚发出去就再没下文。重放同一个动作没有
+                # 任何理由会有不同结果。**成员变更是目前唯一被证实能把树建回来的事件。**
+                if _listen_active and vc is not None and dave is not None:
+                    if getattr(dave, "ready", False) or not vc.is_connected():
+                        _dave_unready_since = None
+                    else:
+                        _now = time.monotonic()
+                        if _dave_unready_since is None:
+                            _dave_unready_since = _now
+                        elif _now - _dave_unready_since >= _DAVE_UNREADY_GRACE_S:
+                            if _now - _dave_last_rejoin < _DAVE_REJOIN_COOLDOWN_S:
+                                pass  # 冷却中, 下一轮再看
+                            else:
+                                _bad_for = _now - _dave_unready_since
+                                _dave_last_rejoin = _now
+                                _dave_unready_since = None
+                                await _force_dave_rejoin(
+                                    "DAVE ready 连续 %.0f 秒为 False (MLS 树没建起来, "
+                                    "这条连接收不到也发不出加密音频)" % _bad_for)
+                                continue
                 # ssrc 自动推断兜底: 频道唯一真人时, 传输层实收但未映射的 ssrc 必是那个真人
                 try:
                     if vc is not None and dave is not None and getattr(dave, "ready", False):
