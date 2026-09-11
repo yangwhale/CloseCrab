@@ -2877,6 +2877,41 @@ class DaveSessionAdapter:
         # 返回 False 跳过那个多余分支, 避免 AttributeError 把好 PCM 丢成 silence。
         return False
 
+    def get_decryption_stats(self, user_id, media_type=None):
+        """把 dave-py 的 DecryptorStats 翻成 davey 的 DecryptionStats 形状。
+
+        **这不是为了补全接口，是为了回答一个具体问题。** 换回 dave-py 之后
+        `_probed` 侧一次失败都没有了，但那只说明 dave-py 的 decrypt() 返回了非 None
+        —— 分不清它是**真解开了**还是**当明文透传了**。这两件事对「怎么修官方
+        davey」的结论完全相反：
+
+          - 若是透传 → 那些帧本来就没加密，官方 davey 报
+            `UnencryptedWhenPassthroughDisabled` 是因为透传被关了。
+            修法 = 把透传打开，一行的事。
+          - 若是真解开 → 那些帧是加密的，官方 davey 认不出来，
+            是它的帧识别或 ratchet 有问题，得往库里查。
+
+        dave-py 的 `passthrough_count` 正好把这两条分开。
+        """
+        dec = self._decryptors.get(str(user_id))
+        if dec is None:
+            raise ValueError("NoDecryptorForUser")
+        st = dec.get_stats(media_type or self._MT_AUDIO)
+
+        def _v(name):
+            a = getattr(st, name)
+            return a() if callable(a) else a
+
+        class _S:
+            pass
+        s = _S()
+        s.successes = _v("decrypt_success_count")
+        s.failures = _v("decrypt_failure_count")
+        s.passthroughs = _v("passthrough_count")
+        s.attempts = _v("decrypt_attempts")
+        s.duration = _v("decrypt_duration")
+        return s
+
     @property
     def voice_privacy_code(self):
         return None

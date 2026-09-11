@@ -213,3 +213,79 @@ def test_shape_tolerates_short_payload():
     s._record_dave_result(False, False, None, ValueError("x"))
     s._record_dave_result(False, False, b"\x01", ValueError("x"))
     assert "尾??" in s._dave_shape_summary()
+
+
+# ─── dave-py 账本转接（DaveSessionAdapter.get_decryption_stats） ─────────────
+#
+# 换回 dave-py 后 `_probed` 侧零失败，但这只说明 decrypt() 返回了非 None ——
+# **分不清是真解开了还是当明文透传了**。这两件事对「怎么修官方 davey」的结论
+# 完全相反，而 dave-py 的 passthrough_count 正好把它们分开。所以这个转接层
+# 唯一的价值就是**把 passthroughs 单独拎出来**，混进 successes 等于白做。
+
+class _PyStats:
+    """dave-py 的 DecryptorStats 形状（字段名跟 davey 完全不同）。"""
+    def __init__(self, ok, bad, pt):
+        self.decrypt_success_count = ok
+        self.decrypt_failure_count = bad
+        self.passthrough_count = pt
+        self.decrypt_attempts = ok + bad + pt
+        self.decrypt_duration = 0
+
+
+class _PyDecryptor:
+    def __init__(self, stats):
+        self._stats = stats
+
+    def get_stats(self, media_type):
+        return self._stats
+
+
+def _adapter(table):
+    """绕开 __init__（它要真去 import dave 建 Session），只装这个方法要的两个字段。"""
+    a = s.DaveSessionAdapter.__new__(s.DaveSessionAdapter)
+    a._decryptors = table
+    a._MT_AUDIO = "audio"
+    return a
+
+
+def test_pystats_are_translated_to_davey_shape():
+    a = _adapter({"7": _PyDecryptor(_PyStats(400, 0, 45))})
+    st = a.get_decryption_stats(7)
+    assert (st.successes, st.failures, st.passthroughs) == (400, 0, 45)
+
+
+def test_passthrough_is_not_folded_into_successes():
+    """**护栏**：透传数不许并进成功数。
+
+    并进去的话账本会打出「成功 445 / 透传 0」—— 跟「真解开 445 帧」长得一模一样，
+    而这两种情况指向完全相反的修法。这个转接层存在的唯一理由就是区分它俩。
+    """
+    a = _adapter({"7": _PyDecryptor(_PyStats(400, 0, 45))})
+    st = a.get_decryption_stats(7)
+    assert st.successes == 400, "透传被算进成功了，这个测量就废了"
+    assert st.passthroughs == 45
+
+
+def test_lookup_uses_string_key():
+    """**护栏**：decrypt() 存的是 str(user_id)，账本传进来的是 int。
+
+    不转字符串就永远查不到 —— 而失败形式是 ValueError，
+    在日志里跟「这人还没进 MLS 组」一模一样，会被当成正常现象忽略掉。
+    """
+    a = _adapter({"7": _PyDecryptor(_PyStats(1, 0, 0))})
+    assert a.get_decryption_stats(7).successes == 1      # int 也要能查到
+    assert a.get_decryption_stats("7").successes == 1
+
+
+def test_missing_decryptor_raises_not_zeros():
+    """**护栏**：查不到这个人时必须抛，不能返回一排 0。
+
+    返回 0 会在账本里显示成「成功0/失败0/透传0」，看着像「这人没说话」，
+    实际是我们根本没在测量他。宁可打一行异常。
+    """
+    a = _adapter({})
+    try:
+        a.get_decryption_stats(7)
+    except ValueError:
+        return
+    raise AssertionError("查不到 decryptor 时静默返回了，不许这样")
