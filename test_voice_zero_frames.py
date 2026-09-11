@@ -74,3 +74,49 @@ def test_mixed_ratio(monkeypatch):
     for i in range(10):
         sink.write(_Data(_stereo([0 if i % 5 == 0 else 500] * 960)), _User())
     assert (sink.hits(), sink.zeros()) == (10, 2)
+
+
+# ─── 解密账本 ───────────────────────────────────────────────────────────────
+
+class _Stats:
+    def __init__(self, ok, bad, pt):
+        self.successes, self.failures, self.passthroughs = ok, bad, pt
+        self.attempts, self.duration = ok + bad, 0
+
+
+class _Dave:
+    def __init__(self, table):
+        self.table = table
+        self.calls = []
+
+    def get_decryption_stats(self, uid, media_type=None):
+        self.calls.append(uid)
+        return self.table[uid]
+
+
+def test_ledger_reports_failures():
+    d = _Dave({7: _Stats(300, 21, 0)})
+    assert s._decryption_ledger(d, [7]) == "7:成功300/失败21/透传0"
+
+
+def test_ledger_needs_user_id():
+    """**护栏**：davey 的账本是 per-user 的，不传 uid 会 TypeError。
+
+    第一版就是这么写错的 —— 日志里只留下一句「<读取失败>」，等于什么都没测到，
+    而它看上去像是「这个 API 用不了」，会让人放弃这条最有用的线索。
+    """
+    d = _Dave({7: _Stats(1, 0, 0)})
+    s._decryption_ledger(d, [7])
+    assert d.calls == [7], "必须带着 user_id 调用"
+
+
+def test_ledger_survives_a_throwing_session():
+    """账本读不出来不许拖垮守护线程 —— 它只是诊断，不是主路径。"""
+    class _Boom:
+        def get_decryption_stats(self, uid, media_type=None):
+            raise RuntimeError("no group")
+    assert "RuntimeError" in s._decryption_ledger(_Boom(), [7])
+
+
+def test_ledger_without_dave():
+    assert s._decryption_ledger(None, [7]) == "-"

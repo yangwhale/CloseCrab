@@ -1753,6 +1753,33 @@ def _get_stt():
     return _stt_engine
 
 
+def _decryption_ledger(dave, uids) -> str:
+    """把 davey 的 per-user 解密账本压成一行诊断文本。
+
+    davey 的 ``get_decryption_stats(user_id, media_type=audio)`` 返回
+    ``successes / failures / attempts / passthroughs``。**failures 是这里唯一
+    真正要看的数** —— py-cord 解密失败时会塞一帧 OPUS_SILENCE 然后若无其事
+    继续跑（reader.py:315 那个 except），日志里只有一条 DEBUG。所以「音质变差」
+    在上层是完全静默的，只有这个计数器会动。
+
+    返回字符串而不是结构体：它只进日志，不参与判断，别让调用方去解包。
+    """
+    if dave is None:
+        return "-"
+    out = []
+    for uid in sorted(set(uids)):
+        try:
+            st = dave.get_decryption_stats(int(uid))
+        except Exception as exc:
+            out.append(f"{uid}:<{type(exc).__name__}>")
+            continue
+        if st is None:
+            out.append(f"{uid}:无记录")
+            continue
+        out.append(f"{uid}:成功{st.successes}/失败{st.failures}/透传{st.passthroughs}")
+    return " ".join(out) or "-"
+
+
 def _get_stt_sink_class():
     """惰性定义 discord.sinks.Sink 子类 (延迟 import discord)。
 
@@ -3192,10 +3219,10 @@ async def _ssrc_infer_loop(period: float = 0.3):
                     # 解密账本: davey 自己数成功/失败/passthrough。**这是唯一能把
                     # 「零帧是对端发的静音」和「零帧是解密失败被吞了」分开的证据** ——
                     # py-cord 那条 except 只打 DEBUG, 从 bot.log 里看不出任何异常。
-                    try:
-                        dstats = dave.get_decryption_stats() if dave else None
-                    except Exception:
-                        dstats = "<读取失败>"
+                    # **按 user_id 逐个取** —— davey 的账本是 per-user 的
+                    # (get_decryption_stats(user_id, media_type=audio))，
+                    # 不传 uid 会 TypeError。uid 从 ssrc_map 拿，正好只有在场的人。
+                    dstats = _decryption_ledger(dave, cur_map.values())
                     log.info(
                         "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s "
                         "实收ssrc=%s 解密账=%s%s",
