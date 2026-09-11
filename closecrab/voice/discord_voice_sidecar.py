@@ -395,6 +395,25 @@ async def _ensure_connected():
     if ch is None:
         log.warning("常驻语音频道不可用 (id=%s)", _target_voice_channel_id)
         return None
+    # 先把**服务端**的语音状态清干净，再连。
+    #
+    # 上面那个 vc.disconnect 只管本地对象；进程刚起来时 guild.voice_client 是 None,
+    # 于是什么都没清 —— 可 Discord 那边完全可能还记着上个进程留下的语音状态
+    # (exit-42 重启没走完优雅下线, 或者上一次握手半途超时)。这时候再发
+    # VOICE_STATE_UPDATE, Discord 认为状态没变化, **不回 VOICE_SERVER_UPDATE**,
+    # py-cord 就死等在 got_both_voice_updates 上, 20s 后超时 —— 而且会一直这样,
+    # 心跳重试多少次都一样, 因为每次重试都撞同一个幽灵。
+    #
+    # 2026-09-11 实测: bunny 连续 6 次握手超时, 堆栈全停在 _wait_for_state
+    # (got_both_voice_updates)。发一次 channel=None 等于告诉 Discord「先当我不在」,
+    # 之后那次 join 才是一次真正的状态变更。
+    #
+    # 没有幽灵时这一步是无害的空操作 —— 上面已经 return 掉了「已连上」的情况。
+    try:
+        await guild.change_voice_state(channel=None)
+        await asyncio.sleep(1.0)   # 给服务端一点时间落状态
+    except Exception:
+        log.debug("清服务端语音状态失败 (忽略, 继续尝试连接)", exc_info=True)
     try:
         vc = await ch.connect(timeout=20.0, reconnect=True)
     except Exception:
