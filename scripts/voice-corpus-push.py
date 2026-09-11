@@ -173,6 +173,14 @@ def main():
                 sender.text(f"⚠️ {rel} · {sec:.1f}s 录到了但推送失败，文件在本地")
             print(f"pushed {rel} ({sec:.1f}s)")
         time.sleep(args.interval)
+
+    # **到点退出必须说一声。** 2026-09-11 栽在这上面：默认 4h 的死期正好在一次
+    # 对话中间到点，017 推了、018/019 没推，日志里安安静静一句「到点退出」——
+    # 用户那头看到的只是「怎么不推了」，跟进程崩了长得一模一样。
+    # 自带死期是对的（没人会记得关它），但**静悄悄地死跟崩溃无法区分**，
+    # 所以死之前往同一个 channel 里留句话，顺带把重启命令写上。
+    sender.text(f"⏹ 语料推送到点退出（跑满 {args.max_age/3600:.1f}h）。"
+                f"要接着推：scripts/voice-corpus-push.py --skip-existing --max-age 28800")
     print("到点退出")
 
 
