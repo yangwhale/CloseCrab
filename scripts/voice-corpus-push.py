@@ -15,11 +15,12 @@
 用法:
   BOT_NAME=bunny scripts/voice-corpus-push.py            # 盯最新一轮录音
   BOT_NAME=bunny scripts/voice-corpus-push.py --max-age 7200
-  BOT_NAME=bunny scripts/voice-corpus-push.py --asr gemini,chirp --gemini-key-from-bot
+  BOT_NAME=bunny scripts/voice-corpus-push.py --asr gemini,chirp,funasr --gemini-key-from-bot
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as cf
 import json
 import os
 import subprocess
@@ -102,7 +103,7 @@ def wav_seconds(wav: str) -> float:
 #
 # **失败一律写进消息正文，不吞。** 跟下面「到点退出要说一声」同源：
 # 静悄悄地没有字幕，跟「识别出来就是空的」长得一模一样。
-_ASR_ENGINES = ("gemini", "chirp")
+_ASR_ENGINES = ("gemini", "chirp", "funasr")
 
 
 def _repo_on_path():
@@ -214,18 +215,84 @@ def asr_chirp(wav: str, language: str = "cmn-Hans-CN") -> str:
                     for r in resp.results if r.alternatives).strip()
 
 
+# FunASR 是本地那一路（容器里 `funasr-wss-server-2pass`，10095），没有网络往返，
+# 所以它在这张对比表里的角色跟另外两个不一样 —— 量的是「自己机器上能做到多好」。
+#
+# **mode 选 offline 是量出来的，不是抄生产的。** 服务端二进制叫 2pass，
+# 意思是它同时有流式那一半（online）和离线重打分那一半（offline）：
+#
+#     001.wav  online  0.54s 「现在都是tpu最不型号是啥」
+#              offline 0.28s 「现在就是tpu最新的型号是啥」
+#     007.wav  online  0.28s 「还有gt的天气」
+#              offline 0.16s 「还有今天的天气」
+#
+# 离线那半**又准又快** —— 快是因为 online 要按 600ms 一块喂进去模拟实时，
+# 我们手里本来就是整段 wav，没有边说边出字的需求。
+# ⚠️ 生产的 `funasr_stt.py` 写死 `mode: "online"`，拿的正是差的那一半。
+#    那边是真流式、确实需要 online 的低延迟，但值不值得改成 2pass 另说。
+_FUNASR_WS = os.environ.get("FUNASR_WS_URL", "ws://127.0.0.1:10095")
+_FUNASR_MODE = os.environ.get("FUNASR_MODE", "offline")
+
+
+def asr_funasr(wav: str) -> str:
+    import audioop
+    from websockets.sync.client import connect
+
+    _repo_on_path()
+    # 热词跟生产同源：livekit_io 也是把 chirp 那份词表空格拼起来喂给 FunASR 的。
+    from closecrab.voice.chirp_phrases import default_phrases
+    hot = " ".join(p for p, _ in default_phrases())
+
+    with wave.open(wav) as wf:
+        pcm = wf.readframes(wf.getnframes())
+        if wf.getnchannels() > 1:
+            pcm = audioop.tomono(pcm, 2, 1, 1)
+        if wf.getframerate() != 16000:
+            pcm, _ = audioop.ratecv(pcm, 2, 1, wf.getframerate(), 16000, None)
+
+    text = ""
+    with connect(_FUNASR_WS, subprotocols=["binary"], close_timeout=5) as ws:
+        ws.send(json.dumps({"mode": _FUNASR_MODE, "chunk_size": [5, 10, 5],
+                            "wav_name": os.path.basename(wav), "is_speaking": True,
+                            "chunk_interval": 10, "itn": True, "hotwords": hot}))
+        step = 16000 * 2 * 6 // 10  # 600ms
+        for i in range(0, len(pcm), step):
+            ws.send(pcm[i:i + step])
+        ws.send(json.dumps({"is_speaking": False}))
+        while True:
+            d = json.loads(ws.recv(timeout=15))
+            # 最后一条是**整句**不是增量（实测 online/2pass 都如此），所以直接覆盖。
+            if d.get("text"):
+                text = d["text"]
+            if d.get("is_final") or d.get("mode") in ("offline", "2pass-offline"):
+                break
+    return text.strip()
+
+
+_ASR_FN = {"gemini": lambda w, m, k: asr_gemini(w, m, k),
+           "chirp": lambda w, m, k: asr_chirp(w),
+           "funasr": lambda w, m, k: asr_funasr(w)}
+
+
 def transcribe(wav: str, engines: list, model: str, api_key: str) -> list:
-    """返回 [(引擎名, 显示文本, 耗时秒)]；任何一路失败只影响它自己那行。"""
-    out = []
-    for name in engines:
+    """返回 [(引擎名, 显示文本, 耗时秒)]；任何一路失败只影响它自己那行。
+
+    三路**并发**跑：串行的话字幕要等 gemini+chirp+funasr 的耗时之和（实测 5–7s），
+    并发下只等最慢那个。每一路的耗时是各自计的，所以那几个数字仍然可比 ——
+    并发只压缩了墙钟，没有污染指标。
+    """
+    def one(name):
         t0 = time.monotonic()
         try:
-            text = asr_gemini(wav, model, api_key) if name == "gemini" else asr_chirp(wav)
-            out.append((name, text or "（识别为空）", time.monotonic() - t0))
+            text = _ASR_FN[name](wav, model, api_key)
+            return name, text or "（识别为空）", time.monotonic() - t0
         except Exception as e:
-            out.append((name, f"⚠️ 失败 {type(e).__name__}: {e}"[:200],
-                        time.monotonic() - t0))
-    return out
+            return name, f"⚠️ 失败 {type(e).__name__}: {e}"[:200], time.monotonic() - t0
+
+    if not engines:
+        return []
+    with cf.ThreadPoolExecutor(max_workers=len(engines)) as pool:
+        return list(pool.map(one, engines))  # map 保序，输出顺序仍按 --asr 写的来
 
 
 class Sender:
