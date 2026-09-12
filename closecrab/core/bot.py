@@ -601,10 +601,7 @@ class BotCore:
             import sys
             _sidecar_mod = sys.modules.get("closecrab.voice.discord_voice_sidecar")
             if _sidecar_mod:
-                _sidecar_mod._tts_interrupted = True
-                src = getattr(_sidecar_mod, "_persistent_source", None)
-                if src:
-                    src.clear()
+                _sidecar_mod.interrupt_playback()   # 三路一起停，不只是 Discord
         except Exception as e:
             log.debug(f"Sidecar interrupt failed: {e}")
 

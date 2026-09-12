@@ -2138,28 +2138,18 @@ class FeishuChannel(Channel):
                     )
 
             elif action_type in ("voice_pause", "voice_resume"):
-                # 同一时刻只有一路 play, 先试 Discord 再 fallback Zello。
+                # 一个播放器管三路出口，不用再「先试 Discord 再 fallback Zello」。
+                # 那套阶梯是旧架构的产物 —— 每个出口一套播放器，所以得挨个试，
+                # 而 LiveKit 压根没有对应实现，这个按钮对它永远是聋的。
                 try:
                     from ..voice.discord_voice_sidecar import (
                         pause_stream, resume_stream,
                     )
-                    if action_type == "voice_pause":
-                        ok = pause_stream()
-                    else:
-                        ok = resume_stream()
+                    ok = (pause_stream() if action_type == "voice_pause"
+                          else resume_stream())
                 except Exception:
+                    log.error(f"Voice {action_type} failed", exc_info=True)
                     ok = False
-                if not ok:
-                    try:
-                        from ..voice.zello_voice_sidecar import (
-                            pause_zello_stream, resume_zello_stream,
-                        )
-                        if action_type == "voice_pause":
-                            ok = pause_zello_stream()
-                        else:
-                            ok = resume_zello_stream()
-                    except Exception:
-                        ok = False
                 if action_type == "voice_pause":
                     msg = "⏸ 已暂停推流" if ok else "当前没有正在推流的语音"
                 else:
@@ -2172,42 +2162,21 @@ class FeishuChannel(Channel):
                 # voice_replay: 从落盘 buffer 整段重播。
                 # voice_rewind / voice_forward: 从当前位置往回/往前跳 10% 继续播。
                 # 三者都重置 active=True, 故都要重新拉起进度 updater (原 updater 可能已退出)。
-                # 通用: 先试 Discord, 失败 fallback Zello (只要有一个在线就工作)。
+                # 位置只有一个，所以一次操作三路同时跳 —— 不用再按出口分支。
                 fid = (decoded.get("metadata") or {}).get("fid", "") or ""
                 try:
+                    from ..voice.discord_voice_sidecar import (
+                        forward_file, replay_file, rewind_file,
+                    )
                     if action_type == "voice_replay":
-                        from ..voice.discord_voice_sidecar import replay_file
                         ok = bool(fid) and replay_file(fid)
-                        if not ok:
-                            from ..voice.zello_voice_sidecar import replay_buffer
-                            ok = bool(fid) and replay_buffer(fid)
                         msg = "🔁 开始重播" if ok else "重播失败 (buffer 不存在或未连语音)"
                     elif action_type == "voice_rewind":
-                        from ..voice.discord_voice_sidecar import rewind_file
                         ok = bool(fid) and rewind_file(fid, 0.1)
-                        if not ok:
-                            from ..voice.discord_voice_sidecar import get_playback_progress, _buf_path as _dc_buf
-                            from ..voice.zello_voice_sidecar import replay_buffer
-                            prog = get_playback_progress()
-                            if prog and fid:
-                                played_s, total_s, _, p_fid = prog
-                                if p_fid == fid and total_s > 0:
-                                    start = max(0, int((played_s - total_s * 0.1) * 48000 * 4))
-                                    ok = replay_buffer(fid, start)
-                        msg = "⏪ 已倒退 10%" if ok else "倒退失败 (buffer 不存在或未连语音)"
+                        msg = "⏪ 已倒退 10%" if ok else "倒退失败 (当前没在播这一段)"
                     else:
-                        from ..voice.discord_voice_sidecar import forward_file
                         ok = bool(fid) and forward_file(fid, 0.1)
-                        if not ok:
-                            from ..voice.discord_voice_sidecar import get_playback_progress
-                            from ..voice.zello_voice_sidecar import replay_buffer
-                            prog = get_playback_progress()
-                            if prog and fid:
-                                played_s, total_s, _, p_fid = prog
-                                if p_fid == fid and total_s > 0:
-                                    start = int((played_s + total_s * 0.1) * 48000 * 4)
-                                    ok = replay_buffer(fid, start)
-                        msg = "⏩ 已前进 10%" if ok else "前进失败 (buffer 不存在或未连语音)"
+                        msg = "⏩ 已前进 10%" if ok else "前进失败 (当前没在播这一段)"
                 except Exception as e:
                     log.error(f"Voice {action_type} failed: {e}", exc_info=True)
                     ok, msg = False, "操作失败"

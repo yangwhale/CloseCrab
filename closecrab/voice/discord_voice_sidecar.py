@@ -163,7 +163,7 @@ def _maybe_gc_buf_dir() -> None:
     按当时的用量每天涨 1.5GB 左右。
 
     保留 7 天的依据: 重播按钮只在语音卡片上, 实际会被点的是刚发出的那条;
-    缓存不在时 `_replay()` 会 log warning 并返回 False, 不会崩。
+    缓存不在时 `replay_file()` 会返回 False, 不会崩。
 
     zello sidecar 往同一个目录落盘, 共用这里的清理 —— 只要有一侧在跑就够了。
     """
@@ -1632,7 +1632,6 @@ async def _cloud_tts_stream(text: str):
 
 
 _SOURCE_CLASS = None
-_FILE_SOURCE_CLASS = None
 
 
 def _get_source_class():
@@ -1816,45 +1815,28 @@ def _flush_hints_from_queue():
 
 
 async def _do_speak(text: str, fid: str = "", backend: str = ""):
-    """单条 TTS 生成 + 分发。同一份 PCM 可以同时落到多个出口。
+    """单条 TTS 生成 + 播放。**只管生成，不管分发** —— 分发是播放器的事。
 
-    出口有三个，判断规则**不一样**，别照着 Discord 那条想当然：
+    2026-09-13 改：原来这里有个 `_fanout()`，边生成边往三个出口塞，同时另存一份
+    到磁盘给「重播」用。那等于**有几个出口就有几套播放器**，位置各算各的，于是
+    飞书那五个按钮只有 Discord 跟得上（Zello 靠另抄一份平行实现勉强跟，LiveKit
+    一个都跟不上）。
 
-    - Discord：连着就用。
-    - Zello：只在 Discord 没连的时候顶上 —— 它俩是「人的耳朵在哪」的互斥关系。
-    - LiveKit：**独立开关，额外加的一路**（`/lkon` / `/lkoff`）。Discord 开着
-      就两边都出声，Discord 关了就只有它出声。
-
-    所以这里不能写成 if/elif 链，得让每个出口各自判断。
+    现在生成出来的 PCM 先落盘，由 `playback` 那个统一播放器按 20ms 一帧顺读、
+    同时发给所有在线出口。**直播和重播因此是同一条路**，「正在播的这一秒」只有
+    一个定义，暂停/快进在首播途中就能用。代价是多一次落盘往返。
     """
     import time as _time
     global _tts_interrupted
+    from . import playback
     t_start = _time.monotonic()
-    source = _get_persistent_source()
+    _get_persistent_source()      # 先把 py-cord 那边唤醒，出口判在线要用
 
-    # 决定输出路径。
-    # 注意 `_use_dc` 要连 source 一起判 —— `is_voice_connected()` 说连着，但
-    # source 建失败时它是 None，光看前者会在 `source.write` 那行炸。
-    _dc_connected = is_voice_connected() and source is not None
-    try:
-        from . import zello_voice_sidecar as _zsv
-        _zello_online = _zsv.is_connected()
-    except Exception:
-        _zello_online = False
-    try:
-        from . import livekit_out as _lko
-        _lk_online = _lko.is_connected()
-    except Exception:
-        _lk_online = False
-    _use_dc = _dc_connected
-    _use_zl = not _dc_connected and _zello_online
-    _use_lk = _lk_online                      # 并联，不跟前两个抢
-
-    # 三个出口一个都没有才提前返回。原来这里是 `if source is None: return` ——
-    # 那等于「Discord 没连就什么都不播」，Zello-only 那条路其实一直是死的。
-    # 这个判断必须在下面那些副作用（_tts_active、打开落盘文件）之前，
-    # 否则提前 return 会留下一个永远为 True 的 _tts_active。
-    if not (_use_dc or _use_zl or _use_lk):
+    outs = playback.outlets()
+    # 三个出口一个都没有才提前返回。这个判断必须在下面那些副作用
+    # （_tts_active、开播）之前，否则提前 return 会留下一个永远为 True 的
+    # _tts_active。
+    if not any(outs.values()):
         return
 
     global _tts_active
@@ -1863,27 +1845,25 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
 
     tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "gemini")
 
-    buf_f = None
-    bpath = _buf_path(fid)
-    if bpath:
-        try:
-            os.makedirs(_BUF_DIR, exist_ok=True)
-            _maybe_gc_buf_dir()      # 顺带回收过期缓存, 自带每小时节流
-            buf_f = open(bpath, "wb")
-        except Exception:
-            log.exception("打开 buffer 落盘文件失败: %s", bpath)
-            buf_f = None
+    try:
+        os.makedirs(_BUF_DIR, exist_ok=True)
+        _maybe_gc_buf_dir()      # 顺带回收过期缓存, 自带每小时节流
+    except Exception:
+        log.exception("准备 buffer 目录失败: %s", _BUF_DIR)
 
-    log.info("TTS 出口: discord=%s zello=%s livekit=%s", _use_dc, _use_zl, _use_lk)
+    log.info("TTS 出口: discord=%s zello=%s livekit=%s",
+             outs["discord"], outs["zello"], outs["livekit"])
+
+    live = playback.begin(fid)
+    if not live:
+        # fid 不合法 → 落不了盘 → 这条播不了。宁可不响也不要绕过播放器偷偷播，
+        # 那样位置又会分叉，正是这次要修的病。
+        log.warning("开播失败 fid=%r，跳过这条", fid)
+        _tts_active = False
+        return
 
     def _fanout(stereo: bytes) -> None:
-        """一份 48k 立体声 PCM 发给所有开着的出口。"""
-        if _use_dc:
-            source.write(stereo)
-        elif _use_zl:
-            _zsv.zello_buf_write_threadsafe(stereo)
-        if _use_lk:
-            _lko.write_threadsafe(stereo)
+        playback.feed(stereo)
 
     try:
         wrote = 0
@@ -1905,14 +1885,11 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                         t_first_pcm = _time.monotonic()
                         log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                                  (t_first_pcm - t_start) * 1000, len(text), text[:30])
-                        if _use_dc:
-                            source = _get_persistent_source() or source
+                        _get_persistent_source()   # TTS 那几百毫秒里可能已 idle 自停
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
                     _fanout(stereo)
                     wrote += len(stereo)
-                    if buf_f is not None:
-                        buf_f.write(stereo)
         else:
             if tts_backend == "cloud_tts":
                 tts_stream = _cloud_tts_stream(text)
@@ -1926,12 +1903,9 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                     t_first_pcm = _time.monotonic()
                     log.info("TTS 延迟: TTFB=%.0fms (text→首帧PCM), %dc, %s",
                              (t_first_pcm - t_start) * 1000, len(text), text[:30])
-                    if _use_dc:
-                        source = _get_persistent_source() or source
+                    _get_persistent_source()   # TTS 那几百毫秒里可能已 idle 自停
                 _fanout(stereo)
                 wrote += len(stereo)
-                if buf_f is not None:
-                    buf_f.write(stereo)
         t_done = _time.monotonic()
         log.info("TTS 延迟: total=%.0fms, audio=%.1fs, %dc, %s",
                  (t_done - t_start) * 1000, wrote / 4 / 48000,
@@ -1940,35 +1914,20 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     except Exception:
         log.exception("流式 TTS 生成失败")
     finally:
-        if buf_f is not None:
-            try:
-                buf_f.close()
-            except Exception:
-                pass
-        if fid:
-            _set_progress(fid, total=wrote, active=False)
-        if _use_zl:
-            try:
-                _zsv.zello_signal_done_threadsafe()
-            except Exception:
-                pass
-        if _use_lk and _tts_interrupted:
-            # 被打断了就把 LiveKit 那边排着的音频丢掉。生成停了不等于播放停了 ——
-            # 队列里还压着几秒，不清的话用户打断完还得再听它说完。
-            try:
-                _lko.clear()
-            except Exception:
-                log.debug("清 LiveKit 队列失败", exc_info=True)
+        # 生成结束 ≠ 播放结束。总长交给播放器（它以磁盘为准），
+        # Zello 收尾也挪到了真播完那一刻 —— 见 playback._on_progress。
+        playback.end()
+        if _tts_interrupted:
+            # 被打断了就把排着的音频全丢掉。生成停了不等于播放停了 ——
+            # 后面还压着几秒，不清的话用户打断完还得再听它说完。
+            playback.stop()
 
     _tts_active = False  # TTS 生成结束，允许 source idle 停播
 
-    # 等本次写入的音频播完再返回（扣除生成期间已播放的时间）
+    # 等这一段真的播完再返回，后一条语音才不会盖住它。
+    # 上限比音频本身多 10s：暂停期间位置不动，不给上限的话整条 TTS 队列会一直卡着。
     if wrote > 0 and not _tts_interrupted:
-        play_dur = wrote / 4 / 48000
-        elapsed = _time.monotonic() - t_start
-        remain = play_dur - elapsed
-        if remain > 0:
-            await asyncio.sleep(remain)
+        await playback.wait_playout(wrote / 4 / 48000 + 10.0)
 
 
 _current_speak_task: "asyncio.Task | None" = None
@@ -2121,254 +2080,75 @@ def _notify_feishu_voice_card(fid: str):
     feishu_loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_send_card()))
 
 
-async def _set_pause(paused: bool) -> bool:
-    """sidecar loop 内: 暂停/恢复当前 Discord 推流 (vc.pause/resume 同步原生 API)。
+# ─── 播放控制：五个按钮统一走 playback，三路一起动 ──────────────────────────
+#
+# 这五个函数的名字和签名一个没改 —— 飞书那边照旧调，只是背后从「只对 Discord
+# 管用的 vc.pause / vc.play」换成了统一播放器。跨线程调度也不用了：播放器自己
+# 是线程安全的，控制方法可以从任意线程直接调。
 
-    暂停期间 _gen_worker 仍往 buffer 写, 不丢音; resume 后从断点继续念。
-    返回是否真的对一个正在播放的流执行了操作。
+
+def interrupt_playback() -> None:
+    """barge-in：用户开口了，三路一起闭嘴。
+
+    原来各处 barge-in 是 `_get_persistent_source().clear()` —— 只清 Discord 那个
+    队列。现在位置在播放器手里，光清出口队列它下一帧又会把后面的音频读出来接着
+    播，所以必须停播放器本身。
     """
-    bot = _sidecar_bot
-    if bot is None or not bot.guilds:
-        return False
-    vc = bot.guilds[0].voice_client
-    if vc is None or not vc.is_connected():
-        return False
-    if paused:
-        if vc.is_playing():
-            vc.pause()
-            return True
-        return False
-    if vc.is_paused():
-        vc.resume()
-        return True
-    return False
+    global _tts_interrupted
+    _tts_interrupted = True
+    try:
+        from . import playback
+        playback.stop()
+    except Exception:
+        log.debug("停播放器失败", exc_info=True)
 
 
 def pause_stream() -> bool:
-    """【飞书线程调用】暂停 Discord 推流。线程安全。无播放中流 → False。"""
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
-        return False
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_set_pause(True), loop)
-        return bool(fut.result(timeout=0.5))
-    except Exception:
-        log.exception("pause_stream 跨线程调度失败")
-        return False
+    """【飞书线程调用】暂停推流。三路一起停。没在播 → False。"""
+    from . import playback
+    return playback.pause()
 
 
 def resume_stream() -> bool:
-    """【飞书线程调用】恢复 Discord 推流。线程安全。无暂停中流 → False。"""
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
-        return False
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_set_pause(False), loop)
-        return bool(fut.result(timeout=0.5))
-    except Exception:
-        log.exception("resume_stream 跨线程调度失败")
-        return False
+    """【飞书线程调用】从断点继续。三路一起继续。没在暂停 → False。"""
+    from . import playback
+    return playback.resume()
 
 
-# ─── 重播 (从落盘 buffer 文件回放整段) ──────────────────────────────────────
-
-
-def _get_file_source_class():
-    """惰性定义重播用 AudioSource (从 .pcm 文件按帧读, 同步更新进度)。"""
-    global _FILE_SOURCE_CLASS
-    if _FILE_SOURCE_CLASS is not None:
-        return _FILE_SOURCE_CLASS
-    import discord
-
-    class _FilePCMSource(discord.AudioSource):
-        """从落盘的 48k/stereo/s16 .pcm 文件按 20ms 帧读回放, 边读边更进度。
-
-        文件已是 Discord 原生 PCM 格式 (生成时即落盘), 无需再 resample。
-        read() 在播放线程被调, 必须快; 文件顺序读已足够快, 不另开缓冲线程。
-        seek_to() 支持无缝跳转: 播放线程不停, 下一帧自动从新位置读。
-        """
-
-        FRAME = 3840  # 20ms @ 48kHz * 2ch * 2bytes
-
-        def __init__(self, fid: str, path: str, total: int, start_byte: int = 0):
-            self._fid = fid
-            self._f = open(path, "rb")
-            self._total = total
-            self._seek_lock = threading.Lock()
-            if start_byte > 0:
-                try:
-                    self._f.seek(min(start_byte, total))
-                except Exception:
-                    start_byte = 0
-                    self._f.seek(0)
-            self._played = start_byte
-            _set_progress(fid, played=start_byte, total=total, active=True)
-
-        def seek_to(self, byte_pos: int):
-            """无缝跳转: 原子地改文件读取位置, 播放线程无需停止。"""
-            byte_pos = max(0, min(byte_pos, self._total))
-            byte_pos -= byte_pos % self.FRAME
-            with self._seek_lock:
-                self._f.seek(byte_pos)
-                self._played = byte_pos
-            _set_progress(self._fid, played=byte_pos, active=True)
-
-        def read(self) -> bytes:
-            with self._seek_lock:
-                chunk = self._f.read(self.FRAME)
-                if not chunk:
-                    _set_progress(self._fid, played=self._total,
-                                  total=self._total, active=False)
-                    return b""
-                self._played += len(chunk)
-            _set_progress(self._fid, played=self._played, active=True)
-            if len(chunk) < self.FRAME:  # 末帧补齐静音
-                chunk = chunk + b"\x00" * (self.FRAME - len(chunk))
-            return chunk
-
-        def is_opus(self) -> bool:
-            return False
-
-        def cleanup(self):
-            try:
-                self._f.close()
-            except Exception:
-                pass
-
-    _FILE_SOURCE_CLASS = _FilePCMSource
-    return _FILE_SOURCE_CLASS
-
-
-async def _replay(fid: str) -> bool:
-    """sidecar loop 内: 停掉当前播放, 从 _buf_path(fid) 整段回放。"""
-    path = _buf_path(fid)
-    if not path or not os.path.exists(path):
-        log.warning("重播失败: buffer 文件不存在 fid=%s", fid)
-        return False
-    bot = _sidecar_bot
-    if bot is None or not bot.guilds:
-        return False
-    vc = bot.guilds[0].voice_client
-    if vc is None or not vc.is_connected():
-        return False
-    if vc.is_playing() or vc.is_paused():
-        vc.stop()  # 打断当前 (直播或上一次重播)
-        for _ in range(40):  # 最多 ~2s 等 stop 落定
-            if not vc.is_playing() and not vc.is_paused():
-                break
-            await asyncio.sleep(0.05)
-    try:
-        total = os.path.getsize(path)
-    except OSError:
-        return False
-    try:
-        source = _get_file_source_class()(fid, path, total)
-        vc.play(source)
-        log.info("重播开始 fid=%s (%.1fs)", fid, total / _PCM_BYTES_PER_SEC)
-        return True
-    except Exception:
-        log.exception("重播 vc.play 失败 fid=%s", fid)
-        return False
+# ─── 重播 / 快进 / 倒退 ──────────────────────────────────────────────────────
+#
+# 旧实现在这里有一个 `_FilePCMSource`：从落盘的 .pcm 顺读，直接交给 `vc.play()`。
+# 那条路**绕过了分流点** —— Zello 和 LiveKit 根本不知道用户按过重播。现在统一由
+# 播放器从同一个文件、同一个位置读，三路自然同步，这里只剩三个转发。
+#
+# 也不再要求 Discord 连着：只有 Zello 或只有 LiveKit 的时候，这三个按钮照样管用。
 
 
 def replay_file(fid: str) -> bool:
-    """【飞书线程调用】重播指定 fid 的整段音频。线程安全。"""
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
-        return False
-    if not is_voice_connected():
-        return False
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_replay(fid), loop)
-        return bool(fut.result(timeout=5))
-    except Exception:
-        log.exception("replay_file 跨线程调度失败 fid=%s", fid)
-        return False
-
-
-async def _seek(fid: str, delta_frac: float) -> bool:
-    """sidecar loop 内: 从当前播放位置按 delta_frac*总长 跳转 (正=前进, 负=倒退)。
-
-    优先无缝 seek: 如果当前 source 已是同 fid 的 _FilePCMSource, 直接改文件读取位置,
-    播放线程不停, 零断流。否则 fallback 到 stop→play (如从直播切换到重播)。
-    """
-    path = _buf_path(fid)
-    if not path or not os.path.exists(path):
-        log.warning("seek 失败: buffer 文件不存在 fid=%s", fid)
-        return False
-    bot = _sidecar_bot
-    if bot is None or not bot.guilds:
-        return False
-    vc = bot.guilds[0].voice_client
-    if vc is None or not vc.is_connected():
-        return False
-    try:
-        total = os.path.getsize(path)
-    except OSError:
-        return False
-    if total <= 0:
-        return False
-    with _progress_lock:
-        played = _progress["played"] if _progress["fid"] == fid else 0
-    step = int(total * delta_frac)
-    start = max(0, min(total, played + step))
-    start -= start % 3840  # 对齐帧边界
-
-    # 无缝 seek: 当前 source 是同 fid 的 _FilePCMSource → 直接改读取位置, 不断流
-    FileCls = _get_file_source_class()
-    cur = getattr(vc, "source", None)
-    if cur is not None and isinstance(cur, FileCls) and getattr(cur, "_fid", None) == fid:
-        cur.seek_to(start)
-        log.info("seamless seek fid=%s delta=%+.0f%% → %.1fs/%.1fs", fid, delta_frac * 100,
-                 start / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
-        return True
-
-    # Fallback: 当前 source 不是 _FilePCMSource (如直播), 需要 stop→play
-    if vc.is_playing() or vc.is_paused():
-        vc.stop()
-        for _ in range(40):
-            if not vc.is_playing() and not vc.is_paused():
-                break
-            await asyncio.sleep(0.05)
-    try:
-        source = FileCls(fid, path, total, start_byte=start)
-        vc.play(source)
-        log.info("seek (stop→play) fid=%s delta=%+.0f%% → %.1fs/%.1fs", fid, delta_frac * 100,
-                 start / _PCM_BYTES_PER_SEC, total / _PCM_BYTES_PER_SEC)
-        return True
-    except Exception:
-        log.exception("seek vc.play 失败 fid=%s", fid)
-        return False
+    """【飞书线程调用】从头重播指定 fid 的整段音频。三路一起。"""
+    from . import playback
+    return playback.replay(fid)
 
 
 def rewind_file(fid: str, frac: float = 0.1) -> bool:
-    """【飞书线程调用】把指定 fid 的播放位置往回跳 frac*总长。线程安全。"""
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
+    """【飞书线程调用】往回跳 frac*总长。三路一起 —— 位置只有一个。
+
+    `fid` 只用来对一下播的是不是这一段：播放器自己记着位置，不用外面告诉它。
+    """
+    from . import playback
+    prog = playback.progress()
+    if prog is None or (fid and prog[3] != fid):
         return False
-    if not is_voice_connected():
-        return False
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_seek(fid, -abs(frac)), loop)
-        return bool(fut.result(timeout=5))
-    except Exception:
-        log.exception("rewind_file 跨线程调度失败 fid=%s", fid)
-        return False
+    return playback.seek(-abs(frac))
 
 
 def forward_file(fid: str, frac: float = 0.1) -> bool:
-    """【飞书线程调用】把指定 fid 的播放位置往前跳 frac*总长。线程安全。"""
-    loop = _sidecar_loop
-    if loop is None or _sidecar_bot is None:
+    """【飞书线程调用】往前跳 frac*总长。三路一起。"""
+    from . import playback
+    prog = playback.progress()
+    if prog is None or (fid and prog[3] != fid):
         return False
-    if not is_voice_connected():
-        return False
-    try:
-        fut = asyncio.run_coroutine_threadsafe(_seek(fid, abs(frac)), loop)
-        return bool(fut.result(timeout=5))
-    except Exception:
-        log.exception("forward_file 跨线程调度失败 fid=%s", fid)
-        return False
+    return playback.seek(abs(frac))
 
 
 # ─── 语音「接收」(STT): vc.start_recording → 连续 PCM → silero VAD → Gemini STT ──
@@ -2660,10 +2440,9 @@ def _get_audio_output_class():
             self.on_playback_finished(playback_position=played, interrupted=False)
 
         def clear_buffer(self) -> None:
-            global _tts_interrupted
             if self._flush_task is not None and not self._flush_task.done():
                 self._flush_task.cancel()
-            _tts_interrupted = True
+            interrupt_playback()      # 设 _tts_interrupted + 三路一起停
             # 直接 cancel _do_speak 协程，不等标志位轮询
             if _current_speak_task is not None and not _current_speak_task.done():
                 _current_speak_task.cancel()

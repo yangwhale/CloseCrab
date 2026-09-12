@@ -349,12 +349,9 @@ class _CloseCrabStream(llm.LLMStream):
         # 设 _tts_interrupted 停止当前 _do_speak + 清空队列 + 清 buffer
         from .discord_voice_sidecar import stream_speak_text
         from . import discord_voice_sidecar as _sidecar_mod
-        _sidecar_mod._tts_interrupted = True
+        _sidecar_mod.interrupt_playback()      # 三路一起停，不只是 Discord
         if _sidecar_mod._speak_queue is not None:
             _sidecar_mod._flush_hints_from_queue()
-        src = _sidecar_mod._get_persistent_source()
-        if src is not None:
-            src.clear()
         log.info("barge-in: interrupted old TTS + cleared buffer for new message")
 
         # ── 即时应答 (instant ack): 并行推一句俏皮短回复到 TTS ──────────

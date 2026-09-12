@@ -69,6 +69,10 @@ _SILENCE = b"\x00" * _FRAME_BYTES
 
 _BUF_DIR = "/tmp/jarvis-tts-buf"
 
+# 播放中每 5 帧（100ms）汇报一次位置。飞书进度条自己就是几秒刷一次，
+# 再密没意义；而回调是在播放线程上持锁跑的，密了要占帧预算。
+_REPORT_EVERY_FRAMES = 5
+
 # 状态机。播放器只有这三种状态，所有按钮都是在它们之间搬家。
 IDLE = "idle"
 PLAYING = "playing"
@@ -133,6 +137,10 @@ class UnifiedPlayer:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stopping = False
+        # 播放中每隔几帧汇报一次位置。状态变化（暂停/seek/播完）一律立刻汇报，
+        # 这个只管「正常往下播」那段 —— 不汇报的话进度条会一路停在 0，
+        # 到播完才跳到 100%。
+        self._since_report = 0
         # 统计：给测试和排障看的，不参与任何判断。
         self.frames_emitted = 0
         self.frames_silence = 0
@@ -380,6 +388,10 @@ class UnifiedPlayer:
             if t.pos > t.total:
                 t.total = t.pos         # live 时 total 跟着位置走
             self._emit(chunk)
+            self._since_report += 1
+            if self._since_report >= _REPORT_EVERY_FRAMES:
+                self._since_report = 0
+                self._report()
 
     def _emit(self, chunk: bytes | None) -> None:
         """把一帧发给所有在线的出口。`chunk=None` 表示这一帧没内容。
