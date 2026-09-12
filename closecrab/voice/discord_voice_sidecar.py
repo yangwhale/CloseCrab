@@ -590,8 +590,79 @@ _utt_loss_pos: list = []   # [(已收帧数, 缺口长度)] —— 用来看丢�
 #                       亲口说它从手机那边丢了多少 —— 上行那一段的直接证据。
 #
 # 先只记不判：报告块里到底出现哪些 ssrc 得看真实数据，靠猜会猜错。
+#
+# ⚠️ 第一版这个探针记下来的全是垃圾，教训写在 `_rtcp_note` 上面，改之前先读。
 _rtcp_sr: dict = {}     # 发报方 ssrc → (packet_count, octet_count)
 _rtcp_rr: dict = {}     # 被报告的 ssrc → (perc_loss_8bit, total_lost, last_seq)
+_rtcp_ok = 0            # 解密+解析成功的 RTCP 包数
+_rtcp_fail = 0          # 解不开的 —— 跟「一个都没来」必须分得开，见 _rtcp_summary
+
+
+def _rtcp_note(pkt) -> None:
+    """记一个**已经解过密**的 RTCP 包。
+
+    ── 为什么这个函数存在，以及第一版错在哪 ──────────────────────────────
+
+    第一版（124c590）把探针挂在 `SenderReportPacket.__init__` 上，理由写得
+    还挺像样：「reader 对 RTCP 的处理就是打一行 unexpected 然后丢掉，挂在
+    分发逻辑上等于赌它以后不改；挂构造函数则只要包被解析过就一定记到。」
+
+    它确实记到了，字段也全填满了 —— 打出来是这样：
+
+        服务器自称发 15175:1820020607 包, 15214:4161767572 包
+        报告块 3729907330:丢12920197(73.0%), 1831013088:丢12188848(66.4%), …
+
+    41 亿个包、几百个素未谋面的 ssrc、丢包率从 0.4% 到 95.3% 乱撒。
+    这不是「数据难看」，这是**在读密文**。
+
+    根因在 py-cord 的收包分发（voice/receive/reader.py::callback）：
+
+        if not is_rtcp(packet_data):
+            packet.decrypted_data = self.decryptor.decrypt_rtp(packet)   # 解密
+        else:
+            packet = decode(packet_data)                                 # 不解密
+
+    RTP 那条路解密，RTCP 这条路**根本没解**。而 SRTCP 只有前 8 字节
+    （版本/类型/长度 + 发报方 ssrc）是明文，sender info 和报告块全是密文。
+    这跟观察到的现象严丝合缝：type 是对的，发报方 ssrc 15175/15214 确实是
+    本次会话的真号，**其余每一个数字都是把随机字节当整数读**。
+
+    > 教训：`struct.unpack` 对垃圾字节一样会成功返回。「字段解析成功」
+    > 跟「字段有意义」之间没有任何关系 —— 这类 bug 不会报错，只会给你
+    > 一份格式完美的假账。判据得是**外部锚点**：包计数该是几千，不是 41 亿。
+
+    解密原语本身是齐的：`PacketDecryptor.decrypt_rtcp()` 写着，各模式的
+    `_decrypt_rtcp_*` 也都实现了。但**上层那个 `decrypt_rtcp()` 不能调** ——
+    它内部这个循环：
+
+        offset = 0
+        while offset < len(data):
+            current_data = data[offset:]
+            if len(current_data) < 8: break
+            ...
+            if dave 就绪 and ssrc in ssrc_user_map: return dave.decrypt(...)
+        return data
+
+    `offset` 声明完就再没被赋过值。对一个正常的 SR 包（长度 ≥ 8、发报方是
+    服务器所以不在 ssrc_user_map 里），两个出口一个都够不着 —— **死循环**，
+    而且是死在收包线程上。所以我们绕过它，直接调下面那层纯解密的
+    `_decryptor_rtcp`，自己 decode。
+    """
+    global _rtcp_ok
+    with _dave_fail_lock:
+        info = getattr(pkt, "info", None)
+        if info is not None:
+            _rtcp_sr[pkt.ssrc] = (info.packet_count, info.octet_count)
+        for r in getattr(pkt, "reports", ()):
+            # 字段名两个包类不一样：SR 的报告块叫 total_lost，RR 的叫
+            # total_loss（py-cord 自己的笔误，两处 namedtuple 各写各的）。
+            # 写死任何一个都会在另一类包上抛 AttributeError —— 而这条路径
+            # 外面包着 try，抛了不会有人喊，只会静静地少记一半。
+            lost = getattr(r, "total_lost", None)
+            if lost is None:
+                lost = getattr(r, "total_loss", 0)
+            _rtcp_rr[r.ssrc] = (r.perc_loss, lost, r.last_seq)
+        _rtcp_ok += 1        # 放最后：中途抛了就不该算成功
 
 
 def _utt_opus_note(ssrc: int, nbytes: int) -> None:
@@ -693,17 +764,26 @@ def _rtcp_summary() -> str:
     with _dave_fail_lock:
         sr = dict(_rtcp_sr)
         rr = dict(_rtcp_rr)
-    if not sr and not rr:
-        return "RTCP 无"
+        ok, fail = _rtcp_ok, _rtcp_fail
+    # 「没收到 RTCP」和「收到了但解不开」要分开报。两者都会让账是空的，
+    # 但一个是没证据，一个是探针坏了 —— 混在一起会让人对着空账干等。
+    if not ok:
+        return f"RTCP 无(解密失败{fail})" if fail else "RTCP 无"
     part = []
     if sr:
         part.append("服务器自称发" + ",".join(
             f"{s}:{c[0]}包" for s, c in sr.items()))
     if rr:
-        # perc_loss 是 8 bit 定点小数（RFC 3550 §6.4.1），除以 256 才是比例
+        # perc_loss 是 8 bit 定点小数（RFC 3550 §6.4.1），除以 256 才是比例。
+        # 只打前 6 个：真实会话里报告块就那么几条，一旦刷出几十上百个
+        # 陌生 ssrc，那本身就是「又在读密文」的信号，不该让它把日志撑爆。
+        it = list(rr.items())[:6]
         part.append("报告块" + ",".join(
-            f"{s}:丢{v[1]}({v[0]/256*100:.1f}%)" for s, v in rr.items()))
-    return " ".join(part)
+            f"{s}:丢{v[1]}({v[0] / 256 * 100:.1f}%)" for s, v in it)
+            + (f"…共{len(rr)}" if len(rr) > 6 else ""))
+    if fail:
+        part.append(f"(另有{fail}个解不开)")
+    return " ".join(part) or f"RTCP {ok}包无内容"
 
 
 def _opus_toc_summary(top: int = 4) -> str:
@@ -3605,36 +3685,36 @@ def _install_receive_probe():
     #    只在 gap>0 时触发, 不是每包都双解码 (那会破坏 Opus 状态)。
     # 1.5) RTCP 账本: 把服务器自己报的收发数记下来。
     #
-    # 挂在**包类的构造函数**上，不挂在 reader 的分发逻辑上 —— 理由是
-    # reader 对这两类包的处理就是「打一行 unexpected 然后丢掉」，
-    # 挂在那儿等于赌它以后不改分发；挂在构造函数上则只要包被解析过就一定记到。
+    # 挂在 reader 的 callback 上 —— **必须挂在这儿**，因为只有这一层同时
+    # 拿得到「原始字节」和「解密用的 decryptor」。挂在包类构造函数上是
+    # 第一版的错法，那里只有字节没有钥匙，记下来的全是密文。经过与判据
+    # 写在 `_rtcp_note` 的 docstring 里。
+    #
+    # 不调 decryptor.decrypt_rtcp() —— 它内部循环不推进 offset，对正常 SR
+    # 包会死循环（同样见 `_rtcp_note`）。直接用底下那层纯解密的
+    # _decryptor_rtcp，自己 decode。
     try:
-        from discord.voice.packets.rtp import (
-            SenderReportPacket as _SR, ReceiverReportPacket as _RR)
+        from discord.voice.receive.reader import AudioReader as _Reader
+        from discord.voice.receive.reader import is_rtcp as _is_rtcp
+        from discord.voice.packets.rtp import decode as _pkt_decode
 
-        def _wrap_report(cls, store_info):
-            if getattr(cls, "_cc_rtcp_probed", False):
-                return
-            _orig_init = cls.__init__
+        if not getattr(_Reader, "_cc_rtcp_probed", False):
+            _orig_cb = _Reader.callback
 
-            def _init(self, data):
-                _orig_init(self, data)
+            def _cb(self, packet_data: bytes) -> None:
+                global _rtcp_fail
                 try:
-                    with _dave_fail_lock:
-                        if store_info and getattr(self, "info", None) is not None:
-                            _rtcp_sr[self.ssrc] = (self.info.packet_count,
-                                                   self.info.octet_count)
-                        for r in getattr(self, "reports", ()):
-                            _rtcp_rr[r.ssrc] = (r.perc_loss, r.total_lost,
-                                                r.last_seq)
+                    if _is_rtcp(packet_data):
+                        _rtcp_note(_pkt_decode(
+                            self.decryptor._decryptor_rtcp(packet_data)))
                 except Exception:
-                    pass          # 诊断代码绝不能把收包路径带崩
-            cls.__init__ = _init
-            cls._cc_rtcp_probed = True
+                    with _dave_fail_lock:
+                        _rtcp_fail += 1     # 诊断代码绝不能把收包路径带崩
+                return _orig_cb(self, packet_data)
 
-        _wrap_report(_SR, True)
-        _wrap_report(_RR, False)
-        log.info("RTCP 账本探针已挂载 (SR/RR, 用于拆分上行段与下行段丢包)")
+            _Reader.callback = _cb
+            _Reader._cc_rtcp_probed = True
+        log.info("RTCP 账本探针已挂载 (先解密再解析, 用于拆分上行段与下行段丢包)")
     except Exception:
         log.exception("RTCP 账本探针挂载失败 (丢包仍可测, 只是分不了段)")
 
