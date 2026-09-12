@@ -94,9 +94,13 @@ log()  { echo "[install-livekit] $*"; }
 die()  { echo "[install-livekit] ERROR: $*" >&2; exit 1; }
 
 require_args() {
-    [[ -z "$FRONTEND_DOMAIN"  ]] && die "缺 --frontend-domain"
-    [[ -z "$SIGNALING_DOMAIN" ]] && die "缺 --signaling-domain"
-    [[ -z "$ADMIN_EMAIL"      ]] && die "缺 --admin-email"
+    # 必须写成 if, 不能用 `[[ -z X ]] && die`. 后者作为函数最后一条语句时,
+    # 参数齐全 → 条件为假 → 整个 && 复合命令返回 1 → 函数返回 1 →
+    # set -e 把脚本干掉, 而且一个字都不打. 2026-09-12 踩到: 参数明明全对,
+    # 脚本静默 exit 1, 日志空白.
+    if [[ -z "$FRONTEND_DOMAIN"  ]]; then die "缺 --frontend-domain"; fi
+    if [[ -z "$SIGNALING_DOMAIN" ]]; then die "缺 --signaling-domain"; fi
+    if [[ -z "$ADMIN_EMAIL"      ]]; then die "缺 --admin-email"; fi
 }
 
 render_template() {

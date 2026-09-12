@@ -1,0 +1,33 @@
+# /etc/systemd/system/lk-gemini-agent.service
+# LiveKit agent —— Gemini Live（realtime 模式）
+#
+# 这个 unit 里有两条注释是拿事故换来的，改之前先读完。
+
+[Unit]
+Description=LiveKit agent — Gemini Live (realtime mode)
+Documentation=https://docs.livekit.io/agents/
+After=network-online.target
+Wants=network-online.target
+# 这里**不能**写 Requires=livekit-server.service。agent 和 SFU 通常不在
+# 同一台机器上（见 agent/env.tmpl 里讲的地域约束），本机根本没有那个 unit；
+# 而 Requires= 是硬绑定 —— 一停被依赖的那个，systemd 会把本 unit 一起停掉。
+# 2026-09-12 清理本机残留的 livekit-server 时，agent 就是这么被连坐停掉的，
+# 表现是「房间里突然没有 agent 了」，看日志只有 exit 255。
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__HOME__/lk-gemini-agent
+Environment=HOME=__HOME__
+# 必须钉死 TMPDIR。livekit-agents 用 multiprocessing forkserver，它的 AF_UNIX
+# socket 建在 TMPDIR 下，而 AF_UNIX 路径上限 108 字节 —— TMPDIR 一长，worker
+# 注册成功但每个 job 进程都起不来，报 "AF_UNIX path too long"。
+# 症状具有迷惑性：日志里 "registered worker" 是绿的，坏的是下一层。
+Environment=TMPDIR=/tmp
+ExecStart=__HOME__/lk-gemini-agent/.venv/bin/python __HOME__/lk-gemini-agent/agent.py start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

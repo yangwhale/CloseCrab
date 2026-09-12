@@ -1,13 +1,37 @@
 # LiveKit Frontend env — CloseCrab voice IO
 # 由 scripts/install-livekit.sh 渲染. 落盘到 ~/livekit-frontend/.env.local (mode 0600), 不要进 git.
 #
-# LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET 必须和 ~/livekit-server/config.yaml 对齐
+# LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET 必须和 livekit-server 的 config.yaml 对齐
 # (frontend Next.js API route 用同一对 key 签 JWT).
-# NEXT_PUBLIC_LIVEKIT_URL 是浏览器侧 wss URL, 走 Caddy 反代到 livekit-server.
-# AGENT_NAME 是 demo fallback (URL 没带 ?bot= 时用), 实际 routing 走 ?bot= 派生 closecrab-voice-{bot}.
+# NEXT_PUBLIC_LIVEKIT_URL 是浏览器侧 wss URL.
+# SFU 跟前端不同机时, LIVEKIT_URL 要写 SFU 的**内网**地址, 不是 127.0.0.1.
 
 LIVEKIT_URL=ws://127.0.0.1:7880
 LIVEKIT_API_KEY=__API_KEY__
 LIVEKIT_API_SECRET=__API_SECRET__
 NEXT_PUBLIC_LIVEKIT_URL=__PUBLIC_WSS_URL__
+
+# ── AGENT_NAME：设不设，取决于 agent 是怎么注册的，两边必须一致 ──────
+# 设了它，app/page.tsx 会把这个名字塞进 room_config，变成「**显式派发**」——
+# SFU 只会把 job 派给注册时用同一个名字的 worker。
+#   · closecrab/voice/livekit_io.py 那套走显式派发，名字是 closecrab-voice-{bot}
+#     ⇒ 保留下面这一行。
+#   · infra/livekit/agent/agent.py（Gemini Live）是**匿名注册**
+#     （WorkerOptions 不传 agent_name），走自动派发 ⇒ 这一行必须**留空或删掉**。
+# 名字一对不上，SFU 就打 "not dispatching agent job since no worker is
+# available"，浏览器等超时后显示 "agent not in the room" —— **两边都不报错**，
+# 只是谁也没等到谁。2026-09-12 踩到，查了很久因为日志全是绿的。
 AGENT_NAME=__DEFAULT_AGENT_NAME__
+
+# ── 下面两条只有用 infra/livekit/frontend/ 那套补丁时才需要 ──────────
+# token 端点：上游那条路由在 NODE_ENV=production 下会直接 throw
+# （见 frontend/app/api/token/route.ts 的注释），而 systemd 起的是
+# `pnpm start`，必然命中。这个开关**必须显式打开**，默认仍然拒绝 ——
+# 谁开的、在哪开的都留痕。
+# ⚠️ 打开后该端点无鉴权，谁调谁就能拿房间 token。
+#    前面必须有一层（IAP / Caddy basicauth / 自己的登录态）才能这么用。
+#ALLOW_INSECURE_TOKEN=true
+#
+# 管理台 /admin 调 RoomService RPC 的地址。必须是**内网** http ——
+# 服务端到服务端没有浏览器 cookie，走公网域名会被 IAP 挡住。
+#LIVEKIT_ADMIN_URL=http://__SFU_PRIVATE_IP__:7880

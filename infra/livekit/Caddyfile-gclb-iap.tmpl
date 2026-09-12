@@ -1,0 +1,57 @@
+# Caddyfile 片段 —— 单域名 + GCLB/IAP 拓扑（2026-09-12 起的现行形态）
+#
+# ⚠️ 这份**不由 install-livekit.sh 渲染**，是手工维护的参考实现。
+#    install-livekit.sh 渲染的是同目录下的 `Caddyfile.tmpl`，那份对应的是
+#    「双域名 + Caddy 自己签证书 + 443 直接对公网」的旧形态，两者不兼容：
+#    前者是让 IAP 挡在前面，后者是绕过 IAP。别把两份混着用。
+#
+# 拓扑：
+#   浏览器 ──HTTPS──► GCLB + IAP ──HTTP:80──► 本机 Caddy ──┬─► 127.0.0.1:7880  (SFU 信令)
+#                                                          └─► __FRONTEND_IP__:3000 (Next.js)
+#   媒体  ──UDP 50000-60000──────────────────────────────► 本机外网 IP（**不过 LB**）
+#
+# 为什么媒体不能也走 LB：ICE candidate 里带的是裸 IP:port，浏览器直接往那个
+# 地址发 UDP。HTTPS LB 不转发 UDP，要想藏在 LB 后面得另外架 TURN。
+
+# ── 为什么 signaling 和前端必须是**同一个域名** ─────────────────────
+# IAP 的登录 cookie 是**按主机名**发的。浏览器只在导航过的那个域名上拿到
+# cookie。独立的 signaling 域名从来没有人用浏览器导航过去 → 它没有 cookie →
+# WebSocket 握手被 IAP 弹 302 到登录页 → 浏览器**不会跟随重定向做 WS 升级**，
+# 直接失败。同源就不存在这个问题。
+# ⇒ 「想让 signaling 也受 IAP 保护」和「用独立 signaling 域名」是互斥的。
+#
+# 站点地址必须显式写 `http://`：TLS 在 GCLB 上就终止了，到这里是明文 80。
+# 不写的话 Caddy 会启用 automatic HTTPS，自己去签证书并把 80 重定向到 443。
+#
+# 也**不要**把这几条塞进一个泛 `:80 {}` 块。独立 site block 更具体、
+# Caddy 优先匹配，跟同机上其他服务互不干扰。
+http://__FRONTEND_DOMAIN__ {
+	header -Server
+	header X-Content-Type-Options nosniff
+
+	# /lk/* → SFU 信令。handle_path 会剥掉 /lk 前缀，
+	# 所以浏览器请求的 /lk/rtc/v1 到 livekit-server 眼里就是 /rtc/v1。
+	# 两边 SDK 都保留路径前缀（已读源码确认：
+	#   JS   livekit-client createV0RtcUrl → appendUrlPath(urlObj,'rtc')
+	#   Py   agents/worker.py:1102 base = scheme://netloc+path，再 urljoin 'agent'）
+	handle_path /lk/* {
+		reverse_proxy 127.0.0.1:7880
+	}
+
+	# 其余全给前端
+	handle {
+		reverse_proxy __FRONTEND_IP__:3000
+	}
+}
+
+# ── 配套的 GCLB 侧注意事项（不是 Caddy 配置，但漏了就白做）───────────
+# 1. url-map 的 IAP 豁免前缀会**连带**豁免这个域名下的同名路径（host 规则是 `*`
+#    时尤其如此）。豁免清单里绝不能出现 /api/*、/admin*、/lk/*。
+# 2. 健康检查来源网段（35.191.0.0/16、130.211.0.0/22）的防火墙规则如果放的是
+#    「全部 TCP / 全部协议」，那 7880 对这些网段是**直接可达的**，绕过 Caddy。
+#    按需收窄到 tcp:80。
+# 3. 关掉 443 时：摘掉实例的 https-server tag（**规则本身还在**，只是不再套用），
+#    并删掉旧 signaling 域名的 DNS A 记录。
+# 4. rtc.tcp_port（7881）是 UDP 被封时的兜底。摘掉对应 tag 等于关掉兜底，
+#    但 SFU 仍会 advertise 这个 candidate —— 在封 UDP 的网络下客户端会直接失败
+#    而不是降级。要么两边都留，要么两边都去掉。
