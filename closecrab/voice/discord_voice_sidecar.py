@@ -549,6 +549,50 @@ def _record_opus_toc(plain: bytes | None) -> None:
         pass
 
 
+# ── 每句话单独记一份 Opus 账 ────────────────────────────────────────────
+#
+# 上面那份 `_opus_toc_stats` 是**从进程启动起累计**的，所以它只能回答
+# 「这场会话整体是什么模式」，回答不了「为什么第 1 句干净、第 6 句糊」。
+#
+# 2026-09-12 就卡在这里：同一次会话 19 句里只有 2 句 4-6 kHz 是正常的
+# （比主频段低 20 dB），其余全部塌到低 30~39 dB。累计账全程报
+# Hybrid/FB 20kHz、95 kbps 一动不动，于是「发送端到底做了什么不一样的事」
+# 完全无从查起 —— 缺的不是分析，是**按句分组的原始数据**。
+#
+# 记两样，各回答一个问题：
+#   ssrc  → 这句是从哪条发送连接来的。会话里同时挂着 11 个 ssrc，
+#           如果那两句干净的来自不同 ssrc，就是「另一台设备/另一条连接」，
+#           跟音频处理链无关。
+#   字节  → 编码器**真花了多少比特**。TOC 只说「允许到 20 kHz」，是上限不是投入。
+#           糊的那些如果照样 238 B/帧，说明比特花了却没内容，问题在编码器入口之前；
+#           如果字节明显掉下去，那是编码器自己在降档，问题在发送端客户端。
+_utt_opus: "collections.Counter[int]" = collections.Counter()   # ssrc → 帧数
+_utt_opus_bytes = 0
+
+
+def _utt_opus_note(ssrc: int, nbytes: int) -> None:
+    """在每个成功解密的包上跑，所以只做加法，不做任何解析。"""
+    global _utt_opus_bytes
+    with _dave_fail_lock:
+        _utt_opus[ssrc] += 1
+        _utt_opus_bytes += nbytes
+
+
+def _utt_opus_take() -> str:
+    """取走并清空本句的账。清空是必须的 —— 不清就又变成累计账，等于没加。"""
+    global _utt_opus_bytes
+    with _dave_fail_lock:
+        items = _utt_opus.most_common(3)
+        n = sum(_utt_opus.values())
+        b = _utt_opus_bytes
+        _utt_opus.clear()
+        _utt_opus_bytes = 0
+    if not n:
+        return "无包"
+    src = ",".join(f"{s}×{c}" for s, c in items)
+    return f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps"
+
+
 def _opus_toc_summary(top: int = 4) -> str:
     with _dave_fail_lock:
         items = _opus_toc_stats.most_common(top)
@@ -2462,12 +2506,14 @@ def _utterance_write(pcm: bytes):
             wf.setsampwidth(2)
             wf.setframerate(48000)
             wf.writeframes(pcm)
+        opus = _utt_opus_take()
         # 时间戳单独存一份，之后好跟 gemini-live-delivery 日志按时间对齐
         with open(path[:-4] + ".json", "w") as f:
             _json.dump({"seq": _utt_seq, "dur_sec": round(dur, 2),
                         "wall": _t.strftime("%Y-%m-%d %H:%M:%S"),
-                        "epoch": _t.time()}, f, ensure_ascii=False)
-        log.info("[语料] 第 %d 句已存: %s (%.1fs)", _utt_seq, path, dur)
+                        "epoch": _t.time(),
+                        "opus": opus}, f, ensure_ascii=False)
+        log.info("[语料] 第 %d 句已存: %s (%.1fs) %s", _utt_seq, path, dur, opus)
     except Exception:
         log.exception("[语料] WAV 写入失败 seq=%d", _utt_seq)
 
@@ -3399,6 +3445,7 @@ def _install_receive_probe():
                                                 padded=padded)
                             # 解开之后才是真 Opus，TOC 只有在这里读才作数
                             _record_opus_toc(plain)
+                            _utt_opus_note(packet.ssrc, len(plain) if plain else 0)
                         except Exception as exc:
                             # **这一行就是「有声但咯楞」的制造现场。** 解密失败被吞掉,
                             # 换成一帧静音接着跑 —— 上层完全看不出异常, 只听得出卡顿。

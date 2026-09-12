@@ -5031,6 +5031,7 @@ class FeishuChannel(Channel):
             tmp.close()
 
             log.info(f"Audio downloaded: {tmp_path}")
+            await loop.run_in_executor(None, self._archive_voice_corpus, tmp_path)
 
             # STT 转写
             text = await loop.run_in_executor(None, self._stt.transcribe, tmp_path)
@@ -5066,6 +5067,51 @@ class FeishuChannel(Channel):
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+    @staticmethod
+    def _archive_voice_corpus(ogg_path: str) -> None:
+        """把收到的飞书语音存一份进语料目录，供离线三路 ASR 对比。
+
+        为什么需要这个：飞书语音走的是「手机本地录一段再上传」，Discord 语音走的是
+        「实时双向通话」。2026-09-12 实测同一个人同一分钟里说同样的话，前者
+        转写全对、后者退化成 8kHz 窄带 —— 因为双向通话会把蓝牙耳机踢进 HFP 免提模式。
+        要把这个对比做实，就得两条路的原始音频都留得下来。
+
+        原来这个文件转写完就在 finally 里 unlink 掉了，所以「你把飞书那段也跑一下
+        三路 ASR」这个要求是**静默做不到**的 —— 不是报错，是文件已经没了。
+
+        落点跟 sidecar 的语料目录同构（NNN.wav + NNN.json，**先 wav 后 json**），
+        voice-corpus-push.py 那个轮询进程就能原样接管，不用再写一套推送。
+        """
+        if os.environ.get("STT_AB_DEBUG") != "1":
+            return
+        try:
+            import subprocess
+            import wave as _wave
+            from datetime import datetime
+
+            day = datetime.now().strftime("%Y%m%d")
+            out_dir = os.path.expanduser(f"~/voice-regression/audio/feishu-{day}")
+            os.makedirs(out_dir, exist_ok=True)
+            seq = len([f for f in os.listdir(out_dir) if f.endswith(".wav")]) + 1
+            wav_path = os.path.join(out_dir, f"{seq:03d}.wav")
+
+            # 统一成 48k 单声道，跟 Discord 那条路的语料同规格，频谱才可比。
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", ogg_path,
+                 "-ac", "1", "-ar", "48000", wav_path],
+                check=True, timeout=30,
+            )
+            with _wave.open(wav_path) as w:
+                dur = w.getnframes() / w.getframerate()
+            # json 最后写：轮询进程拿它当「wav 已经 close 完」的判据。
+            with open(os.path.join(out_dir, f"{seq:03d}.json"), "w") as f:
+                json.dump({"seq": seq, "dur_sec": round(dur, 1), "source": "feishu",
+                           "wall": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
+            log.info("[voice-corpus] 飞书语音已存档: %s (%.1fs)", wav_path, dur)
+        except Exception:
+            # 存档失败绝不能影响转写本身 —— 它只是个旁路。
+            log.warning("[voice-corpus] 飞书语音存档失败", exc_info=True)
 
     @staticmethod
     def _convert_image_to_jpeg(data: bytes) -> tuple[bytes, str]:
