@@ -25,17 +25,83 @@ import closecrab.voice.discord_voice_sidecar as sc
 
 @pytest.fixture(autouse=True)
 def _clean():
-    sc._utt_opus.clear()
-    sc._utt_gaps.clear()
-    sc._utt_loss_pos.clear()
-    sc._utt_opus_bytes = 0
-    sc._utt_lost = 0
+    def _reset():
+        sc._utt_opus.clear()
+        sc._utt_gaps.clear()
+        sc._utt_loss_pos.clear()
+        sc._utt_opus_bytes = 0
+        sc._utt_lost = 0
+        sc._utt_seq_jump = 0
+    _reset()
     yield
-    sc._utt_opus.clear()
-    sc._utt_gaps.clear()
-    sc._utt_loss_pos.clear()
-    sc._utt_opus_bytes = 0
-    sc._utt_lost = 0
+    _reset()
+
+
+# ── 序列号差值：往回走的号绝不能算成丢包 ──────────────────────────────────
+#
+# 这一组是 2026-09-12 生产上第一条分段账单直接换来的：
+#     626帧 丢65751(99.1%) 分段100%/20%/21%/21%
+# 65751 = 65535 + 216。一个重复包被 py-cord 的 gap_wrapped 折算成 65535 帧
+# 缺口，把真实的 216 帧（25.7%，跟后三段完全吻合）整个淹掉。
+
+def test_正常连号不算丢():
+    assert sc._seq_gap(100, 101) == 0
+
+
+def test_中间少了两个号就是丢两帧():
+    assert sc._seq_gap(100, 103) == 2
+
+
+def test_重复包不算丢包():
+    """就是把 99.1% 那条账单打出来的元凶。gap_wrapped(100,100) = 65535。"""
+    assert sc._seq_gap(100, 100) == 0
+    assert sc._utt_lost == 0
+
+
+def test_乱序迟到的包不算丢包():
+    """帧其实到了，只是晚了。记成丢包是凭空捏造。"""
+    assert sc._seq_gap(100, 98) == 0
+
+
+def test_序列号回绕要正确跨过去():
+    """16 位序列号绕回 0 是每 22 分钟一次的常态，不是丢包。"""
+    assert sc._seq_gap(65535, 0) == 0
+    assert sc._seq_gap(65534, 1) == 2      # 65535 和 0 两个号都没到
+    assert sc._seq_gap(65530, 65533) == 2
+
+
+def test_大跳变单独计数不摊进丢包率():
+    """换流 / 重连时 last 属于另一条流，两个号之间没有可比性。"""
+    assert sc._seq_gap(100, 20000) == 0
+    assert sc._utt_seq_jump == 1
+    assert sc._utt_lost == 0
+
+
+def test_跳出半个序列号空间的跳变认不出来_但也不会误报成丢包():
+    """有符号距离的固有边界，写下来免得以后有人当 bug 去"修"。
+
+    16 位空间里「往前跳 40000」和「往后退 25536」是同一个差值，
+    没有额外信息就分不开。分不开时我们选**不记丢包** —— 宁可漏报一次
+    跳变，也不要凭空捏造几万帧丢包。今天那个 99.1% 就是反过来选的代价。
+    """
+    assert sc._seq_gap(100, 40000) == 0
+    assert sc._utt_lost == 0
+    assert sc._utt_seq_jump == 0           # 被当成后退了，认不出来
+
+
+def test_跳变要打进账单且跟丢包分开():
+    feed([(100, 0)])
+    sc._seq_gap(100, 20000)
+    note = sc._utt_opus_take()
+    assert "跳变1" in note, note
+    assert "丢0" in note, note
+
+
+def test_跳变计数也要按句清零():
+    sc._seq_gap(100, 20000)
+    sc._utt_opus[15100] += 1
+    sc._utt_opus_take()
+    assert sc._utt_seq_jump == 0
 
 
 def feed(recv_then_gap: list[tuple[int, int]]) -> None:

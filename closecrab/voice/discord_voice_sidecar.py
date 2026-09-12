@@ -673,6 +673,45 @@ def _utt_opus_note(ssrc: int, nbytes: int) -> None:
         _utt_opus_bytes += nbytes
 
 
+_utt_seq_jump = 0      # 序列号大跳变次数（换流/重连），不算丢包但要看得见
+
+
+def _seq_gap(last: int, cur: int) -> int:
+    """两个 RTP 序列号之间**真正丢了几帧**。
+
+    py-cord 自带的 `gap_wrapped(a, b) = (b - a - 1) mod 65536` 不能直接用来
+    数丢包 —— 它只会往前看。序列号往回走的时候它照样返回一个正数，而且是
+    接近 65536 的巨数：
+
+        重复包   100 → 100  ⇒ 65535
+        乱序迟到 100 →  99  ⇒ 65534
+
+    2026-09-12 第一条分段账单就栽在这儿：丢 65751 帧、丢包率 99.1%、
+    第一段 100%。65751 = **65535 + 216** —— 一个重复包制造的幻影缺口，
+    把真实的 216 帧（25.7%，跟后三段 20/21/21% 完全吻合）整个淹掉了。
+
+    > 判据还是外部锚点：整句才收 626 帧，不可能丢 65751 帧。
+    > 而 65535 这个数本身就在喊「我是 mod 65536 的负数」。
+
+    所以改成**有符号距离**：把差值折回 ±32768 区间，往回走就是非正数。
+
+      d <= 0     重复包或迟到的乱序包。不是丢包，一帧都不记 —— 它对应的帧
+                 其实到了（或者早就到了），记成丢包是凭空捏造。
+      d 太大     换流 / 重连 / ssrc 轮换，`last` 属于另一条流，两个号之间
+                 没有可比性。单独计数，不摊进丢包率。门限取 1000 帧 = 20 秒：
+                 比任何一句话都长，正常说话不可能出现。
+    """
+    global _utt_seq_jump
+    d = (cur - last + 32768) % 65536 - 32768
+    if d <= 0:
+        return 0
+    if d > 1000:
+        with _dave_fail_lock:
+            _utt_seq_jump += 1
+        return 0
+    return d - 1
+
+
 def _utt_loss_note(gap: int) -> None:
     """记一次 RTP 序列号缺口。
 
@@ -715,9 +754,11 @@ def _utt_loss_note(gap: int) -> None:
 
 def _utt_opus_take() -> str:
     """取走并清空本句的账。清空是必须的 —— 不清就又变成累计账，等于没加。"""
-    global _utt_opus_bytes, _utt_lost
+    global _utt_opus_bytes, _utt_lost, _utt_seq_jump
     with _dave_fail_lock:
         items = _utt_opus.most_common(3)
+        jump = _utt_seq_jump
+        _utt_seq_jump = 0
         n = sum(_utt_opus.values())
         b = _utt_opus_bytes
         lost = _utt_lost
@@ -749,6 +790,10 @@ def _utt_opus_take() -> str:
             q[min(3, at * 4 // n)][1] += g
         loss += " 分段" + "/".join(
             f"{(l/(r+l)*100):.0f}%" if (r + l) else "-" for r, l in q)
+    # 跳变单独报, 绝不并进丢包率 —— 它是「这两个号没有可比性」,
+    # 不是「这中间的帧没到」。混进去就是 2026-09-12 那个 99.1%。
+    if jump:
+        loss += f" 跳变{jump}"
     return (f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps{loss}"
             f" | {_rtcp_summary()}")
 
@@ -3731,8 +3776,6 @@ def _install_receive_probe():
             _fec_recover_n = [0]
             _fec_fail_n = [0]
 
-            from discord.voice.utils.wrapped import gap_wrapped as _gap_wrapped
-
             def _decode_guarded(self, packet):
                 try:
                     # 先无条件记丢包，再谈恢复。
@@ -3742,7 +3785,7 @@ def _install_receive_probe():
                     if (packet is not None and hasattr(self, '_last_seq')
                             and self._last_seq >= 0):
                         try:
-                            _utt_loss_note(_gap_wrapped(self._last_seq, packet.sequence))
+                            _utt_loss_note(_seq_gap(self._last_seq, packet.sequence))
                         except Exception:
                             pass
                     # FEC: 检测丢包 (序列号 gap) 并恢复
@@ -3750,7 +3793,7 @@ def _install_receive_probe():
                             and self._last_seq >= 0
                             and self._decoder is not None
                             and packet.decrypted_data):
-                        gap = _gap_wrapped(self._last_seq, packet.sequence)
+                        gap = _seq_gap(self._last_seq, packet.sequence)
                         if 0 < gap < 50:
                             try:
                                 fec_pcm = self._decoder.decode(
