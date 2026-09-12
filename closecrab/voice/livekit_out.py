@@ -63,6 +63,11 @@ _connected = False
 _stopping = False
 _pending = bytearray()          # 只在 _loop 线程里碰
 _has_data: asyncio.Event | None = None
+_stop_evt: asyncio.Event | None = None   # 让重连退避能被 /lkoff 立刻叫醒
+
+# 重连退避：连上就归零，连不上翻倍封顶。
+_RETRY_MIN = 1.0
+_RETRY_MAX = 30.0
 
 
 # ── 状态查询 ──────────────────────────────────────────────────────────
@@ -189,16 +194,29 @@ def clear() -> None:
 
 # ── 连接主体 ──────────────────────────────────────────────────────────
 
-async def _pump() -> None:
+def _reason_name(reason) -> str:  # noqa: ANN001
+    """把断开原因的数字翻成名字。日志里只有个 `10` 的话，排障第一步得先去
+    查枚举表才知道那是 ROOM_CLOSED —— 那次查表就是这个函数存在的理由。"""
+    try:
+        from livekit.protocol.models import DisconnectReason
+        return f"{DisconnectReason.Name(int(reason))}({int(reason)})"
+    except Exception:
+        return str(reason)
+
+
+async def _pump(dead: asyncio.Event) -> None:
     """把攒下的 PCM 按 20ms 一帧喂给 LiveKit。
 
     `capture_frame` 内部有队列、满了会 await —— 节奏就是靠它定的，
     这边不用自己 sleep 限速。喂不满一帧就等着，**不补静音**：
     LiveKit 这条路没有 Zello 那种「不发包就掉线」的毛病，安静就该真安静。
+
+    `dead` 是本次连接的墓碑。没有它的话房间塌了这个循环还在原地转 ——
+    往一个已经断开的 source 里灌帧不报错，于是外面永远等不到「该重连了」。
     """
     from livekit import rtc
     assert _has_data is not None
-    while not _stopping:
+    while not _stopping and not dead.is_set():
         if len(_pending) < _FRAME_BYTES:
             _has_data.clear()
             try:
@@ -219,18 +237,20 @@ async def _pump() -> None:
             return
 
 
-async def _run(cfg: dict, identity: str) -> None:
-    global _room, _source, _connected, _has_data
+async def _session(cfg: dict, identity: str) -> None:
+    """连一次房间，推到断为止。断开就正常返回，由 `_run` 决定要不要再连。"""
+    global _room, _source, _connected
     from livekit import rtc
 
-    _has_data = asyncio.Event()
     room = rtc.Room()
+    dead = asyncio.Event()
 
     @room.on("disconnected")
     def _on_disconnected(reason):  # noqa: ANN001
         global _connected
         _connected = False
-        log.warning("LiveKit 输出连接断开: %s", reason)
+        dead.set()
+        log.warning("LiveKit 输出连接断开: %s", _reason_name(reason))
 
     # auto_subscribe 也关。token 里已经禁了订阅，这是第二层 ——
     # 两层都留着是因为它们失效的方式不一样：一个改配置会破，一个改代码会破。
@@ -246,7 +266,7 @@ async def _run(cfg: dict, identity: str) -> None:
     log.info("LiveKit 输出已连上房间 %s (identity=%s)", room.name, identity)
 
     try:
-        await _pump()
+        await _pump(dead)
     finally:
         _connected = False
         try:
@@ -254,7 +274,40 @@ async def _run(cfg: dict, identity: str) -> None:
         except Exception:
             log.debug("disconnect 失败", exc_info=True)
         _room = _source = None
-        log.info("LiveKit 输出已断开")
+
+
+async def _run(cfg: dict, identity: str) -> None:
+    """看门狗：断了就退避重连，直到 `/lkoff`。
+
+    **为什么非有这一层不可**：这一路只有 bot 自己一个参与者的时候，SFU 会把房间
+    当空房关掉（实测连上 120 秒后收到 `ROOM_CLOSED`），而房间一关我们就被踢出来。
+    没有重连的话，从那一刻起 `is_connected()` 一直是 False —— 分流那边老老实实
+    打着 `livekit=False`，用户在房间里等到天亮也听不到一个字，而且**日志里一切
+    正常**，因为确实没人报错。
+
+    人进房间之前 bot 是孤零零的，所以「被关掉」是常态不是异常，退避封顶 30 秒。
+    """
+    global _has_data, _stop_evt
+    _has_data = asyncio.Event()
+    _stop_evt = asyncio.Event()
+    delay = _RETRY_MIN
+
+    while not _stopping:
+        try:
+            await _session(cfg, identity)
+            delay = _RETRY_MIN      # 连上过就归零，别让偶发抖动把退避越推越长
+        except Exception as e:
+            log.warning("LiveKit 输出连接失败: %s", e)
+        if _stopping:
+            break
+        log.info("LiveKit 输出 %.0fs 后重连房间 %s", delay, cfg["room"])
+        try:
+            # 用等 stop 事件来代替 sleep：/lkoff 不用干等这一轮退避走完。
+            await asyncio.wait_for(_stop_evt.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        delay = min(delay * 2, _RETRY_MAX)
+    log.info("LiveKit 输出已断开")
 
 
 def start(bot_name: str, config: dict | None = None) -> bool:
@@ -303,11 +356,14 @@ def stop() -> None:
     global _thread, _stopping, _connected
     _stopping = True
     _connected = False
-    if _loop is not None and _has_data is not None:
-        try:
-            _loop.call_soon_threadsafe(_has_data.set)  # 把 _pump 从等待里叫醒
-        except RuntimeError:
-            pass
+    # 两个等待点都要叫醒：_pump 那个「等音频」，和看门狗那个「等退避」。
+    # 只叫醒前一个的话，/lkoff 会卡到本轮退避走完（最长 30 秒）。
+    for ev in (_has_data, _stop_evt):
+        if _loop is not None and ev is not None:
+            try:
+                _loop.call_soon_threadsafe(ev.set)
+            except RuntimeError:
+                pass
     th = _thread
     if th is not None:
         th.join(timeout=10)

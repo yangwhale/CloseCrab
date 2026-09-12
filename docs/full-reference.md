@@ -877,7 +877,7 @@ python3 scripts/watch-task.py list|stop <name>
 | 语音消息 | 用户发语音 | Channel 层 STT（Gemini→Chirp2→Whisper）→ BotCore → 回复 + TTS ogg |
 | Discord 常驻语音频道 | `/discordon` | 边生成边推流（首帧 ~0.9s），DAVE E2EE，暂停/继续/重播 |
 | Zello PTT 对讲 | `/zelloon` | Zello Channel API：Opus 解码 → STT → 飞书消息通道；回复反向推 PTT 流 |
-| LiveKit 房间输出 | `/lkon` | 常驻连进同名房间，把 TTS **额外**推一路进去。`can_subscribe=False` + `kind=agent` 两道锁保证只发不收 |
+| LiveKit 房间输出 | `/lkon` | 常驻连进同名房间，把 TTS **额外**推一路进去。`can_subscribe=False` + `kind=agent` 两道锁保证只发不收。断线自动退避重连（最长 30s）—— **房里只剩 bot 一个人时 SFU 会把房间当空房关掉**（实测 120s），没有重连就会悄无声息地哑掉：日志一切正常，分流打着 `livekit=False`，人在房间里怎么等都没声 |
 
 **音色是 bot 级配置**，存 `bots/{name}.channels.discord.tts_voice`（Gemini TTS 15 个 voice）。
 流式与 ogg 两条路**共用同一个来源** `closecrab/voice/tts_config.py`，没配就直接抛错 ——
