@@ -568,6 +568,7 @@ def _record_opus_toc(plain: bytes | None) -> None:
 #           如果字节明显掉下去，那是编码器自己在降档，问题在发送端客户端。
 _utt_opus: "collections.Counter[int]" = collections.Counter()   # ssrc → 帧数
 _utt_opus_bytes = 0
+_utt_lost = 0          # 本句 RTP 序列号缺口累计（= 真丢了多少帧）
 
 
 def _utt_opus_note(ssrc: int, nbytes: int) -> None:
@@ -578,19 +579,45 @@ def _utt_opus_note(ssrc: int, nbytes: int) -> None:
         _utt_opus_bytes += nbytes
 
 
+def _utt_loss_note(gap: int) -> None:
+    """记一次 RTP 序列号缺口。
+
+    为什么非要数序列号：2026-09-12 Chris 手动在 iPhone 上从 96k 一路降到 8k，
+    想验证「码率太高时 5G 上行拥塞反而传不过来」。这个假设**只能靠丢包数回答**，
+    而我一开始想用「每秒收到多少帧」去估，算出来有超过 50 帧/秒的——
+    物理上不可能（20 ms 一帧就是 50 帧/秒封顶），说明时间窗对不齐，那条路是死的。
+
+    序列号不一样：它是发送端自己打的连续编号，缺一个就是丢一个，不受采样窗口影响。
+
+    注意别跟 `_fec_recover_n` 混为一谈 —— 那个只统计「FEC 成功补回来的」，
+    gap 超过 50 或者 FEC 关着的时候一个都不记。这里要的是**丢了多少**，
+    不是**救回来多少**，所以无条件先记。
+    """
+    global _utt_lost
+    if gap <= 0:
+        return
+    with _dave_fail_lock:
+        _utt_lost += gap
+
+
 def _utt_opus_take() -> str:
     """取走并清空本句的账。清空是必须的 —— 不清就又变成累计账，等于没加。"""
-    global _utt_opus_bytes
+    global _utt_opus_bytes, _utt_lost
     with _dave_fail_lock:
         items = _utt_opus.most_common(3)
         n = sum(_utt_opus.values())
         b = _utt_opus_bytes
+        lost = _utt_lost
         _utt_opus.clear()
         _utt_opus_bytes = 0
+        _utt_lost = 0
     if not n:
         return "无包"
     src = ",".join(f"{s}×{c}" for s, c in items)
-    return f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps"
+    # 丢包率分母用「收到 + 丢掉」，也就是发送端本来打算发的总数。
+    # 拿收到数当分母会把丢包率算小，丢得越狠低估越多。
+    loss = f" 丢{lost}({lost/(n+lost)*100:.1f}%)" if lost else " 丢0"
+    return (f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps{loss}")
 
 
 def _opus_toc_summary(top: int = 4) -> str:
@@ -3507,6 +3534,16 @@ def _install_receive_probe():
 
             def _decode_guarded(self, packet):
                 try:
+                    # 先无条件记丢包，再谈恢复。
+                    # 这两件事必须分开：下面那段是 FEC 恢复，它带着 `_FEC_ENABLED`
+                    # 和 `gap < 50` 两道门；用它的计数当丢包率，等于「只统计救回来的」，
+                    # 丢得越狠反而数字越好看 —— 正好把要找的信号抹掉。
+                    if (packet is not None and hasattr(self, '_last_seq')
+                            and self._last_seq >= 0):
+                        try:
+                            _utt_loss_note(_gap_wrapped(self._last_seq, packet.sequence))
+                        except Exception:
+                            pass
                     # FEC: 检测丢包 (序列号 gap) 并恢复
                     if (_FEC_ENABLED and packet and hasattr(self, '_last_seq')
                             and self._last_seq >= 0
