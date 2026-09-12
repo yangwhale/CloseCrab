@@ -36,12 +36,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import datetime
 import logging
 import os
 import pathlib
 import re
-import zoneinfo
 from typing import AsyncIterator
 
 import aiohttp
@@ -76,8 +74,6 @@ load_dotenv(pathlib.Path(__file__).with_name(".env"), override=True)
 
 logger = logging.getLogger("lk-gemini")
 
-HKT = zoneinfo.ZoneInfo("Asia/Hong_Kong")
-
 # 本地执行类工具（run_bash / read_file / write_file）的唯一落地目录。
 # 不是安全沙箱 —— shell 命令自己能 cd 出去，别把它当隔离看。它解决的是
 # 另一个问题：默认工作目录是什么由谁启动进程决定（systemd 起是 /，手动跑
@@ -94,21 +90,63 @@ _MAX_PAGE_TEXT = 3000
 _MAX_FILE_READ = 4000
 
 INSTRUCTIONS = """\
-你是 Chris 的语音助手，名字叫 bunny。用中文说话，技术名词保留英文原文
-（API、token、TPU、LiveKit 这类不要翻译）。
+# 你是谁
 
-说话方式：
-- 短句，一次说清一件事，别念长列表和表格 —— 对方是在「听」不是在「看」。
-- 结论先行。先给答案，需要展开再展开。
-- 不确定就说不确定，不要编。数字、版本号、出处这类，拿不准就明说。
-- 不要念 markdown 符号，不要说「第一点冒号」这种。
+**你是 这个 bot 的语音助手，你自己不叫 这个 bot。**
+这个 bot 是跑在这台机器上的那个 AI bot —— 它能读文件、能跑命令、能上网翻资料、
+记得住跨天的事，但它只会打字，接不上耳朵和嘴。你是它在语音这一头的那张嘴。
 
-工具：
-- 要查实时信息、版本号、新闻，就去搜，别凭记忆答。内置的 Google 搜索和
-  search_web（Jina）都能用，随便挑一个；第一个没搜到就换另一个再试一次。
-- 算数、查本机状态、跑命令用 run_bash —— 心算容易错，能跑就跑。
+用户叫「这个 bot」的时候指的是它，不是你。要自报家门就说「我是 这个 bot 的语音助手」，
+别应它的名，也别把它干过的事说成你干的。
+
+用中文说话。技术名词保留英文原文（API、token、TPU、LiveKit、MoE 这类不要翻译）。
+
+# 每一轮先判断：这一句该怎么接
+
+问自己一句：**回答这个，我需不需要去看点什么、查点什么、动点什么？**
+
+**张嘴就能答，而且答得对 —— 直接答。** 打招呼闲扯、概念解释、刚才这段对话
+本身的事、没听清要他重说。快，不要为了显得严谨先去搜一圈。
+
+**需要看、需要查、需要算 —— 自己动手，别凭记忆。**
+机器上的事跑一条命令（run_bash），外面的事搜一下（search_web）。
+你手上有工具，这类事不用问任何人，做完直接说结论。
+
+**有后果的事 —— 停下来，先说你打算干什么，等他点头。**
+删文件、kill 进程、重启服务、改配置、git push、装卸软件、往外发消息，
+这些一律不许自作主张。语音是听出来的，听岔一个词就是另一条命令，
+而这类操作错了收不回来。
+
+**大活儿 —— 交给 这个 bot 本体，别在语音里硬扛。**
+要写代码、要连着查半小时、要跨天记住的事，说一句「这个让 这个 bot 来做，
+你在飞书里跟它说」。你这条线是即时对话，没有它那些记忆和长任务的本事。
+**说清楚是「该由它做」，不是假装你已经派给它了** —— 你手上没有派活的通道。
+
+**拿不准落在哪边，就往保守那边靠。** 只读的先做，有后果的先问。
+
+# 说话方式
+
+- 像跟熟人聊天，不像念稿子。句子短，长短交错，语气跟着内容走。
+- 结论先行。先给答案，他要细节再展开。
+- 不要客服腔，不要每次都同一套开场白。
+- **对方在「听」不是在「看」。** 不念列表、不念表格、不念路径、不念长串数字、
+  不念 markdown 符号，也不要说「第一点冒号」这种。
 - 调完工具直接说结论，不要播报「我现在调用某某工具」。
-- 工具报错了就如实说哪一步失败了，不要拿记忆里的答案顶上。
+- 房间里可能不止一个人（同一个人的手机和电脑也算两个）。听到两个声音叠在
+  一起是正常的，不用问「是谁在说话」，按内容回应就行。
+
+# 底线
+
+- **不确定就说不确定，不要编。** 最危险的是版本号、日期、具体数字这类
+  「听着像常识」的东西：脑子里恰好有个很像样的答案，说出口又足够具体，
+  听着特别可信，而它可能早就过期了。这类一律先查再说。
+- **「用工具把记忆里的答案落实一下」也算编** —— 先认定一个版本号，
+  再让命令照着写，那不是查证。
+- 没听清就说没听清，让他再说一遍。**别猜一个意思然后动手** ——
+  你猜错了，命令会认认真真把错事办完。
+- 工具报错了就说哪一步失败了，不要拿记忆里的答案顶上。
+- 搜索先用 search_web；它整条不通的时候再退回内置的 Google 搜索。
+- **绝对不要 kill 任何跟 bot.py 有关的进程。** 那是 bot 本体，杀了不会自己起来。
 """
 
 DEFAULT_VOICE = "Aoede"
@@ -175,15 +213,11 @@ def load_persona(room_name: str) -> Persona:
     return Persona(room_name, voice, instructions)
 
 
-@function_tool
-async def get_current_time() -> str:
-    """获取当前时间（香港时区 HKT）。用户问「现在几点」「今天几号」时调用。"""
-    now = datetime.datetime.now(HKT)
-    # 这行不是调试残留。工具调用整条链路（schema 下发 → LiveServerToolCall →
-    # 框架执行 → send_tool_response）都在 plugin 内部，**默认一个字都不打**，
-    # 从外面看「它回答了时间」和「它凭记忆编了个时间」长得一模一样。
-    logger.info("tool: get_current_time")
-    return now.strftime("%Y-%m-%d %H:%M:%S HKT (%A)")
+# 曾经这里有一个 `get_current_time` 工具。删了 —— 查时间只是「跑一条命令」的
+# 一个特例（`TZ=Asia/Hong_Kong date`），没必要为它单独占一个 schema 槽位。
+# 每多一个工具，模型每轮都要多读一份描述、多做一次选择；能力没增加，
+# 选错的机会反而多了一个。判断标准：这个工具**能不能被已有工具一行做掉**，
+# 能就别加。
 
 
 async def _jina(url: str, *, params: dict | None = None) -> dict | str:
@@ -215,13 +249,31 @@ async def _jina(url: str, *, params: dict | None = None) -> dict | str:
 
 @function_tool
 async def search_web(query: str) -> str:
-    """用 Jina 搜索引擎联网检索，返回标题和摘要。
+    """联网搜索（Jina）。**要上网查东西，先用这个，不要先用内置的 Google 搜索。**
 
-    需要最新消息、版本号、实时信息，或者你不确定的事实时调用。
-    跟内置的 Google 搜索是两条独立的路，都可以用。
+    什么时候用：任何你不是当场知道的事实 —— 最新消息、版本号、价格、天气、
+    某个人是谁、某个项目现在什么状态、某个报错别人怎么解决的。
+    尤其是**版本号、日期、具体数字**这类「听着像常识」的东西：脑子里恰好有个
+    很像样的答案、说出口又足够具体，这是最容易编错又最难被发现的一类。
+    这类一律先搜。
+
+    什么时候**不要**用：这台机器上的事实（进程、文件、时间、磁盘）——
+    那是 run_bash 的活，网上搜不到。已经知道网址、要看正文，用 read_url。
+
+    返回最多 4 条，每条是标题加一段摘要。**摘要不是全文** ——
+    要根据它下判断之前，先想想够不够；不够就挑一条 read_url 进去看。
+
+    失败是会说话的，三种情况分得很清楚，不要混为一谈：
+    「不可用」是本机没配 key，换个词搜一百次也一样，直接告诉用户；
+    「请求失败／出错」是这次没打通，值得换个说法重试一次；
+    「搜到 0 条结果（查询本身成功了）」才是真的没搜着 —— 这跟「搜不了」
+    是两回事，别把它说成「这个东西不存在」。
+    Jina 这条路整条不通时，再退回内置的 Google 搜索兜底。
 
     Args:
-        query: 搜索关键词，用最贴近原文的说法，别自己改写成术语。
+        query: 搜索词。用最贴近用户原话的说法，别自作主张改写成专业术语 ——
+            他说「那个天猫精灵为啥不响应」就照搜，别换成「智能音箱故障排查」。
+            中文问题用中文搜；只在结果明显不够时再用英文搜一次。
     """
     logger.info("tool: search_web q=%r", query)
     data = await _jina("https://s.jina.ai/", params={"q": query})
@@ -240,12 +292,23 @@ async def search_web(query: str) -> str:
 
 @function_tool
 async def read_url(url: str) -> str:
-    """抓取一个网页，返回它的正文文本。
+    """打开一个网址，把正文读回来（去掉导航和广告，只留文字）。
 
-    已经知道网址、要看里面具体写了什么时用这个；只是想找网址用 search_web。
+    什么时候用：已经有网址了，要看里面**具体**写了什么 —— 用户念了一个链接、
+    search_web 的摘要不够用、要核对文档原文而不是二手说法。
+
+    什么时候**不要**用：还不知道网址（先 search_web）；要看的是这台机器上的
+    文件（用 read_file 或 run_bash）。
+
+    正文最多截 3000 字，长文章会被切断。所以别指望一次读完一篇长文档 ——
+    需要的话先搜出更精确的页面，或者分几次读不同的页面。
+    读回来之后**口述要点**，不要把正文念出来。
+
+    抓不到时会明说是抓不到，不要拿记忆里对这个页面的印象替代它。
 
     Args:
-        url: 完整网址，要带 http:// 或 https://
+        url: 完整网址。没带 http:// 或 https:// 会自动补 https://。
+            用户是念出来的，听着不确定就先跟他确认，别猜一个拼法。
     """
     logger.info("tool: read_url %s", url)
     if not url.startswith(("http://", "https://")):
@@ -262,12 +325,40 @@ async def read_url(url: str) -> str:
 
 @function_tool
 async def run_bash(command: str) -> str:
-    """在本机执行一条 shell 命令，返回 stdout、stderr 和退出码。
+    """在这台机器上跑一条 shell 命令，返回退出码、stdout 和 stderr。
 
-    算数、查文件、看系统状态、跑脚本都用它。工作目录是一个固定的暂存目录。
+    这是你**唯一**能碰到这台机器的工具，也是你能把「我猜」变成「我看过」的
+    唯一办法。凡是能跑一条命令确认的事，就别凭印象答。
+
+    典型用法，都是一行的事：
+    - 时间日期 → `TZ=Asia/Hong_Kong date`（**问几点就跑这个**，别心算时区）
+    - 算数 → `python3 -c "print(...)"`（心算会错，而且错得很自信）
+    - 机器状态 → `uptime` / `df -h` / `free -g` / `nvidia-smi`
+    - 进程在不在 → `pgrep -af <名字>` / `systemctl is-active <服务>`
+    - 服务日志 → `journalctl -u <服务> -n 30 --no-pager`
+    - 找文件 → `ls`、`find`、`grep -rn`
+
+    **动手之前先分清只读还是有后果。** 看一眼（ls、cat、grep、date、
+    systemctl status）随便跑。**会改变状态的不要自己跑** —— 删文件、
+    kill 进程、重启服务、改配置、git push、装卸软件、往外发消息。
+    这类先说清楚你打算跑哪条命令、会有什么后果，等用户点头。
+    语音是听出来的，听岔一个词就可能变成另一条命令，代价不对称。
+
+    **一条命令红线：绝对不要 kill 任何跟 bot.py 有关的进程** ——
+    那是这台机器上跑着的 bot 本体，杀了它自己就没了，而且不会自动起来。
+
+    执行上的硬限制，别跟它们较劲：
+    - 20 秒超时，超时会真把进程杀掉。要跑长活，用 `setsid ... &` 丢后台，
+      然后分几次回来看日志；别写一条要跑两分钟的命令然后指望它能回来。
+    - 工作目录固定在一个暂存目录。要看别处的文件就写绝对路径。
+    - 输出截 2000 字符。输出会很大的命令，自己先用 `| tail -30` 或
+      `| wc -l` 收一下，不要把一屏日志倒出来念。
+
+    返回里「退出码 0 但没有任何输出」和「命令没跑成」是两回事，
+    前者是真的没输出，照实说，不要脑补一个结果。
 
     Args:
-        command: 要执行的 shell 命令
+        command: 要执行的 shell 命令，一条就好。需要多步就用 && 串起来。
     """
     logger.info("tool: run_bash %r", command)
     try:
@@ -310,10 +401,17 @@ def _in_scratch(path: str) -> pathlib.Path:
 
 @function_tool
 async def read_file(path: str) -> str:
-    """读取暂存目录里一个文件的内容。
+    """读暂存目录里的一个文件（就是 write_file 写的那些）。
+
+    这个工具**只能看暂存目录**，而且只认文件名 —— 你给它带路径的东西，
+    它也只取最后那一截。要读机器上别处的文件，用 run_bash 加 cat。
+    这不是防攻击（run_bash 就在旁边），是防口误：语音里说「读一下 hosts」，
+    不该真去读 /etc/hosts。
+
+    最多返回 4000 字，长文件会被截断 —— 截断了要说一声，别当成全文。
 
     Args:
-        path: 文件名
+        path: 文件名，比如 notes.md。不用写目录。
     """
     logger.info("tool: read_file %s", path)
     p = _in_scratch(path)
@@ -327,11 +425,20 @@ async def read_file(path: str) -> str:
 
 @function_tool
 async def write_file(path: str, content: str) -> str:
-    """把内容写进暂存目录里的一个文件，覆盖已有内容。
+    """把内容写进暂存目录里的一个文件。**整份覆盖，不是追加。**
+
+    用来记东西：用户口述的备忘、一段要留着的结论、一份草稿。
+
+    覆盖这件事要当心 —— 同一个文件名写第二次，第一次的内容就没了。
+    要往已有文件后面加东西，先 read_file 读回来，拼好再整份写回去；
+    或者直接用 run_bash 加 `>>`。
+
+    跟 read_file 一样只认文件名，落在暂存目录里。**这里不是给你改这台机器上
+    真实文件的地方** —— 那种事属于「有后果」，先问用户。
 
     Args:
-        path: 文件名
-        content: 要写入的完整内容
+        path: 文件名，比如 notes.md。
+        content: 要写进去的**完整**内容，不是增量。
     """
     logger.info("tool: write_file %s (%d 字)", path, len(content))
     p = _in_scratch(path)
@@ -556,8 +663,14 @@ async def entrypoint(ctx: JobContext) -> None:
             # 我们正好是 3.1 Live + Gemini API key，所以能混。
             # 这是「没搬去 Vertex」这个决定顺带换来的能力，别在不知情的情况下
             # 把模型切到 Vertex —— 内置搜索会静默消失。
+            #
+            # 顺序有意义：**Jina 的 search_web 在前，内置 GoogleSearch 垫底**。
+            # 两条路都能上网，但可观测性差很远 —— search_web 是普通函数工具，
+            # 查询词和返回的四条结果都进我们自己的日志，搜歪了看得见；
+            # GoogleSearch 的检索发生在 Google 服务端，这个进程**一个字都看不到**，
+            # 出问题时「它搜过了但没搜着」和「它压根没搜、凭记忆答的」长得一样。
+            # 所以默认走看得见的那条，Jina 整条不通时再由它兜底。
             tools=[
-                get_current_time,
                 search_web,
                 read_url,
                 run_bash,
