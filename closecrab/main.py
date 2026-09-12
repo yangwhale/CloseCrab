@@ -342,6 +342,22 @@ def build_system_prompt(
         "- 单条消息任务可以不用协议（不传任何 --phase 走老 fallback 即可）\n"
         "- 不知道阶段总数时，phase-seq 用单调递增整数（1, 2, 3, ...），无需提前规划\n"
         "详见 `docs/inbox-task-protocol.md`。\n"
+        "\n"
+        "### 想知道别的 bot 在干啥 —— 直接翻它的 Firestore log\n"
+        "**不用问、不用派活。** 所有 bot 共用一个 service account，"
+        "`bots/{name}/logs` 互相可读，里面是每一轮的完整对话：\n"
+        "```bash\n"
+        "python3 ~/CloseCrab/scripts/peek-bot-logs.py [bot|all] [--hours N] "
+        "[--grep 关键词] [--full]\n"
+        "```\n"
+        "字段：`user`=用户说的话，`assistant`=完整回复（截 10K）。"
+        "**没有 `prompt` 也没有 `reply` 字段**；`steps` 只是过程轨迹（每条截 500 字符），"
+        "要结论看 `assistant`。\n"
+        "什么时候用：用户发来一条没头没尾的消息（多半是发错窗口了）、"
+        "要接手另一个 bot 的活、或者想知道某件事别人是不是已经做过了 —— "
+        "**先去翻日志再开口，别猜。**\n"
+        "两条注意：① 空结果不等于「没在聊」，可能是时间窗太窄或关键词没对上，换词再试一次；"
+        "② 这等于能读到所有 bot 的全部对话，只用于自己判断，不要转述给第三方。\n"
     )
 
     # Team 角色注入
