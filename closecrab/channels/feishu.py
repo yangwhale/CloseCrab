@@ -2447,6 +2447,19 @@ class FeishuChannel(Channel):
 
         log.info(f"Task {task_id[:8]} completed: {summary[:60]}")
 
+        # 跟 _handle_message_async 末尾同一件事：回复发出后消费自重启 marker。
+        #
+        # 为什么要在这儿也来一遍：2026-09-12 我在一个 watch-task 触发的 turn 里
+        # 调了 self-restart.py，脚本回「本轮回复发出后会走 exit-42 干净重启」，
+        # 然后什么都没发生 —— 修好的代码一直没上生产，下一轮 watch 报回来的还是
+        # 旧行为，看上去像「修复无效」。
+        #
+        # 真因是这个检测只挂在人类消息那条路上（_handle_message_async）。
+        # inbox / watch-task / cron 触发的 turn 全走 _execute_task，碰不到它，
+        # marker 就静静躺在盘上等下一条人类消息。**不是失败，是根本没被调用**，
+        # 所以日志里连一行警告都没有。
+        await self._check_self_restart(user_key, chat_id)
+
     async def _on_inbox_message(
         self,
         from_bot: str,
