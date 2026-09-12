@@ -346,7 +346,7 @@ Discord User ID 获取方式：开启开发者模式（设置 → 高级 → 开
 | 会话 | `/status` `/end` `/restart` `/stop` `/context` `/sessions` `/docs` |
 | 模型与推理档位 | `/model` `/low` `/medium` `/high` `/xhigh` `/think` `/mode` `/mcp` |
 | 上下文压缩 | `/cmp`（透传 Claude Code 的 compact） |
-| 语音 | `/voice` · `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/hlson` `/hlsoff` |
+| 语音 | `/voice` · `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/lkon` `/lkoff` · `/hlson` `/hlsoff` |
 
 > bot 菜单项的 `event_key` 填命令名即可（带不带 `/` 都行）。
 
@@ -492,6 +492,7 @@ FIRESTORE_DATABASE=closecrab
 | `channels.feishu.log_chat_id` | — | 专门转发日志的群 |
 | `channels.feishu.voice_mode_users` | — | 这些 open_id 发来的消息按 voice 模式处理 |
 | `channels.zello.enabled` | — | Zello PTT 开关，`/zelloon` `/zellooff` 会改写它。账号在 `config/zello`（全 bot 共享） |
+| `channels.livekit.enabled` | — | LiveKit 房间输出开关，`/lkon` `/lkoff` 会改写它。凭据在 `config/livekit`（全 bot 共享，同一台 SFU 一对 key）；房间名默认 == bot 名 |
 | `email` | — | 飞书企业邮件 |
 | `team` | — | 团队配置 |
 | `inbox` | — | Inbox 通信 |
@@ -876,12 +877,15 @@ python3 scripts/watch-task.py list|stop <name>
 | 语音消息 | 用户发语音 | Channel 层 STT（Gemini→Chirp2→Whisper）→ BotCore → 回复 + TTS ogg |
 | Discord 常驻语音频道 | `/discordon` | 边生成边推流（首帧 ~0.9s），DAVE E2EE，暂停/继续/重播 |
 | Zello PTT 对讲 | `/zelloon` | Zello Channel API：Opus 解码 → STT → 飞书消息通道；回复反向推 PTT 流 |
+| LiveKit 房间输出 | `/lkon` | 常驻连进同名房间，把 TTS **额外**推一路进去。`can_subscribe=False` + `kind=agent` 两道锁保证只发不收 |
 
 **音色是 bot 级配置**，存 `bots/{name}.channels.discord.tts_voice`（Gemini TTS 15 个 voice）。
 流式与 ogg 两条路**共用同一个来源** `closecrab/voice/tts_config.py`，没配就直接抛错 ——
 不做静默兜底，否则「改了配置不生效」这类问题查起来极其费劲。
 
-**开关落盘**：`/discordon` `/discordoff` `/zelloon` `/zellooff` 都写回 Firestore，跨重启保持。
+**开关落盘**：`/discordon` `/discordoff` `/zelloon` `/zellooff` `/lkon` `/lkoff` 都写回 Firestore，跨重启保持。
+
+**Discord / Zello 互斥，LiveKit 并联。** 前两个回答的是同一个问题（人的耳朵挂在哪），所以是 if/elif；LiveKit 回答的是另一个问题（要不要往房间里也灌一份），所以它必须是独立的 if。`_do_speak()` 里那个 `_fanout()` 就是这条规则的落点。
 Zello 全网只有一个账号，`/zelloon` 会先检查有没有别的 bot 占着（同账号双登会互踢）。
 Zello 的开发者 token 由本地私钥**每次登录现签**，不写死（写死的会过期）。
 

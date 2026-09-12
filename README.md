@@ -142,10 +142,13 @@ python3 scripts/inbox-send.py bunny "在 B200 上跑 Llama 4 benchmark，写到 
 | **语音消息** | 用户在飞书 / Discord 发语音 | Channel 层 STT（Gemini→Chirp2→Whisper）→ BotCore → 回复 + TTS ogg 语音摘要 |
 | **Discord 常驻语音频道** | `/discordon` | bot 常驻语音频道，回复**边生成边推流**（首帧 ~0.9s），支持 DAVE E2EE、暂停/继续/重播 |
 | **Zello PTT 对讲** | `/zelloon` | Zello Channel API：对讲机按住说话 → Opus 解码 → STT → 走飞书消息通道；回复反向推成 PTT 流 |
+| **LiveKit 房间输出** | `/lkon` | 往同名 LiveKit 房间**额外加一路**音频（只发不收）。跟上面两个并联，不是二选一 |
 
 **音色是 bot 级配置**，存 Firestore `bots/{name}.channels.discord.tts_voice`（Gemini TTS 的 15 个 voice 任选）。流式直播和 ogg 语音消息**共用同一个来源**，没配就直接报错——不做静默兜底，避免"改了配置不生效"这类问题。
 
-**开关都会落盘**：`/discordon` `/discordoff` `/zelloon` `/zellooff` 写回 Firestore，跨重启保持。Zello 全网只有一个账号，`/zelloon` 会先检查是否已被别的 bot 占用（同账号双登会互踢）。
+**开关都会落盘**：`/discordon` `/discordoff` `/zelloon` `/zellooff` `/lkon` `/lkoff` 写回 Firestore，跨重启保持。Zello 全网只有一个账号，`/zelloon` 会先检查是否已被别的 bot 占用（同账号双登会互踢）。
+
+**三个出口的判断规则不一样**：Discord 和 Zello 互斥（Zello 只在 Discord 没连时顶上，它俩回答的是「人的耳朵在哪」这同一个问题）；**LiveKit 是并联的第三路** —— 两边都开就两边出声，Discord 关了就只往 LiveKit 灌。
 
 > LiveKit（`/voice` 浏览器通话）的房间与网页前端已停用；`closecrab/voice/livekit_io.py` 仍然承重 —— Discord 语音**接收**方向依赖它的 agents SDK，别按文件名误删。
 
@@ -389,7 +392,7 @@ scripts/boot-autostart.sh [--check]
 | 会话 | `/status` `/end` `/restart` `/stop` `/context` `/sessions` `/docs` |
 | 模型与推理档位 | `/model` `/low` `/medium` `/high` `/xhigh` `/think` `/mode` `/mcp` |
 | 上下文压缩 | `/cmp`（透传 Claude Code 的 compact） |
-| 语音 | `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/hlson` `/hlsoff`（HLS 直播）· ~~`/voice`~~（LiveKit 浏览器通话已停用） |
+| 语音 | `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/lkon` `/lkoff`（LiveKit 房间输出）· `/hlson` `/hlsoff`（HLS 直播）· ~~`/voice`~~（LiveKit 浏览器通话已停用） |
 
 #### Step 5 — Reaction 快捷指令（点赞语义）
 

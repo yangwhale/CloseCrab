@@ -162,6 +162,7 @@ scripts/firestore-backup-cron.sh                      # 周度：GCS export + �
 | `config/global` | 全局常量（cc_pages_url、gcs_bucket） |
 | `config/secrets` | deploy.sh 拉取的部署期 secrets |
 | `config/zello` | Zello 账号与频道配置（`zello_voice_sidecar.py`） |
+| `config/livekit` | LiveKit SFU 凭据（url / api_key / api_secret），全 bot 共享；`livekit_out.py` 读 |
 | `config/watch_sweep` / `config/inbox_sweep` | 两个清扫器的游标 |
 | `scheduled_jobs` | cron-tool 任务（job_id、target、fire_at、cron、message、status） |
 | `watch_tasks` | watch-task.py 长跑盯梢任务（name、interval、prompt、model、host） |

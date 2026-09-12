@@ -91,7 +91,7 @@ FEISHU_STYLE_SKILL = Path.home() / ".claude/skills/feishu-style/SKILL.md"
 _STOP_KEYWORDS = {"停", "停止", "stop", "取消", "算了", "打住", "急刹车", "停下", "别做了", "不要了"}
 
 # 文本指令
-_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff", "/hlson", "/hlsoff"}
+_TEXT_COMMANDS = {"/status", "/end", "/restart", "/stop", "/docs", "/context", "/sessions", "/voice", "/cmp", "/low", "/medium", "/high", "/xhigh", "/model", "/think", "/mode", "/mcp", "/discordon", "/discordoff", "/zelloon", "/zellooff", "/hlson", "/hlsoff", "/lkon", "/lkoff"}
 
 # 语音情绪标签: Gemini TTS 用的 [casually] / [thinking] 这种，全小写、不跟 "(".
 # 用全小写排除标题里的 [External]；用 (?!\() 排除 markdown 链接 [title](url)。
@@ -4402,6 +4402,19 @@ class FeishuChannel(Channel):
         elif cmd == "/zellooff":
             from ..voice.zello_voice_sidecar import stop_sidecar as zello_stop
             ok, msg = await asyncio.to_thread(zello_stop, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/lkon":
+            # 给 LiveKit 房间**额外加**一路音频输出。跟 /discordon 不是二选一 ——
+            # 两边都开就两边都出声，Discord 关了就只往 LiveKit 灌。
+            from ..voice.livekit_out import start_sidecar as lk_start
+            await self._async_send_text(chat_id, "正在接进 LiveKit 房间…")
+            ok, msg = await asyncio.to_thread(lk_start, self._bot_name)
+            await self._async_send_text(chat_id, msg)
+
+        elif cmd == "/lkoff":
+            from ..voice.livekit_out import stop_sidecar as lk_stop
+            ok, msg = await asyncio.to_thread(lk_stop, self._bot_name)
             await self._async_send_text(chat_id, msg)
 
         elif cmd == "/hlson":

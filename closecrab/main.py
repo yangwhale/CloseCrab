@@ -864,6 +864,14 @@ def main():
     except Exception as e:
         log.warning(f"Zello sidecar 启动失败 (non-fatal): {e}")
 
+    # LiveKit 输出旁路 (发送方向: TTS → LiveKit 房间)。跟 Discord / Zello 并联,
+    # 由 /lkon /lkoff 控制, 开关状态在 channels.livekit.enabled, 这里按它自启。
+    try:
+        from .voice.livekit_out import start as start_livekit_out
+        start_livekit_out(bot_name)
+    except Exception as e:
+        log.warning(f"LiveKit 输出启动失败 (non-fatal): {e}")
+
     # 启动 Channel
     # Why os._exit instead of sys.exit / return: LiveKit Rust SDK spawns
     # native OS threads (tokio-rt-worker, AudioDevice, AudioSourceCapt,

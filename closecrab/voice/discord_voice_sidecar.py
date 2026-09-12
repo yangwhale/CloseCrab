@@ -1816,12 +1816,45 @@ def _flush_hints_from_queue():
 
 
 async def _do_speak(text: str, fid: str = "", backend: str = ""):
-    """单条 TTS 生成+播放。直接写入持久 source，无需新建/抢占/预缓冲。"""
+    """单条 TTS 生成 + 分发。同一份 PCM 可以同时落到多个出口。
+
+    出口有三个，判断规则**不一样**，别照着 Discord 那条想当然：
+
+    - Discord：连着就用。
+    - Zello：只在 Discord 没连的时候顶上 —— 它俩是「人的耳朵在哪」的互斥关系。
+    - LiveKit：**独立开关，额外加的一路**（`/lkon` / `/lkoff`）。Discord 开着
+      就两边都出声，Discord 关了就只有它出声。
+
+    所以这里不能写成 if/elif 链，得让每个出口各自判断。
+    """
     import time as _time
     global _tts_interrupted
     t_start = _time.monotonic()
     source = _get_persistent_source()
-    if source is None:
+
+    # 决定输出路径。
+    # 注意 `_use_dc` 要连 source 一起判 —— `is_voice_connected()` 说连着，但
+    # source 建失败时它是 None，光看前者会在 `source.write` 那行炸。
+    _dc_connected = is_voice_connected() and source is not None
+    try:
+        from . import zello_voice_sidecar as _zsv
+        _zello_online = _zsv.is_connected()
+    except Exception:
+        _zello_online = False
+    try:
+        from . import livekit_out as _lko
+        _lk_online = _lko.is_connected()
+    except Exception:
+        _lk_online = False
+    _use_dc = _dc_connected
+    _use_zl = not _dc_connected and _zello_online
+    _use_lk = _lk_online                      # 并联，不跟前两个抢
+
+    # 三个出口一个都没有才提前返回。原来这里是 `if source is None: return` ——
+    # 那等于「Discord 没连就什么都不播」，Zello-only 那条路其实一直是死的。
+    # 这个判断必须在下面那些副作用（_tts_active、打开落盘文件）之前，
+    # 否则提前 return 会留下一个永远为 True 的 _tts_active。
+    if not (_use_dc or _use_zl or _use_lk):
         return
 
     global _tts_active
@@ -1841,15 +1874,16 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
             log.exception("打开 buffer 落盘文件失败: %s", bpath)
             buf_f = None
 
-    # 决定输出路径: Discord vc 连着 → Discord play; 否则 → Zello playback loop
-    _dc_connected = is_voice_connected()
-    try:
-        from . import zello_voice_sidecar as _zsv
-        _zello_online = _zsv.is_connected()
-    except Exception:
-        _zello_online = False
-    _use_dc = _dc_connected
-    _use_zl = not _dc_connected and _zello_online
+    log.info("TTS 出口: discord=%s zello=%s livekit=%s", _use_dc, _use_zl, _use_lk)
+
+    def _fanout(stereo: bytes) -> None:
+        """一份 48k 立体声 PCM 发给所有开着的出口。"""
+        if _use_dc:
+            source.write(stereo)
+        elif _use_zl:
+            _zsv.zello_buf_write_threadsafe(stereo)
+        if _use_lk:
+            _lko.write_threadsafe(stereo)
 
     try:
         wrote = 0
@@ -1875,10 +1909,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                             source = _get_persistent_source() or source
                     pcm48, state = audioop.ratecv(pcm24, 2, 1, 24000, 48000, state)
                     stereo = audioop.tostereo(pcm48, 2, 1, 1)
-                    if _use_dc:
-                        source.write(stereo)
-                    elif _use_zl:
-                        _zsv.zello_buf_write_threadsafe(stereo)
+                    _fanout(stereo)
                     wrote += len(stereo)
                     if buf_f is not None:
                         buf_f.write(stereo)
@@ -1897,10 +1928,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                              (t_first_pcm - t_start) * 1000, len(text), text[:30])
                     if _use_dc:
                         source = _get_persistent_source() or source
-                if _use_dc:
-                    source.write(stereo)
-                elif _use_zl:
-                    _zsv.zello_buf_write_threadsafe(stereo)
+                _fanout(stereo)
                 wrote += len(stereo)
                 if buf_f is not None:
                     buf_f.write(stereo)
@@ -1924,6 +1952,13 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
                 _zsv.zello_signal_done_threadsafe()
             except Exception:
                 pass
+        if _use_lk and _tts_interrupted:
+            # 被打断了就把 LiveKit 那边排着的音频丢掉。生成停了不等于播放停了 ——
+            # 队列里还压着几秒，不清的话用户打断完还得再听它说完。
+            try:
+                _lko.clear()
+            except Exception:
+                log.debug("清 LiveKit 队列失败", exc_info=True)
 
     _tts_active = False  # TTS 生成结束，允许 source idle 停播
 
