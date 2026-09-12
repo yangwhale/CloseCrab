@@ -571,6 +571,27 @@ _utt_opus_bytes = 0
 _utt_lost = 0          # 本句 RTP 序列号缺口累计（= 真丢了多少帧）
 _utt_gaps: "collections.Counter[int]" = collections.Counter()   # 缺口长度 → 出现次数
 
+# ── RTCP：把「端到端丢包」拆成两段 ──────────────────────────────────────
+#
+# 上面数的序列号缺口是**端到端**的：缺一个号只说明这个包没到我这儿，
+# 分不出是「手机 → Discord 服务器」丢的，还是「服务器 → 我们」丢的。
+# 2026-09-12 Chris 直接问到这一点，而当时我确实回答不了。
+#
+# 答案一直躺在垃圾桶里：Discord 每隔几秒发一个 RTCP Sender Report，
+# py-cord 只打一行「Received unexpected rtcp packet type=200」就扔了 ——
+# 日志里已经攒了七万多条。那里面有两样正好缺的东西：
+#
+#   info.packet_count → 服务器**自称发了多少个**。跟我们实收数一比，
+#                       「服务器 → 我们」这一段就单独量出来了。
+#   reports[].total_lost / perc_loss
+#                     → 报告块，讲的是**发这份报告的人自己收到了什么**。
+#                       如果里面出现 Chris 上行那条流的 ssrc，那就是服务器
+#                       亲口说它从手机那边丢了多少 —— 上行那一段的直接证据。
+#
+# 先只记不判：报告块里到底出现哪些 ssrc 得看真实数据，靠猜会猜错。
+_rtcp_sr: dict = {}     # 发报方 ssrc → (packet_count, octet_count)
+_rtcp_rr: dict = {}     # 被报告的 ssrc → (perc_loss_8bit, total_lost, last_seq)
+
 
 def _utt_opus_note(ssrc: int, nbytes: int) -> None:
     """在每个成功解密的包上跑，所以只做加法，不做任何解析。"""
@@ -634,7 +655,32 @@ def _utt_opus_take() -> str:
         _名 = {1: "1", 2: "2", 3: "3", 4: "4", 10: "5-10", 99: ">10"}
         loss += " 缺口[" + " ".join(
             f"{_名[k]}×{gaps[k]}" for k in sorted(gaps)) + "]"
-    return (f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps{loss}")
+    return (f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps{loss}"
+            f" | {_rtcp_summary()}")
+
+
+def _rtcp_summary() -> str:
+    """把服务器自己报的账摊开。**不做减法，只并排放。**
+
+    很想直接算「端到端丢包 − 服务器→我们丢包 = 上行丢包」，但那个减法暂时不能做：
+    SR 的 packet_count 是**从会话开始累计**的，而我们的帧数是按句清零的，
+    两个口径不一样，相减出来是个没有意义的数。要拆段得先把 SR 也做成差分，
+    等看清报告块里到底有哪些 ssrc 再决定怎么对齐 —— 先把原始数摆出来。
+    """
+    with _dave_fail_lock:
+        sr = dict(_rtcp_sr)
+        rr = dict(_rtcp_rr)
+    if not sr and not rr:
+        return "RTCP 无"
+    part = []
+    if sr:
+        part.append("服务器自称发" + ",".join(
+            f"{s}:{c[0]}包" for s, c in sr.items()))
+    if rr:
+        # perc_loss 是 8 bit 定点小数（RFC 3550 §6.4.1），除以 256 才是比例
+        part.append("报告块" + ",".join(
+            f"{s}:丢{v[1]}({v[0]/256*100:.1f}%)" for s, v in rr.items()))
+    return " ".join(part)
 
 
 def _opus_toc_summary(top: int = 4) -> str:
@@ -3534,6 +3580,41 @@ def _install_receive_probe():
     #    py-cord 2.8.0 的 JitterBuffer 不产生 FakePacket, 内置 FEC 路径是死代码。
     #    我们在 _decode_packet 层面检测 gap 并做 decode(fec=True) + decode(fec=False)。
     #    只在 gap>0 时触发, 不是每包都双解码 (那会破坏 Opus 状态)。
+    # 1.5) RTCP 账本: 把服务器自己报的收发数记下来。
+    #
+    # 挂在**包类的构造函数**上，不挂在 reader 的分发逻辑上 —— 理由是
+    # reader 对这两类包的处理就是「打一行 unexpected 然后丢掉」，
+    # 挂在那儿等于赌它以后不改分发；挂在构造函数上则只要包被解析过就一定记到。
+    try:
+        from discord.voice.packets.rtp import (
+            SenderReportPacket as _SR, ReceiverReportPacket as _RR)
+
+        def _wrap_report(cls, store_info):
+            if getattr(cls, "_cc_rtcp_probed", False):
+                return
+            _orig_init = cls.__init__
+
+            def _init(self, data):
+                _orig_init(self, data)
+                try:
+                    with _dave_fail_lock:
+                        if store_info and getattr(self, "info", None) is not None:
+                            _rtcp_sr[self.ssrc] = (self.info.packet_count,
+                                                   self.info.octet_count)
+                        for r in getattr(self, "reports", ()):
+                            _rtcp_rr[r.ssrc] = (r.perc_loss, r.total_lost,
+                                                r.last_seq)
+                except Exception:
+                    pass          # 诊断代码绝不能把收包路径带崩
+            cls.__init__ = _init
+            cls._cc_rtcp_probed = True
+
+        _wrap_report(_SR, True)
+        _wrap_report(_RR, False)
+        log.info("RTCP 账本探针已挂载 (SR/RR, 用于拆分上行段与下行段丢包)")
+    except Exception:
+        log.exception("RTCP 账本探针挂载失败 (丢包仍可测, 只是分不了段)")
+
     # 2) 崩溃兜底: 单帧 decode 失败 → 回落静音 PCM, 不让 PacketRouter 退出。
     try:
         from discord.opus import PacketDecoder, Decoder
