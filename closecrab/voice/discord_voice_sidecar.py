@@ -569,6 +569,7 @@ def _record_opus_toc(plain: bytes | None) -> None:
 _utt_opus: "collections.Counter[int]" = collections.Counter()   # ssrc → 帧数
 _utt_opus_bytes = 0
 _utt_lost = 0          # 本句 RTP 序列号缺口累计（= 真丢了多少帧）
+_utt_gaps: "collections.Counter[int]" = collections.Counter()   # 缺口长度 → 出现次数
 
 
 def _utt_opus_note(ssrc: int, nbytes: int) -> None:
@@ -592,12 +593,22 @@ def _utt_loss_note(gap: int) -> None:
     注意别跟 `_fec_recover_n` 混为一谈 —— 那个只统计「FEC 成功补回来的」，
     gap 超过 50 或者 FEC 关着的时候一个都不记。这里要的是**丢了多少**，
     不是**救回来多少**，所以无条件先记。
+
+    除了总数还要记**缺口长度的分布**，因为这一项直接决定「要不要把 FEC 打开」：
+    Opus 的带内 FEC（LBRR）是把**上一帧**的低码率副本塞进当前包里，所以
+    一个收到的包只能往回补**一帧**。
+      gap=1  → 后面那个包里带着它的副本，能补回来
+      gap≥2  → 这一串里只有最后一帧补得回来，前面的彻底没了
+    也就是说 FEC 的上限收益 = 「gap=1 的次数 ÷ 总丢帧数」。
+    只看 19% 这个总数是决定不了开不开的 —— 全是长串的话开了也基本白开，
+    而它要多花约 20~30% 的码率，在本来就拥塞的上行上反而可能是负收益。
     """
     global _utt_lost
     if gap <= 0:
         return
     with _dave_fail_lock:
         _utt_lost += gap
+        _utt_gaps[gap if gap <= 4 else (10 if gap <= 10 else 99)] += 1
 
 
 def _utt_opus_take() -> str:
@@ -608,15 +619,21 @@ def _utt_opus_take() -> str:
         n = sum(_utt_opus.values())
         b = _utt_opus_bytes
         lost = _utt_lost
+        gaps = dict(_utt_gaps)
         _utt_opus.clear()
         _utt_opus_bytes = 0
         _utt_lost = 0
+        _utt_gaps.clear()
     if not n:
         return "无包"
     src = ",".join(f"{s}×{c}" for s, c in items)
     # 丢包率分母用「收到 + 丢掉」，也就是发送端本来打算发的总数。
     # 拿收到数当分母会把丢包率算小，丢得越狠低估越多。
     loss = f" 丢{lost}({lost/(n+lost)*100:.1f}%)" if lost else " 丢0"
+    if gaps:
+        _名 = {1: "1", 2: "2", 3: "3", 4: "4", 10: "5-10", 99: ">10"}
+        loss += " 缺口[" + " ".join(
+            f"{_名[k]}×{gaps[k]}" for k in sorted(gaps)) + "]"
     return (f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps{loss}")
 
 
