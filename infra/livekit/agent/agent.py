@@ -35,15 +35,34 @@ FunctionDeclaration → 会话建立时下发 → Gemini 回 LiveServerToolCall 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime
 import logging
 import os
 import pathlib
+import re
 import zoneinfo
+from typing import AsyncIterator
 
 import aiohttp
 from dotenv import load_dotenv
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, function_tool
+from livekit import rtc
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    WorkerOptions,
+    cli,
+    function_tool,
+)
+from livekit.agents.job import DEFAULT_PARTICIPANT_KINDS
+from livekit.agents.voice.io import AudioInput
+
+# `RoomOptions` 目前只在子包里，`livekit.agents` 顶层没导出（1.8.1 实测
+# `from livekit.agents import RoomOptions` 直接 ImportError，提示你用
+# RoomInputOptions）。但顶层那两个 RoomInputOptions/RoomOutputOptions
+# 已经被标了 deprecated，运行时会打 warning ⇒ 用新的，从子包导。
+from livekit.agents.voice.room_io import RoomOptions
 from livekit.plugins.google.realtime import RealtimeModel
 from livekit.plugins.google.tools import GoogleSearch
 
@@ -91,6 +110,69 @@ INSTRUCTIONS = """\
 - 调完工具直接说结论，不要播报「我现在调用某某工具」。
 - 工具报错了就如实说哪一步失败了，不要拿记忆里的答案顶上。
 """
+
+DEFAULT_VOICE = "Aoede"
+
+# ── 人格：按房间名选 ────────────────────────────────────────────────
+# 房间名就是 bot 名。前端 `?room=bunny` → 房间 `bunny` → 读 `personas/bunny.md`。
+# 一个 worker 进程伺候所有房间：LiveKit 是**每个房间派一个独立的 job 进程**，
+# 所以六个 bot 不需要六个 systemd unit，job 进来自己看房间名加载对应人格即可。
+#
+# 为什么人格放本地文件而不去 Firestore 拿：`bots/{name}` 里**没有**人格字段
+# （实测键只有 active_channel / description / model / worker_type 这些），
+# CloseCrab 的 system prompt 是 `main.py` 在运行时拼出来的。为了一个
+# description 把 google-cloud-firestore 拖进这个 venv 不划算。
+PERSONA_DIR = pathlib.Path(__file__).with_name("personas")
+
+# 房间名会被拿去拼文件路径，所以**必须**自己校验，不能信前端那层白名单 ——
+# 那是另一个进程里的另一份配置，它松了这边就穿了。
+_SAFE_ROOM = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,31}\Z")
+_VOICE_LINE = re.compile(r"\Avoice:\s*(\w+)\s*\Z")
+
+
+@dataclasses.dataclass(frozen=True)
+class Persona:
+    name: str
+    voice: str
+    instructions: str
+
+
+def load_persona(room_name: str) -> Persona:
+    """房间名 → 人格。没有对应文件就用内置默认人格（bunny）。
+
+    文件格式刻意做得很薄，第一行可选：
+
+        voice: Puck
+        <空行>
+        你是 ...
+
+    只认 `voice:` 一个头部字段。再多的配置项要么进 CloseCrab 的 Firestore，
+    要么就说明这里该换成真正的配置格式 —— 别在这儿长出第二套 YAML。
+    """
+    if not _SAFE_ROOM.match(room_name):
+        # 随机房间名（voice_assistant_room_1234）走的就是这一条，不是异常。
+        return Persona("default", DEFAULT_VOICE, INSTRUCTIONS)
+
+    path = PERSONA_DIR / f"{room_name}.md"
+    if not path.exists():
+        logger.info("房间 %s 没有人格文件，用默认人格", room_name)
+        return Persona("default", DEFAULT_VOICE, INSTRUCTIONS)
+
+    text = path.read_text(encoding="utf-8")
+    voice = DEFAULT_VOICE
+    lines = text.splitlines()
+    if lines and (m := _VOICE_LINE.match(lines[0])):
+        voice = m.group(1)
+        lines = lines[1:]
+    instructions = "\n".join(lines).strip()
+    if not instructions:
+        # 空文件是配置错误，不是「没有人格」。说清楚再退回默认，
+        # 否则下次只会看到「它怎么不像 bunny 了」。
+        logger.warning("人格文件 %s 是空的，退回默认人格", path.name)
+        return Persona("default", DEFAULT_VOICE, INSTRUCTIONS)
+
+    logger.info("房间 %s 加载人格 %s（voice=%s）", room_name, path.name, voice)
+    return Persona(room_name, voice, instructions)
 
 
 @function_tool
@@ -260,7 +342,194 @@ async def write_file(path: str, content: str) -> str:
         return f"写入出错：{exc}"
 
 
+# ── 混音池：把房间里所有人的麦克风合成一条流 ──────────────────────────
+_MIX_SAMPLE_RATE = 24000      # 跟框架 AudioInputOptions 的默认值对齐
+_MIX_NUM_CHANNELS = 1
+_MIX_FRAME_MS = 50
+
+
+class MixedRoomAudioInput(AudioInput):
+    """把房间里**所有人**的麦克风混成一条流喂给模型。
+
+    为什么要自己写：框架默认的 RoomIO 只把 agent 的「耳朵」挂在**一个**参与者
+    身上（`RoomOptions.participant_identity` 不给就挂第一个进来的，见
+    `room_io.py:_on_participant_available`）。你用笔记本先进房间、再掏出手机
+    说话，它一个字都收不到 —— 耳朵还贴在笔记本那边。
+
+    这对聊天室的语义是错的。房间本来就是广播域：SFU 把每个人的音轨转发给所有
+    人，浏览器在本地把几路叠起来播。agent 不该是例外。
+
+    真正的约束不在 LiveKit 而在模型 —— Gemini Live 的 websocket 只吃**一条**
+    音频流。所以正确的做法不是「切换耳朵」，是在喂进去之前先混音。SDK 里现成
+    就有 `rtc.AudioMixer`（N 条流进，逐样本相加再 clip，一条流出）。
+
+    代价说清楚：混完就分不出谁是谁了，模型没有说话人分离。两个人同时说话，它
+    听到的是叠在一起的声音 —— 跟真人坐在会议室里听到的一样。
+
+    还有一个**声学**问题它解决不了：两台设备摆在同一张桌子上时，A 的喇叭放出
+    agent 的声音会被 B 的麦克风收进来，混进池子再送回模型，于是模型听见自己。
+    浏览器的回声消除只消得掉本机喇叭，消不掉旁边那台。物理上挨着就静音一台。
+
+    三个实现上的坑：
+
+    1. **只混没静音的轨。** mixer 对超过 100 ms 没出数的流每轮打一条 warning
+       （`audio_mixer.py:_get_contribution`）。静音的参与者根本不发包，挂在池子
+       里就是每秒 10 条日志。所以按 track_muted / track_unmuted 动态增删。
+    2. **静音期要自己补帧。** 没静音但没说话时 Opus DTX 会停发包，同样触发上面
+       那个 warning。`_paced()` 负责：有真音立刻转发，超过一帧时长没来就补一帧
+       静音。顺带把整条流钉在实时速率上 —— mixer 自己不限速，出帧节奏完全靠
+       输入流的自然节奏定拍。
+    3. **全员静音时要真的停。** 此时池子里一条流都没有，mixer 空转 sleep、不产出
+       任何帧 ⇒ 什么都不会发给 Gemini。跟单人模式静音时的行为一致，不会白烧配额。
+    """
+
+    def __init__(self, room: rtc.Room) -> None:
+        super().__init__(label="MixedRoomAudio")
+        self._room = room
+        self._chunk = int(_MIX_SAMPLE_RATE * _MIX_FRAME_MS / 1000)
+        self._mixer = rtc.AudioMixer(
+            sample_rate=_MIX_SAMPLE_RATE,
+            num_channels=_MIX_NUM_CHANNELS,
+            blocksize=self._chunk,
+        )
+        # publication.sid → (原始流, 喂给 mixer 的那个包装生成器)
+        # 两个都要留着：remove_stream 认的是生成器对象本身，关闭要关原始流。
+        self._sources: dict[str, tuple[rtc.AudioStream, AsyncIterator[rtc.AudioFrame]]] = {}
+        # 关流的 task 要留个强引用，否则 asyncio 只持弱引用，可能没跑完就被 GC 掉。
+        self._closing: set[asyncio.Task] = set()
+
+        room.on("track_subscribed", self._on_track_subscribed)
+        room.on("track_unsubscribed", self._on_track_unsubscribed)
+        room.on("track_muted", self._on_track_muted)
+        room.on("track_unmuted", self._on_track_unmuted)
+
+        # 已经在房间里、已经在说话的人：事件是不会补发的，得自己扫一遍。
+        # 这条不是防御性代码 —— agent 加入时房里通常**已经**有人了。
+        for participant in room.remote_participants.values():
+            for pub in participant.track_publications.values():
+                if pub.track is not None and not pub.muted:
+                    self._add(pub.sid, pub.track, participant)
+
+    # -- 事件 --------------------------------------------------------
+
+    @staticmethod
+    def _wanted(kind: int, participant: rtc.RemoteParticipant) -> bool:
+        # 参与者类型沿用框架那份白名单（standard / sip / connector），
+        # 关键是把 AGENT 挡在外面 —— 房里要是再进来一个 agent，它的声音会被
+        # 混进池子送回模型，模型就开始跟自己说话。
+        return kind == rtc.TrackKind.KIND_AUDIO and participant.kind in DEFAULT_PARTICIPANT_KINDS
+
+    def _on_track_subscribed(self, track, publication, participant) -> None:
+        if self._wanted(track.kind, participant) and not publication.muted:
+            self._add(publication.sid, track, participant)
+
+    def _on_track_unsubscribed(self, track, publication, participant) -> None:
+        self._remove(publication.sid, "取消订阅")
+
+    def _on_track_muted(self, participant, publication) -> None:
+        self._remove(publication.sid, "静音")
+
+    def _on_track_unmuted(self, participant, publication) -> None:
+        track = getattr(publication, "track", None)
+        if track is not None and self._wanted(track.kind, participant):
+            self._add(publication.sid, track, participant)
+
+    # -- 增删 --------------------------------------------------------
+
+    def _add(self, sid: str, track: rtc.Track, participant: rtc.RemoteParticipant) -> None:
+        if sid in self._sources:
+            return
+        stream = rtc.AudioStream.from_track(
+            track=track,
+            sample_rate=_MIX_SAMPLE_RATE,
+            num_channels=_MIX_NUM_CHANNELS,
+            frame_size_ms=_MIX_FRAME_MS,
+        )
+        paced = self._paced(stream)
+        self._sources[sid] = (stream, paced)
+        self._mixer.add_stream(paced)
+        logger.info("混音池 +1：%s（共 %d 路）", participant.identity, len(self._sources))
+
+    def _remove(self, sid: str, why: str) -> None:
+        entry = self._sources.pop(sid, None)
+        if entry is None:
+            return
+        stream, paced = entry
+        self._mixer.remove_stream(paced)
+        # 事件回调是同步的，关流得丢给 event loop。
+        task = asyncio.create_task(self._close_source(stream))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+        logger.info("混音池 -1：%s（%s，共 %d 路）", sid, why, len(self._sources))
+
+    @staticmethod
+    async def _close_source(stream: rtc.AudioStream) -> None:
+        # 只关底层 AudioStream，**不要**去 aclose 那个 `_paced` 生成器：
+        # mixer 的 `_get_contribution` 可能正 await 着它的 `__anext__`，
+        # 这时候 aclose 会抛 "asynchronous generator is already running"。
+        # 底层一关，`_paced` 下次被拉动就自然 return，没人拉就等 GC 收 —— 两条路都干净。
+        try:
+            await stream.aclose()
+        except Exception:                          # noqa: BLE001 — 关流失败不该拖垮会话
+            logger.debug("关闭音频源时出错", exc_info=True)
+
+    # -- 限速转发 ----------------------------------------------------
+
+    async def _paced(self, stream: rtc.AudioStream) -> AsyncIterator[rtc.AudioFrame]:
+        """转发真音；一帧时长内没等到就补一帧静音。
+
+        写法上有个必须注意的点：**不能**用 `asyncio.wait_for(it.__anext__())`。
+        超时会把里面那个 `__anext__` 取消掉，而它已经从队列里摘走的那一帧就丢了
+        （asyncio 里 getter 被取消和 set_result 之间有个众所周知的竞态）。
+        所以把 task 留着跨轮次复用 —— 这轮没等到，下轮接着等同一个 task。
+        """
+        silence = rtc.AudioFrame(
+            b"\x00" * (self._chunk * 2 * _MIX_NUM_CHANNELS),
+            _MIX_SAMPLE_RATE,
+            _MIX_NUM_CHANNELS,
+            self._chunk,
+        )
+        it = stream.__aiter__()
+        pending: asyncio.Task | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.ensure_future(it.__anext__())
+                done, _ = await asyncio.wait({pending}, timeout=_MIX_FRAME_MS / 1000)
+                if not done:
+                    yield silence
+                    continue
+                task, pending = pending, None
+                try:
+                    yield task.result().frame
+                except StopAsyncIteration:
+                    return
+        finally:
+            if pending is not None:
+                pending.cancel()
+
+    # -- AudioInput 接口 ---------------------------------------------
+
+    async def __anext__(self) -> rtc.AudioFrame:
+        return await self._mixer.__anext__()
+
+    async def aclose(self) -> None:
+        self._room.off("track_subscribed", self._on_track_subscribed)
+        self._room.off("track_unsubscribed", self._on_track_unsubscribed)
+        self._room.off("track_muted", self._on_track_muted)
+        self._room.off("track_unmuted", self._on_track_unmuted)
+        for sid in list(self._sources):
+            stream, paced = self._sources.pop(sid)
+            self._mixer.remove_stream(paced)
+            await self._close_source(stream)
+        await self._mixer.aclose()
+
+
 async def entrypoint(ctx: JobContext) -> None:
+    # 房间名就是 bot 名。一个 worker 伺候所有房间 —— LiveKit 给**每个房间**派一个
+    # 独立的 job 进程，所以六个 bot 不需要六个 systemd unit，进来自己认房间就行。
+    persona = load_persona(ctx.room.name)
+
     session = AgentSession(
         # 导入路径是 `livekit.plugins.google.realtime`, 不是老文档里那个
         # `google.beta.realtime` —— 后者在 1.8.1 里已经不是真模块了
@@ -271,14 +540,14 @@ async def entrypoint(ctx: JobContext) -> None:
             # vertexai 显式写 False：3.1 Live 走 Vertex 会被 plugin 直接拒掉，
             # 留默认值能跑，但写出来的目的是让下一个读代码的人不必去翻源码。
             vertexai=False,
-            voice="Aoede",
+            voice=persona.voice,
             temperature=0.8,
-            instructions=INSTRUCTIONS,
+            instructions=persona.instructions,
         ),
     )
     await session.start(
         agent=Agent(
-            instructions=INSTRUCTIONS,
+            instructions=persona.instructions,
             # 最后那个 GoogleSearch() 不是函数工具，是 Gemini 的**内置**工具
             # （provider tool）—— 检索在 Google 服务端完成，不经过这个进程。
             # ⚠️ 内置工具和函数工具**混用**有个硬门槛：plugin 的
@@ -298,7 +567,28 @@ async def entrypoint(ctx: JobContext) -> None:
             ],
         ),
         room=ctx.room,
+        room_options=RoomOptions(
+            # 音频输入我们自己接管（下面那个混音池），所以把框架那条关掉。
+            # 关掉的只是 RoomIO 的音频输入，**订阅不受影响** ——
+            # `AgentSession.start()` 会去跑 `job_ctx.connect()`，默认
+            # AutoSubscribe.SUBSCRIBE_ALL，所有音轨照常订阅、track_subscribed
+            # 照常触发。副作用只有两个：pre_connect_audio（进房前那几百毫秒的
+            # 缓冲）和 plugin 的 noise_cancellation 钩子（我们没用）。
+            audio_input=False,
+            # 默认 True = 「跟 agent 绑定的那个参与者一走，就把这个 job 关掉」。
+            # 在共享房间里这是错的：手机退出不该把笔记本的会话一起收走。
+            # 关掉之后由 SFU 的 empty_timeout（实测我们这套是 300 秒）兜底 ——
+            # 房间真空五分钟才销毁，期间换设备回来还是同一个 Gemini 会话、
+            # 同一段对话历史。
+            close_on_disconnect=False,
+        ),
     )
+
+    # 接管输入：全房间混音，而不是只听第一个进来的人。
+    mixed = MixedRoomAudioInput(ctx.room)
+    session.input.audio = mixed
+    ctx.add_shutdown_callback(mixed.aclose)
+
     # 这里**不能**用 `session.generate_reply()` 让它先开口打招呼。
     # 3.1 Live 不支持服务端主动触发生成，plugin 会打
     #   "generate_reply is not compatible with 'gemini-3.1-flash-live-preview'"

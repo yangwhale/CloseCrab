@@ -52,10 +52,40 @@ export async function POST(req: Request) {
       ? RoomConfiguration.fromJson(body.room_config, { ignoreUnknownFields: true })
       : new RoomConfiguration();
 
+    // ── 房间名从查询串来：`/api/token?room=bunny` ────────────────────
+    // 一个 bot 一个房间，手机和笔记本进同一个房间、各自是一个参与者。
+    // 不带 ?room= 时保持上游原来的随机房间行为 —— 老链接不受影响。
+    //
+    // 房间名会一路传到 agent 那边被拿去拼人格文件路径，所以必须白名单，
+    // 不能只做字符校验：任何人都能调这个端点，`?room=<别人的 bot>` 等于
+    // 直接拨进别人的助理。
+    const roomParam = new URL(req.url).searchParams.get('room');
+    let roomName: string;
+    if (roomParam) {
+      // 配置缺失就 500，**不要**悄悄退回随机房间 —— 那会让「白名单没配」
+      // 表现成「功能好像能用但每次都是新房间」，最难查的那种。
+      if (!process.env.ALLOWED_ROOMS) {
+        throw new Error('ALLOWED_ROOMS is not defined but ?room= was requested');
+      }
+      const allowed = process.env.ALLOWED_ROOMS.split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!allowed.includes(roomParam)) {
+        return new NextResponse(`room not allowed: ${roomParam}`, { status: 400 });
+      }
+      roomName = roomParam;
+    } else {
+      roomName = `voice_assistant_room_${Math.floor(Math.random() * 10_000)}`;
+    }
+
     // Generate participant token
     const participantName = 'user';
-    const participantIdentity = `voice_assistant_user_${Math.floor(Math.random() * 10_000)}`;
-    const roomName = `voice_assistant_room_${Math.floor(Math.random() * 10_000)}`;
+    // 上游用 `Math.random() * 10_000` 生成 identity。以前每个窗口都是自己的
+    // 随机房间，撞车也没人看得见；现在大家进同一个房间，**撞 identity 就是
+    // 事故** —— LiveKit 规定一个房间里同一个 identity 只能有一个连接，
+    // 手机一进来就把笔记本踢下线，而且看起来像「随机掉线」。
+    // 1/10000 在两台设备上不算小，换成 UUID。
+    const participantIdentity = `voice_assistant_user_${crypto.randomUUID()}`;
 
     const participantToken = await createParticipantToken(
       { identity: participantIdentity, name: participantName },
