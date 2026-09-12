@@ -570,6 +570,7 @@ _utt_opus: "collections.Counter[int]" = collections.Counter()   # ssrc → 帧�
 _utt_opus_bytes = 0
 _utt_lost = 0          # 本句 RTP 序列号缺口累计（= 真丢了多少帧）
 _utt_gaps: "collections.Counter[int]" = collections.Counter()   # 缺口长度 → 出现次数
+_utt_loss_pos: list = []   # [(已收帧数, 缺口长度)] —— 用来看丢包是不是往后半句堆
 
 # ── RTCP：把「端到端丢包」拆成两段 ──────────────────────────────────────
 #
@@ -623,6 +624,14 @@ def _utt_loss_note(gap: int) -> None:
     也就是说 FEC 的上限收益 = 「gap=1 的次数 ÷ 总丢帧数」。
     只看 19% 这个总数是决定不了开不开的 —— 全是长串的话开了也基本白开，
     而它要多花约 20~30% 的码率，在本来就拥塞的上行上反而可能是负收益。
+
+    还要记**这个缺口出现在句子的第几段**。2026-09-12 Chris 报的现象是
+    「句子说长了，前半句还行，后半句开始着急、草草发完」，并猜是 5G 上行
+    发着发着就堵了。这个猜测有个很锐利的预言：丢包应该**往后半句堆**。
+    总丢包率是把整句摊平的，正好把这个信号平均掉 —— 所以要按位置分段记。
+
+    位置用「到目前为止收了多少帧」表示，不用墙钟时间：说话有停顿，
+    墙钟会把停顿也算进去，而我们要问的是「说到这句的几成时开始丢」。
     """
     global _utt_lost
     if gap <= 0:
@@ -630,6 +639,7 @@ def _utt_loss_note(gap: int) -> None:
     with _dave_fail_lock:
         _utt_lost += gap
         _utt_gaps[gap if gap <= 4 else (10 if gap <= 10 else 99)] += 1
+        _utt_loss_pos.append((sum(_utt_opus.values()), gap))
 
 
 def _utt_opus_take() -> str:
@@ -641,10 +651,12 @@ def _utt_opus_take() -> str:
         b = _utt_opus_bytes
         lost = _utt_lost
         gaps = dict(_utt_gaps)
+        pos = list(_utt_loss_pos)
         _utt_opus.clear()
         _utt_opus_bytes = 0
         _utt_lost = 0
         _utt_gaps.clear()
+        _utt_loss_pos.clear()
     if not n:
         return "无包"
     src = ",".join(f"{s}×{c}" for s, c in items)
@@ -655,6 +667,17 @@ def _utt_opus_take() -> str:
         _名 = {1: "1", 2: "2", 3: "3", 4: "4", 10: "5-10", 99: ">10"}
         loss += " 缺口[" + " ".join(
             f"{_名[k]}×{gaps[k]}" for k in sorted(gaps)) + "]"
+    # 分四段看丢包落在句子的哪一截。分母是每段**本该有的帧数**
+    # （该段收到的 + 该段丢掉的），不是整句平均 —— 否则丢得多的那段
+    # 因为收得少，反而显得占比小，把要找的趋势正好抹反。
+    if pos and n >= 40:
+        q = [[0, 0] for _ in range(4)]          # [收到, 丢掉]
+        for i in range(n):
+            q[min(3, i * 4 // n)][0] += 1
+        for at, g in pos:
+            q[min(3, at * 4 // n)][1] += g
+        loss += " 分段" + "/".join(
+            f"{(l/(r+l)*100):.0f}%" if (r + l) else "-" for r, l in q)
     return (f"ssrc={src} {n}帧 均{b/n:.0f}B/帧≈{b*8*50/n/1000:.0f}kbps{loss}"
             f" | {_rtcp_summary()}")
 
