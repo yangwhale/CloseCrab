@@ -42,7 +42,7 @@
 
 | 文件 | 目的地 | 说明 |
 |---|---|---|
-| `agent/agent.py` | `~/lk-gemini-agent/agent.py` | Gemini Live agent 本体，7 个工具 |
+| `agent/agent.py` | `~/lk-gemini-agent/agent.py` | Gemini Live agent 本体。工具 6 个通用的（`search_web` / `read_url` / `run_bash` / `read_file` / `write_file` / 内置 `GoogleSearch`），**有人格的房间再加一个 `ask_<bot>`** 把活派给本体 |
 | `agent/personas/*.md` | `~/lk-gemini-agent/personas/` | 一个房间一份人格（声音 + instructions），见下面「一个 bot 一个房间」 |
 | `agent/requirements.txt` | — | 直接依赖，实跑验证过的版本 |
 | `agent/env.tmpl` | `~/lk-gemini-agent/.env`（0600） | **含 secret，不进 git** |
@@ -82,6 +82,41 @@ Gemini session、同一份对话历史。不带 `?room=` 时保持上游的随�
 | 人格文件 | `agent/personas/<房间名>.md` | 第一行 `voice: <名字>`，空行后是 instructions |
 | 具名派发 | `WorkerOptions(agent_name="gemini-live")` + `ensure_rooms.py` | **一个 worker 伺候所有房间** —— job 自己读 `ctx.room.name` 挑人格，六个 bot **不需要**六个 systemd unit。为什么从匿名改成具名，见下面「房间常驻」 |
 | 混音输入 | `MixedRoomAudioInput` | 见下 |
+
+### 派活给本体，以及答案怎么回来（`ask_<bot>`，2026-09-14）
+
+房间名 == bot 名还有第二个用处：助手据此知道**自己是谁的助手**，从而拿到
+一个 `ask_<bot>` 工具，把「写代码 / 连着查半小时 / 跨天记得住」这类活转给本体。
+没有这条通道的话，助手只能说「这个你去飞书跟它说」—— 等于把人从语音里赶出去，
+整条语音链路就白搭了。
+
+```
+iOS 房间 bunny ──ask_bunny──► Firestore inbox ──► bunny 本体（飞书那条进程）
+      ▲                                                    │
+      └────────── livekit_out：bunny-speaker ◄──────────────┘
+                  （常驻音轨，只说不听）
+```
+
+去程和回程是**两个进程、两条独立的路**，各自会单独坏掉，所以分开记：
+
+| 这一头 | 在哪 | 坏了的表现 |
+|---|---|---|
+| 去程 | `agent.py` 的 `_make_ask_tool()` | 助手说「已经交给它了」，Firestore 里没有那条消息 |
+| sender 后缀 | `BOT_NAME=<bot>-voice` | 本体按**文字**模式作答，只有末尾两句被念出来 |
+| 回程开关 | `bots/<bot>.channels.livekit.enabled` | 活派出去了，答案永远回不来（`/lkon` 打开） |
+| 回程音轨 | `closecrab/voice/livekit_out.py` | 同上，日志里搜 `LiveKit 输出已连上房间` |
+
+三个容易被漏掉的点：
+
+- **助手听不见本体那条轨**（混音池按 kind 过滤掉 agent）。这是故意的 ——
+  否则本体一停嘴助手就接话，用户听见两个 bot 互相捧哏。代价是助手不知道本体
+  刚说了什么，用户追问「刚那第二条再讲讲」它是真不知道。
+- **没有人格文件的房间一个 ask 工具都不给。** 随机房间名（不带 `?room=`）走的
+  就是这条。给一个指向不存在的 bot 的工具比没有更糟：它会派出去、Firestore
+  里留一条永远没人收的消息，而用户听到的是「已经交给它了」。
+- **`<bot>-speaker` 是常驻音轨，房间空着它也连着。** 所以「轨在线」不能当成
+  「有人在听」—— 判据是 `livekit_out.has_listener()`（数房间里的非 agent 参与者）。
+  混了会让飞书那条 ogg 兜底被永久静音，而日志里一切正常。
 
 ## 房间常驻（2026-09-13）
 

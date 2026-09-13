@@ -40,6 +40,7 @@ import logging
 import os
 import pathlib
 import re
+import signal
 from typing import AsyncIterator
 
 import aiohttp
@@ -466,6 +467,133 @@ async def write_file(path: str, content: str) -> str:
         return f"写入出错：{exc}"
 
 
+# ---------------------------------------------------------------- 派活给本体
+#
+# **这是语音助手存在的理由本身。** 上面那五个工具是它自己的手脚，够应付
+# 「看一眼、搜一下、算一下」；真正有价值的能力 —— 写代码、连着查半小时、
+# 记得住跨天的事 —— 全在本体那边。没有这条通道，助手只能说「这个你去飞书
+# 跟它说」，等于把用户从语音里赶出去，那整条语音链路就白搭了。
+#
+# 抄的是 `closecrab/voice/gemini_live_bridge.py` 的 `_ask_owner`（Discord /
+# 飞书那条语音路），连同它踩过的坑一起抄：
+#
+# 1. **fire-and-forget，绝不等结果。** Gemini 3.1 Live 的 function calling 是
+#    同步的 —— 从模型发起调用到我们回 tool response，用户那头**完全静音**。
+#    而派出去的活按定义就是「要好几分钟」的活，等于让人对着死寂坐五分钟。
+# 2. **发用户原话，不套模板。** 以前那边包过一层「【来自语音助理的转交】…」，
+#    结果本体按文字模式作答、只有末尾两句被念出来。谁转的写在 sender 里
+#    （`<bot>-voice`），飞书端认这个后缀就把整条当「用户用嘴说的话」处理。
+# 3. **必须用系统 python3，不能用 sys.executable。** 这个 agent 跑在自己的
+#    venv 里，那里面没有 google-cloud-firestore，用 venv 的解释器跑
+#    inbox-send.py 一路 ImportError —— 跟 tee.py 第一版栽的是同一个坑。
+#
+# 结果怎么回到耳朵里：本体在飞书回复时，`_send_voice_summary` 会把 TTS 同时
+# 灌进 `livekit_out` 那条常驻音轨（房间名 == bot 名 == 人格文件名），也就是
+# 本体**在这个房间里自己开口**，用它自己的声音。助手听不见那条轨（混音池
+# 按 kind 过滤掉 agent），所以不会跟本体互相捧哏 —— 这是设计，不是漏了。
+
+SYS_PY = "/usr/bin/python3"
+INBOX_SEND = pathlib.Path.home() / "CloseCrab" / "scripts" / "inbox-send.py"
+
+# asyncio 对 task 只持弱引用。不留着，收尸协程可能跑一半就被 GC 掉。
+_BG_TASKS: set[asyncio.Task] = set()
+
+_ASK_DOC = """\
+把一件事交给 {bot} 去办。{bot} 是这台机器上那个能力完整的 AI bot ——
+会写代码、改配置、做调研、跑长任务，记得住跨天的事。
+
+**这个工具发出去就立刻返回，不会等结果。**{bot} 干完会自己在这个房间里
+开口说结论（它有一条只说不听的音轨接在这里），你不用转述，也不用等。
+
+**这是你的默认动作。** 用户想让人办一件事，就调它 —— 不管这件事大不大、
+难不难、快不快，也不管你觉得自己能不能干。写代码、改配置、调研、跑长任务、
+查跨天的事，全都属于 {bot}。用户没点名说让谁干，默认也是 {bot}。
+
+**用户点了「{bot}」的名字时更是必调** —— 不管后面跟的是什么，
+「让{bot}继续」「问{bot}…」「告诉{bot}…」「叫{bot}…」「跟{bot}说…」都算。
+点名本身就是指令，哪怕内容只有「继续」两个字，也要原样转过去。
+用户点名要找的是 {bot}，不是你 —— 你替它答就是答错人。
+
+**先调这个工具，再开口说话。顺序不能反。** 说「我让{bot}去查」并不等于派活，
+调这个工具才是派活 —— 先把交代的话说完，很容易就觉得这件事已经办了，
+于是这一轮过去了、工具一次都没发出去。用户听着像办了，其实什么都没发生。
+
+调完（立刻返回，不用等）再说两句：一句复述你听懂了什么，一句说你派了什么。
+不用等用户点头。
+
+Args:
+    task: 要交办的事情，写全。{bot} 看不到你们刚才的对话，所以把背景、
+        用户想要什么、前几轮聊过的相关内容都写进来。用户原话里的名字、
+        数字、路径一个字都别改。**你自己没听准的地方要在任务里说明**
+        （比如「他说的可能是 wiki，我不确定」）—— 让 {bot} 知道哪里有歧义，
+        比你猜一个填进去强。
+"""
+
+
+async def _reap_inbox(proc: asyncio.subprocess.Process, bot: str, task: str) -> None:
+    """等派活进程收口并记日志。纯观测，不影响主链路。
+
+    **不 await 就没人看 returncode**：Firestore 写失败会彻底静默 —— 模型以为
+    派出去了、用户以为在等回话，其实什么都没发生。
+    """
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        logger.warning("inbox-send 30 秒没收口，放弃等待：%s", task[:60])
+        # 杀**整个进程组**。单杀这个 pid 的话，它 fork 的孙进程还攥着 stdout
+        # 那根管道，communicate() 要等管道关闭才返回，于是一路挂着。
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        return
+    if proc.returncode != 0:
+        logger.warning("inbox-send 退出码 %s：%s",
+                       proc.returncode, (out or b"").decode("utf-8", "replace")[:300])
+    else:
+        logger.info("已派给 %s：%s", bot, task[:80])
+
+
+def _make_ask_tool(bot: str):
+    """按房间名现造一个 `ask_<bot>`。
+
+    工具名带 bot 名字而不是叫 `delegate`：语音场景下模型是**听着**自己在调
+    什么，`ask_bunny` 比 `delegate_to_owner` 好理解，也更不容易乱调。房间名
+    == bot 名，所以每个房间的助手只看得见自己那位本体，不会串台。
+    """
+    async def ask(task: str) -> str:
+        task = (task or "").strip()
+        if not task:
+            return "任务内容是空的，没法转交。"
+        # sender 写 `<bot>-voice` 而不是 bot 自己：一来 bot 收到自己发的消息很怪，
+        # 二来这个后缀是飞书端切语音模式的唯一判据（feishu.py 搜 _VOICE_SENDER_SUFFIX）。
+        env = dict(os.environ, BOT_NAME=f"{bot}-voice")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                SYS_PY, str(INBOX_SEND), bot, task,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning("派活给 %s 失败（进程都没起来）：%s", bot, exc)
+            return f"转交失败：{exc}。跟用户说一声，别装作派出去了。"
+
+        t = asyncio.create_task(_reap_inbox(proc, bot, task))
+        _BG_TASKS.add(t)
+        t.add_done_callback(_BG_TASKS.discard)
+
+        return (
+            f"已经交给 {bot} 了。它干完会自己在这个房间里说结果 —— "
+            f"跟用户说一句你派了什么，然后继续聊别的，不用等、也不用替它转述。"
+        )
+
+    ask.__name__ = f"ask_{bot}"
+    ask.__doc__ = _ASK_DOC.format(bot=bot)
+    return function_tool(ask, name=f"ask_{bot}")
+
+
 # ── 混音池：把房间里所有人的麦克风合成一条流 ──────────────────────────
 # 显式派发用的 worker 名字。ensure_rooms.py 要用同一个字符串，改这里就得改那里。
 _AGENT_NAME = "gemini-live"
@@ -713,6 +841,17 @@ def _build_session(persona: Persona) -> AgentSession:
 
 
 def _build_agent(persona: Persona) -> Agent:
+    # `ask_<bot>` 排**第一个**，因为它是默认动作 —— 大活儿一律派出去，自己那
+    # 五个工具是给「看一眼就能答」的小事用的。顺序是模型读到的顺序，摆在最后
+    # 等于告诉它「实在没辙了再考虑」，那正好把主次弄反。
+    #
+    # `persona.name == "default"` 说明这个房间没有人格文件（随机房间名走的就是
+    # 这条），也就没有对应的本体可派。**这时候一个 ask 工具都不给** ——
+    # 给一个指向不存在的 bot 的工具，比没有更糟：它会派出去、Firestore 里留一条
+    # 永远没人收的消息，而用户听到的是「已经交给它了」。
+    tools = []
+    if persona.name != "default":
+        tools.append(_make_ask_tool(persona.name))
     return Agent(
             instructions=persona.instructions,
             # 最后那个 GoogleSearch() 不是函数工具，是 Gemini 的**内置**工具
@@ -730,7 +869,7 @@ def _build_agent(persona: Persona) -> Agent:
             # GoogleSearch 的检索发生在 Google 服务端，这个进程**一个字都看不到**，
             # 出问题时「它搜过了但没搜着」和「它压根没搜、凭记忆答的」长得一样。
             # 所以默认走看得见的那条，Jina 整条不通时再由它兜底。
-            tools=[
+            tools=tools + [
                 search_web,
                 read_url,
                 run_bash,

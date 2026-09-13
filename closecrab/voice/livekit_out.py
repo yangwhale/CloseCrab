@@ -76,6 +76,35 @@ def is_connected() -> bool:
     return _connected
 
 
+def has_listener() -> bool:
+    """房间里有没有**真人**在听。跟 `is_connected()` 是两件事。
+
+    `is_connected()` 只说明我们这条常驻音轨还连着，**跟房间里有没有人完全无关**
+    —— 看门狗会在空房被 SFU 关掉之后一直重连回来（见 `_run`）。所以拿它当
+    「有人听见了」用会出事：`/lkon` 一开，飞书那条 ogg 兜底就被永久静音了，
+    而用户多数时候根本没打开那个 app，于是语音回复凭空消失。
+
+    判据是**远端参与者里有没有非 agent 的**。房间里常驻的两位都是 agent：
+    我们自己（`<bot>-speaker`，token 里 `with_kind("agent")`）和那个语音助手
+    worker。真人从 iOS / 浏览器进来是 STANDARD，SIP 打进来是 SIP ——
+    所以这里排除 agent 而不是只认 STANDARD，免得以后多一种接入方式就漏判。
+
+    跨线程读 `remote_participants`：取一次快照、只读 kind。读到的是「刚才某一刻」
+    的房间，差一拍无所谓 —— 这个判断的后果只是多发或少发一条 ogg，
+    不值得为它跟事件循环做一次同步往返。
+    """
+    room = _room
+    if not _connected or room is None:
+        return False
+    try:
+        from livekit import rtc
+        agent = rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+        return any(p.kind != agent for p in list(room.remote_participants.values()))
+    except Exception:
+        log.debug("数房间里的人失败", exc_info=True)
+        return False
+
+
 # ── 配置 ──────────────────────────────────────────────────────────────
 
 def _load_config(bot_name: str, *, require_enabled: bool = True) -> dict | None:

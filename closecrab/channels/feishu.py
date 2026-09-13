@@ -104,6 +104,35 @@ _RE_VOICE_EMOTION_TAG = re.compile(r"\[[a-z][a-z _-]*\](?!\()")
 # 后缀由 gemini_live_bridge._ask_owner 写死（env BOT_NAME = f"{BOT_NAME}-voice"）。
 _VOICE_SENDER_SUFFIX = "-voice"
 
+
+def _heard_live(*, streaming: bool, zello_took: bool,
+                discord_connected: bool, livekit_listener: bool) -> bool:
+    """这条回复有没有**真人正在流式听**。决定要不要跳过飞书那条 ogg 兜底。
+
+    抽成纯函数是因为这个判断很容易写歪，而写歪的两种方式后果都不响：
+
+    - **拿「播放器收下了」当「有人听见了」。** `stream_speak_text` 的闸门
+      2026-09-14 放宽到也认 LiveKit 之后，`streaming` 会因为 `<bot>-speaker`
+      那条**常驻**音轨在线而恒为 True —— 那条轨不管房间里有没有人都连着（空房
+      被 SFU 关掉，看门狗还会连回来）。照它判，ogg 就被永久静音了，而用户多数
+      时候根本没开那个 app：回复凭空消失，日志里一切正常。
+    - **反过来，只看房间里有没有人。** 没跑 Discord sidecar 的 bot
+      （只挂飞书的那几个就是）`stream_speak_text` 在第一道门就返回 False，
+      一个字节都没进队列 —— 这时候房间里有人反而会把 ogg 也跳掉，两头都不出声。
+
+    所以是两级：先问**有没有人收下**（`streaming` / `zello_took`），
+    再问**收下的那头有没有人在听**。三个出口的「有人听」判据不一样：
+
+    - Discord / Zello —— 连着就算。人先在频道里，bot 才进去。
+    - LiveKit —— 必须真去数房间里有没有非 agent 的参与者（`has_listener()`）。
+
+    Zello 走的是 `_send_voice_summary` 里那条独立分支、不经统一播放器，
+    所以它自己认账，不看 `streaming`。
+    """
+    if zello_took:
+        return True
+    return bool(streaming and (discord_connected or livekit_listener))
+
 # Model 简写 map (chris 的约定: O/S/H + 版本数字)
 # 用于 /model 命令: `/model O46` 等价于 `/model claude-opus-4-6`
 # self-restart 冷却锁（秒）：boot 后这段时间内拒绝模型自重启，防无限循环。
@@ -4860,18 +4889,35 @@ class FeishuChannel(Channel):
         except Exception:
             pass
         # Discord 不在线但 Zello 在线 → 走 Zello 独立 TTS 路径 (传 fid 供重播)
+        zello_took = False
         if not streaming:
             try:
                 from ..voice.zello_voice_sidecar import is_connected as _zc, speak_text as _zs
                 if _zc():
                     _zs(text, fid=fid)
-                    streaming = True
+                    zello_took = True
                     log.info("Voice summary via Zello (Discord offline, fid=%s)", fid)
             except Exception:
                 pass
-        # Discord 真在推流 → 发暂停/继续/重播控制卡片。控制的是服务器侧给 Discord
-        # 推帧的代码 (vc.pause/resume/replay), 不是飞书客户端的播放器。
-        if streaming and fid not in self._voice_cards:
+
+        # 「播放器收下了」≠「有人听见了」—— 这两件事从这里开始分家，
+        # 判据抽在 `_heard_live()` 里，理由和反例都写在那个函数上。
+        discord_on = livekit_listener = False
+        if streaming:
+            try:
+                from ..voice.discord_voice_sidecar import is_voice_connected as _dvc
+                from ..voice import livekit_out as _lko
+                discord_on, livekit_listener = bool(_dvc()), bool(_lko.has_listener())
+            except Exception:
+                log.debug("判断语音听众失败，按没人听处理", exc_info=True)
+        heard_live = _heard_live(streaming=streaming, zello_took=zello_took,
+                                 discord_connected=discord_on,
+                                 livekit_listener=livekit_listener)
+
+        # 有人真在听 → 发暂停/继续/重播控制卡片。控制的是服务器侧那个统一播放器
+        # (pause/resume/replay), 不是飞书客户端的播放器 —— 所以 Discord 和
+        # LiveKit 的听众都归它管。
+        if heard_live and fid not in self._voice_cards:
             try:
                 card = self._build_voice_control_card(open_id, chat_id, fid=fid)
                 card_id = await self._async_send_card_with_id(chat_id, card)
@@ -4891,8 +4937,10 @@ class FeishuChannel(Channel):
             if open_id and self._voice_io.has_active_session(open_id):
                 await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
 
-        # ── 3. 飞书 ogg 兜底 (任何流式 channel 在线都跳过) ──
-        if not streaming:
+        # ── 3. 飞书 ogg 兜底 (**有人真在流式听**才跳过) ──
+        # 判据是 heard_live 不是 streaming：常驻的 LiveKit 音轨会让 streaming
+        # 恒为 True，照那个判就等于把飞书这条语音永久关掉了。
+        if not heard_live:
             if await self._tts_and_send_one(chat_id, text):
                 log.info(f"Voice summary ogg sent to {chat_id}")
         else:

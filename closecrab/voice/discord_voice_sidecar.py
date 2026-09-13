@@ -1978,19 +1978,40 @@ async def _enqueue_speak(text: str, fid: str = "", backend: str = ""):
 
 
 def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
-    """【飞书/LiveKit 线程调用】流式直生 TTS 推 Discord 常驻语音频道念。线程安全。
+    """【飞书/LiveKit 线程调用】流式直生 TTS 推给**所有在线出口**念。线程安全。
 
-    未连语音频道 / sidecar 未启动 → 静默返回 False (不主动建连, 不费劲)。
+    一个出口都不在线 / sidecar 未启动 → 静默返回 False (不主动建连, 不费劲)。
     fire-and-forget: 立即返回, 不阻塞调用方。
     backend: 指定 TTS 后端 (qwen3/gemini/cloud_tts)，空=用默认。
     fid 非空时把整段音频落盘到 _buf_path(fid), 供后续 replay_file(fid) 重播。
+
+    **闸门看的是三个出口的并集，不是 Discord 一家。** 2026-09-14 改 ——
+    这个函数的名字和所在文件都还带着 Discord，但底下早就换成 `playback`
+    那个统一播放器了（discord / zello / livekit 三个 sink）。闸门没跟着改，
+    于是「Discord 没连语音频道」会把 LiveKit 房间里的听众一起挡在外面：
+    iOS 那头用 `ask_<bot>` 派活出去，本体答完了一个字也传不回来。
+    **只放宽，不收紧**，而且只放 LiveKit 这一种进来 —— 不是直接改成
+    `playback.any_online()`。两个理由：
+
+    - `playback._discord_online()` 比 `is_voice_connected()` 多要求
+      `_persistent_source` 已经建好，而那是 `_do_speak` 进去之后才唤醒的。
+      光看 `any_online()` 反而会在「已连语音频道、source 还没建」那一瞬间
+      **比原来更严**，把本来念得出来的 reply 挡掉。
+    - Zello 现在有两条实现：统一播放器里的 sink，和 `_send_voice_summary`
+      里那条旧的独立路径 —— 后者正是靠这个函数返回 False 来触发的。
+      顺手把 Zello 也放进来，等于悄悄把它切到另一条没测过的实现上。
+      那是另一件事，不在这次改动里。
+
+    真正的权威判断在 `_do_speak` 开头（唤醒 source 之后才数出口），
+    这里放宽了也不会凭空多播 —— 那边一个出口都没有仍然会提前返回。
     """
     if not text or not text.strip():
         return False
     loop = _sidecar_loop
     if loop is None or _sidecar_bot is None:
         return False
-    if not is_voice_connected():
+    from . import livekit_out
+    if not (is_voice_connected() or livekit_out.is_connected()):
         return False
     if _speak_queue is None:
         return False
