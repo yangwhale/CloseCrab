@@ -18,14 +18,14 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 Group=__USER__
-WorkingDirectory=__HOME__/lk-gemini-agent
+WorkingDirectory=__AGENT_DIR__
 Environment=HOME=__HOME__
 # 必须钉死 TMPDIR。livekit-agents 用 multiprocessing forkserver，它的 AF_UNIX
 # socket 建在 TMPDIR 下，而 AF_UNIX 路径上限 108 字节 —— TMPDIR 一长，worker
 # 注册成功但每个 job 进程都起不来，报 "AF_UNIX path too long"。
 # 症状具有迷惑性：日志里 "registered worker" 是绿的，坏的是下一层。
 Environment=TMPDIR=/tmp
-ExecStart=__HOME__/lk-gemini-agent/.venv/bin/python __HOME__/lk-gemini-agent/agent.py start
+ExecStart=__AGENT_DIR__/.venv/bin/python __AGENT_DIR__/agent.py start
 Restart=on-failure
 RestartSec=5
 

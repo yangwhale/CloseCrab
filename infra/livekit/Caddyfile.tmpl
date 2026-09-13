@@ -1,18 +1,32 @@
-# Caddyfile — CloseCrab voice IO 反代
-# 由 scripts/install-livekit.sh 渲染并 install 到 /etc/caddy/Caddyfile.
-# __FRONTEND_DOMAIN__ : 前端域名 (浏览器访问的 voice UI)
-# __SIGNALING_DOMAIN__: livekit-server signaling 域名 (浏览器 wss 走这个)
-# __ADMIN_EMAIL__     : Let's Encrypt 注册邮箱
-
-{
-    email __ADMIN_EMAIL__
-}
+# Caddy 站点片段 —— 双域名直连形态（setup A，旧形态）
+#
+# 由 scripts/install-livekit.sh --caddy-mode direct 渲染，落到
+# /etc/caddy/sites/closecrab-livekit.caddy。**不是** /etc/caddy/Caddyfile ——
+# 那份是共用的，同一台机器上通常还挂着别的站点，整份覆盖会把它们全删掉。
+#
+# 占位符：
+#   __FRONTEND_DOMAIN__   前端域名（浏览器访问的 voice UI）
+#   __SIGNALING_DOMAIN__  livekit-server signaling 域名（浏览器 wss 走这个）
+#   __ADMIN_EMAIL__       Let's Encrypt 注册邮箱
+#   __FRONTEND_UPSTREAM__ 前端回源地址，同机是 127.0.0.1:3000
+#   __SFU_UPSTREAM__      SFU 回源地址，同机是 127.0.0.1:7880
+#
+# ── 为什么邮箱写成站点内的 `tls`，不写全局 `{ email }` ────────────────
+# 全局选项块必须是**主 Caddyfile 的第一个块**，出现在 import 进来的片段里
+# 会直接报错。站点级 `tls <email>` 是等价写法（同样是注册 ACME 账号用的），
+# 而且能让这份片段成为真正自包含的 drop-in。
+#
+# ⚠️ 这个形态把 signaling 和 token 端点**裸露在公网**。现行生产用的是
+#    Caddyfile-gclb-iap.tmpl（单域名 + IAP 鉴权），新装一律用那个。
+#    这份留着是因为没有 GCLB 的环境（自己的小机器、本地实验）还用得上。
 
 __FRONTEND_DOMAIN__ {
-    encode gzip
-    reverse_proxy localhost:3000
+	tls __ADMIN_EMAIL__
+	encode gzip
+	reverse_proxy __FRONTEND_UPSTREAM__
 }
 
 __SIGNALING_DOMAIN__ {
-    reverse_proxy localhost:7880
+	tls __ADMIN_EMAIL__
+	reverse_proxy __SFU_UPSTREAM__
 }

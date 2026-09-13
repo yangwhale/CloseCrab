@@ -6,16 +6,22 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=__USER__
-Group=__USER__
-WorkingDirectory=__HOME__/livekit-server
-ExecStart=/usr/local/bin/livekit-server --config __HOME__/livekit-server/config.yaml
+# ── 为什么不写 User= ────────────────────────────────────────────────
+# config.yaml 里有明文 API secret，所以它是 root:root 0600 放在 /etc/livekit/。
+# 降权到普通用户就得把 secret 改成那个用户可读 —— 在一台还跑着别的服务的
+# 共用机器上，那是放宽而不是收紧。SFU 本身不需要特权（7880/7881 和
+# 50000-60000 都在 1024 以上），跑 root 纯粹是为了让配置留在 /etc 下。
+# 要降权的话两件事一起做：改 config 的属主，并把下面 ReadWritePaths 补上。
+ExecStart=/usr/local/bin/livekit-server --config __CONFIG_PATH__
 Restart=on-failure
 RestartSec=5
 
-# Hardening (LiveKit needs UDP binding so we can't lock down too tight)
+# 能收的都收了。ProtectSystem=full 之外不能再紧 —— LiveKit 要绑一万个
+# UDP 端口并读本机网卡地址（use_external_ip），网络类的限制一加就起不来。
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 [Unit]
-Description=LiveKit Frontend (agent-starter-react, CloseCrab fork)
-Documentation=https://github.com/yangwhale/agent-starter-react
+Description=LiveKit Frontend (agent-starter-react + CloseCrab overlay)
+Documentation=https://github.com/livekit-examples/agent-starter-react
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 Group=__USER__
-WorkingDirectory=__HOME__/livekit-frontend
+WorkingDirectory=__FRONTEND_DIR__
 Environment=NODE_ENV=production
 Environment=PORT=3000
 # PATH 必须包含 node 和 pnpm 所在目录. nvm 安装的 node 不在系统 PATH 里,

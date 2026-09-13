@@ -1,13 +1,21 @@
-# Caddyfile 片段 —— 单域名 + GCLB/IAP 拓扑（2026-09-12 起的现行形态）
+# Caddy 站点片段 —— 单域名 + GCLB/IAP 拓扑（2026-09-12 起的现行形态，默认用这份）
 #
-# ⚠️ 这份**不由 install-livekit.sh 渲染**，是手工维护的参考实现。
-#    install-livekit.sh 渲染的是同目录下的 `Caddyfile.tmpl`，那份对应的是
-#    「双域名 + Caddy 自己签证书 + 443 直接对公网」的旧形态，两者不兼容：
-#    前者是让 IAP 挡在前面，后者是绕过 IAP。别把两份混着用。
+# 由 scripts/install-livekit.sh --caddy-mode gclb-iap 渲染，落到
+# /etc/caddy/sites/closecrab-livekit.caddy。**不是** /etc/caddy/Caddyfile ——
+# 那份是共用的，同一台机器上通常还挂着别的站点，整份覆盖会把它们全删掉。
+#
+# 同目录下的 `Caddyfile.tmpl` 是「双域名 + Caddy 自己签证书 + 443 直接对公网」
+# 的旧形态（--caddy-mode direct），两者不兼容：这份让 IAP 挡在前面，那份绕过
+# IAP。别把两份混着用，脚本也只会装其中一份。
+#
+# 占位符：
+#   __FRONTEND_DOMAIN__   对外域名（页面和信令共用，见下）
+#   __FRONTEND_UPSTREAM__ 前端回源地址，前端不在本机时写它的内网 IP:3000
+#   __SFU_UPSTREAM__      SFU 回源地址，SFU 在本机就是 127.0.0.1:7880
 #
 # 拓扑：
-#   浏览器 ──HTTPS──► GCLB + IAP ──HTTP:80──► 本机 Caddy ──┬─► 127.0.0.1:7880  (SFU 信令)
-#                                                          └─► __FRONTEND_IP__:3000 (Next.js)
+#   浏览器 ──HTTPS──► GCLB + IAP ──HTTP:80──► 本机 Caddy ──┬─► __SFU_UPSTREAM__      (SFU 信令)
+#                                                          └─► __FRONTEND_UPSTREAM__ (Next.js)
 #   媒体  ──UDP 50000-60000──────────────────────────────► 本机外网 IP（**不过 LB**）
 #
 # 为什么媒体不能也走 LB：ICE candidate 里带的是裸 IP:port，浏览器直接往那个
@@ -35,12 +43,12 @@ http://__FRONTEND_DOMAIN__ {
 	#   JS   livekit-client createV0RtcUrl → appendUrlPath(urlObj,'rtc')
 	#   Py   agents/worker.py:1102 base = scheme://netloc+path，再 urljoin 'agent'）
 	handle_path /lk/* {
-		reverse_proxy 127.0.0.1:7880
+		reverse_proxy __SFU_UPSTREAM__
 	}
 
 	# 其余全给前端
 	handle {
-		reverse_proxy __FRONTEND_IP__:3000
+		reverse_proxy __FRONTEND_UPSTREAM__
 	}
 }
 

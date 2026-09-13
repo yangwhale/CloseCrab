@@ -6,7 +6,7 @@
 # NEXT_PUBLIC_LIVEKIT_URL 是浏览器侧 wss URL.
 # SFU 跟前端不同机时, LIVEKIT_URL 要写 SFU 的**内网**地址, 不是 127.0.0.1.
 
-LIVEKIT_URL=ws://127.0.0.1:7880
+LIVEKIT_URL=__SFU_URL__
 LIVEKIT_API_KEY=__API_KEY__
 LIVEKIT_API_SECRET=__API_SECRET__
 NEXT_PUBLIC_LIVEKIT_URL=__PUBLIC_WSS_URL__
@@ -23,19 +23,24 @@ NEXT_PUBLIC_LIVEKIT_URL=__PUBLIC_WSS_URL__
 # 只是谁也没等到谁。2026-09-12 踩到，查了很久因为日志全是绿的。
 AGENT_NAME=__DEFAULT_AGENT_NAME__
 
-# ── 下面两条只有用 infra/livekit/frontend/ 那套补丁时才需要 ──────────
+# ── 下面三条只有用 infra/livekit/frontend/ 那套补丁时才需要 ──────────
+# 三个都由脚本渲染成**具体值**，不是注释示例。空值等同没设（Node 里空串是
+# falsy，三处消费方都按「没配」处理），所以留空是安全的默认。
+#
 # token 端点：上游那条路由在 NODE_ENV=production 下会直接 throw
 # （见 frontend/app/api/token/route.ts 的注释），而 systemd 起的是
-# `pnpm start`，必然命中。这个开关**必须显式打开**，默认仍然拒绝 ——
-# 谁开的、在哪开的都留痕。
+# `pnpm start`，必然命中。这个开关**必须显式打开**（--allow-insecure-token），
+# 默认仍然拒绝 —— 谁开的、在哪开的都留痕。
 # ⚠️ 打开后该端点无鉴权，谁调谁就能拿房间 token。
 #    前面必须有一层（IAP / Caddy basicauth / 自己的登录态）才能这么用。
-#ALLOW_INSECURE_TOKEN=true
-#
+ALLOW_INSECURE_TOKEN=__ALLOW_INSECURE_TOKEN__
+
 # 管理台 /admin 调 RoomService RPC 的地址。必须是**内网** http ——
 # 服务端到服务端没有浏览器 cookie，走公网域名会被 IAP 挡住。
-#LIVEKIT_ADMIN_URL=http://__SFU_PRIVATE_IP__:7880
-#
+# 不给 --admin-url 时，脚本把 LIVEKIT_URL 的 ws:// 换成 http:// 填进来
+# （同一个地址的两种 scheme，不是另找了一个来源）。
+LIVEKIT_ADMIN_URL=__LIVEKIT_ADMIN_URL__
+
 # ── 允许用 ?room= 进的房间白名单 ────────────────────────────────────
 # 一个 bot 一个房间，房间名 == bot 名 == agent 那边的人格文件名
 # （`agent/personas/<房间名>.md`）。手机和笔记本带同一个 ?room= 就进同一个
@@ -46,6 +51,6 @@ AGENT_NAME=__DEFAULT_AGENT_NAME__
 # 这个变量**没设**而请求又带了 ?room= 则 500 —— 故意不兜底成随机房间，
 # 否则「白名单忘了配」会伪装成「功能正常但每次都是新房间」，最难查的那种。
 #
-# ⚠️ 加一个新房间要动**两处**：这里，和 agent 那边的 personas/ 目录。
-#    两个进程各自校验一遍是故意的 —— 它们可以不在同一台机器上。
-#ALLOWED_ROOMS=bot1,bot2,bot3
+# ⚠️ 加一个新房间要动**两处**：这里（--allowed-rooms），和 agent 那边的
+#    personas/ 目录。两个进程各自校验一遍是故意的 —— 它们可以不在同一台机器上。
+ALLOWED_ROOMS=__ALLOWED_ROOMS__
