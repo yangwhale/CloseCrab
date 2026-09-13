@@ -48,7 +48,7 @@
 | `agent/env.tmpl` | `~/lk-gemini-agent/.env`（0600） | **含 secret，不进 git** |
 | `agent/ensure_rooms.py` | `~/lk-gemini-agent/ensure_rooms.py` | 建常驻房间 + 显式派 agent。**用系统 python3 跑**（要 `google.cloud.firestore`，agent 的 venv 里没有） |
 | `agent/speak_into_room.py` | `~/lk-gemini-agent/speak_into_room.py` | 往房间里推一段现成音频（bot 主动说话那条路） |
-| `agent/tee.py` | `~/lk-gemini-agent/tee.py` | 把喂给 Gemini 的音频就地劈一路，按句推飞书，见下面「旁听」 |
+| `agent/tee.py` | `~/lk-gemini-agent/tee.py` | 把你说的话在交给 Gemini 那一帧劈一路出来，按句推飞书，见下面「旁听」 |
 | `agent/tests/two_devices_test.py` | — | 端到端回归：两台「设备」进同一个房间，一台先走 |
 | `agent/tests/lk_probe.py` | — | 真 chromium 驱动生产前端，验 20 秒握手死线不误杀 |
 | `agent/tests/lk_probe2.py` | — | 同上，多一层 `setTimeout` 钩子，抓定时器上弦点 |
@@ -341,8 +341,11 @@ LK_URL=ws://<SFU 内网 IP>:7880 python3 agent/tests/two_devices_test.py
 
 ## 旁听（`agent/tee.py`，2026-09-13）
 
-想听听通话里到底说了什么、agent 的声音什么效果时用。做法是**在 agent 进程内
-把音频劈一路出来**，按句切开、存盘、再作为飞书语音消息推过去。
+要 debug 的是**上行**：手机说话经常咯楞咯楞的。所以只录你说的那一路 ——
+模型吐出来的语音质量一直很稳，不录。
+
+做法是在 agent 进程内、音频交给 Gemini 的**那一帧**就地劈一路出来，按句切开、
+存盘、再作为飞书语音消息推过去。
 
 ```bash
 # systemd drop-in：/etc/systemd/system/lk-gemini-agent.service.d/tee.conf
@@ -350,7 +353,7 @@ Environment=LK_TEE=1
 ```
 
 改完 `systemctl daemon-reload && systemctl restart lk-gemini-agent`。落盘在
-`~/lk-tee/<房间>/<时间戳>/`，`in-NNN.wav` 是人说的、`out-NNN.wav` 是 agent 答的。
+`~/lk-tee/<房间>/<时间戳>/`，一句一个 `NNN.wav` 加一个同名 `.json`。
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
@@ -358,9 +361,9 @@ Environment=LK_TEE=1
 | `LK_TEE_PUSH` | `1` | 关掉就只存盘不推飞书（调门限时用） |
 | `LK_TEE_DIR` | `~/lk-tee` | 落盘目录 |
 | `LK_TEE_THRESH` | `180` | int16 平均绝对值，超过算在说话 |
-| `LK_TEE_HANG` | `0.9` | 静这么久算一句说完（只对进声那一路有意义，见下） |
+| `LK_TEE_HANG` | `1.0` | 静这么久算一句说完（对齐 Discord 的 `_UTT_GAP`） |
 | `LK_TEE_PRE` | `0.35` | 前摇，不留会每句缺字头 |
-| `LK_TEE_MIN` | `0.7` | **有声部分**短于这个就当噪声扔掉 |
+| `LK_TEE_MIN` | `0.4` | **有声部分**短于这个就当噪声扔掉 |
 | `LK_TEE_MAX` | `60` | 一句最长切到这 |
 
 ### 为什么不再派一个参与者进房间录
@@ -368,42 +371,54 @@ Environment=LK_TEE=1
 第一版（`record_room.py`，已从本仓库移除，git 历史里还有）是拿 AGENT kind 的
 身份进房、订阅所有人的音轨、自己混一遍。能跑，但它是**另一条链路** ——
 混出来的东西只是「跟 Gemini 听到的很像」，不是同一份。麦克风换了、某条轨订阅
-晚了、混音参数差一点，你听到的就不是模型听到的，而这种偏差恰恰在你想排查
-「它为什么没听懂」的时候最要命。而且它还得自己处理 AGENT kind、自带死期、
-混音对齐这一堆只为「进得去房间」而存在的复杂度。
+晚了、混音参数差一点，你听到的就不是模型听到的，而这种偏差恰恰落在你最想看清楚
+的地方。它还得自己处理 AGENT kind、自带死期、混音对齐这一堆只为「进得去房间」
+而存在的复杂度。
 
-现在劈在两个隘口上，都是**进程内**、不增加参与者：
+现在劈在 `MixedRoomAudioInput.__anext__`：所有人混完、重采样完，逐帧交给
+Gemini websocket 的**那一帧**。这是唯一的隘口，拿到的字节跟模型吃进去的
+一个 bit 都不差。
 
-| 路 | 挂在哪 | 拿到的是 |
-|---|---|---|
-| `in` | `MixedRoomAudioInput.__anext__` | 所有人混完、重采样完，逐帧交给 Gemini websocket 的**那一帧** |
-| `out` | `AudioOutput` 链（`session.output.audio`） | 模型吐出来、即将发布到房间的那一帧 |
+### 句子边界：抄 Discord 那套，但判据必须换
 
-出声那侧挂完链要能退 —— `attach_output()` 整个包在 try 里，挂不上就原样放着。
-**宁可听不到回放，不能放不出声。**
+`closecrab/voice/discord_voice_sidecar.py` 的 `_utterance_feed` /
+`_utterance_flush_loop` / `_utterance_write` 早就在做这件事，做得很好。这边照搬
+了它的形状：一句一个 wav、旁边配一个同名 json 记时间戳、太短的判杂音扔掉、
+重活甩到后台不挡收音。那份代码在 bot 进程、用的是另一个 venv，**import 不到**，
+所以是抄不是复用。
 
-### 两路的「句号」不是同一个东西 —— 这里栽过一次
+**唯一必须换掉的是判据。** Discord 侧数的是「多久没来数据」：
 
-进声是实时流：没人说话时照样每 50 毫秒来一帧静音，所以「静了 0.9 秒」是个
-能观察到的事件，拿它当句号成立。
+```python
+idle = _t.monotonic() - _utt_last_ts
+if idle >= _UTT_GAP:  # 1.0 秒 —— 这句说完了
+```
 
-出声不是。模型**成段吐**，而且可以比实时快（框架原话 "frames can be pushed
-faster than real-time"），两段之间它根本不发帧、不是发静音帧。第一版两路共用
-能量门限，结果是 out 路帧收到了、**一句都切不出来**，日志里只有沉默。框架给
-的句号是 `flush()` —— 一次 flush 就是它说完一轮。
+它成立是因为 Opus DTX：没人说话就真的不发包。LiveKit 这边不成立 ——
+`_paced()` 在真帧没按时到的时候会**补一帧静音**塞进混音池（不补的话 mixer
+每秒刷十条 warning）。帧永远不断，idle 永远攒不起来。所以这边只能看能量。
 
-被打断时框架调 `clear_buffer()`，那半句直接扔掉（`drop()`）：存了你回放会听到
-一句实际上**没被播出去**的话，比没有更误导。
+从它那儿直接拿过来的另外两条经验：要留前摇（门限触发时字头已经过去了），
+以及太短的不要（咳嗽、键盘、桌子磕一下都能顶过门限）。门限判的是**有声部分**
+有多长不是整段多长 —— 整段带着前摇和尾巴，0.2 秒的一声脆响也能凑够 `MIN_SEC`。
+离线测试里这条是被反例逼出来的。
 
-### 句子边界照搬 Discord 那套
+### `filled_ms` 就是咯楞的直接读数
 
-`closecrab/voice/discord_voice_sidecar.py` 里 `_utt_dir` 那段早就在做这件事。
-那份代码在 bot 进程、用的是另一个 venv，**这边 import 不到**，所以是照搬做法
-不是复用函数。两个细节来自它的经验：要留前摇（门限触发时字头已经过去了），
-以及太短的不要（咳嗽、键盘、桌子磕一下都能顶过门限）。
+上一节那个「补一帧静音」的行为，反过来正好是想要的度量：`_paced()` 补的帧是
+**字面的全零**，而真麦克风有底噪、不可能给出精确的零。所以一句话里出现多少个
+整块全零，就是真帧迟到了多少 —— 不用另外埋点。
 
-门限判的是**有声部分**有多长，不是整段多长 —— 整段带着前摇和尾巴，0.2 秒的
-一声脆响也能凑够 `MIN_SEC`。离线测试里这条是被反例逼出来的。
+每句的 json 和飞书 caption 里都带着它：
+
+```json
+{"seq": 2, "dur_sec": 2.95, "sample_rate": 24000, "filled_ms": 300,
+ "wall": "2026-09-13 16:20:33", "epoch": 1789316433.97}
+```
+
+只数**第一个和最后一个有声块之间**的。前摇和尾巴本来就是静音，算进去的话每句
+都虚报半秒多，一个永远不为零的指标没人会看。`wall` / `epoch` 是为了跟 agent
+日志按时间对齐（也是 Discord 那边的做法）。
 
 ### 推送
 

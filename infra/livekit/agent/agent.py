@@ -506,7 +506,7 @@ class MixedRoomAudioInput(AudioInput):
         self._room = room
         # 旁听（默认关，LK_TEE=1 打开）。挂在这里而不是另派一个参与者进房间，
         # 是因为下面 __anext__ 那一帧就是 Gemini 真正吃进去的那一帧。
-        self._tee = _tee.make(room.name, "in")
+        self._tee = _tee.make(room.name)
         self._chunk = int(_MIX_SAMPLE_RATE * _MIX_FRAME_MS / 1000)
         self._mixer = rtc.AudioMixer(
             sample_rate=_MIX_SAMPLE_RATE,
@@ -913,9 +913,6 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
         await session.start(agent=_build_agent(persona), room=ctx.room, room_options=_ROOM_OPTIONS)
-        # 出声那一路只能在 start 之后挂 —— RoomIO 是 start 里建的，
-        # 在那之前 session.output.audio 还是 None。
-        _tee.attach_output(session, ctx.room.name)
         # 握手成不成，看的是**这一行里有没有 lk.agent.state**，以及房间里有没有
         # 别的 kind=AGENT 参与者在它前面挡着（那个会被前端误认成助手本人）。
         logger.info("会话已起：我=%s ‖ 同房=%s", _who(ctx.room.local_participant), _roster(ctx.room))
