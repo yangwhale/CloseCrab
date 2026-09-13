@@ -233,8 +233,13 @@ async def _jina(url: str, *, params: dict | None = None) -> dict | str:
     key_file = pathlib.Path.home() / ".closecrab-jina-auth"
     if not key_file.exists():
         return "不可用：本机没有配 Jina key。"
+    # 那个文件里存的是**整个 header 值**，已经带着 "Bearer " —— dsh 的 profile 和
+    # ~/.claude.json 的 MCP 都是直接原样当 Authorization 用的。这里再拼一次前缀
+    # 就成了 "Bearer Bearer jina_..."，服务端回 401 "Invalid API key"，
+    # 看着跟 key 过期一模一样。两种写法都收，别再让下一个人查一遍。
+    key = key_file.read_text().strip()
     headers = {
-        "Authorization": f"Bearer {key_file.read_text().strip()}",
+        "Authorization": key if key.lower().startswith("bearer ") else f"Bearer {key}",
         "Accept": "application/json",
     }
     try:
