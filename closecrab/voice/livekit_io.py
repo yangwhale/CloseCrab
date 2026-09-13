@@ -113,7 +113,13 @@ def hmac_key_path_for_bot(bot_name: str) -> Path:
 def make_voice_sig(secret: str, open_id: str) -> str:
     """对 open_id 用 HMAC-SHA256 签名,十六进制返回。
 
-    next.js token endpoint 用同样算法验签,通过才肯签 feishu:{open_id} identity。
+    ⚠️ **现役前端不验这个签名了**，`make_join_url` 也不再带它。留着是因为:
+    secret 还在 Firestore `bots/{name}.livekit.hmac_secret` 和本机 key 文件里
+    （`config-manage.py set-livekit` 专门写了防呆不让它被覆盖），删函数等于
+    让那份配置变成谁也解释不了的孤儿。真要清，三处一起清。
+
+    老契约: next.js token endpoint 用同样算法验签, 通过才肯签
+    feishu:{open_id} identity。
     """
     return hmac.new(
         secret.encode("utf-8"), open_id.encode("utf-8"), hashlib.sha256
@@ -1363,24 +1369,30 @@ class LiveKitVoiceIO:
             log.warning(f"broadcast: say_to_user open_id={open_id[:8]} failed: {e}")
             return False
 
-    def make_join_url(self, open_id: str) -> str:
-        """为指定 open_id 生成浏览器加入链接。
+    def make_join_url(self) -> str:
+        """生成浏览器加入链接。
 
-        URL: {frontend_url}/?bot={bot_name}&openId={open_id}&sig={sig}
-          - bot:    bot_name (next.js 按它读对应 HMAC secret 文件 + dispatch
-                    对应 agent_name)。一台机器多 bot 时是路由的关键。
-          - openId: 飞书用户 open_id
-          - sig:    HMAC-SHA256(hmac_secret, open_id), next.js 验签后才肯签
-                    feishu:{open_id} identity 的 token。
+        URL: {frontend_url}/?room={bot_name}
 
-        前端落地后, starter-react 会 fetch /api/token (POST), 把 bot/openId/sig
-        放进 body, route handler 验签后签 token + dispatch
-        closecrab-voice-{bot} agent。
+        **房间名就是 bot 名**，这一条贯穿三个进程：前端按它查
+        `ALLOWED_ROOMS` 白名单并签 token，agent 按它读
+        `infra/livekit/agent/personas/<房间名>.md` 决定人格和音色。
+
+        ── 为什么不再带 openId / sig ──────────────────────────────────
+        老版本发的是 `?bot=X&openId=Y&sig=HMAC(...)`，配的是另一套前端：
+        它按 bot 名读 HMAC secret 验签，再显式派发 `closecrab-voice-{bot}`。
+        **现在部署的前端（infra/livekit/frontend/）根本不读这三个参数** ——
+        它只认 `?room=`，agent 那边也改成匿名注册走自动派发了。
+
+        带着老参数发出去不会报错，这正是它难查的地方：`room` 缺省 →
+        token route 退回随机房间 `voice_assistant_room_1234` → agent 那边
+        `_SAFE_ROOM` 不匹配 → **落到默认人格**。于是不管从哪个 bot 点进去，
+        接电话的都是同一个默认助手，而三个进程的日志全是绿的。
+
+        鉴权现在由白名单 + 前面那层（IAP / Caddy）负责，不再靠 sig。
+        `hmac_secret` 仍然留在 Firestore 里没删 —— 见 `make_voice_sig`。
         """
-        sig = make_voice_sig(self._hmac_secret, open_id)
-        params = urllib.parse.urlencode(
-            {"bot": self._bot_name, "openId": open_id, "sig": sig}
-        )
+        params = urllib.parse.urlencode({"room": self._bot_name})
         # rstrip 防 Firestore 里手贱填了尾斜杠
         base = self._frontend_url.rstrip("/")
         return f"{base}/?{params}"

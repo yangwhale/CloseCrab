@@ -20,11 +20,10 @@
 #   ./deploy.sh --cc-only    # 只装 Claude Code 环境 + Skills
 #   ./deploy.sh --bot        # 补装 Bot（已有 CC 环境后追加）
 #   ./deploy.sh --voice      # 安装 / 升级 Voice IO 依赖 (Python 包 + LiveKit infra)
-#                            # 需配合 --voice-frontend-domain / --voice-signaling-domain / --voice-email
+#                            # 需配合 --voice-component (装哪几个组件)
 #
 # 组合示例:
-#   ./deploy.sh --bot --voice --voice-frontend-domain live.example.com \
-#               --voice-signaling-domain livekit.example.com --voice-email admin@example.com
+#   ./deploy.sh --bot --voice --voice-component frontend,agent
 #
 # 前提: Claude Code CLI 已安装 (curl -fsSL https://claude.ai/install.sh | bash)
 
@@ -62,9 +61,23 @@ skill_allowed() {
 MODE="full"
 USE_NPM=false
 INSTALL_VOICE=false
+# 这些只做转发, **不在这里校验**。哪个组件需要哪个参数, 由
+# scripts/install-livekit.sh 一家说了算 —— 两边各写一份判断, 迟早漂移成
+# 「deploy.sh 说缺参数, 直接跑安装脚本却好好的」。
+VOICE_COMPONENT=""
+VOICE_CADDY_MODE=""
 VOICE_FRONTEND_DOMAIN=""
 VOICE_SIGNALING_DOMAIN=""
 VOICE_ADMIN_EMAIL=""
+VOICE_PUBLIC_WSS_URL=""
+VOICE_ALLOWED_ROOMS=""
+VOICE_FRONTEND_UPSTREAM=""
+VOICE_SFU_URL=""
+# 上面那几个是常用的, 给个好记的名字。**但不要把安装脚本的旗标在这里逐条抄一遍**
+# —— 它每长一个新开关, 这里就得跟着改一次, 漏一次就变成「那个参数 deploy.sh
+# 传不了」。剩下的一律走这个逃生口, 原样透传:
+#   --voice-arg --sfu-upstream --voice-arg 10.0.0.1:7880 --voice-arg --allow-insecure-token
+VOICE_EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,9 +86,16 @@ while [[ $# -gt 0 ]]; do
         --npm)     USE_NPM=true; shift ;;
         --voice)   INSTALL_VOICE=true; shift ;;
         --nvidia-skills) NVIDIA_SKILLS=1; shift ;;
+        --voice-component)        VOICE_COMPONENT="$2"; shift 2 ;;
+        --voice-caddy-mode)       VOICE_CADDY_MODE="$2"; shift 2 ;;
         --voice-frontend-domain)  VOICE_FRONTEND_DOMAIN="$2"; shift 2 ;;
         --voice-signaling-domain) VOICE_SIGNALING_DOMAIN="$2"; shift 2 ;;
         --voice-email)            VOICE_ADMIN_EMAIL="$2"; shift 2 ;;
+        --voice-public-wss-url)   VOICE_PUBLIC_WSS_URL="$2"; shift 2 ;;
+        --voice-allowed-rooms)    VOICE_ALLOWED_ROOMS="$2"; shift 2 ;;
+        --voice-frontend-upstream) VOICE_FRONTEND_UPSTREAM="$2"; shift 2 ;;
+        --voice-sfu-url)          VOICE_SFU_URL="$2"; shift 2 ;;
+        --voice-arg)              VOICE_EXTRA_ARGS+=("$2"); shift 2 ;;
         --help|-h)
             cat <<'HELP'
 用法: ./deploy.sh [--cc-only | --bot] [--npm] [--voice ...]
@@ -87,21 +107,41 @@ while [[ $# -gt 0 ]]; do
 
 Voice IO (LiveKit) 选项 (任何 mode 都可叠加):
   --voice                          启用 voice 安装 (Python 依赖 + LiveKit infra)
-  --voice-frontend-domain DOMAIN   前端域名 (如 live.example.com)
-  --voice-signaling-domain DOMAIN  Signaling 域名 (如 livekit.example.com)
-  --voice-email EMAIL              Let's Encrypt 邮箱
+  --voice-component LIST           **必填**。装哪几个组件, 逗号分隔:
+                                     sfu       livekit-server (SFU 那台)
+                                     frontend  Next.js 网页入口
+                                     agent     Gemini Live agent
+                                     caddy     反代站点片段
+                                   这几样通常**不在同一台机器上**, 所以没有默认值 ——
+                                   猜一个默认等于在别人的机器上装别人的东西。
+  --voice-caddy-mode MODE          gclb-iap (默认, 现行生产) | direct
+  --voice-frontend-domain DOMAIN   对外域名 (装 caddy 时要)
+  --voice-signaling-domain DOMAIN  独立 signaling 域名 (只有 direct 模式要)
+  --voice-email EMAIL              Let's Encrypt 邮箱 (只有 direct 模式要)
+  --voice-public-wss-url URL       浏览器侧 signaling URL (gclb-iap 下是 wss://<域名>/lk)
+  --voice-allowed-rooms LIST       网页入口的房间白名单 (== bot 名)
+  --voice-frontend-upstream H:P    Caddy 回源前端的地址。**跨机时必须给** ——
+                                   反代跟前端常常不在一台机器上
+  --voice-sfu-url ws://H:P         frontend/agent 连 SFU 的内网地址
+                                   (不给就用 Firestore config/livekit.url)
 
-示例 (新机器从零部署带 voice 的 bot):
-  ./deploy.sh --voice \
-      --voice-frontend-domain live.example.com \
-      --voice-signaling-domain livekit.example.com \
-      --voice-email admin@example.com
+  --voice-arg TOKEN                原样透传给 install-livekit.sh 的逃生口, 可重复。
+                                   上面没列出的开关都走这里, 带值的写两次:
+                                     --voice-arg --sfu-upstream --voice-arg 10.0.0.1:7880
+                                     --voice-arg --allow-insecure-token
 
-示例 (已有 bot 增量加 voice):
-  ./deploy.sh --voice \
+  完整旗标见 scripts/install-livekit.sh --help。上面只是常用的几个 ——
+  **参数齐不齐由那个脚本判断**, deploy.sh 不重复一遍。
+
+示例 (bot 机器: 网页入口 + Gemini Live agent):
+  ./deploy.sh --voice --voice-component frontend,agent \
+      --voice-public-wss-url wss://live.example.com/lk \
+      --voice-allowed-rooms  bunny,jarvis
+
+示例 (SFU 机器: 服务端 + 反代片段):
+  ./deploy.sh --voice --voice-component sfu,caddy \
       --voice-frontend-domain live.example.com \
-      --voice-signaling-domain livekit.example.com \
-      --voice-email admin@example.com
+      --voice-frontend-upstream 10.0.0.5:3000
 HELP
             exit 0
             ;;
@@ -1338,18 +1378,47 @@ install_bot() {
     local BASE_LOCK="$SCRIPT_DIR/requirements/base.lock"
     local VOICE_LOCK="$SCRIPT_DIR/requirements/voice.lock"
 
+    # 装之前先数一遍包数。**空 lockfile 不是「没有依赖」，是 lockfile 坏了** ——
+    # `pip install -r <空文件>` 退 0，于是「什么都没装」会伪装成「装完了」。
+    # 2026-09-10 到 09-13，requirements/voice.lock 就是空的（只有 header），
+    # 三个月里每次 `deploy.sh --voice` 都报「Voice 依赖安装完成 (pinned)」，
+    # 实际一个包没装。生成侧已经在 scripts/lock-deps.sh 堵了，这里是消费侧 ——
+    # 老 checkout / 半路 git pull 一样能拿到空 lock，所以两边都要判。
+    #
+    # ⚠️ 数法不能写成 `$(grep -c ... || echo 0)`。零匹配时 grep **既打印 0 又退 1**,
+    #    那个 `|| echo 0` 于是再补一个 0, 结果是字符串 "0\n0" ——
+    #    `[[ "$n" -eq 0 ]]` 直接报 syntax error。改成赋值失败才兜底。
+    lock_pkg_count() {
+        local n
+        n=$(grep -cE '^[a-zA-Z0-9]' "$1" 2>/dev/null) || n=0
+        echo "${n:-0}"
+    }
+
     if [[ -f "$BASE_LOCK" ]]; then
-        echo "  使用 lockfile: requirements/base.lock"
+        local base_count
+        base_count=$(lock_pkg_count "$BASE_LOCK")
+        if [[ "$base_count" -eq 0 ]]; then
+            echo "  ERROR: requirements/base.lock 是空的（0 个包）。"
+            echo "         这不是「没有依赖」，是 lockfile 坏了 —— 照装会静默"
+            echo "         装出一个缺依赖的 bot。先跑 scripts/lock-deps.sh 重新生成。"
+            exit 1
+        fi
+        echo "  使用 lockfile: requirements/base.lock (${base_count} 个 pinned 包)"
         if $PIP install --break-system-packages -q -r "$BASE_LOCK" 2>&1 | tail -3; then
-            local base_count
-            base_count=$(grep -cE '^[a-zA-Z0-9]' "$BASE_LOCK" || echo 0)
             echo "  Base 依赖安装完成 (${base_count} 个 pinned 包)"
         else
             echo "  警告: base lock 安装失败"
         fi
         if [[ "$INSTALL_VOICE" == "true" && -f "$VOICE_LOCK" ]]; then
+            local voice_count
+            voice_count=$(lock_pkg_count "$VOICE_LOCK")
+            if [[ "$voice_count" -eq 0 ]]; then
+                echo "  ERROR: requirements/voice.lock 是空的（0 个包）。"
+                echo "         --voice 要装的东西一个都没有。先跑 scripts/lock-deps.sh。"
+                exit 1
+            fi
             if $PIP install --break-system-packages -q -r "$VOICE_LOCK" 2>&1 | tail -3; then
-                echo "  Voice 依赖安装完成 (pinned)"
+                echo "  Voice 依赖安装完成 (${voice_count} 个 pinned 包)"
             else
                 echo "  警告: voice lock 安装失败"
             fi
@@ -1446,27 +1515,31 @@ print(f"  可用 channels: {ok}")
 
 install_voice() {
     echo "[Voice] 安装 LiveKit voice infra..."
-    # 检查必填参数 (install-livekit.sh 自己也会检查, 这里提前 fail fast)
-    local missing=()
-    [[ -z "$VOICE_FRONTEND_DOMAIN"  ]] && missing+=("--voice-frontend-domain")
-    [[ -z "$VOICE_SIGNALING_DOMAIN" ]] && missing+=("--voice-signaling-domain")
-    [[ -z "$VOICE_ADMIN_EMAIL"      ]] && missing+=("--voice-email")
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "  ERROR: --voice 模式缺以下参数:"
-        for arg in "${missing[@]}"; do
-            echo "    $arg"
-        done
-        echo "  例如:"
-        echo "    ./deploy.sh --voice \\"
-        echo "        --voice-frontend-domain  live.example.com \\"
-        echo "        --voice-signaling-domain livekit.example.com \\"
-        echo "        --voice-email            admin@example.com"
+    # 只校验 --voice-component 这一个。它是**这一层**的信息 (这台机器该扮演
+    # 什么角色), 安装脚本无从推断; 其余参数缺不缺由那个脚本判断, 不在这里抄
+    # 第二份 —— 抄第二份就会出现「deploy.sh 说缺参数, 直接跑安装脚本却好好的」。
+    if [[ -z "$VOICE_COMPONENT" ]]; then
+        echo "  ERROR: --voice 必须配合 --voice-component <list>"
+        echo "    sfu / frontend / agent / caddy, 逗号分隔"
+        echo "  这几样通常不在同一台机器上, 所以没有默认值。例如:"
+        echo "    ./deploy.sh --voice --voice-component frontend,agent"
         exit 1
     fi
-    "$SCRIPT_DIR/scripts/install-livekit.sh" \
-        --frontend-domain  "$VOICE_FRONTEND_DOMAIN" \
-        --signaling-domain "$VOICE_SIGNALING_DOMAIN" \
-        --admin-email      "$VOICE_ADMIN_EMAIL"
+
+    local args=(--component "$VOICE_COMPONENT")
+    [[ -z "$VOICE_CADDY_MODE"        ]] || args+=(--caddy-mode        "$VOICE_CADDY_MODE")
+    [[ -z "$VOICE_FRONTEND_DOMAIN"   ]] || args+=(--frontend-domain   "$VOICE_FRONTEND_DOMAIN")
+    [[ -z "$VOICE_SIGNALING_DOMAIN"  ]] || args+=(--signaling-domain  "$VOICE_SIGNALING_DOMAIN")
+    [[ -z "$VOICE_ADMIN_EMAIL"       ]] || args+=(--admin-email       "$VOICE_ADMIN_EMAIL")
+    [[ -z "$VOICE_PUBLIC_WSS_URL"    ]] || args+=(--public-wss-url    "$VOICE_PUBLIC_WSS_URL")
+    [[ -z "$VOICE_ALLOWED_ROOMS"     ]] || args+=(--allowed-rooms     "$VOICE_ALLOWED_ROOMS")
+    [[ -z "$VOICE_FRONTEND_UPSTREAM" ]] || args+=(--frontend-upstream "$VOICE_FRONTEND_UPSTREAM")
+    [[ -z "$VOICE_SFU_URL"           ]] || args+=(--sfu-url           "$VOICE_SFU_URL")
+    # 逃生口里的东西原样追加, 不解析不校验 —— 由安装脚本自己判。
+    # `${arr[@]+...}` 那层是给 set -u 用的: 空数组直接展开会报 unbound variable。
+    args+=(${VOICE_EXTRA_ARGS[@]+"${VOICE_EXTRA_ARGS[@]}"})
+
+    "$SCRIPT_DIR/scripts/install-livekit.sh" "${args[@]}"
 }
 
 # ====================================================================

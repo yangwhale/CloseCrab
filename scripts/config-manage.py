@@ -229,31 +229,37 @@ def cmd_set_livekit(args):
     """Write bots/{bot_name}.livekit field for voice IO.
 
     Two ways to provide credentials:
-      1. --auto-detect: read from ~/livekit-server/.api_key / .api_secret (set by install-livekit.sh)
+      1. --auto-detect: read from Firestore `config/livekit`（install-livekit.sh 的 sfu
+         组件生成 key 后发布上去，全机器共享的唯一真相）
       2. --api-key / --api-secret: explicit values
+
+    注意 --auto-detect **不读本机文件**。早期版本读 ~/livekit-server/.api_key，
+    那是「每台机器各有一份」的旧模型 —— 在不跑 SFU 的机器上那个文件根本不存在，
+    而 frontend / agent / bot 恰恰常常不和 SFU 同机。install-livekit.sh 改成
+    发布到 Firestore 后就再也不写那两个文件了。
 
     HMAC secret is NOT set here — bot generates it on first start and writes back to Firestore.
     """
-    from pathlib import Path
-
     db = get_db()
     doc_ref = db.collection("bots").document(args.bot_name)
     if not doc_ref.get().exists:
         print(f"Bot '{args.bot_name}' not found")
         sys.exit(1)
 
+    shared = db.collection("config").document("livekit").get().to_dict() or {}
+
     # 拿 API key/secret
     if args.auto_detect:
-        key_file = Path.home() / "livekit-server" / ".api_key"
-        secret_file = Path.home() / "livekit-server" / ".api_secret"
-        if not key_file.exists() or not secret_file.exists():
-            print(f"--auto-detect 失败: {key_file} 或 {secret_file} 不存在")
-            print("先在本机跑 ./scripts/install-livekit.sh 装 LiveKit infra")
+        api_key = (shared.get("api_key") or "").strip()
+        api_secret = (shared.get("api_secret") or "").strip()
+        if not api_key or not api_secret:
+            print("--auto-detect 失败: Firestore config/livekit 里没有 api_key/api_secret")
+            print("先在跑 SFU 的那台机器上执行:")
+            print("  ./scripts/install-livekit.sh --component sfu")
+            print("（它生成 key 并发布到 config/livekit，之后所有机器共用这一份）")
             sys.exit(1)
-        api_key = key_file.read_text().strip()
-        api_secret = secret_file.read_text().strip()
         # 不打印 api_key 全文 (会进 shell history / SSH 日志). 显示前 8 字符即可.
-        print(f"自动检测到 API key: {api_key[:8]}... (已读自 {key_file})")
+        print(f"从 Firestore config/livekit 读到 API key: {api_key[:8]}...")
     else:
         if not args.api_key or not args.api_secret:
             print("必须指定 --auto-detect 或 (--api-key + --api-secret)")
@@ -261,8 +267,10 @@ def cmd_set_livekit(args):
         api_key = args.api_key
         api_secret = args.api_secret
 
-    # url (signaling) 默认从 frontend domain 推 (live.x.com → wss://livekit.x.com 或 ws://127.0.0.1:7880)
-    url = args.url or "ws://127.0.0.1:7880"
+    # url (signaling): --url > config/livekit.url > 本机 SFU 默认口
+    url = args.url or (shared.get("url") or "").strip() or "ws://127.0.0.1:7880"
+    if not args.url and shared.get("url"):
+        print(f"signaling url 取自 config/livekit: {url}")
 
     livekit_cfg = {
         "url": url,
@@ -603,13 +611,13 @@ def main():
     p_lk.add_argument("--frontend-url", required=True,
                       help="Frontend URL, e.g. https://live.example.com (用户飞书 /voice 命令拿到的链接 host)")
     p_lk.add_argument("--auto-detect", action="store_true",
-                      help="从本机 ~/livekit-server/.api_key / .api_secret 自动读取凭据 "
-                           "(推荐, 避免人工拷贝长字符串)")
+                      help="从 Firestore config/livekit 读凭据 (推荐; install-livekit.sh 的 "
+                           "sfu 组件发布到那里, 全机器共享)")
     p_lk.add_argument("--api-key", help="LiveKit API key (--auto-detect 时不用)")
     p_lk.add_argument("--api-secret", help="LiveKit API secret (--auto-detect 时不用)")
     p_lk.add_argument("--url", default="",
-                      help="Server signaling URL, 默认 ws://127.0.0.1:7880 "
-                           "(bot 和 livekit-server 同机时用 localhost 即可)")
+                      help="Server signaling URL; 不传则用 config/livekit.url, "
+                           "再没有才退 ws://127.0.0.1:7880 (bot 与 SFU 同机时够用)")
     p_lk.add_argument("--vertex-project", default="",
                       help="GCP Vertex AI project (Gemini STT/TTS 用), 默认从 GOOGLE_CLOUD_PROJECT 推")
     p_lk.add_argument("--vertex-location", default="",

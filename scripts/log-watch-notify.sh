@@ -17,7 +17,11 @@ set -o pipefail
 LOG=$1; PAT=$2; STATE=${3:-/tmp/.logwatch.seen}; PREFIX=${4:-进度}
 [ -f "$LOG" ] || exit 0
 
-NOW=$(grep -cE "$PAT" "$LOG" 2>/dev/null || echo 0)
+# 不能写成 `$(grep -c ... || echo 0)`：零匹配时 grep **既打印 0 又退 1**，
+# 那个 `|| echo 0` 会再补一个 0，NOW 变成 "0\n0"。于是下一行的 `[ -le ]` 报
+# integer expression expected 退非零，「没新行就静默退出」这一行**失效**，
+# 一路走到底发出一条空通知 —— 正好是本脚本要避免的那件事。
+NOW=$(grep -cE "$PAT" "$LOG" 2>/dev/null) || NOW=0
 SEEN=$(cat "$STATE" 2>/dev/null || echo 0)
 [ "$NOW" -le "$SEEN" ] && exit 0        # 没新行就静默退出，不刷屏
 

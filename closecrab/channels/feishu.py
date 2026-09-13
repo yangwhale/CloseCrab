@@ -4549,10 +4549,11 @@ class FeishuChannel(Channel):
             return
 
         try:
-            # 去 sig 简化版: frontend 已支持无 sig 路径.
-            # URL 保持原始 https://live.higcp.com 形式, 不包 AppLink.
-            base = self._voice_io._frontend_url.rstrip("/")
-            url = f"{base}/?bot={self._voice_io._bot_name}&openId={user_key}"
+            # URL 由 voice_io 一家拼 —— 这里以前自己拼了一份
+            # `?bot=X&openId=Y`，跟现役前端只认 `?room=` 的契约对不上，
+            # 结果是每次都进随机房间、接电话的是默认人格，而且不报错。
+            # 两处各拼一份 URL 就迟早漂到这个下场，所以只留一个出口。
+            url = self._voice_io.make_join_url()
         except Exception as e:
             log.error(f"build voice url failed: {e}", exc_info=True)
             await self._async_send_text(chat_id, f"⚠️ 生成 voice 链接失败: {e}")
