@@ -10,7 +10,7 @@
   <img src="crab-with-claude-code-inside.png" alt="CloseCrab — AI Agent Bot 框架" width="600"/>
 </p>
 
-> **把 Claude Code、OpenClaw、Kilo Code、Gemini CLI 变成 24/7 在线的聊天 Bot——跑在飞书、Discord、钉钉上，支持共享记忆、bot 间协作、运行时热切换、实时语音。**
+> **把 Claude Code、OpenClaw、Kilo Code、Gemini CLI、DeepSeek Harness 变成 24/7 在线的聊天 Bot——跑在飞书、Discord、钉钉上，支持共享记忆、bot 间协作、运行时热切换、实时语音。**
 
 CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实现 agent 能力——直接驱动 CLI 进程，所以**上游生态里的每一个 Skill、Plugin、MCP Server 都能即装即用，零适配成本**。
 
@@ -22,9 +22,9 @@ CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实�
 
 | 词 | 意思 |
 |---|---|
-| **Runtime** | 后端的 AI Agent CLI 进程。CloseCrab 不自己实现 agent，而是驱动 [Claude Code](https://github.com/anthropics/claude-code) / [Gemini CLI](https://github.com/google-gemini/gemini-cli) / OpenClaw / Kilo Code 这些现成的 CLI |
+| **Runtime** | 后端的 AI Agent CLI 进程。CloseCrab 不自己实现 agent，而是驱动 [Claude Code](https://github.com/anthropics/claude-code) / [Gemini CLI](https://github.com/google-gemini/gemini-cli) / OpenClaw / Kilo Code / DeepSeek Harness 这些现成的 CLI |
 | **turn** | 一次「用户消息进来 → agent 想完 → 回复发出」的完整往返。**它是本文的成本单位** —— 说「零 turn」就是不花模型钱 |
-| **Channel** | 聊天平台适配层（飞书 / Discord / 钉钉），负责把各家消息统一成 `UnifiedMessage` |
+| **Channel** | 聊天平台适配层（飞书 / Discord / 钉钉，外加一个自建网页入口），负责把各家消息统一成 `UnifiedMessage` |
 | **ACP** | Agent Client Protocol，Gemini CLI 和 OpenClaw 用的 JSON-RPC over NDJSON 协议 |
 | **CC Pages** | 本项目的 HTML 发布通道：bot 写文件到 GCS，通过你自己的域名访问。（注意：下文「Claude Code CLI」不缩写成 CC，避免混淆） |
 | **allowlist** | `config/skill-allowlist.txt`。仓库里的 skill 很多，只有列在这里的才会被 deploy 装上 |
@@ -34,17 +34,17 @@ CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实�
 
 ## 能力矩阵一览
 
-**4 个 Agent Runtime · 3 个聊天平台 · 默认部署 28 个 Skill（24 个公共 + 4 个私有；仓库共 47 个，按 allowlist 放行）· 3 条语音通道 · 1 套统一身份和记忆。**
+**5 个 Agent Runtime · 3 个聊天平台 + 1 个自建网页入口 · 默认部署 30 个 Skill（25 个公共 + 5 个私有；仓库共 48 个，按 allowlist 放行）· 4 条语音通道 · 1 套统一身份和记忆。**
 
 | 维度 | 能力 |
 |---|---|
-| 💬 **平台（3 个，飞书为主）** | 飞书 / Lark（一等公民）· Discord · 钉钉 |
-| 🔄 **Runtime（4 个，热切换）** | Claude Code · OpenClaw · Kilo Code · Gemini CLI——任意 bot 15 秒切换 |
-| 🎙️ **语音（3 条通道）** | 语音消息 STT+TTS · Discord 常驻语音频道**实时直播流** · Zello PTT 对讲 |
+| 💬 **平台（3+1，飞书为主）** | 飞书 / Lark（一等公民）· Discord · 钉钉 · `web`（自建 HTTP 入口，给只有网页没有 IM 的对外 bot） |
+| 🔄 **Runtime（5 个，热切换）** | Claude Code · OpenClaw · Kilo Code · Gemini CLI · DeepSeek Harness——任意 bot 15 秒切换 |
+| 🎙️ **语音（4 条通道）** | 语音消息 STT+TTS · Discord 常驻语音频道**实时直播流** · Zello PTT 对讲 · LiveKit 浏览器通话 / 房间输出 |
 | 🧠 **共享记忆** | MEMORY.md + 100+ topic 文件 + GCS 同步 + OpenClaw sqlite 向量索引 |
 | ⏰ **Timeline（定时 + 盯梢）** | `cron-tool` 到点叫醒 · `watch-task` 起小 agent 自己判断进度，SKIP/REPORT/DONE 三态 |
 | 🤝 **Bot 团队** | 多 bot 跨机器协作 · `#team-ops` 频道派活 · Firestore inbox 实时推送 |
-| 🔧 **Skill（默认 24 个）** | Wiki · Imagen/TTS/音乐生成 · 飞书邮件 · 浏览器自动化 · GPU 集群验收 · skill-creator 自举 |
+| 🔧 **Skill（默认 25 个公共）** | Wiki · Imagen/TTS/音乐生成 · 飞书邮件 · 浏览器自动化 · 多模态讲解文档 · TPU 配置顾问 · skill-creator 自举 |
 | 📄 **CC Pages** | bot 生成 HTML 报告，一条命令发布到 GCS + 自定义域名 |
 | 🔌 **完整上游生态** | Claude Code skills · MCP servers · Gemini extensions · OpenClaw plugins |
 
@@ -62,16 +62,16 @@ CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实�
 |---|---|---|
 | **入口** | `closecrab/main.py` | CLI 解析、配置加载、system prompt 构造、TTS 音色加载、信号处理 |
 | **核心** | `closecrab/core/bot.py` | BotCore：消息路由、per-user worker、Firestore 日志、急刹车 |
-| **Channels (3+1)** | `closecrab/channels/` | `feishu.py` · `feishu_streaming_card.py` · `discord.py` · `dingtalk.py` |
-| **Workers (4 active)** | `closecrab/workers/` | `claude_code.py` · `openclaw_acp.py` · `kilo.py` · `gemini_acp.py` |
-| **Voice** | `closecrab/voice/` | `discord_voice_sidecar.py`（直播流 + DAVE E2EE）· `zello_voice_sidecar.py`（PTT）· `tts_config.py`（音色单一来源）· `gemini_tts.py` · `gemini_stt.py` / `chirp_stt.py` / `funasr_stt.py` · `livekit_io.py` |
+| **Channels (4)** | `closecrab/channels/` | `feishu.py` · `feishu_streaming_card.py` · `discord.py` · `dingtalk.py` · `web.py`（**不是平台适配器**，自建 aiohttp 请求–响应入口，出站文本走 `sanitize_outbound()`） |
+| **Workers (5 active)** | `closecrab/workers/` | `claude_code.py` · `openclaw_acp.py` · `kilo.py` · `gemini_acp.py` · `dsh_worker.py`（`gemini_cli.py` 是死代码，见 `core/bot.py:91`） |
+| **Voice** | `closecrab/voice/` | `player.py` + `playback.py`（**统一播放器**：一个时钟、一个播放位置、三个哑出口）· `discord_voice_sidecar.py`（直播流 + DAVE E2EE）· `livekit_out.py`（房间里那张常驻的嘴，单向只发不收）· `zello_voice_sidecar.py`（PTT）· `gemini_live_bridge.py`（Gemini Live 双向流桥）· `instant_ack.py` / `tool_voice_phrases.py`（先应一声再干活）· `chirp_phrases.py`（~450 条 STT 热词，Speech v2 adaptation）· `tts_config.py`（音色单一来源）· `gemini_tts.py` · `gemini_stt.py` / `chirp_stt.py` / `funasr_stt.py` · `livekit_io.py` · `personas/`（语音助理人格）· `web/`（自带网页语音端 + Live2D） |
 | **STT** | `closecrab/utils/stt.py` | Gemini → Chirp2 → Whisper fallback 链 |
 | **Inbox** | `closecrab/utils/firestore_inbox.py` | Bot 间实时消息（Firestore `on_snapshot`） |
 | **Timeline** | `scripts/cron-daemon.py` · `cron-tool.py` · `watch-task.py` | 单例 daemon 30s tick，定时任务与长跑盯梢共用一条时间线 |
 
 ---
 
-## 4 个 Runtime · 运行时热切换
+## 5 个 Runtime · 运行时热切换
 
 每个 runtime 是一个不同的 AI Agent CLI。CloseCrab 让同一个 bot 在它们之间运行时切换——**身份 / 记忆 / 团队上下文在切换中全部保留**。
 
@@ -85,6 +85,11 @@ CloseCrab 把 AI Agent CLI 工具包装成多平台聊天 Bot。它不重新实�
 | **OpenClaw** | ACP / JSON-RPC + 外部 Gateway | 模型最广、1M-token 可用、sqlite 语义记忆、共享 Gateway 省资源 | `set-worker-type bot openclaw` |
 | **Kilo Code** | HTTP SSE | 启动最快 (~3s)、真流式 part.delta、Cloud-managed | `set-worker-type bot kilo` |
 | **Gemini CLI** | ACP / NDJSON | Google Search 接地、Workspace 扩展、自带 web_fetch | `set-worker-type bot gemini` |
+| **DeepSeek Harness** | line-framed JSON-RPC on stdio | **唯一能跑 Gemini 3.x 模型的 runtime**（走 LiteLLM 网关）、10 个委派工具（subagent / ralph / workflow / goal 状态机）、按消费者分档路由模型 | `set-worker-type bot dsh` |
+
+> **dsh 的三个反直觉点**：① `session/prompt` 一提交就返回，一轮结束看 `session.status: idle`；
+> ② session id **不能复用**，进程一重启 dsh 侧对话历史就没了；③ `interrupt()` 是硬中断（杀进程）。
+> 部署与 LiteLLM 网关要求见 [docs/dsh-worker-deploy.md](docs/dsh-worker-deploy.md)。
 
 **切换中自动处理**：model 命名空间翻译（`claude-opus-4-7` → `provider/model:openclaw`）· workspace 文件自愈（GEMINI.md / AGENTS.md 缺失自动重写）· memory 索引重建（OpenClaw sqlite 启动扫描）。
 
@@ -135,7 +140,7 @@ python3 scripts/inbox-send.py bunny "在 B200 上跑 Llama 4 benchmark，写到 
 
 ## 语音 I/O
 
-三条独立的语音通道，可以同时开：
+四条独立的语音通道，可以同时开：
 
 | 通道 | 触发 | 链路 |
 |---|---|---|
@@ -143,6 +148,23 @@ python3 scripts/inbox-send.py bunny "在 B200 上跑 Llama 4 benchmark，写到 
 | **Discord 常驻语音频道** | `/discordon` | bot 常驻语音频道，回复**边生成边推流**（首帧 ~0.9s），支持 DAVE E2EE、暂停/继续/重播 |
 | **Zello PTT 对讲** | `/zelloon` | Zello Channel API：对讲机按住说话 → Opus 解码 → STT → 走飞书消息通道；回复反向推成 PTT 流 |
 | **LiveKit 房间输出** | `/lkon` | 往同名 LiveKit 房间**额外加一路**音频（只发不收）。跟上面两个并联，不是二选一 |
+| **LiveKit 浏览器通话** | `/voice` | bot 回一条链接，浏览器打开就是双向实时对话（Gemini Live + 每 bot 独立人格与音色） |
+
+### 统一播放器 —— 一个时钟，一个位置，三个哑出口
+
+飞书卡片上那五个按钮（⏸ ▶️ ⏪ 🔁 ⏩）**曾经只对 Discord 管用**，病根不是漏配：
+实时播报走 TTS 分流点，播放控制走 py-cord 自己的 voice client，**两条路**。
+于是有几个出口就有几套播放器，每加一路控制功能就得再抄一遍，抄漏了还不报错。
+
+现在只有一个 `UnifiedPlayer`（`voice/player.py`）持有时钟和播放位置，
+每 20 ms 按单调时钟对表发一帧；Discord / Zello / LiveKit 三个 sink 是**哑的** ——
+给一帧写一帧，不知道自己在播第几秒。所以 seek 一次三路同时跳，**新增出口不用再抄控制逻辑**。
+
+直播和重播也合成了同一条路：TTS 边生成边播时音频先落盘再由播放器顺读，
+「正在播的这一秒」永远只有一个定义，暂停/快进在首播途中就能用。
+欠载时不前进位置，只按出口各自策略补帧——Zello 不发包会掉线所以补静音，LiveKit 安静就该真安静。
+
+### 其它约定
 
 **音色是 bot 级配置**，存 Firestore `bots/{name}.channels.discord.tts_voice`（Gemini TTS 的 15 个 voice 任选）。流式直播和 ogg 语音消息**共用同一个来源**，没配就直接报错——不做静默兜底，避免"改了配置不生效"这类问题。
 
@@ -150,7 +172,49 @@ python3 scripts/inbox-send.py bunny "在 B200 上跑 Llama 4 benchmark，写到 
 
 **三个出口的判断规则不一样**：Discord 和 Zello 互斥（Zello 只在 Discord 没连时顶上，它俩回答的是「人的耳朵在哪」这同一个问题）；**LiveKit 是并联的第三路** —— 两边都开就两边出声，Discord 关了就只往 LiveKit 灌。
 
-> LiveKit（`/voice` 浏览器通话）的房间与网页前端已停用；`closecrab/voice/livekit_io.py` 仍然承重 —— Discord 语音**接收**方向依赖它的 agents SDK，别按文件名误删。
+> `/lkon` 是一条**常驻车道**，不是「说话时连、说完就断」。连 SFU 是重量级操作，
+> 跟 `/discordon` `/zelloon` 一样由斜杠命令控制生死，跟 Discord 那一路各开各的。
+> 房间里的本体是**单向的**：只发不收，也不是完整的 LiveKit agent，就是一根推流管道。
+> **bot 与 bot 之间完全禁止说话。**
+
+### 装 LiveKit 语音栈
+
+`/voice` 那条浏览器通话链路由四个组件拼成，**可以分散在不同机器上**，所以安装脚本按组件装：
+
+| 组件 | 是什么 |
+|---|---|
+| `sfu` | livekit-server 本体 + `/etc/livekit/config.yaml` + systemd unit |
+| `frontend` | Next.js 前端 + systemd unit |
+| `agent` | Gemini Live agent（接电话的那一位） + systemd unit |
+| `caddy` | 反代站点片段（**drop-in，不整份覆盖主 Caddyfile**） |
+
+```bash
+# 在前端那台机器上：只装前端 + 反代，SFU 指向另一台
+./deploy.sh --voice --voice-component frontend,caddy \
+    --voice-frontend-domain voice.example.com \
+    --voice-sfu-url ws://10.0.0.1:7880
+
+# 安装脚本自己还有十几个旗标，deploy.sh 不逐条镜像，走逃生口原样透传
+./deploy.sh --voice --voice-component caddy \
+    --voice-arg --sfu-upstream --voice-arg 10.0.0.1:7880 \
+    --voice-arg --allow-insecure-token
+
+# 体检 / 只重渲染配置 / 轮换 key，全都不碰二进制
+scripts/install-livekit.sh --check
+scripts/install-livekit.sh --component frontend --refresh-templates
+```
+
+**三个一错就静默失败的地方**：
+
+- **房间名就是 bot 名**，它贯穿三个进程 —— 前端拿 `?room=` 查 `--allowed-rooms` 白名单并签
+  token，agent 按同一个名字读 `personas/<房间名>.md` 决定人格和音色。名字对不上不会报错，
+  只会**每个 bot 都用默认人格接电话**，而三边日志全绿。
+- **`--agent-name` 必须留空**（Gemini Live agent 匿名注册，走自动派发）。填了名字就变显式派发，
+  两边对不上时浏览器一直转圈，**双方都不打错误日志**。
+- **Caddy 用 drop-in 片段**。同一个地址出现两个站点块会让 Caddy 拒绝加载**整份配置** ——
+  那台机器上所有站点一起下线。所以主 Caddyfile 里已有同名站点时脚本默认拒装，要覆盖得显式 `--force-caddy`。
+
+细节见 [infra/livekit/README.md](infra/livekit/README.md)。
 
 ---
 
@@ -187,22 +251,22 @@ python3 scripts/watch-task.py list|stop <name>
 
 ---
 
-## 默认部署的 Skill（24 个）
+## 默认部署的 Skill（25 个公共）
 
-每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`。**deploy.sh 只 link `config/skill-allowlist.txt` 里放行的**——仓库里还有 20 多个低频 skill，源码都在、默认不装，需要时在 allowlist 加一行再跑 deploy 就回来。新建 skill 用 `skill-creator` 自举。
+每个 skill 是 `skills/{name}/SKILL.md` 加可选的 `scripts/` 和 `references/`。**deploy.sh 只装 `config/skill-allowlist.txt` 里放行的**（是 `cp -a` **不是 symlink**，所以改了源码要重跑 deploy 才生效）——仓库里另有 23 个低频 skill，源码都在、默认不装，需要时在 allowlist 加一行再跑 deploy 就回来。新建 skill 用 `skill-creator` 自举。
 
 | 分类 | Skills |
 |---|---|
-| **知识与记忆** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `session-handoff`（会话崩了写交接） |
-| **多媒体生成** | `imagen-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `deck-builder`（PPT / Google Docs）· `live-canvas`（实时白板讲解） |
+| **知识与记忆** | `wiki`（Quartz Wiki + 9 个 MCP tools）· `session-handoff`（会话崩了写交接）· `tpuguru`（TPU 训练配置顾问：CPU 上 AOT 编译判显存、读 profile、定位静默错误） |
+| **多媒体生成** | `imagen-generator` · `tts-generator`（15 voice + 情绪标签）· `music-generator`（Lyria）· `deck-builder`（PPT / Google Docs）· `live-canvas`（实时白板讲解）· `multimodal-explainer`（讲解文档 + 内嵌 TTS 语音段） |
 | **浏览器 / 阅读** | `browser-cli`（CDP 直连；一次页面快照 ~350 token，走 MCP 是 15-20K）· `wechat-reader`（公众号文章，绕验证码） |
 | **飞书** | `feishu-mail`（企业邮箱收发）· `feishu-user-msg` |
-| **GPU 集群** | `nvl72-qa`（GB200/GB300 验收：DCGM 诊断 · NCCL 带宽 · 跨域多节点 · 故障节点处理） |
 | **生活 / 本地** | `weather-forecast`（香港天文台 + Open-Meteo）· `hk-bus`（Maps + KMB/Citybus 实时到站）· `hk-share-award-tax-dipn38`（香港股票报税 DIPN 38） |
 | **运维** | `smoke-test`（部署后健康检查）· `cc-pages-backup` · `bot-config` |
 | **元能力** | `skill-creator`（自举）· `agent-teams`（团队协调）· `evolution`（三方互评优化 worker）· `notify`（多平台通知）· `chat-style` / `page-style`（输出风格，注入式） |
 
-> 部分 skill 依赖内部环境（Google 内网 MCP、客户群追踪等），放在私有仓库，不在这份清单里。
+> 另有 5 个 skill 依赖内部环境（内网 MCP、专有集群工具等），装在 `$PRIVATE_SKILLS_DIR`（默认 `~/private-skills`），
+> 过同一份 allowlist，**不在本仓库、也不在这份清单里**。所以一台全量部署的机器上是 30 个。
 
 ## 跨 Worker 通用脚本
 
@@ -385,14 +449,14 @@ scripts/boot-autostart.sh [--check]
 | 📚 文档 | `docs` | 飞书内显示 CloseCrab 文档链接 |
 | 🎙️ Discord 语音 | `discordon` | 让 bot 连进 Discord 常驻语音频道 |
 
-**完整命令集（23 个，直接发消息也能用）**：
+**完整命令集（25 个，直接发消息也能用）**：
 
 | 分组 | 命令 |
 |---|---|
 | 会话 | `/status` `/end` `/restart` `/stop` `/context` `/sessions` `/docs` |
 | 模型与推理档位 | `/model` `/low` `/medium` `/high` `/xhigh` `/think` `/mode` `/mcp` |
 | 上下文压缩 | `/cmp`（透传 Claude Code 的 compact） |
-| 语音 | `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/lkon` `/lkoff`（LiveKit 房间输出）· `/hlson` `/hlsoff`（HLS 直播）· ~~`/voice`~~（LiveKit 浏览器通话已停用） |
+| 语音 | `/voice`（LiveKit 浏览器通话）· `/discordon` `/discordoff` · `/zelloon` `/zellooff` · `/lkon` `/lkoff`（LiveKit 房间输出）· `/hlson` `/hlsoff`（HLS 直播） |
 
 #### Step 5 — Reaction 快捷指令（点赞语义）
 
@@ -475,6 +539,27 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 
 ---
 
+### web —— 自建网页入口（跟上面三个不是一类）
+
+前三个是**平台适配器**：用各家 SDK 建长连接、等平台把消息推进来。`web` 没有平台 ——
+它自己起一个 aiohttp server，交互是**请求–响应**：前端 POST 一条消息，跑完才返回。
+给「只有网页、没有 IM」的对外 bot 用。
+
+```bash
+python3 scripts/config-manage.py create mybot --channel web --web-port 8080
+```
+
+改它之前记住三条差异：
+
+1. **没有主动推送。** `send_message()` 只能把文本塞进 `_history` 等前端轮询，别指望像飞书那样随时 push 卡片。
+2. **交互式工具一律 auto-continue。** 网页上没有按钮，ExitPlanMode 按 `approved`、AskUserQuestion 取第一项。
+   不这么做，控制请求会一直挂到 BotCore 的 user lock 超时。
+3. **出站文本必须走 `_emit()`**，它调 `sanitize_outbound()` 做确定性删除（装饰块、内网域名、本机路径）。
+   这个 channel 面向**外部用户**——靠 system prompt 自觉压不住另一个 prompt 注入的东西，所以在 channel 层兜死。
+   **新增对外 channel 时复用这个函数。**
+
+---
+
 ## 平台功能对比
 
 | 功能 | 飞书 / Lark | Discord | 钉钉 |
@@ -483,10 +568,11 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 | 语音输入 STT | ✅ 语音消息 | ✅ 语音频道 | — |
 | 语音摘要 TTS（ogg） | ✅ | ✅ | — |
 | 常驻语音频道实时推流 | — | ✅ `/discordon`（DAVE E2EE） | — |
+| LiveKit 浏览器通话 | ✅ `/voice` | — | — |
 | Zello PTT 对讲 | ✅ 消息回灌飞书 | — | — |
 | 交互卡片 | ✅ animated card · streaming card · 卡片按钮回调 | edit + emoji | — |
 | 点赞 → 快捷指令 | ✅ 7 种 emoji 语义 | — | — |
-| 命令 | ✅ 23 个 | ✅ 9 个 slash command | — |
+| 命令 | ✅ 25 个 | ✅ 9 个 slash command | — |
 | 消息引用 | ✅ | ✅ | — |
 | 连接方式 | WebSocket (lark_ws 长连接) | Discord Gateway | Stream |
 
@@ -521,7 +607,10 @@ scripts/dispatch-bot.sh recall <bot>          # 不收 host
 scripts/dispatch-bot.sh check  <ssh_host>     # 只收 host，不收 bot
 
 # Runtime 切换
-scripts/config-manage.py set-worker-type <bot> claude|openclaw|kilo|gemini
+scripts/config-manage.py set-worker-type <bot> claude|openclaw|kilo|gemini|dsh
+
+# LiveKit 语音栈（按组件装/体检/轮换 key，见「装 LiveKit 语音栈」）
+scripts/install-livekit.sh --component sfu,frontend,agent,caddy [--check|--refresh-templates]
 
 # Bot 间消息（Firestore inbox，on_snapshot 实时推送）
 scripts/inbox-send.py <target> "<msg>"
@@ -595,6 +684,9 @@ python3 scripts/inbox-send.py <test-bot> "请依次 Read 这 5 个大文件不�
 | [OpenClaw 部署指南](docs/openclaw-deploy-quickstart.md) | OpenClaw Gateway + agent.json 配置 |
 | [OpenClaw Worker 设计](docs/openclaw-worker-design.md) | ACP 协议、per-bot session 路由、context 压缩 |
 | [Kilo Worker 设计](docs/kilo-worker-design.md) | HTTP SSE、part.delta + emitted_len 不变量 |
+| [DSH Worker 部署](docs/dsh-worker-deploy.md) | DeepSeek Harness + LiteLLM 网关要求、profile patch 的两条反直觉规则 |
+| [LiveKit 语音栈](infra/livekit/README.md) | 四组件分机部署、房间名契约、Caddy drop-in |
+| [语音部署速查](docs/voice-deploy-quickstart.md) | STT/TTS 与语音通道的上手步骤 |
 | [GBrain 集成指南](docs/gbrain-integration.md) | PGLite memory bank + OAuth MCP + per-bot 独立部署（可选） |
 | [博客: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | 4 个 runtime 互相吸收能力的设计哲学 |
 

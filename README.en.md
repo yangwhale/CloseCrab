@@ -10,7 +10,7 @@
   <img src="crab-with-claude-code-inside.png" alt="CloseCrab — AI Agent Bot Framework" width="600"/>
 </p>
 
-> **Run Claude Code, OpenClaw, Kilo Code, and Gemini CLI as 24/7 chat bots on Lark/Feishu, Discord, and DingTalk — with shared memory, bot-to-bot collaboration, hot-swappable runtimes, and browser-based voice calling.**
+> **Run Claude Code, OpenClaw, Kilo Code, Gemini CLI, and DeepSeek Harness as 24/7 chat bots on Lark/Feishu, Discord, and DingTalk — with shared memory, bot-to-bot collaboration, hot-swappable runtimes, and real-time voice.**
 
 CloseCrab wraps the world's best AI agent CLIs into multi-platform chat bots. It does not re-implement agent capabilities — it directly drives the CLI processes, so **every upstream skill, plugin, and MCP server works out of the box, with zero adaptation required**.
 
@@ -20,16 +20,17 @@ CloseCrab wraps the world's best AI agent CLIs into multi-platform chat bots. It
 
 ## Capability Matrix
 
-**4 agent runtimes · 3 chat platforms · 33 built-in skills · 1 unified identity and memory.**
+**5 agent runtimes · 3 chat platforms + 1 self-hosted web entrance · 30 skills deployed by default (25 public + 5 private; 48 in the repo, gated by an allowlist) · 4 voice lanes · 1 unified identity and memory.**
 
 | Dimension | Capability |
 |---|---|
-| 💬 **Platforms (3, Lark-first)** | Lark / Feishu (primary) · Discord · DingTalk |
-| 🔄 **Runtimes (4, hot-swap)** | Claude Code · OpenClaw · Kilo Code · Gemini CLI — switch any bot in 15 seconds |
-| 🎙️ **Voice I/O** | Lark voice messages STT + TTS reply · `/voice` for browser-based LiveKit calls |
+| 💬 **Platforms (3+1, Lark-first)** | Lark / Feishu (primary) · Discord · DingTalk · `web` (self-hosted HTTP entrance, for outward-facing bots that have a web page but no IM) |
+| 🔄 **Runtimes (5, hot-swap)** | Claude Code · OpenClaw · Kilo Code · Gemini CLI · DeepSeek Harness — switch any bot in 15 seconds |
+| 🎙️ **Voice (4 lanes)** | Voice-message STT + TTS reply · **live stream** into a Discord voice channel · Zello PTT · LiveKit browser call / room output |
 | 🧠 **Shared memory** | MEMORY.md + 100+ topic files + GCS sync + OpenClaw sqlite vector index |
+| ⏰ **Timeline (schedule + watch)** | `cron-tool` wakes a bot at a set time · `watch-task` spawns a small agent that judges progress itself, three-state SKIP / REPORT / DONE |
 | 🤝 **Bot teams** | Cross-machine collaboration via `#team-ops` channel + real-time Firestore inbox |
-| 🔧 **33 built-in skills** | Wiki · Imagen/Veo/TTS generation · Lark suite (mail/doc/sheet/bitable) · Chrome automation · skill-creator self-hosting |
+| 🔧 **Skills (25 public by default)** | Wiki · Imagen / TTS / music generation · Lark mail · browser automation · multimodal explainer docs · TPU sizing advisor · skill-creator self-hosting |
 | 📄 **CC Pages** | Bot-generated HTML reports, one-command publish to GCS + custom domain |
 | 🛠️ **Cross-worker utility scripts** | `cron-tool` reminders · `subagent-parallel` real parallelism · `session-status` self-check |
 | 🔌 **Full upstream ecosystem** | Claude Code skills · MCP servers · Gemini extensions · OpenClaw plugins |
@@ -46,17 +47,19 @@ CloseCrab wraps the world's best AI agent CLIs into multi-platform chat bots. It
 
 | Layer | Path | Implementation |
 |---|---|---|
-| **Entry point** | `closecrab/main.py` | CLI parsing, config loading, system prompt building, signal handling |
+| **Entry point** | `closecrab/main.py` | CLI parsing, config loading, system prompt building, TTS voice loading, signal handling |
 | **Core** | `closecrab/core/bot.py` | BotCore: message routing, per-user worker, Firestore logs, emergency stop |
-| **Channels (3+1)** | `closecrab/channels/` | `feishu.py` · `feishu_streaming_card.py` · `discord.py` · `dingtalk.py` |
-| **Workers (4 active)** | `closecrab/workers/` | `claude_code.py` · `openclaw_acp.py` · `kilo.py` · `gemini_acp.py` |
+| **Channels (4)** | `closecrab/channels/` | `feishu.py` · `feishu_streaming_card.py` · `discord.py` · `dingtalk.py` · `web.py` (**not a platform adapter** — a self-hosted aiohttp request/response entrance; outbound text goes through `sanitize_outbound()`) |
+| **Workers (5 active)** | `closecrab/workers/` | `claude_code.py` · `openclaw_acp.py` · `kilo.py` · `gemini_acp.py` · `dsh_worker.py` (`gemini_cli.py` is dead code, see `core/bot.py:91`) |
+| **Voice** | `closecrab/voice/` | `player.py` + `playback.py` (**unified player**: one clock, one position, three dumb sinks) · `discord_voice_sidecar.py` (live stream + DAVE E2EE) · `livekit_out.py` (the always-on mouth in the room — publishes only, receives nothing) · `zello_voice_sidecar.py` (PTT) · `gemini_live_bridge.py` (Gemini Live bidirectional bridge) · `instant_ack.py` / `tool_voice_phrases.py` (say something before starting work) · `chirp_phrases.py` (~450 STT hotwords, Speech v2 adaptation) · `tts_config.py` (single source of truth for voices) · `gemini_tts.py` · `gemini_stt.py` / `chirp_stt.py` / `funasr_stt.py` · `livekit_io.py` · `personas/` (voice-assistant personas) · `web/` (built-in web voice client + Live2D) |
 | **STT** | `closecrab/utils/stt.py` | Gemini → Chirp2 → Whisper fallback chain |
 | **Inbox** | `closecrab/utils/firestore_inbox.py` | Bot-to-bot real-time messaging (Firestore `on_snapshot`) |
-| **Voice** | `scripts/install-livekit.sh` | LiveKit server + frontend + Caddy + systemd one-shot installer |
+| **Timeline** | `scripts/cron-daemon.py` · `cron-tool.py` · `watch-task.py` | Single-instance daemon on a 30 s tick; scheduled jobs and long-run watchers share one timeline |
+| **Voice install** | `scripts/install-livekit.sh` | LiveKit SFU + frontend + Gemini Live agent + Caddy, installed per component |
 
 ---
 
-## The 4 Runtimes · Runtime Hot-Swap
+## The 5 Runtimes · Runtime Hot-Swap
 
 Each runtime is a different AI agent CLI. CloseCrab lets the same bot switch between them at runtime — **identity, memory, and team context are all preserved across switches**.
 
@@ -70,6 +73,10 @@ Each runtime is a different AI agent CLI. CloseCrab lets the same bot switch bet
 | **OpenClaw** | ACP / JSON-RPC + external Gateway | Widest model support, 1M-token capable, sqlite semantic memory, shared Gateway | `set-worker-type bot openclaw` |
 | **Kilo Code** | HTTP SSE | Fastest cold start (~3s), real-streaming part.delta, Cloud-managed | `set-worker-type bot kilo` |
 | **Gemini CLI** | ACP / NDJSON | Google Search grounding, Workspace extensions, built-in web_fetch | `set-worker-type bot gemini` |
+| **DeepSeek Harness** | Line-framed JSON-RPC on stdio | **The only runtime that can drive Gemini 3.x models** (via a LiteLLM gateway), 10 delegation tools (subagent / ralph / workflow / goal state machine), per-consumer model routing | `set-worker-type bot dsh` |
+
+> **Three counter-intuitive things about dsh**: (1) `session/prompt` returns the moment it is accepted — a turn ends when `session.status` reports `idle`; (2) session ids **cannot be reused**, so restarting the process loses dsh-side conversation history; (3) `interrupt()` is a hard interrupt (it kills the process).
+> Deployment and the LiteLLM gateway requirement: [docs/dsh-worker-deploy.md](docs/dsh-worker-deploy.md).
 
 **What's auto-handled on switch**: model namespace translation (`claude-opus-4-7` → `provider/model:openclaw`) · workspace file self-healing (GEMINI.md / AGENTS.md rewritten if missing) · memory index rebuild (OpenClaw sqlite scans on startup).
 
@@ -118,35 +125,122 @@ python3 scripts/inbox-send.py bunny "Run Llama 4 benchmark on B200, write the re
 
 ## Voice I/O
 
-Two voice entry points:
+Four independent voice lanes; they can all be on at once:
 
-| Entry | Trigger | Pipeline |
+| Lane | Trigger | Pipeline |
 |---|---|---|
-| **Voice message** | User sends a voice message in Lark / Discord | Channel-layer STT (Gemini→Chirp2→Whisper) → BotCore → bot reply + TTS voice summary |
-| **Browser call** | User sends `/voice` in Lark | Bot returns a LiveKit URL → user opens in browser → bidirectional real-time STT/TTS |
+| **Voice message** | User sends a voice message in Lark / Discord | Channel-layer STT (Gemini→Chirp2→Whisper) → BotCore → bot reply + TTS ogg voice summary |
+| **Discord voice channel** | `/discordon` | Bot sits in a voice channel and **streams the reply while it is still being generated** (~0.9 s to first frame); DAVE E2EE, pause / resume / replay |
+| **Zello PTT** | `/zelloon` | Zello Channel API: press-to-talk → Opus decode → STT → through the normal Lark message path; replies are pushed back as a PTT stream |
+| **LiveKit room output** | `/lkon` | Adds **one more** audio lane into the same-named LiveKit room (publish-only, receives nothing). It runs *alongside* the two above, not instead of them |
+| **LiveKit browser call** | `/voice` | Bot replies with a link; opening it in a browser is a bidirectional real-time conversation (Gemini Live + a per-bot persona and voice) |
 
-LiveKit calling stack (one-shot installer: `scripts/install-livekit.sh`):
-- **livekit-server** + **livekit-frontend** (forked from `agent-starter-react`) + **Caddy** auto LE cert + **systemd unit**
-- Multiple bots share one LiveKit infra per machine, routed via URL `?bot=` param + per-bot HMAC key for signature verification
-- STT/TTS go through Vertex AI's Gemini, requires `roles/aiplatform.user`
+### The unified player — one clock, one position, three dumb sinks
 
-See [docs/voice-deploy-quickstart.md](docs/voice-deploy-quickstart.md) for full deployment.
+The five buttons on the Lark card (⏸ ▶️ ⏪ 🔁 ⏩) **used to work only for Discord**, and the cause was not a missing config: live narration went through the TTS fan-out point while playback control went through py-cord's own voice client — **two separate paths**. So every outlet grew its own player, and every new control feature had to be copied into each of them; miss one and nothing complains.
+
+Now a single `UnifiedPlayer` (`voice/player.py`) owns the clock and the play position, emitting one frame every 20 ms against a monotonic clock. The three sinks (Discord / Zello / LiveKit) are **dumb** — they write whatever frame they are handed and have no idea what second is playing. So one seek moves all three at once, and **a new outlet never has to re-implement control logic**.
+
+Live and replay collapsed into the same path too: while TTS is still generating, audio lands on disk first and the player reads it sequentially, so "the second currently playing" has exactly one definition and pause / seek work mid-broadcast. On underrun the position does not advance; each sink fills according to its own policy — Zello gets silence packets (it drops the connection otherwise), LiveKit gets genuine silence.
+
+### Other conventions
+
+**The voice is per-bot config**, stored in Firestore at `bots/{name}.channels.discord.tts_voice` (any of Gemini TTS's 15 voices). Live streaming and ogg voice messages **read the same source**; if it is unset the code errors out rather than silently falling back — that is how "I changed the config and nothing happened" bugs get avoided.
+
+**The switches persist**: `/discordon` `/discordoff` `/zelloon` `/zellooff` `/lkon` `/lkoff` write back to Firestore and survive restarts. There is only one Zello account fleet-wide, so `/zelloon` first checks whether another bot already holds it (two logins on one account kick each other).
+
+**The three outlets follow different rules**: Discord and Zello are mutually exclusive (Zello only takes over when Discord is not connected — both answer the same question, "where are the human's ears"). **LiveKit is a parallel third lane**: with both on, sound comes out of both; turn Discord off and everything goes to LiveKit only.
+
+> `/lkon` is a **persistent lane**, not "connect when speaking, disconnect when done". Connecting to an SFU is a heavyweight operation, so like `/discordon` and `/zelloon` its lifetime is controlled by slash commands, independently of the Discord lane.
+> The bot's own presence in the room is **one-way**: it publishes and receives nothing, and it is not a full LiveKit agent — just a pipe that pushes a stream.
+> **Bot-to-bot speech is completely forbidden.**
+
+### Installing the LiveKit voice stack
+
+The `/voice` browser-call path is four components, and they **can live on different machines**, so the installer installs per component:
+
+| Component | What it is |
+|---|---|
+| `sfu` | livekit-server itself + `/etc/livekit/config.yaml` + systemd unit |
+| `frontend` | Next.js frontend + systemd unit |
+| `agent` | The Gemini Live agent (the one that answers the call) + systemd unit |
+| `caddy` | Reverse-proxy site fragment (**a drop-in — it does not overwrite the main Caddyfile**) |
+
+```bash
+# On the frontend machine: frontend + reverse proxy only, SFU points at another box
+./deploy.sh --voice --voice-component frontend,caddy \
+    --voice-frontend-domain voice.example.com \
+    --voice-sfu-url ws://10.0.0.1:7880
+
+# The installer has a dozen more flags; deploy.sh does not mirror them one by one —
+# pass them through verbatim via the escape hatch
+./deploy.sh --voice --voice-component caddy \
+    --voice-arg --sfu-upstream --voice-arg 10.0.0.1:7880 \
+    --voice-arg --allow-insecure-token
+
+# Health check / re-render configs only / rotate keys — none of these touch binaries
+scripts/install-livekit.sh --check
+scripts/install-livekit.sh --component frontend --refresh-templates
+```
+
+**Three places where a mistake fails silently:**
+
+- **The room name is the bot name**, and it spans three processes — the frontend takes `?room=`, checks it against the `--allowed-rooms` whitelist and signs the token; the agent reads `personas/<room>.md` under the same name to pick persona and voice. A mismatch raises nothing: **every bot just answers with the default persona**, and all three logs stay green.
+- **`--agent-name` must be left empty** (the Gemini Live agent registers anonymously and relies on automatic dispatch). Give it a name and it becomes explicit dispatch; when the two sides disagree the browser spins forever and **neither side logs an error**.
+- **Caddy uses a drop-in fragment.** Two site blocks for the same address make Caddy refuse to load **the entire config**, taking every site on that machine down with it. So if the main Caddyfile already has a site with that name the script refuses by default; `--force-caddy` overrides.
+
+Details in [infra/livekit/README.md](infra/livekit/README.md); a full walkthrough in [docs/voice-deploy-quickstart.md](docs/voice-deploy-quickstart.md).
 
 ---
 
-## 33 Built-in Skills
+## Timeline — Scheduling and Long-Run Watching
 
-Each skill is `skills/{name}/SKILL.md` plus optional `scripts/` and `references/`. `deploy.sh` auto-symlinks them to `~/.claude/skills/{name}`. Use the `skill-creator` skill to bootstrap a new one.
+One timeline, one daemon, two uses. **It is started as a singleton by the first bot's `run.sh`**, so the daemon shares the bots' environment; no bot on the machine means no daemon.
+
+| Use | Tool | Daemon behaviour |
+|---|---|---|
+| **Wake a bot at a given time** | `cron-tool.py` | No reasoning — at the appointed time it writes one sentence into the target bot's inbox |
+| **Watch a long-running job** | `watch-task.py` | Every N seconds it spawns a small agent that judges for itself. Three states: **SKIP** (stay silent) / **REPORT** (post to Lark, zero turns) / **DONE** (write to the inbox to hand off, then terminate itself) |
+
+```bash
+# Scheduled reminders (--cron and --at are interpreted in HKT)
+python3 scripts/cron-tool.py add --target <bot> --in 10m --message "..."
+python3 scripts/cron-tool.py add --target <bot> --cron "0 9 * * MON-FRI" --message "..."
+python3 scripts/cron-tool.py list|remove <job_id>
+
+# Watch a training run / benchmark, speak up only when something changes
+python3 scripts/watch-task.py create --name t80 --interval 120 --model sonnet \
+    --notify-bot <bot> --max-age 7200 \
+    --prompt "Read /tmp/t80.log and judge progress. Use DONE on TRAINING COMPLETE or Error. SKIP if nothing changed."
+python3 scripts/watch-task.py list|stop <name>
+```
+
+**Design points:**
+
+- **Notifications and trigger events go through different channels.** REPORT posts directly via `feishu-notify.py` — **zero turns, zero tokens**; DONE writes to the inbox and triggers one full turn in the main process to take over. Don't let a "just so you know" update burn a turn.
+- **Pick the probe's tier**: `--model haiku` (did the log change? — the default) / `sonnet` (needs to understand the content before judging) / `opus` (needs to make a real trade-off).
+- **A task is pinned to the machine that created it.** Every record carries a host; multiple machines driving one timeline coordinate through Firestore transactions. Records with no host are deleted outright.
+- **There are hard ceilings**: `--max-age` reaps after 6 hours by default, `--stall-after` flags a suspected hang. **Never put anything that calls an LLM into the system crontab** — such entries have no owner, are invisible to `list`, and never terminate themselves.
+
+Design details in [docs/task-scheduler-design.md](docs/task-scheduler-design.md).
+
+---
+
+## Skills Deployed by Default (25 public)
+
+Each skill is `skills/{name}/SKILL.md` plus optional `scripts/` and `references/`. **`deploy.sh` only installs what is listed in `config/skill-allowlist.txt`** — and it is a `cp -a`, **not a symlink**, so editing the source requires re-running deploy before it takes effect. The repo holds 23 more low-frequency skills whose source ships but which are not installed; add a line to the allowlist and re-run deploy to get one back. Bootstrap new ones with `skill-creator`.
 
 | Category | Skills |
 |---|---|
-| **Office (Lark)** | `feishu-mail` · `feishu-doc` · `feishu-sheet` · `feishu-bitable` (Bitable / Base) |
-| **Knowledge** | `wiki` (180+ pages Quartz wiki, 9 MCP tools) · `code-wiki-recon` (rapid unfamiliar-repo recon) · `paper-explainer` · `fireworks-tech-graph` |
-| **Multimedia** | `imagen-generator` (Imagen 4) · `veo-generator` (Veo 3.1) · `tts-generator` (Gemini TTS, 15 voices + emotion tags) · `frontend-slides` (HTML slides) · `math-video-tutor` |
-| **Browser / WeChat** | `chrome-browser` (Chrome MCP fallback) · `wechat-reader` |
-| **Infrastructure** | `tmux-installer` · `tmux-orchestrator` · `zsh-installer` · `lustre-mounter` · `lssd-mounter` · `bwrap-bypass` (bypass Claude Code sandbox) · `vscode-reference` |
-| **AI training / inference** | `maxdiffusion-trainer` |
-| **Meta** | `skill-creator` (self-hosting) · `agent-teams` (team coordination) · `bot-config` · `chat-style` · `page-style` · `notify` · `issue-handler` · `session-handoff` · `gemini-ui-reviewer` (UI review) · `go-eat` (cafeteria menu) |
+| **Knowledge & memory** | `wiki` (Quartz wiki + 9 MCP tools) · `session-handoff` (write a handoff when a session dies) · `tpuguru` (TPU training-config advisor: AOT-compile on CPU to predict HBM, read profiles, locate silent errors) |
+| **Multimedia** | `imagen-generator` · `tts-generator` (15 voices + emotion tags) · `music-generator` (Lyria) · `deck-builder` (PPT / Google Docs) · `live-canvas` (live whiteboard narration) · `multimodal-explainer` (explainer docs with embedded TTS audio) |
+| **Browser / reading** | `browser-cli` (direct CDP; a page snapshot is ~350 tokens versus 15–20 K over MCP) · `wechat-reader` (WeChat articles, bypasses the captcha) |
+| **Lark** | `feishu-mail` (corporate mailbox) · `feishu-user-msg` |
+| **Life / local** | `weather-forecast` (HK Observatory + Open-Meteo) · `hk-bus` (Maps + KMB/Citybus real-time arrivals) · `hk-share-award-tax-dipn38` (HK share-award tax, DIPN 38) |
+| **Ops** | `smoke-test` (post-deploy health check) · `cc-pages-backup` · `bot-config` |
+| **Meta** | `skill-creator` (self-hosting) · `agent-teams` (team coordination) · `evolution` (three-way peer review to tune a worker) · `notify` (multi-platform notifications) · `chat-style` / `page-style` (output style, injected) |
+
+> Another 5 skills depend on an internal environment (intranet MCP, proprietary cluster tooling, …). They live in `$PRIVATE_SKILLS_DIR` (default `~/private-skills`), pass through the same allowlist, and are **neither in this repo nor in the list above** — which is why a fully deployed machine reports 30.
 
 ---
 
@@ -175,6 +269,23 @@ python3 scripts/session-status.py <bot> [--days N]
 
 ---
 
+## ⚠️ Security Boundary (read this before deploying)
+
+**What this project fundamentally does is turn chat messages into shell commands on your machine.** The agent has Read / Edit / Bash and every MCP server; its privileges are exactly those of the Linux user running it. Evaluate the risk on that basis.
+
+| Risk | Current state | What you should do |
+|---|---|---|
+| **Who can command it** | `allowed_user_ids` / `allowed_open_ids` are **empty by default = anyone can talk to it** | Configure the allowlist as the very first deployment step. In group chats, also confirm the bot only answers when @-mentioned or in a designated chat |
+| **What it can do** | Arbitrary shell, read/write across the whole home directory, every MCP. No sandbox | Run it as a **dedicated Linux user**, not your main account; keep sensitive directories out of its `work_dir` |
+| **Where credentials live** | Platform tokens and API keys live in Firestore, never in git | Put an IAM allowlist on Firestore; keep `.env` down to the two non-sensitive values (project + database) |
+| **Between users** | Sessions are isolated, but **the filesystem is shared** — a file A created is readable by B's agent | Don't mistake "multi-user" for "multi-tenant". It is not |
+| **Prompt injection** | The agent reads web pages, PDFs, and messages from others; any of it may contain instructions | Don't let it process untrusted input on a machine that holds production credentials |
+| **Cost** | Every message is a model call, and long sessions carry large `cache_read` | Watch usage with `/status` and `scripts/session-status.py`; use the haiku tier for probe-type tasks |
+
+> In one line: **treat it as "handing someone a shell on your machine"**, not as a chatbot.
+
+---
+
 ## Quick Start
 
 ```bash
@@ -191,25 +302,35 @@ cp .env.example .env && vim .env
 python3 scripts/config-manage.py create mybot --channel feishu \
     --app-id "cli_xxxxxxx" --app-secret "xxxxxxxxxxxx"
 
-# 5. Start (run.sh is the auto-restarting wrapper)
+# 5. Start (run.sh is the auto-restarting wrapper; it also brings up the cron-daemon as a singleton)
 nohup ./run.sh mybot > /tmp/mybot.log 2>&1 &
 ```
 
 > **Pro tip**: Already have Claude Code installed? Run `claude` in this directory, then say "follow the README and deploy this as a Lark bot for me" — it will read this document and handle the entire deployment.
 
+### Autostart on boot
+
+```bash
+# All three machines call this from @reboot; idempotent, safe to run by hand to verify
+scripts/boot-autostart.sh [--check]
+```
+
+Order: fill in cron's minimal environment → wait for DNS → gcsfuse → OpenClaw Gateway → `launcher.sh start all`. **The cron-daemon is not started here** — the first bot's run.sh brings it up, so it inherits the same PATH the bots have.
+
 ### Adding voice calling (incremental)
 
 ```bash
-# Add voice infra to an existing bot
-./deploy.sh --voice \
-    --voice-frontend-domain  live.example.com \
-    --voice-signaling-domain livekit.example.com \
-    --voice-email            you@example.com
+# Install the voice stack per component (they may live on different machines)
+./deploy.sh --voice --voice-component frontend,caddy \
+    --voice-frontend-domain voice.example.com \
+    --voice-sfu-url ws://10.0.0.1:7880
 
-# Configure voice credentials for a specific bot (auto-detect from local files)
+# Configure voice credentials for a specific bot
 python3 scripts/config-manage.py set-livekit <bot> --auto-detect \
-    --frontend-url https://live.example.com --enable
+    --frontend-url https://voice.example.com --enable
 ```
+
+Full component breakdown in [Installing the LiveKit voice stack](#installing-the-livekit-voice-stack).
 
 ---
 
@@ -369,7 +490,7 @@ python3 scripts/config-manage.py create mybot --channel discord --token "DISCORD
 python3 scripts/config-manage.py set-discord mybot --allowed-user-ids "123,456"
 ```
 
-Discord ships with 7 slash commands (`/status` `/end` `/restart` `/stop` `/docs` `/context` `/sessions`), auto-registered to the server on bot startup.
+Discord ships with 9 slash commands (`/status` `/end` `/restart` `/stop` `/docs` `/context` `/sessions` `/say` `/leave`), auto-registered to the server on bot startup.
 
 ---
 
@@ -387,6 +508,20 @@ python3 scripts/config-manage.py create mybot --channel dingtalk \
 
 DingTalk only supports text messages — no voice / slash commands / card button callbacks.
 
+### web — a self-hosted page entrance (not the same kind of thing as the three above)
+
+The first three are **platform adapters**: each opens a long connection with a vendor SDK and waits for the platform to push messages in. `web` has no platform — it brings up its own aiohttp server, and the interaction is **request/response**: the frontend POSTs a message and the call returns when the turn is finished. It exists for outward-facing bots that have a web page but no IM.
+
+```bash
+python3 scripts/config-manage.py create mybot --channel web --web-port 8080
+```
+
+Three differences to remember before changing it:
+
+1. **There is no push.** `send_message()` can only drop text into `_history` for the frontend to poll; don't expect to push a card at will the way Lark does.
+2. **Interactive tools always auto-continue.** There are no buttons on the page, so ExitPlanMode answers `approved` and AskUserQuestion takes the first option. Without that, a control request hangs until BotCore's user lock times out.
+3. **Outbound text must go through `_emit()`**, which calls `sanitize_outbound()` to deterministically strip decoration blocks, intranet domains, and local paths. This channel faces **external users** — a system prompt cannot reliably suppress what another prompt injects, so the channel layer enforces it. **Reuse this function for any new outward-facing channel.**
+
 ---
 
 ## What You Need
@@ -401,7 +536,9 @@ DingTalk only supports text messages — no voice / slash commands / card button
 |---|---|
 | **GCS bucket** | CC Pages (web reports) + cross-machine shared memory (gcsfuse mount) |
 | **MCP API keys** | GitHub · Context7 · Jina — each unlocks an MCP server |
-| **LiveKit domains** | `/voice` browser calls need 2 domains (frontend + signaling) |
+| **Zello account** | PTT lane (the developer token is signed on the fly by a local private key at each login) |
+
+> **Python 3.13+ note**: `audioop` was removed by PEP 594, so the Discord voice sidecar needs `audioop-lts` installed first on newer systems. The voice-config module `voice/tts_config.py` was deliberately kept dependency-free and is unaffected.
 
 ---
 
@@ -412,10 +549,13 @@ DingTalk only supports text messages — no voice / slash commands / card button
 | Text messaging | ✅ | ✅ | ✅ |
 | Voice input (STT) | ✅ voice message | ✅ voice channel | — |
 | Voice summary (TTS) | ✅ | ✅ | — |
-| Browser call | ✅ `/voice` (LiveKit) | — | — |
+| Live push into a voice channel | — | ✅ `/discordon` (DAVE E2EE) | — |
+| LiveKit browser call | ✅ `/voice` | — | — |
+| Zello PTT | ✅ replies routed back through Lark | — | — |
 | Interactive cards | ✅ animated card · streaming card · button callbacks | edit + emoji | — |
 | Reaction → shortcut | ✅ 7 emoji semantics | — | — |
-| Bot menu / slash commands | ✅ 8 menu items | ✅ 7 slash commands | — |
+| Commands | ✅ 25 | ✅ 9 slash commands | — |
+| Bot menu | ✅ 8 menu items | — | — |
 | Message quoting | ✅ | ✅ | — |
 | Connection type | WebSocket (lark_ws long connection) | Discord Gateway | Stream |
 
@@ -441,7 +581,7 @@ scripts/launcher.sh start|stop|restart|status|logs <bot>
 scripts/dispatch-bot.sh deploy|recall|move|check <bot> <host>
 
 # Runtime switch
-scripts/config-manage.py set-worker-type <bot> claude|openclaw|kilo|gemini
+scripts/config-manage.py set-worker-type <bot> claude|openclaw|kilo|gemini|dsh
 
 # Bot-to-bot messaging (Firestore inbox, on_snapshot real-time push)
 scripts/inbox-send.py <target> "<msg>"
@@ -460,12 +600,18 @@ scripts/send-to-discord.sh --channel <id> "<msg>"
 | Doc | Content |
 |---|---|
 | [Full reference](docs/full-reference.md) | Detailed deployment, config, troubleshooting |
+| [Wiki deploy guide](docs/wiki-deploy.md) | Standing up the Wiki on a new machine: v1/v2 differences · `WIKI_REPO` ownership · **one-command MCP install** (`scripts/install-wiki-mcp.sh`) · the Chinese-retrieval pitfalls |
+| [Timeline design](docs/task-scheduler-design.md) | Single-instance cron-daemon, watch-task's three-state protocol, cross-machine transactional claim |
+| [Inbox task protocol V1](docs/inbox-task-protocol.md) | kickoff / progress / done, with progress bypassing the LLM turn |
 | [OpenClaw deploy guide](docs/openclaw-deploy-quickstart.md) | OpenClaw Gateway + agent.json configuration |
 | [OpenClaw Worker design](docs/openclaw-worker-design.md) | ACP protocol, per-bot session routing, context compaction |
 | [Kilo Worker design](docs/kilo-worker-design.md) | HTTP SSE, part.delta + emitted_len invariant |
 | [Kilo optimization notes](docs/kilo-worker-optimization.md) | Streaming chunk threshold, partial flush tuning |
-| [Voice deploy guide](docs/voice-deploy-quickstart.md) | LiveKit + Caddy + Gemini STT/TTS one-shot installer |
-| [Blog: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | Design philosophy: how 4 runtimes absorb each other's capabilities |
+| [DSH Worker deploy](docs/dsh-worker-deploy.md) | DeepSeek Harness + the LiteLLM gateway requirement, and the two counter-intuitive rules of profile patches |
+| [LiveKit voice stack](infra/livekit/README.md) | Per-component deployment across machines, the room-name contract, the Caddy drop-in |
+| [Voice deploy quickstart](docs/voice-deploy-quickstart.md) | Getting STT/TTS and the voice lanes running |
+| [GBrain integration](docs/gbrain-integration.md) | PGLite memory bank + OAuth MCP + per-bot deployment (optional) |
+| [Blog: Hybrid Agent Runtimes](https://blog.higcp.com/2026/05/17/hybrid-agent-runtimes/) | Design philosophy: how agent runtimes absorb each other's capabilities |
 
 ---
 
