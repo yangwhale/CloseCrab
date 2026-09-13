@@ -47,6 +47,8 @@
 | `agent/requirements.txt` | — | 直接依赖，实跑验证过的版本 |
 | `agent/env.tmpl` | `~/lk-gemini-agent/.env`（0600） | **含 secret，不进 git** |
 | `agent/ensure_rooms.py` | `~/lk-gemini-agent/ensure_rooms.py` | 建常驻房间 + 显式派 agent。**用系统 python3 跑**（要 `google.cloud.firestore`，agent 的 venv 里没有） |
+| `agent/speak_into_room.py` | `~/lk-gemini-agent/speak_into_room.py` | 往房间里推一段现成音频（bot 主动说话那条路） |
+| `agent/record_room.py` | `~/lk-gemini-agent/record_room.py` | 旁录房间通话 → 存盘 → 推飞书语音，见下面「旁录」 |
 | `agent/tests/two_devices_test.py` | — | 端到端回归：两台「设备」进同一个房间，一台先走 |
 | `agent/tests/lk_probe.py` | — | 真 chromium 驱动生产前端，验 20 秒握手死线不误杀 |
 | `agent/tests/lk_probe2.py` | — | 同上，多一层 `setTimeout` 钩子，抓定时器上弦点 |
@@ -336,6 +338,54 @@ GEMINI_API_KEY=... ./scripts/install-livekit.sh --component agent \
 # 401 Invalid IAP credentials —— 脚本不是浏览器，没有 IAP cookie。
 LK_URL=ws://<SFU 内网 IP>:7880 python3 agent/tests/two_devices_test.py
 ```
+
+## 旁录（`agent/record_room.py`，2026-09-13）
+
+把通话录下来存一份，再作为飞书语音消息推过去 —— 想听听 agent 的声音到底
+什么效果时用。跑在 agent 那台机器上，用 agent 的 venv：
+
+```bash
+cd ~/lk-gemini-agent
+BOT_NAME=bunny .venv/bin/python record_room.py bunny          # 等人进来 → 录 → 推
+.venv/bin/python record_room.py bunny --no-push               # 只存盘
+.venv/bin/python record_room.py bunny --max-sec 300 --grace 5
+```
+
+落盘在 `~/lk-recordings/<房间>/<时间戳>/`：`mix.wav` / `mix.ogg` 是混音，
+再加**每个参与者一份单轨 wav**。单轨是故意留的 —— 判断 TTS 音质要听 agent
+干净的那一路，混音里混着自己的麦。
+
+### 三条约束，每条对应一个会踩的坑
+
+1. **必须以 AGENT 身份进房间**（`with_kind("agent")`）。`agent.py` 里
+   `_wanted()` 挑哪几路进混音池送模型、`_humans()` 数房间里有没有人，两处都用
+   `DEFAULT_PARTICIPANT_KINDS`（CONNECTOR/SIP/STANDARD，**不含 AGENT**）。
+   挂成 standard 会同时触发两件事而且都不报错：录音机被当成一路输入送回模型
+   （模型开始跟自己说话），以及**房间常驻 + 录音机常驻 ⇒ Gemini 会话永远
+   放不掉**，一直烧配额。
+2. **只订阅不发布** —— grants 跟 `speak_into_room.py` 正好反过来
+   （`can_publish=False, can_subscribe=True`）。
+3. **自带死期**。`--wait-sec` 管「没人来」，`--max-sec` 管「录太久」，
+   `--grace` 管「最后一个人走了之后再等几秒」。远端起的进程不许无限期挂着。
+
+### 混音怎么对齐
+
+SFU 把每个人拆成独立一路，各路开始时间不同。每路记一个相对录音起点的采样
+偏移，`AudioStream(track, sample_rate=48000, num_channels=1)` 统一重采样，
+最后按偏移叠加。**累加用 int32 再限幅** —— 两个人同时说话时 int16 直接加会
+溢出回绕，听感是爆音而不是过载。
+
+### 推送
+
+走 `scripts/feishu-notify.py --voice <ogg>`（**零 LLM turn**）。录音是在任何
+一次对话之外结束的，所以不能用回复里的 `<voice-file>` 标签。上传路径跟
+`channels/feishu.py` 的 `_tts_and_send_one` 是同一条（`file_type("opus")` →
+`file_key` → `msg_type("audio")`），两处各写一遍是因为本脚本不进 bot 进程，
+**改一边记得看另一边**。
+
+飞书那边只有 30MB 的文件大小限制，没有公开的时长上限（60 秒那条是语音
+*识别* 接口的限制，不是发送）。`--push-max-sec`（默认 900）超了就只推路径不推
+语音，并在日志里说明 —— 不做静默截断。
 
 ## 哪些不进 git
 
