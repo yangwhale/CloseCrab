@@ -87,3 +87,6 @@ chrome-browser
 multimodal-explainer
 glinux-tools
 tpuguru
+
+# 让麻瓜去学习一下我们的课程 —— 派多视角 subagent 评审教材/讲义（2026-09-13 加）
+muggle-review
