@@ -46,7 +46,10 @@
 | `agent/personas/*.md` | `~/lk-gemini-agent/personas/` | 一个房间一份人格（声音 + instructions），见下面「一个 bot 一个房间」 |
 | `agent/requirements.txt` | — | 直接依赖，实跑验证过的版本 |
 | `agent/env.tmpl` | `~/lk-gemini-agent/.env`（0600） | **含 secret，不进 git** |
+| `agent/ensure_rooms.py` | `~/lk-gemini-agent/ensure_rooms.py` | 建常驻房间 + 显式派 agent。**用系统 python3 跑**（要 `google.cloud.firestore`，agent 的 venv 里没有） |
 | `agent/tests/two_devices_test.py` | — | 端到端回归：两台「设备」进同一个房间，一台先走 |
+| `agent/tests/lk_probe.py` | — | 真 chromium 驱动生产前端，验 20 秒握手死线不误杀 |
+| `agent/tests/lk_probe2.py` | — | 同上，多一层 `setTimeout` 钩子，抓定时器上弦点 |
 | `lk-gemini-agent.service.tmpl` | `/etc/systemd/system/lk-gemini-agent.service` | agent systemd unit |
 | `frontend/**` | `~/livekit-frontend/**` | 对上游 `agent-starter-react` 的五处改动 |
 
@@ -59,6 +62,7 @@
 | `components/app/app.tsx` | 把房间名拼进 token 端点的查询串 |
 | `app/admin/page.tsx` | 房间管理台（谁在房间里 / 静音 / 踢人 / 关房间）—— 自建 OSS **不带**任何管理界面，官方 dashboard 是 Cloud 的产品 |
 | `app/api/admin/rooms/route.ts` | 上面那个页面的后端，包了 RoomService RPC |
+| `@livekit__components-react@2.9.20.patch` | **库补丁**，不是应用代码。放到 `~/livekit-frontend/patches/` 下，`package.json` 的 `pnpm.patchedDependencies` 引它，`pnpm install` 时自动打。修的是 `useAgent` 不回读参与者当前属性 —— 见下面「常驻 agent 会粘状态」。**改完要 `pnpm build` 再重启 unit**，跑的是 `next start` 不是 dev server |
 
 ## 一个 bot 一个房间（2026-09-12）
 
@@ -72,8 +76,65 @@ Gemini session、同一份对话历史。不带 `?room=` 时保持上游的随�
 |---|---|---|
 | 房间名白名单 | `.env.local` 的 `ALLOWED_ROOMS` | 决定 `?room=` 能进哪些房间 |
 | 人格文件 | `agent/personas/<房间名>.md` | 第一行 `voice: <名字>`，空行后是 instructions |
-| 匿名派发 | `WorkerOptions` 不传 `agent_name` | **一个 worker 伺候所有房间** —— LiveKit 给每个房间派一个独立 job 进程，job 自己读 `ctx.room.name` 挑人格。六个 bot **不需要**六个 systemd unit |
+| 具名派发 | `WorkerOptions(agent_name="gemini-live")` + `ensure_rooms.py` | **一个 worker 伺候所有房间** —— job 自己读 `ctx.room.name` 挑人格，六个 bot **不需要**六个 systemd unit。为什么从匿名改成具名，见下面「房间常驻」 |
 | 混音输入 | `MixedRoomAudioInput` | 见下 |
+
+## 房间常驻（2026-09-13）
+
+六个房间**永不销毁**，一人一间挂在那里。代价是几个空房间的记账，换来的是
+**零启动延迟** —— 进房就能说话，不用等 SFU 建房 + 派发 + agent 连 Gemini。
+
+三处配合改动：
+
+| 改动 | 为什么 |
+|---|---|
+| `empty_timeout` / `departure_timeout` 设 `_FOREVER`（10 年秒数） | **不能填 0**。LiveKit 把 0 解释成「用默认值」（300 / 20），不是「永不超时」 |
+| 派发从匿名改成具名 + `ensure_rooms.py` 显式派 | 自动派发**只在房间被创建那一刻触发**。房间永不销毁 ⇒ 那一刻一辈子只有一次 ⇒ worker 一重启，六个房间全成空房 |
+| Gemini 会话按「有没有人」建/放 | 房间常驻 ≠ Gemini 连接常驻。空房间挂着一条 Live 连接毫无意义，而且它每 170 秒自己断一次刷一条 error |
+
+`ensure_rooms.py --reclaim` 是重启自愈的关键，systemd `ExecStartPost` 调它。
+判据只能用**参与者列表**不能用派发记录（worker 一重启 job 就没了，记录还在），
+而且要先踢掉旧 agent 的尸体 —— SFU 的参与者列表在重启后十几秒内都还挂着死掉的 job。
+
+### ⚠️ 常驻 agent 会「粘状态」，这是一个前端死循环的源头
+
+**症状**：每次进房，页面显示 `Agent is listening, ask it a question`，
+**第 20 秒**却弹 `Session ended / Agent joined the room but did not complete
+initializing`。服务端日志全绿 —— 会话在人进房的同一毫秒建好，
+`lk.agent.state: initializing → listening` 用了 0.17 秒。
+
+**成因是两个东西凑在一起**：
+
+1. `AgentSession` 只管往参与者属性上写 `lk.agent.state`，**散场不负责擦**。
+   于是空房间里的常驻 agent 一直挂着 `listening`，明明连接早就放掉了。
+   下一个人进来、新会话起来，框架再写一次 `listening` —— **值没变，SDK 就不发
+   `AttributesChanged`**。
+2. `@livekit/components-react` 的 `useAgent` 只在**组件挂载那一刻**
+   seed 一次属性（`useAgent.ts:551`，那时还没连上房间，seed 的是 `{}`），
+   之后**纯靠事件学，从不回读参与者当前属性**。事件永远不来 ⇒ 它认定对方还在
+   `connecting` ⇒ 20 秒握手死线判死。
+
+同一个页面上的 `useVoiceAssistant` 是直接读 `participant.attributes` 活对象的，
+所以 UI 显示「在听」而握手失败 —— **一个页面两套读法**，这个自相矛盾的画面
+就是最强的线索。
+
+**两边都修，缺一不可**：
+
+| 位置 | 改动 | 单独修它治不了什么 |
+|---|---|---|
+| `agent/agent.py` `_clear_agent_state()` | 会话放掉时把 `lk.agent.state` 置空（空串 = 服务端删 key） | 治不了「grace 期内重连」—— 那时属性还粘着 |
+| `frontend/@livekit__components-react@2.9.20.patch` | 订阅 `AttributesChanged` 前先回读一次当前属性 | 治不了「空闲 agent 对外撒谎说自己 ready」 |
+
+> **可迁移的教训**：把一个「用完即走」的组件改成常驻，要逐条检查它**对外宣告的
+> 状态谁负责擦**。生命周期一变，原本靠「进程消失」隐式清理的状态就全都留在了原地，
+> 而下游往往只订阅变化、不读当前值 —— 于是一个永不变化的错误值比一个错误的变化
+> 更难发现。
+
+复现手法见 `agent/tests/lk_probe.py`（真 chromium 驱动生产前端，
+把 token 响应里的 `serverUrl` 改写成 SFU 内网地址绕过 IAP）。
+`lk_probe2.py` 多包一层 `setTimeout`/`clearTimeout` 钩子，用来抓「那个 20 秒
+定时器是谁在什么时候上的弦」。**决定性的回归用例是「断开后立刻重连」** ——
+那一轮不会有任何属性变更事件，能过才说明前端补丁真生效了。
 
 ### 为什么要自己写混音，框架那套不够用
 

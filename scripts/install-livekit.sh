@@ -486,6 +486,7 @@ install_frontend() {
     ( cd "$FRONTEND_DIR" && git fetch --quiet origin && git checkout --quiet "$FRONTEND_REF" ) \
         || warn "checkout $FRONTEND_REF 失败, 用工作树当前版本"
     frontend_apply_overlay
+    register_library_patches
     write_frontend_env
     # 不能用 --frozen-lockfile: 覆盖层可能引入上游 lock 里没有的依赖,
     # 那时 frozen 会直接失败而不是解开.
@@ -494,6 +495,37 @@ install_frontend() {
     log "  pnpm build..."
     ( cd "$FRONTEND_DIR" && pnpm build 2>&1 | tail -5 )
     install_frontend_unit
+}
+
+register_library_patches() {
+    # 覆盖层里的 patches/*.patch 只是躺在磁盘上的文件, pnpm 不会自己发现它们 ——
+    # 必须在 package.json 的 pnpm.patchedDependencies 里点名, 下一次 pnpm install
+    # 才会打. 漏了这步不报错, 只是补丁静默不生效, 表现成「装完还是老 bug」.
+    #
+    # 不用 `pnpm patch-commit`: 那条命令要先 `pnpm patch` 开一份工作副本,
+    # 而我们的补丁是现成的. 直接改 package.json 更直白, 也幂等.
+    local dir="$FRONTEND_DIR/patches"
+    [[ -d "$dir" ]] || return 0
+    local n; n="$(find "$dir" -name '*.patch' | wc -l)"
+    [[ "$n" -gt 0 ]] || return 0
+
+    FRONTEND_DIR="$FRONTEND_DIR" python3 - <<'PY'
+import json, os, pathlib
+
+root = pathlib.Path(os.environ["FRONTEND_DIR"])
+pkg_path = root / "package.json"
+pkg = json.loads(pkg_path.read_text())
+
+# 文件名就是 pnpm 的 key: `<包名, / 换成 __>@<版本>.patch`
+entries = {
+    p.stem.replace("__", "/"): f"patches/{p.name}"
+    for p in sorted((root / "patches").glob("*.patch"))
+}
+pkg.setdefault("pnpm", {}).setdefault("patchedDependencies", {}).update(entries)
+pkg_path.write_text(json.dumps(pkg, indent=2) + "\n")
+for k in entries:
+    print(f"  登记库补丁 {k}")
+PY
 }
 
 install_frontend_unit() {
@@ -861,8 +893,11 @@ do_refresh() {
     fi
     if [[ "$WANT_FRONTEND" == true ]]; then
         [[ -d "$FRONTEND_DIR" ]] || die "$FRONTEND_DIR 不存在, 跑 install 而不是 refresh"
-        frontend_apply_overlay; write_frontend_env; install_frontend_unit
-        log "  注意: refresh **不 build**. 改了补丁文件要自己跑 (cd $FRONTEND_DIR && pnpm build)"
+        frontend_apply_overlay; register_library_patches; write_frontend_env; install_frontend_unit
+        # 库补丁（patches/*.patch）比应用代码多一步: 它要 pnpm install 才会打进
+        # node_modules, 光 build 是不够的.
+        log "  注意: refresh **不 install 也不 build**. 改了应用层补丁跑"
+        log "        (cd $FRONTEND_DIR && pnpm build); 改了 patches/ 下的库补丁要先 pnpm install"
     fi
     if [[ "$WANT_AGENT" == true ]]; then install_agent; fi
     if [[ "$WANT_CADDY" == true ]]; then require_caddy_args; install_caddy_site; fi

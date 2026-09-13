@@ -45,9 +45,11 @@ from typing import AsyncIterator
 import aiohttp
 from dotenv import load_dotenv
 from livekit import rtc
+from google.genai import types as genai_types
 from livekit.agents import (
     Agent,
     AgentSession,
+    APIConnectOptions,
     JobContext,
     WorkerOptions,
     cli,
@@ -450,6 +452,13 @@ async def write_file(path: str, content: str) -> str:
 
 
 # ── 混音池：把房间里所有人的麦克风合成一条流 ──────────────────────────
+# 显式派发用的 worker 名字。ensure_rooms.py 要用同一个字符串，改这里就得改那里。
+_AGENT_NAME = "gemini-live"
+
+# 房间空了多久才放掉 Gemini 会话。刷新页面 / 换设备 / 网络抖一下都会让房间短暂
+# 空一瞬，那种时候不该把对话历史一起丢掉，所以给一分钟缓冲。
+_IDLE_GRACE_SEC = float(os.getenv("GEMINI_IDLE_GRACE_SEC", "60"))
+
 _MIX_SAMPLE_RATE = 24000      # 跟框架 AudioInputOptions 的默认值对齐
 _MIX_NUM_CHANNELS = 1
 _MIX_FRAME_MS = 50
@@ -504,6 +513,12 @@ class MixedRoomAudioInput(AudioInput):
         self._sources: dict[str, tuple[rtc.AudioStream, AsyncIterator[rtc.AudioFrame]]] = {}
         # 关流的 task 要留个强引用，否则 asyncio 只持弱引用，可能没跑完就被 GC 掉。
         self._closing: set[asyncio.Task] = set()
+        # 「房间里此刻有没有活着的人声轨」。只用来做日志和排障 ——
+        # **会话生命周期不看它**，看的是 _Presence（有没有人进房）。
+        # 原因见 _Presence 的文档：前端有个 20 秒握手死线，等到有人开口才建会话
+        # 就一定会超时。留着这个信号是因为「订阅了几路」和「有没有人在房间」是
+        # 两件事，分开看才查得出「人在但麦克风没推上来」这类问题。
+        self.voice_present = asyncio.Event()
 
         room.on("track_subscribed", self._on_track_subscribed)
         room.on("track_unsubscribed", self._on_track_unsubscribed)
@@ -555,6 +570,7 @@ class MixedRoomAudioInput(AudioInput):
         paced = self._paced(stream)
         self._sources[sid] = (stream, paced)
         self._mixer.add_stream(paced)
+        self.voice_present.set()
         logger.info("混音池 +1：%s（共 %d 路）", participant.identity, len(self._sources))
 
     def _remove(self, sid: str, why: str) -> None:
@@ -567,6 +583,8 @@ class MixedRoomAudioInput(AudioInput):
         task = asyncio.create_task(self._close_source(stream))
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
+        if not self._sources:
+            self.voice_present.clear()
         logger.info("混音池 -1：%s（%s，共 %d 路）", sid, why, len(self._sources))
 
     @staticmethod
@@ -632,12 +650,8 @@ class MixedRoomAudioInput(AudioInput):
         await self._mixer.aclose()
 
 
-async def entrypoint(ctx: JobContext) -> None:
-    # 房间名就是 bot 名。一个 worker 伺候所有房间 —— LiveKit 给**每个房间**派一个
-    # 独立的 job 进程，所以六个 bot 不需要六个 systemd unit，进来自己认房间就行。
-    persona = load_persona(ctx.room.name)
-
-    session = AgentSession(
+def _build_session(persona: Persona) -> AgentSession:
+    return AgentSession(
         # 导入路径是 `livekit.plugins.google.realtime`, 不是老文档里那个
         # `google.beta.realtime` —— 后者在 1.8.1 里已经不是真模块了
         # (`hasattr(google.beta, 'realtime')` 为 True 但 import 报 ModuleNotFound)。
@@ -650,10 +664,33 @@ async def entrypoint(ctx: JobContext) -> None:
             voice=persona.voice,
             temperature=0.8,
             instructions=persona.instructions,
+            # 会话时长：官方文档写「不开压缩时纯音频会话上限 15 分钟」
+            # (ai.google.dev/gemini-api/docs/live-session)。开了滑动窗压缩就
+            # **没有上限**了 —— 超过 trigger_tokens 就把最老的一段丢掉接着说，
+            # 而不是把整个会话掐掉。两个参数都留空 = 用服务端默认阈值。
+            #
+            # ⚠️ 这条治的**不是**我们现在每 2 分半一次的 1008。那个是
+            # gemini-3.1-flash-live-preview 这个 preview 模型自己的毛病：
+            # 约 170 秒一到就断，**跟有没有人说话、有没有压缩都无关**，
+            # 而且断之前不发 goAway 也不发 sessionResumptionUpdate
+            # （官方论坛 172602 号帖，2.5 Live 没这问题）。
+            # 治它只能靠下面那个 conn_options 把重连做得又快又稳。
+            # 压缩在这里是拆掉 15 分钟那道**另一个**天花板，别把两件事记混。
+            context_window_compression=genai_types.ContextWindowCompressionConfig(
+                sliding_window=genai_types.SlidingWindow(),
+            ),
+            # 重连预算。默认是 max_retry=3 / retry_interval=2s，对「每 170 秒
+            # 必断一次」这种节奏太紧：第一次重试是 0.1 秒（plugin 写死的），
+            # 之后每次都等满 retry_interval。收到数据就清零计数
+            # (realtime_api.py:1062)，所以正常情况下永远用不到 8 次 ——
+            # 8 是留给 Gemini 侧短暂抽风的，别让它把整个 agent 拖死。
+            conn_options=APIConnectOptions(max_retry=8, retry_interval=0.5, timeout=10.0),
         ),
     )
-    await session.start(
-        agent=Agent(
+
+
+def _build_agent(persona: Persona) -> Agent:
+    return Agent(
             instructions=persona.instructions,
             # 最后那个 GoogleSearch() 不是函数工具，是 Gemini 的**内置**工具
             # （provider tool）—— 检索在 Google 服务端完成，不经过这个进程。
@@ -678,40 +715,235 @@ async def entrypoint(ctx: JobContext) -> None:
                 write_file,
                 GoogleSearch(),
             ],
-        ),
-        room=ctx.room,
-        room_options=RoomOptions(
-            # 音频输入我们自己接管（下面那个混音池），所以把框架那条关掉。
-            # 关掉的只是 RoomIO 的音频输入，**订阅不受影响** ——
-            # `AgentSession.start()` 会去跑 `job_ctx.connect()`，默认
-            # AutoSubscribe.SUBSCRIBE_ALL，所有音轨照常订阅、track_subscribed
-            # 照常触发。副作用只有两个：pre_connect_audio（进房前那几百毫秒的
-            # 缓冲）和 plugin 的 noise_cancellation 钩子（我们没用）。
-            audio_input=False,
-            # 默认 True = 「跟 agent 绑定的那个参与者一走，就把这个 job 关掉」。
-            # 在共享房间里这是错的：手机退出不该把笔记本的会话一起收走。
-            # 关掉之后由 SFU 的 empty_timeout（实测我们这套是 300 秒）兜底 ——
-            # 房间真空五分钟才销毁，期间换设备回来还是同一个 Gemini 会话、
-            # 同一段对话历史。
-            close_on_disconnect=False,
-        ),
     )
 
-    # 接管输入：全房间混音，而不是只听第一个进来的人。
-    mixed = MixedRoomAudioInput(ctx.room)
-    session.input.audio = mixed
-    ctx.add_shutdown_callback(mixed.aclose)
 
-    # 这里**不能**用 `session.generate_reply()` 让它先开口打招呼。
-    # 3.1 Live 不支持服务端主动触发生成，plugin 会打
-    #   "generate_reply is not compatible with 'gemini-3.1-flash-live-preview'"
-    # 然后 agent 层再补一条 ERROR "failed to generate a reply"。
-    # 不是配置问题，是这个模型当前的能力边界 —— 所以由用户先说话。
-    # （`session.say()` 同样不行：Gemini 的 supports_say 是 False。）
+_ROOM_OPTIONS = RoomOptions(
+    # 音频输入我们自己接管（那个混音池），所以把框架那条关掉。
+    # 关掉的只是 RoomIO 的音频输入，**订阅不受影响** ——
+    # `AgentSession.start()` 会去跑 `job_ctx.connect()`，默认
+    # AutoSubscribe.SUBSCRIBE_ALL，所有音轨照常订阅、track_subscribed
+    # 照常触发。副作用只有两个：pre_connect_audio（进房前那几百毫秒的
+    # 缓冲）和 plugin 的 noise_cancellation 钩子（我们没用）。
+    audio_input=False,
+    # 默认 True = 「跟 agent 绑定的那个参与者一走，就把这个 job 关掉」。
+    # 在共享房间里这是错的：手机退出不该把笔记本的会话一起收走。
+    # 房间现在是常驻的（SFU 侧 empty_timeout / departure_timeout 都设成了
+    # 十年），所以这个 job 进程从房间建起来那一刻活到天荒地老 —— 换设备、
+    # 掉线重连回来，都不用重新派 job。
+    close_on_disconnect=False,
+)
+
+
+def _humans(room: rtc.Room) -> int:
+    """房间里有几个**人**。
+
+    `bunny-speaker`（本体那条只推不收的流）和 agent 自己都是 AGENT kind，
+    不算人 —— 算进来的话 bunny 的会话就永远放不掉了。
+    """
+    return sum(1 for p in room.remote_participants.values() if p.kind in DEFAULT_PARTICIPANT_KINDS)
+
+
+def _who(p: rtc.RemoteParticipant | rtc.LocalParticipant) -> str:
+    """一个参与者的一行画像：身份 / kind / 属性 / 发布了几条轨。
+
+    这三样凑齐才看得出「前端会挑中谁当语音助手，以及它认为那人是什么状态」。
+    前端的判据是**第一个 kind=AGENT 且没有 `lk.publish_on_behalf` 的参与者**
+    （useAgent.ts:528-536），拿到之后看它的 `lk.agent.state` —— 所以只打身份
+    是不够的。
+
+    2026-09-13「每个房间都在第 20 秒断」就是靠这行日志排掉了两个嫌疑：本体那条
+    `<bot>-speaker` 不是真凶（hulk 房里根本没有它，照样断），真凶是
+    **空闲 agent 身上粘着的 `lk.agent.state: listening`** —— 见
+    `_clear_agent_state`。
+    """
+    attrs = ",".join(f"{k}={v}" for k, v in sorted(p.attributes.items())) or "-"
+    return f"{p.identity}(kind={p.kind} attrs=[{attrs}] tracks={len(p.track_publications)})"
+
+
+def _roster(room: rtc.Room) -> str:
+    """房间里所有远端参与者的画像，逗号分隔。"""
+    return " | ".join(_who(p) for p in room.remote_participants.values()) or "（空）"
+
+
+class _Presence:
+    """「房间里有没有人」，做成一个可等待的信号。
+
+    为什么判据是**人在不在**而不是**有没有音频帧**：前端（@livekit/components-react
+    的 useAgent）在用户连上后起一个 **20 秒**的定时器，到点去看 agent 报没报
+    `lk.agent.state`，没报就直接判 "Agent joined the room but did not complete
+    initializing" 并把会话掐掉（useAgent.ts:329-341）。而那个属性是
+    AgentSession 起来之后才写的。
+
+    按音频帧建会话就踩这个：agent 人在房间里坐着、但不建会话 ⇒ 属性一直不存在
+    ⇒ 每个房间都必然在第 20 秒被前端判死。实测四次尝试全是 19-20 秒离开。
+
+    所以门槛前移到「有人进房」—— 进房到握手完成通常一秒出头，离 20 秒很远。
+    「没人跟它说话就断」这条要求本身不受影响：房间空了照样放掉会话。
+    """
+
+    def __init__(self, room: rtc.Room) -> None:
+        self._room = room
+        self.present = asyncio.Event()
+        room.on("participant_connected", self._on_connected)
+        room.on("participant_disconnected", self._on_disconnected)
+        self._recount(None)
+        logger.info("房间 %s 进场清点：%s", room.name, _roster(room))
+
+    def _on_connected(self, p) -> None:
+        logger.info("＋进房 %s", _who(p))
+        self._recount(p)
+
+    def _on_disconnected(self, p) -> None:
+        logger.info("－离开 %s", _who(p))
+        self._recount(p)
+
+    def _recount(self, _participant) -> None:
+        if _humans(self._room):
+            self.present.set()
+        else:
+            self.present.clear()
+
+    async def wait_until_empty(self, grace: float) -> None:
+        """等到「房间里没人，并且连续没人满 grace 秒」。中途有人回来就重新计时。
+
+        为什么要缓冲：刷新页面、从手机切到电脑、网络抖一下重连，都会让房间短暂
+        空一瞬。这种时候把 Gemini 会话连同对话历史一起丢掉是错的。
+
+        有人时按秒轮询，不去给 Event 加「等清空」的原语 —— asyncio.Event 只能等
+        set 不能等 clear，自己造一个要处理 set/clear 之间的竞态，而这里 1 Hz 的
+        轮询成本可以忽略、正确性一眼能看穿。
+        """
+        while True:
+            if self.present.is_set():
+                await asyncio.sleep(1)
+                continue
+            try:
+                await asyncio.wait_for(self.present.wait(), timeout=grace)
+            except asyncio.TimeoutError:
+                return
+
+
+async def _unpublish_agent_tracks(room: rtc.Room) -> None:
+    """把 AgentSession 发布的音轨收回来。
+
+    **框架不会自己收。** `_ParticipantAudioOutput.aclose()` 只关音源，没有
+    unpublish（room_io/_output.py:102-108）。会话每重建一次就在 agent 身上多留
+    一条死轨，客户端会把它们全订阅了。实测 bunny 关一次会话后挂着两条。
+
+    这个 job 进程自己不发布任何别的东西，所以「本地发布的音轨」就等价于
+    「上一次会话留下的」，可以整片收掉。本体那条 `<bot>-speaker` 是**另一个
+    参与者**，不在这里。
+    """
+    for pub in list(room.local_participant.track_publications.values()):
+        if pub.kind == rtc.TrackKind.KIND_AUDIO:
+            try:
+                await room.local_participant.unpublish_track(pub.sid)
+            except Exception:  # noqa: BLE001 — 收不回来也不该拖垮下一轮会话
+                logger.warning("回收残留音轨失败：%s", pub.sid, exc_info=True)
+
+
+async def _clear_agent_state(room: rtc.Room) -> None:
+    """会话放掉之后，把 `lk.agent.state` 从自己身上抹掉。
+
+    **这不只是卫生问题，它是 2026-09-13「每次都在第 20 秒断」的一半病因。**
+
+    `AgentSession` 只管往上写状态，散场不负责擦。于是一个空房间里的常驻 agent
+    会一直挂着 `lk.agent.state: listening` —— 明明没有任何 Gemini 连接。下一个
+    人进来、新会话起来，框架再写一次 `listening`：**值没变，SDK 就不发
+    AttributesChanged**。而前端的 `useAgent` 只在挂载那一刻 seed 一次属性
+    （那时还没连上房间，seed 的是空对象），之后纯靠事件学 —— 事件永远不来，
+    它就永远认为对方还在 connecting，20 秒握手死线一到判死。
+
+    擦掉之后，下一轮的 `listening` 就是一次货真价实的变化，事件正常发出。
+    顺带把语义摆正了：没有会话的时候本来就不该宣称自己在听。
+
+    （前端那半边也修了 —— `patches/@livekit__components-react@2.9.20.patch`
+    让它订阅前先回读一次当前属性。两边都改是故意的：只改前端治不了「空闲
+    agent 撒谎说自己 ready」，只改这边治不了「人在 grace 期内重连」。）
+
+    空字符串就是删除：服务端把 value 为 "" 的 key 从属性表里摘掉。
+    """
+    try:
+        await room.local_participant.set_attributes({"lk.agent.state": ""})
+    except Exception:  # noqa: BLE001 — 擦不掉也不该拖垮下一轮会话
+        logger.warning("清 lk.agent.state 失败", exc_info=True)
+
+
+async def entrypoint(ctx: JobContext) -> None:
+    # 房间名就是 bot 名。一个 worker 伺候所有房间 —— LiveKit 给**每个房间**派一个
+    # 独立的 job 进程，所以六个 bot 不需要六个 systemd unit，进来自己认房间就行。
+    persona = load_persona(ctx.room.name)
+
+    # 房间常驻 ⇒ 这个 job 也常驻。但**Gemini 连接不常驻**：房间空着的时候占一条
+    # Live 连接毫无意义，而且那条连接每 170 秒自己断一次、每次都刷一条 error。
+    # 所以这里把两件事拆开：
+    #   房间 + job 进程 + persona + 工具 —— 一直在，进房即可说话，零启动延迟；
+    #   Gemini 会话                     —— 有人进房就建，房间空满 grace 秒就放掉。
+    #
+    # 判据是「有没有人」不是「有没有声」—— 前端有个 20 秒握手死线，详见 _Presence。
+    await ctx.connect()
+    mixed = MixedRoomAudioInput(ctx.room)
+    ctx.add_shutdown_callback(mixed.aclose)
+    presence = _Presence(ctx.room)
+
+    while True:
+        await presence.present.wait()
+        logger.info("房间 %s 有人进来了（%d 人），建立 Gemini 会话", ctx.room.name, _humans(ctx.room))
+        session = _build_session(persona)
+        # AudioInput 自己是无状态的（io.py:41 只存 label/source），跨会话复用安全。
+        session.input.audio = mixed
+
+        # 前端等的就是 `lk.agent.state` 这个属性，所以它每次变化都值得留一行 ——
+        # 「前端说没初始化完」和「我们这边压根没报状态」是两回事，没有这行日志
+        # 就只能靠猜。
+        session.on(
+            "agent_state_changed",
+            lambda ev: logger.info("lk.agent.state: %s → %s", ev.old_state, ev.new_state),
+        )
+
+        await session.start(agent=_build_agent(persona), room=ctx.room, room_options=_ROOM_OPTIONS)
+        # 握手成不成，看的是**这一行里有没有 lk.agent.state**，以及房间里有没有
+        # 别的 kind=AGENT 参与者在它前面挡着（那个会被前端误认成助手本人）。
+        logger.info("会话已起：我=%s ‖ 同房=%s", _who(ctx.room.local_participant), _roster(ctx.room))
+
+        # 这里**不能**用 `session.generate_reply()` 让它先开口打招呼。
+        # 3.1 Live 不支持服务端主动触发生成，plugin 会打
+        #   "generate_reply is not compatible with 'gemini-3.1-flash-live-preview'"
+        # 然后 agent 层再补一条 ERROR "failed to generate a reply"。
+        # 不是配置问题，是这个模型当前的能力边界 —— 所以由用户先说话。
+        # （`session.say()` 同样不行：Gemini 的 supports_say 是 False。）
+
+        try:
+            await presence.wait_until_empty(_IDLE_GRACE_SEC)
+        finally:
+            await session.aclose()
+            await _unpublish_agent_tracks(ctx.room)
+            await _clear_agent_state(ctx.room)
+        logger.info("房间空满 %.0f 秒，放掉 Gemini 会话，等下一个人进来", _IDLE_GRACE_SEC)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    # 不传 agent_name → 自动派发：房间一建起来 worker 就进去。
-    # 传了名字就变成显式派发，前端签 token 时必须带同一个名字，多一处能配错的地方。
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    # 起名字 = 关掉自动派发，改由 ensure_rooms.py 用 AgentDispatchService 显式派。
+    #
+    # 为什么不能用自动派发：自动派发只在**房间被创建的那一刻**触发一次。房间现在
+    # 是常驻的，那一刻一辈子只有一次 —— 这个 worker 一重启，所有已存在的房间就
+    # 永远没有 agent 了，除非把房间删掉重建（会把里面的人踢下线）。
+    # 实测踩过：bunny 的房间因为 /lkon 早就在了，重启后五个新房间都有 agent，
+    # 只有 bunny 是个空壳。
+    #
+    # 显式派发没有这个问题：派发是幂等的、可以随时补，ensure_rooms.py 每 5 分钟
+    # 对着「房间里有没有 gemini agent」这个**事实**校一次，缺了就补。
+    #
+    # 注意前端**不用**改：token 里的 roomConfig.agents 是另一条派发路径，
+    # 走 API 派发时前端什么都不用带。
+    #
+    # drain_timeout 默认 3600 秒 —— 那个默认值假设 job 会自己跑完。我们的 job 是
+    # 常驻的 while True，永远不会自己结束，所以收到 SIGTERM 后它会一直挂着，
+    # 直到 systemd 的 TimeoutStopSec 到点补一刀 SIGKILL。旧 job 拖着不走的这段
+    # 时间里，它还挂在房间的参与者列表里，ensure_rooms.py 会把它误判成
+    # 「agent 在岗」而不补派 —— 实测就这么漏了五个房间。给 5 秒，重启干净利落。
+    cli.run_app(
+        WorkerOptions(entrypoint_fnc=entrypoint, agent_name=_AGENT_NAME, drain_timeout=5)
+    )

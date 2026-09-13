@@ -1,19 +1,11 @@
-# LiveKit Gemini Live agent —— 直接依赖，2026-09-12 实跑验证的版本
-#
-# 只列直接依赖，间接依赖交给 pip 解。整个 venv 装完约 634 MB
-# （torch + onnxruntime 是大头，被 turn-detector / silero 拖进来的），
-# 部署前先看目标机器的剩余磁盘。
-#
-# livekit-agents 1.8.1 相对我们上一版（1.5.16）的关键差异：
-#   - realtime 的正确导入路径是 `livekit.plugins.google.realtime`，
-#     旧的 `google.beta.realtime` 只是 hasattr 为真，import 会 ModuleNotFound
-#   - provider 内置工具（GoogleSearch 等）能和函数工具**混用**，
-#     但仅限 Gemini 3 Developer API —— Vertex 不支持，见 agent.py 里的长注释
-#   - Python 需要 3.10+，本机实跑 3.12.3
-
+google-genai==2.23.0
+livekit==1.1.18
 livekit-agents==1.8.1
+livekit-api==1.2.1
+livekit-blingfire==1.1.0
+livekit-local-inference==0.2.7
 livekit-plugins-google==1.8.1
 livekit-plugins-silero==1.8.1
 livekit-plugins-turn-detector==1.8.1
+livekit-protocol==1.1.26
 python-dotenv==1.2.3
-aiohttp==3.14.3

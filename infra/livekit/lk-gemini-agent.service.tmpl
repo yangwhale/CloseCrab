@@ -26,6 +26,13 @@ Environment=HOME=__HOME__
 # 症状具有迷惑性：日志里 "registered worker" 是绿的，坏的是下一层。
 Environment=TMPDIR=/tmp
 ExecStart=__AGENT_DIR__/.venv/bin/python __AGENT_DIR__/agent.py start
+# 重启 = 所有 job 被杀。房间是常驻的，不会再有「房间被创建」这个事件来触发
+# 自动派发，所以必须自己把 agent 补回去 —— 否则房间一直空着，要等下一个
+# timer 周期（最多 5 分钟）才自愈，那几分钟里进房的人在对着空气说话。
+# --reclaim 会先把房间里的旧 agent 尸体踢干净再无条件补派：SFU 的参与者列表
+# 在 worker 重启后十几秒内都还挂着死掉的 job，不能拿它判「在不在岗」。
+# sleep 只是等 worker 完成注册，5 秒足够。
+ExecStartPost=/bin/sh -c '( sleep 5; exec /usr/bin/python3 __AGENT_DIR__/ensure_rooms.py --reclaim ) &'
 Restart=on-failure
 RestartSec=5
 

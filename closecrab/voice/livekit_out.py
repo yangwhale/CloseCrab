@@ -134,6 +134,21 @@ def _build_token(cfg: dict, identity: str) -> str:
         .with_identity(identity)
         .with_name(identity)
         .with_kind("agent")
+        # 必须带这个属性，否则前端会把**本体这条流**当成语音助手本人。
+        #
+        # `@livekit/components-react` 的 useAgent / useVoiceAssistant 是这么找
+        # 助手的（useAgent.ts:528-536）：在远端参与者里取**第一个** kind=AGENT
+        # 且属性里**没有** `lk.publish_on_behalf` 的。本体这条流恰好两条都满足，
+        # 而且它比 agent job 早进房 —— 于是前端一直盯着一个永远不会写
+        # `lk.agent.state` 的参与者看，20 秒握手死线一到就判
+        # "Agent joined the room but did not complete initializing"。
+        # 真正的助手就在隔壁好好地 listening，前端根本没在看它。
+        #
+        # 带上这个 key 就被那条 find 跳过了。值填房间名（= bot 名），它不等于
+        # 任何 agent 的 identity，所以也不会被当成谁的 worker —— 就是「我不是
+        # 助手本人」这一个意思。音频照常播：房间音频走 RoomAudioRenderer，
+        # 它渲染所有已订阅音轨，跟挑不挑得中助手无关。
+        .with_attributes({"lk.publish_on_behalf": cfg["room"]})
         .with_grants(
             api.VideoGrants(
                 room_join=True,
