@@ -61,7 +61,9 @@
 | `app/page.tsx` | 把网址上的 `?room=` 读出来往下传（Next 15 的 `searchParams` 是 Promise，必须 await） |
 | `components/app/app.tsx` | 把房间名拼进 token 端点的查询串 |
 | `app/admin/page.tsx` | 房间管理台（谁在房间里 / 静音 / 踢人 / 关房间）—— 自建 OSS **不带**任何管理界面，官方 dashboard 是 Cloud 的产品 |
-| `app/api/admin/rooms/route.ts` | 上面那个页面的后端，包了 RoomService RPC |
+| `app/api/admin/rooms/route.ts` | 上面那个页面的后端，包了 RoomService RPC。**自己不做正面鉴权**（靠 IAP），只加了一条「非 IAP 入口一律 404」的拒绝，见下面「原生 app 入口」 |
+| `app/api/rooms/route.ts` | 房间目录。名单来自 `ALLOWED_ROOMS`（跟换 token 同一份），在线状态查 SFU。查不到 SFU 时返回 `null` 而不是 `false` —— 「不知道」和「离线」在客户端要画成不同颜色 |
+| `lib/native-auth.ts` | 原生入口的 HMAC 验签。两个 API 共用一份，签名格式分叉一个字符就是一个说不清的 403 |
 | `@livekit__components-react@2.9.20.patch` | **库补丁**，不是应用代码。放到 `~/livekit-frontend/patches/` 下，`package.json` 的 `pnpm.patchedDependencies` 引它，`pnpm install` 时自动打。修的是 `useAgent` 不回读参与者当前属性 —— 见下面「常驻 agent 会粘状态」。**改完要 `pnpm build` 再重启 unit**，跑的是 `next start` 不是 dev server |
 
 ## 一个 bot 一个房间（2026-09-12）
@@ -174,6 +176,76 @@ agent 会听见自己刚说的话。戴耳机或静音其中一台。
 LiveKit 规定一个房间里同一个 identity 只能有一个连接，手机一进来就把笔记本踢下线，
 而且表现得像「随机掉线」。1/10000 在两台设备上不算小。已换 `crypto.randomUUID()`。
 
+## 原生 app 入口（`/native/*`，2026-09-13）
+
+iOS app（`yangwhale/agent-starter-swift`）跟浏览器**用同一套后端、不同一条入口**。
+
+### 为什么必须另开一条
+
+IAP 的登录凭据是**浏览器 cookie**，按主机名发。原生 app 没有浏览器，
+所以对它来说 IAP 不是「多一道门」而是「永远进不去」：取 token 的 POST 被 302
+到 Google 登录页，WebSocket 升级同样被 302，而客户端不会跟着重定向做握手。
+
+信令本来就是设计成公开的 —— 真正的门是那张 15 分钟的 JWT。所以只有**发 JWT 的
+那个端点**真正需要保护，把它从 IAP 换成 HMAC 验签，安全性没有降级。
+
+### 三层各干什么
+
+| 层 | 干的事 |
+|---|---|
+| GCLB url-map | `/native/*` 这条 pathRule 指到**不开 IAP** 的 backend service，其余仍走 IAP 那个 |
+| Caddy | `/native/*` 上**覆盖**写入 `X-CC-Entry: native`，浏览器那两条路上**显式 unset**；并把 `/native` 前缀剥掉 |
+| Next.js | 看到 `X-CC-Entry: native` 就要求 HMAC 验签（`lib/native-auth.ts`），并回 `LIVEKIT_NATIVE_URL` 而不是 `LIVEKIT_URL` |
+
+那个 unset **不是洁癖**：少了它，任何人从浏览器那条路带一个自己写的
+`X-CC-Entry: native` 进来，就既过了 IAP 又骗过下游的入口判断，验签直接被跳过。
+Caddy 是唯一入口，所以「从哪条路进来的」只能由它说了算。
+
+### ⚠️ `handle_path` 剥前缀 = 把整棵路由树再暴露一遍
+
+开这个口子的**第一版就破了一次**，值得写下来：
+
+`/native/*` 看起来是一条很窄的新路径，但 `handle_path` 会把前缀剥掉，所以
+`/native/api/admin/rooms` 打到 Next.js 眼里就是 `/api/admin/rooms` ——
+那个管理台路由**自己不带任何鉴权**（它一直靠 IAP 挡着），于是公网上凭空多了一个
+不用签名的 `deleteRoom` / `removeParticipant` 接口，裸奔约一小时才被发现。
+
+现在两道都挡：Caddy 对 `/native/admin*` 和 `/native/api/admin/*` 直接 404，
+路由自己再用 `isNativeEntry()` 拒一次。两道都留着 —— 反代的路由顺序是会被人改的，
+代码里那条不会。
+
+**教训不是「别开豁免」，是开之前把「前缀剥掉之后能打到哪些路由」一条条数一遍。**
+
+### 验签
+
+`HMAC-SHA256(CC_NATIVE_SECRET, "<scope>:<unix 秒>")`，十六进制小写，±300 秒时窗。
+scope 对 `/api/token` 是**房间名**、对 `/api/rooms` 是字面量 `rooms`。
+
+把 scope 签进去是为了让一张签名只能用在它申请的那个房间上 —— 否则抓到一次
+`?room=bunny` 的请求，改成 `?room=jarvis` 就能重放。
+
+密钥没配 = **整条路关掉**（503），不是放行。一个忘了配的部署应该表现成
+「手机连不上」，而不是「公网上多了个谁都能调的 token 接口」。
+
+### 改完怎么验
+
+url-map 是**逐台 GFE** 生效的，改完几分钟内同一个 URL 两次请求会打到新旧两套配置
+上，看起来像「时灵时不灵」。**别去 debug 逻辑**，轮询到连续几轮结果一致再判断。
+
+跑完这几条才算通（2026-09-13 实测全过）：
+
+| 用例 | 期望 |
+|---|---|
+| `/native/api/rooms` 无签名 | 401 |
+| `/native/api/rooms` 正确签名 | 200 + 房间 JSON |
+| `/native/api/token?room=<bot>` 正确签名 | 200 |
+| 同一签名改成别的房间重放 | 403 |
+| `?room=` 不在白名单 | 400 |
+| `/native/api/admin/rooms` 无论签不签 | 404 |
+| 裸 `/api/rooms` + 伪造 `X-CC-Entry: native` | IAP 登录页 |
+| `/native/lk/rtc/validate?access_token=<jwt>` | 200 `success` |
+| 裸 `/lk/rtc/validate?access_token=<jwt>` | IAP 登录页 |
+
 ## 占位符约定
 
 模板里所有 `__XXX__` 都由 `scripts/install-livekit.sh` 的 `render()` 替换，
@@ -190,6 +262,8 @@ LiveKit 规定一个房间里同一个 identity 只能有一个连接，手机�
 | `__DEFAULT_AGENT_NAME__` | 显式派发的 agent 名 | `--agent-name`。**现役部署留空** —— Gemini Live agent 匿名注册走自动派发，填了名字两边都不报错、谁也等不到谁 |
 | `__LIVEKIT_ADMIN_URL__` | `/admin` 调 RoomService 用的内网 http 地址 | `--admin-url` |
 | `__ALLOW_INSECURE_TOKEN__` | 是否开放无鉴权 token 端点 | `--allow-insecure-token`；**前面必须有 IAP / basicauth 挡着** |
+| `__CC_NATIVE_SECRET__` | 原生 app 验签用的共享密钥 | 首次 `openssl rand -hex 32` 生成并发布到 Firestore `config/livekit.native_secret`；之后复用。**不随 `--rotate-keys` 轮换** —— 换它要走到每台手机上重填，用 `--rotate-native-secret` 显式说 |
+| `__LIVEKIT_NATIVE_URL__` | 回给原生 app 的 signaling 地址 | 从 `--public-wss-url` 推（`…/lk` → `…/native/lk`），`--native-wss-url` 可覆盖。`direct` 形态下留空（那套整站不过 IAP，不需要这条路） |
 | `__FRONTEND_DIR__` / `__AGENT_DIR__` | 前端、agent 的安装目录 | 脚本默认 `$HOME/livekit-frontend`、`$HOME/lk-gemini-agent`（同名环境变量可覆盖） |
 | `__PNPM_BIN__` / `__PNPM_BIN_DIR__` / `__NODE_BIN_DIR__` | systemd unit 里要写死的绝对路径 | `command -v pnpm` / `command -v node` 推导 —— **systemd 不继承登录 shell 的 PATH，nvm 装的 node 必须写全路径** |
 | `__FRONTEND_DOMAIN__` / `__SIGNALING_DOMAIN__` | Caddy 站点域名 | `--frontend-domain` / `--signaling-domain`（后者只有 `direct` 模式要） |
@@ -287,6 +361,10 @@ scripts/install-livekit.sh --component frontend --refresh-templates
 scripts/install-livekit.sh --component sfu --rotate-keys
 # 之后要重启所有用 voice 的 bot（从 Firestore 重新拉 key），
 # 并在 agent / frontend 那两台跑 --refresh-templates 把新 key 落到本地 .env
+
+# 换原生 app 的共享密钥：**会让所有已装的 iOS app 立刻 401**，
+# 必须挨台设备在「设置 → 共享密钥」里重填。所以它不跟 --rotate-keys 走。
+scripts/install-livekit.sh --component frontend --rotate-native-secret
 
 # 卸载某个组件：停服务 + 删 unit + 删本组件装的二进制
 scripts/install-livekit.sh --component agent --uninstall

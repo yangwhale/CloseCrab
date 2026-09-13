@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { AccessToken, type AccessTokenOptions, type VideoGrant } from 'livekit-server-sdk';
 import { RoomConfiguration } from '@livekit/protocol';
+import { checkNativeAuth, isNativeEntry } from '@/lib/native-auth';
 
 type ConnectionDetails = {
   serverUrl: string;
@@ -13,6 +14,9 @@ type ConnectionDetails = {
 const API_KEY = process.env.LIVEKIT_API_KEY;
 const API_SECRET = process.env.LIVEKIT_API_SECRET;
 const LIVEKIT_URL = process.env.LIVEKIT_URL;
+// 原生 app 的信令地址。跟浏览器那个**不是同一个** —— LIVEKIT_URL 指向
+// `/lk`，那条路在 IAP 后面，手机握手会被弹到登录页。native 要走 `/native/lk`。
+const LIVEKIT_NATIVE_URL = process.env.LIVEKIT_NATIVE_URL;
 
 // don't cache the results
 export const revalidate = 0;
@@ -74,9 +78,22 @@ export async function POST(req: Request) {
         return new NextResponse(`room not allowed: ${roomParam}`, { status: 400 });
       }
       roomName = roomParam;
+    } else if (isNativeEntry(req)) {
+      // native 那条路是对公网开的，不给「不带 room 就随机开一间」这种口子 ——
+      // 那等于一个匿名建房接口。而且签名是按房间名签的，没有房间名就没法验。
+      return new NextResponse('native 入口必须带 ?room=', { status: 400 });
     } else {
       roomName = `voice_assistant_room_${Math.floor(Math.random() * 10_000)}`;
     }
+
+    // ── native 入口验签 ─────────────────────────────────────────────
+    // 放在这里而不是函数开头，是因为签名是**按房间名签的**，得先把 roomName
+    // 解出来才能验。白名单校验已经在上面过了，所以这时候的 roomName 一定是
+    // 名单里的值，不会被拿去当签名 scope 做什么手脚。
+    //
+    // 浏览器那条路这个函数直接返回 ok —— IAP 已经挡过一道，不重复造轮子。
+    const gate = checkNativeAuth(req, roomName);
+    if (!gate.ok) return new NextResponse(gate.message, { status: gate.status });
 
     // Generate participant token
     const participantName = 'user';
@@ -93,9 +110,22 @@ export async function POST(req: Request) {
       roomConfig
     );
 
+    // 从哪条路进来的，就回哪条路的信令地址。把这件事放服务端而不是让每台设备
+    // 自己填一个覆盖值：换域名、加一层代理的时候不用挨个去改手机。
+    //
+    // native 进来却没配这个变量就直接 500，**不要**退回 LIVEKIT_URL ——
+    // 那会返回一个手机连不上的地址，表现成「token 拿到了但连接超时」，
+    // 是最难往「配置漏了一行」这个方向想的症状。
+    if (isNativeEntry(req) && !LIVEKIT_NATIVE_URL) {
+      throw new Error(
+        'LIVEKIT_NATIVE_URL is not defined but the request came from the native entry'
+      );
+    }
+    const serverUrl = isNativeEntry(req) ? LIVEKIT_NATIVE_URL! : LIVEKIT_URL;
+
     // Return connection details
     const data: ConnectionDetails = {
-      serverUrl: LIVEKIT_URL,
+      serverUrl,
       roomName,
       participantName,
       participantToken,

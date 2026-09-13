@@ -54,3 +54,28 @@ LIVEKIT_ADMIN_URL=__LIVEKIT_ADMIN_URL__
 # ⚠️ 加一个新房间要动**两处**：这里（--allowed-rooms），和 agent 那边的
 #    personas/ 目录。两个进程各自校验一遍是故意的 —— 它们可以不在同一台机器上。
 ALLOWED_ROOMS=__ALLOWED_ROOMS__
+
+# ── 原生 app（iOS）那条入口 ────────────────────────────────────────
+# 浏览器走 /lk，整站在 IAP 后面，靠登录 cookie 过关。原生 app 没有那张 cookie，
+# token 请求和 WebSocket 握手都会被弹到 Google 登录页，所以给它开一条
+# /native/* —— 在 GCLB url-map 上落到不开 IAP 的后端，鉴权换成 HMAC 验签。
+#
+# 两个值都由脚本渲染：URL 从 NEXT_PUBLIC_LIVEKIT_URL 推（同一个地址的两条入口，
+# 不是另找的来源），密钥从 Firestore config/livekit 的 native_secret 取
+# （跟 api_secret 同一个文档，重装能原样取回）。
+#
+# 验签：HMAC-SHA256(CC_NATIVE_SECRET, "<scope>:<unix 秒>")，十六进制小写，
+# ±300 秒时窗。scope 对 /api/token 是房间名、对 /api/rooms 是字面量 rooms ——
+# 签进去是为了让一张签名只能用在它申请的那个房间上，抓到也改不成别的房间重放。
+#
+# **密钥留空 = 整条 native 路关掉**（一律 503），不是「不鉴权放行」。
+# 这是故意的：一个忘了配密钥的部署，应该是「手机连不上」而不是
+# 「公网上多了一个谁都能调的 token 接口」。
+CC_NATIVE_SECRET=__CC_NATIVE_SECRET__
+
+# 给原生 app 回的 signaling 地址。**必须跟 LIVEKIT_URL 不同** ——
+# 那个指向 /lk，手机走过去会被 IAP 弹回来。
+# native 请求进来而这一项是空的 ⇒ /api/token 直接 500，**不回退**到 LIVEKIT_URL。
+# 回退的后果是返回一个手机连不上的地址，症状是「token 拿到了但连接超时」，
+# 最难往「配置漏了一行」这个方向想。
+LIVEKIT_NATIVE_URL=__LIVEKIT_NATIVE_URL__

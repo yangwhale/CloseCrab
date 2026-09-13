@@ -1,16 +1,28 @@
 import { NextResponse } from 'next/server';
 import { RoomServiceClient } from 'livekit-server-sdk';
+import { isNativeEntry } from '@/lib/native-auth';
 
 /**
  * 房间管理 API —— 自建 LiveKit OSS **不带**任何管理界面（实测 1.13.6：
  * 7880 上只有 /rtc 信令和 /twirp/* 的 RPC，没有 UI，/debug/pprof 也是 404）。
  * 官方的 dashboard 是 LiveKit Cloud 的产品，不在 OSS 里。所以这一层是自己补的。
  *
- * 鉴权：**这里故意不做**。这个路由跟整个前端一样坐在 live.higcp.com 后面，
- * 而那个域名是 GCLB + IAP，未登录直接 401，连不到 Next.js。再叠一层自己写的
- * 鉴权只会多一处能配错的地方。⚠️ 前提是别把 /api/admin 加进 url-map 的
- * IAP 豁免路径。cc-alb 目前豁免的是 /assets/* 和 /feishu/*（两条都落到非 IAP
- * 的 cc-bs），而 host 规则是 *，所以 live.higcp.com 下的这两个前缀同样不鉴权。
+ * 鉴权：**靠 IAP，这里只做一道拒绝。** 这个路由跟整个前端一样坐在
+ * live.higcp.com 后面，而那个域名是 GCLB + IAP，未登录直接 401，连不到 Next.js。
+ * 正面的鉴权不在这里重做 —— 再叠一层自己写的只会多一处能配错的地方。
+ *
+ * ⚠️ 上面那句话有个前提：**别让任何绕开 IAP 的入口够到 /api/admin**。
+ * 2026-09-13 就破过一次：给原生 app 开的 `/native/*` 在 url-map 上落到不开 IAP
+ * 的后端，而 Caddy 的 handle_path 会把前缀剥掉 —— 于是
+ * `/native/api/admin/rooms` 原样打到这里，成了一个公网可达、不用签名的
+ * deleteRoom / removeParticipant 接口，裸奔约一小时。
+ *
+ * 所以下面这条 `isNativeEntry` 拒绝不是「多一层保险」，是**这条路由唯一能自己
+ * 把住的东西**：它不验证谁有权限（那是 IAP 的活），只声明「凡是从非 IAP 入口
+ * 进来的，一律当不存在」。Caddy 那边也挡了一道，两道都留着 —— 反代的路由顺序
+ * 是会被人改的，这里的判断不会。
+ *
+ * 加新的非 IAP 入口前，回来数一遍：那条路剥完前缀之后能打到哪些路由。
  *
  * 连 SFU 走**内网**（VPC peering），不绕公网、不过 IAP —— 服务端到服务端，
  * 没有浏览器 cookie 可用，走公网那条路只会被 IAP 挡住。
@@ -31,7 +43,15 @@ function client(): RoomServiceClient {
   return new RoomServiceClient(SFU_ADMIN_URL, API_KEY, API_SECRET);
 }
 
-export async function GET() {
+/** 非 IAP 入口一律当路由不存在 —— 404 而不是 403，不确认这里有东西。 */
+function denyNative(req: Request): NextResponse | null {
+  if (!isNativeEntry(req)) return null;
+  return NextResponse.json({ error: 'not found' }, { status: 404 });
+}
+
+export async function GET(req: Request) {
+  const denied = denyNative(req);
+  if (denied) return denied;
   try {
     const svc = client();
     const rooms = await svc.listRooms();
@@ -74,6 +94,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const denied = denyNative(req);
+  if (denied) return denied;
   try {
     const svc = client();
     const { action, room, identity, trackSid, muted } = await req.json();

@@ -68,7 +68,9 @@ PUBLIC_WSS_URL=""
 AGENT_NAME="${AGENT_NAME:-}"          # 留空 = 匿名派发（Gemini Live agent 用这个）
 ALLOWED_ROOMS=""
 ADMIN_URL=""
+NATIVE_WSS_URL=""                     # 留空 = 从 --public-wss-url 推（gclb-iap 形态下）
 ALLOW_INSECURE_TOKEN="false"
+ROTATE_NATIVE="false"
 FORCE_CADDY="false"
 ACTION="install"
 AGENT_GEMINI_KEY=""
@@ -146,6 +148,8 @@ while [[ $# -gt 0 ]]; do
         --agent-name)         AGENT_NAME="$2"; shift 2 ;;
         --allowed-rooms)      ALLOWED_ROOMS="$2"; shift 2 ;;
         --admin-url)          ADMIN_URL="$2"; shift 2 ;;
+        --native-wss-url)     NATIVE_WSS_URL="$2"; shift 2 ;;
+        --rotate-native-secret) ROTATE_NATIVE="true"; shift ;;
         --allow-insecure-token) ALLOW_INSECURE_TOKEN="true"; shift ;;
         --force-caddy)        FORCE_CADDY="true"; shift ;;
         --refresh-templates)  ACTION="refresh"; shift ;;
@@ -244,7 +248,7 @@ unit_state() { systemctl is-active "$1" 2>/dev/null || echo "absent"; }
 # 三个字段: url (SFU 内网 ws 地址) / api_key / api_secret.
 # closecrab/voice/livekit_out.py 读的就是这个文档, 部署侧现在跟它同源.
 
-LK_API_KEY=""; LK_API_SECRET=""; LK_URL=""
+LK_API_KEY=""; LK_API_SECRET=""; LK_URL=""; LK_NATIVE_SECRET=""
 
 # ── 怎么访问 Firestore: REST + gcloud token, **不用 google-cloud-firestore** ──
 #
@@ -293,12 +297,13 @@ try:
     f = (json.loads(os.environ["FS_BODY"]) or {}).get("fields", {})
 except Exception:
     f = {}
-for k in ("api_key", "api_secret", "url"):
+for k in ("api_key", "api_secret", "url", "native_secret"):
     print(f.get(k, {}).get("stringValue", ""))
 ' 2>/dev/null || true)"
-    LK_API_KEY="$(echo "$out"    | sed -n 1p)"
-    LK_API_SECRET="$(echo "$out" | sed -n 2p)"
-    LK_URL="$(echo "$out"        | sed -n 3p)"
+    LK_API_KEY="$(echo "$out"       | sed -n 1p)"
+    LK_API_SECRET="$(echo "$out"    | sed -n 2p)"
+    LK_URL="$(echo "$out"           | sed -n 3p)"
+    LK_NATIVE_SECRET="$(echo "$out" | sed -n 4p)"
 }
 
 fs_put_keys() {
@@ -307,13 +312,15 @@ fs_put_keys() {
     # 同一个文档里别人加的字段原样留着.
     local url; url="$(_fs_doc_url)"
     url+="?updateMask.fieldPaths=api_key&updateMask.fieldPaths=api_secret&updateMask.fieldPaths=url"
+    url+="&updateMask.fieldPaths=native_secret"
     local payload
-    payload="$(LK_K="$LK_API_KEY" LK_S="$LK_API_SECRET" LK_U="$LK_URL" python3 -c '
+    payload="$(LK_K="$LK_API_KEY" LK_S="$LK_API_SECRET" LK_U="$LK_URL" LK_N="$LK_NATIVE_SECRET" python3 -c '
 import json, os
 print(json.dumps({"fields": {
     "api_key":    {"stringValue": os.environ["LK_K"]},
     "api_secret": {"stringValue": os.environ["LK_S"]},
     "url":        {"stringValue": os.environ["LK_U"]},
+    "native_secret": {"stringValue": os.environ["LK_N"]},
 }}))')"
     local code
     code="$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$url" \
@@ -321,6 +328,23 @@ print(json.dumps({"fields": {
         -d "$payload" || true)"
     [[ "$code" == 200 ]] || die "写 Firestore config/livekit 失败 (HTTP $code)"
     log "  已发布到 Firestore config/livekit (key 前缀 ${LK_API_KEY:0:8}…)"
+}
+
+native_ensure_secret() {
+    # 原生 app（iOS）走 /native/* 那条不过 IAP 的路, 鉴权换成 HMAC 验签,
+    # 这把密钥就是验签用的. 跟 api_secret 放同一个 Firestore 文档 ——
+    # 换机器重装时能原样取回, 不然每装一次手机上就得重填一次.
+    #
+    # **不随 --rotate-keys 轮换**: api_key/secret 换了只影响服务端自己,
+    # 这把换了要走到每一台手机上重填. 想换用 --rotate-native-secret 显式说.
+    if [[ "$ROTATE_NATIVE" == true || -z "$LK_NATIVE_SECRET" ]]; then
+        LK_NATIVE_SECRET="$(openssl rand -hex 32)"
+        log "  生成新的 native 共享密钥 (rotate=$ROTATE_NATIVE)"
+        log "  ⚠️  每台装了 iOS app 的设备都要重填一次「共享密钥」, 否则一律 401"
+        fs_put_keys
+    else
+        log "  复用 Firestore 里已有的 native 共享密钥"
+    fi
 }
 
 need_keys() {
@@ -457,6 +481,17 @@ write_frontend_env() {
     local admin_url="$ADMIN_URL"
     if [[ -z "$admin_url" ]]; then admin_url="${LK_URL/#ws:\/\//http://}"; fi
 
+    # 原生 app 的 signaling 地址. 跟 PUBLIC_WSS_URL 是**同一个地址的两条入口**
+    # (浏览器 /lk 过 IAP, 手机 /native/lk 不过), 所以从它推, 不算第二个来源.
+    # 只在 gclb-iap 形态下推 —— direct 形态整站不过 IAP, 没有 native 这条路,
+    # 留空即可(前端那边 native 请求遇到空值直接 500, 不会回退成一个连不上的地址).
+    local native_wss="$NATIVE_WSS_URL"
+    if [[ -z "$native_wss" && "$CADDY_MODE" == "gclb-iap" && "$PUBLIC_WSS_URL" == */lk ]]; then
+        native_wss="${PUBLIC_WSS_URL%/lk}/native/lk"
+    fi
+    # 有这条路才需要密钥. direct 形态下不生成, 免得 Firestore 里多一个没人用的 secret.
+    [[ -z "$native_wss" ]] || native_ensure_secret
+
     local tmp; tmp="$(mktemp)"
     render_template "$INFRA_DIR/frontend-env.local.tmpl" "$tmp" \
         "API_KEY=$LK_API_KEY" "API_SECRET=$LK_API_SECRET" \
@@ -465,10 +500,17 @@ write_frontend_env() {
         "DEFAULT_AGENT_NAME=$AGENT_NAME" \
         "ALLOWED_ROOMS=$ALLOWED_ROOMS" \
         "LIVEKIT_ADMIN_URL=$admin_url" \
+        "LIVEKIT_NATIVE_URL=$native_wss" \
+        "CC_NATIVE_SECRET=$LK_NATIVE_SECRET" \
         "ALLOW_INSECURE_TOKEN=$ALLOW_INSECURE_TOKEN"
     install -m 0600 "$tmp" "$FRONTEND_DIR/.env.local"
     rm -f "$tmp"
     log "  写入 $FRONTEND_DIR/.env.local (0600)"
+    if [[ -n "$native_wss" ]]; then
+        log "  原生 app 入口: $native_wss (取 token 走 <域名>/native/api/token)"
+    else
+        log "  原生 app 入口未配置 —— iOS app 连不上, 浏览器不受影响"
+    fi
     if [[ -z "$AGENT_NAME" ]]; then
         log "  AGENT_NAME 留空 = 匿名派发 (Gemini Live agent 用这个)"
     else

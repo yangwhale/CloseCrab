@@ -37,24 +37,105 @@ http://__FRONTEND_DOMAIN__ {
 	header -Server
 	header X-Content-Type-Options nosniff
 
-	# /lk/* → SFU 信令。handle_path 会剥掉 /lk 前缀，
+	# ── X-CC-Entry：这一组 header_up 是整个 /native 方案的信任边界 ──────
+	# Caddy 是**唯一**入口（GCLB 只往这里回源），所以「请求从哪条路进来的」
+	# 这件事只有它说了算。它在 /native/* 上**覆盖**写入 X-CC-Entry: native，
+	# 在浏览器那两条路上**显式 unset**。
+	#
+	# 两边都要写，缺一不可：
+	#   · 只写 set 不写 unset ⇒ 浏览器路上自己带一个 X-CC-Entry: native 的请求
+	#     会**同时**拿到 IAP 放行和 native 分支 —— 前端就会跳过验签。
+	#   · header_up 是覆盖不是追加，所以客户端自带的同名头在 /native/* 上也会被
+	#     盖掉，伪造不了。
+	# 前端消费方：frontend/lib/native-auth.ts 的 isNativeEntry()。
+
+	# /lk/* → SFU 信令（浏览器走这条，在 IAP 后面）。handle_path 会剥掉 /lk 前缀，
 	# 所以浏览器请求的 /lk/rtc/v1 到 livekit-server 眼里就是 /rtc/v1。
 	# 两边 SDK 都保留路径前缀（已读源码确认：
 	#   JS   livekit-client createV0RtcUrl → appendUrlPath(urlObj,'rtc')
 	#   Py   agents/worker.py:1102 base = scheme://netloc+path，再 urljoin 'agent'）
 	handle_path /lk/* {
-		reverse_proxy __SFU_UPSTREAM__
+		reverse_proxy __SFU_UPSTREAM__ {
+			header_up -X-CC-Entry
+		}
 	}
 
-	# 其余全给前端
+	# /native/lk/* → 同一个 SFU，但走非 IAP 后端。原生 app 没有浏览器的登录
+	# cookie，WS 升级会被 IAP 弹 302，而客户端不会跟着重定向做握手，直接失败。
+	# 信令本身不靠 IAP 保护 —— 进房间要的是那张 15 分钟的 JWT，
+	# 而 JWT 只能从下面那条验过签的 /native/api/token 换到。
+	# 这条必须排在 /native/* 前面：Caddy 的 handle_path 按书写顺序匹配，
+	# 反过来写的话信令会被当成普通 API 转给前端。
+	handle_path /native/lk/* {
+		reverse_proxy __SFU_UPSTREAM__ {
+			header_up X-CC-Entry native
+		}
+	}
+
+	# 管理台**不开给 native**。/admin 和 /api/admin/* 自己没有任何鉴权 ——
+	# 它们一直是靠 IAP 挡着的，而 /native/* 恰恰是绕开 IAP 的那条路。
+	# 下面那条 handle_path 会把 /native 前缀剥掉，所以不挡的话
+	# `/native/api/admin/rooms` 就是一个公网可达、不用签名的
+	# deleteRoom / removeParticipant 接口。2026-09-13 真这么裸奔过约一小时。
+	# 这两条必须排在通配那条前面 —— handle 系列按书写顺序匹配。
+	handle /native/admin* {
+		respond "not found" 404
+	}
+
+	handle /native/api/admin/* {
+		respond "not found" 404
+	}
+
+	# /native/* → 前端，但不走 IAP，改由 HMAC 验签把门（CC_NATIVE_SECRET）。
+	# 前缀被剥掉，所以 app 请求的 /native/api/token 到 Next.js 眼里就是 /api/token
+	# —— 服务端只有一套路由，两条入口共用。
+	handle_path /native/* {
+		reverse_proxy __FRONTEND_UPSTREAM__ {
+			header_up X-CC-Entry native
+		}
+	}
+
+	# 其余全给前端（浏览器路，IAP 已经在上游验过身）
 	handle {
-		reverse_proxy __FRONTEND_UPSTREAM__
+		reverse_proxy __FRONTEND_UPSTREAM__ {
+			header_up -X-CC-Entry
+		}
 	}
 }
 
 # ── 配套的 GCLB 侧注意事项（不是 Caddy 配置，但漏了就白做）───────────
 # 1. url-map 的 IAP 豁免前缀会**连带**豁免这个域名下的同名路径（host 规则是 `*`
 #    时尤其如此）。豁免清单里绝不能出现 /api/*、/admin*、/lk/*。
+#
+#    **`/native/*` 是这条规则的唯一例外，而且不是网开一面。** 原生 app 没有
+#    浏览器 cookie，IAP 对它是「永远进不去」而不是「多一道门」，所以那条路的
+#    鉴权换成了另一套，不是取消了：
+#      · `/native/api/*` —— 每个请求带 `HMAC-SHA256(CC_NATIVE_SECRET,
+#        "<scope>:<unix 秒>")`，±300 秒时窗。scope 对 /api/token 是房间名、
+#        对 /api/rooms 是字面量 `rooms`，所以一张签名只能用在它申请的那个房间上，
+#        抓到一次也改不成别的房间重放。
+#      · `/native/lk/*` —— 信令本来就设计成公开的，真正的门是那张 15 分钟 JWT，
+#        而 JWT 只能从上面那条验过签的路换到。
+#      · `/native/admin*` 和 `/native/api/admin/*` —— **没有补偿，直接 404**。
+#        管理台自己不带鉴权，给它配一把 native 密钥等于把 deleteRoom 开到公网。
+#        原生 app 也不需要它。Caddy 挡一道、路由自己再拒一道（`isNativeEntry`
+#        直接回 404），两道都留着。
+#    豁免的**只有 `/native/` 这个前缀本身**：`/api/*`、`/lk/*`、`/admin*` 的裸
+#    路径仍然全在 IAP 后面。验证方法是对裸路径伪造一个 `X-CC-Entry: native`
+#    再请求一次 —— 应该还是被弹到 Google 登录页（2026-09-13 实测如此）。
+#
+#    ⚠️ **开这个口子前，把「前缀剥掉之后能打到哪些路由」一条条数一遍。**
+#    我第一次加 `/native/*` 时漏了 `/api/admin/*`，公网上多了一个无鉴权的
+#    deleteRoom 接口约一小时。危险的不是这条豁免规则，是 `handle_path` 剥前缀
+#    这个行为 —— 它让一条看起来很窄的新路径，等价于把**整棵路由树**再暴露一遍。
+#
+#    url-map 那一侧要加的东西（`gcloud compute url-maps export/import`）：
+#      pathMatchers[name=<挂着 IAP 后端的那个>].pathRules 里追加
+#        - paths: ['/native/*']
+#          service: <不开 IAP 的那个 backendService>
+#    改完**要等几分钟**：url-map 是**逐台 GFE** 生效的，传播窗口里同一个 URL
+#    两次请求会打到新旧两套配置上，看起来像「时灵时不灵的 bug」。
+#    别去 debug 逻辑，轮询到连续几轮结果一致为止。
 # 2. 健康检查来源网段（35.191.0.0/16、130.211.0.0/22）的防火墙规则如果放的是
 #    「全部 TCP / 全部协议」，那 7880 对这些网段是**直接可达的**，绕过 Caddy。
 #    按需收窄到 tcp:80。
