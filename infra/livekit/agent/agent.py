@@ -64,6 +64,8 @@ from livekit.agents.voice.io import AudioInput
 # 已经被标了 deprecated，运行时会打 warning ⇒ 用新的，从子包导。
 from livekit.agents.voice.room_io import RoomOptions
 from livekit.plugins.google.realtime import RealtimeModel
+
+import tee as _tee
 from livekit.plugins.google.tools import GoogleSearch
 
 # override=True 不是可有可无的。load_dotenv 默认**不覆盖已存在的环境变量**，
@@ -502,6 +504,9 @@ class MixedRoomAudioInput(AudioInput):
     def __init__(self, room: rtc.Room) -> None:
         super().__init__(label="MixedRoomAudio")
         self._room = room
+        # 旁听（默认关，LK_TEE=1 打开）。挂在这里而不是另派一个参与者进房间，
+        # 是因为下面 __anext__ 那一帧就是 Gemini 真正吃进去的那一帧。
+        self._tee = _tee.make(room.name, "in")
         self._chunk = int(_MIX_SAMPLE_RATE * _MIX_FRAME_MS / 1000)
         self._mixer = rtc.AudioMixer(
             sample_rate=_MIX_SAMPLE_RATE,
@@ -636,9 +641,14 @@ class MixedRoomAudioInput(AudioInput):
     # -- AudioInput 接口 ---------------------------------------------
 
     async def __anext__(self) -> rtc.AudioFrame:
-        return await self._mixer.__anext__()
+        frame = await self._mixer.__anext__()
+        if self._tee:
+            self._tee.feed(frame)
+        return frame
 
     async def aclose(self) -> None:
+        if self._tee:
+            self._tee.close()
         self._room.off("track_subscribed", self._on_track_subscribed)
         self._room.off("track_unsubscribed", self._on_track_unsubscribed)
         self._room.off("track_muted", self._on_track_muted)
@@ -903,6 +913,9 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
         await session.start(agent=_build_agent(persona), room=ctx.room, room_options=_ROOM_OPTIONS)
+        # 出声那一路只能在 start 之后挂 —— RoomIO 是 start 里建的，
+        # 在那之前 session.output.audio 还是 None。
+        _tee.attach_output(session, ctx.room.name)
         # 握手成不成，看的是**这一行里有没有 lk.agent.state**，以及房间里有没有
         # 别的 kind=AGENT 参与者在它前面挡着（那个会被前端误认成助手本人）。
         logger.info("会话已起：我=%s ‖ 同房=%s", _who(ctx.room.local_participant), _roster(ctx.room))

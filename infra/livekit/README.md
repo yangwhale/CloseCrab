@@ -48,7 +48,7 @@
 | `agent/env.tmpl` | `~/lk-gemini-agent/.env`（0600） | **含 secret，不进 git** |
 | `agent/ensure_rooms.py` | `~/lk-gemini-agent/ensure_rooms.py` | 建常驻房间 + 显式派 agent。**用系统 python3 跑**（要 `google.cloud.firestore`，agent 的 venv 里没有） |
 | `agent/speak_into_room.py` | `~/lk-gemini-agent/speak_into_room.py` | 往房间里推一段现成音频（bot 主动说话那条路） |
-| `agent/record_room.py` | `~/lk-gemini-agent/record_room.py` | 旁录房间通话 → 存盘 → 推飞书语音，见下面「旁录」 |
+| `agent/tee.py` | `~/lk-gemini-agent/tee.py` | 把喂给 Gemini 的音频就地劈一路，按句推飞书，见下面「旁听」 |
 | `agent/tests/two_devices_test.py` | — | 端到端回归：两台「设备」进同一个房间，一台先走 |
 | `agent/tests/lk_probe.py` | — | 真 chromium 驱动生产前端，验 20 秒握手死线不误杀 |
 | `agent/tests/lk_probe2.py` | — | 同上，多一层 `setTimeout` 钩子，抓定时器上弦点 |
@@ -339,53 +339,84 @@ GEMINI_API_KEY=... ./scripts/install-livekit.sh --component agent \
 LK_URL=ws://<SFU 内网 IP>:7880 python3 agent/tests/two_devices_test.py
 ```
 
-## 旁录（`agent/record_room.py`，2026-09-13）
+## 旁听（`agent/tee.py`，2026-09-13）
 
-把通话录下来存一份，再作为飞书语音消息推过去 —— 想听听 agent 的声音到底
-什么效果时用。跑在 agent 那台机器上，用 agent 的 venv：
+想听听通话里到底说了什么、agent 的声音什么效果时用。做法是**在 agent 进程内
+把音频劈一路出来**，按句切开、存盘、再作为飞书语音消息推过去。
 
 ```bash
-cd ~/lk-gemini-agent
-BOT_NAME=bunny .venv/bin/python record_room.py bunny          # 等人进来 → 录 → 推
-.venv/bin/python record_room.py bunny --no-push               # 只存盘
-.venv/bin/python record_room.py bunny --max-sec 300 --grace 5
+# systemd drop-in：/etc/systemd/system/lk-gemini-agent.service.d/tee.conf
+Environment=LK_TEE=1
 ```
 
-落盘在 `~/lk-recordings/<房间>/<时间戳>/`：`mix.wav` / `mix.ogg` 是混音，
-再加**每个参与者一份单轨 wav**。单轨是故意留的 —— 判断 TTS 音质要听 agent
-干净的那一路，混音里混着自己的麦。
+改完 `systemctl daemon-reload && systemctl restart lk-gemini-agent`。落盘在
+`~/lk-tee/<房间>/<时间戳>/`，`in-NNN.wav` 是人说的、`out-NNN.wav` 是 agent 答的。
 
-### 三条约束，每条对应一个会踩的坑
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `LK_TEE` | 关 | 总开关。关着的时候热路上一个字节都不碰 |
+| `LK_TEE_PUSH` | `1` | 关掉就只存盘不推飞书（调门限时用） |
+| `LK_TEE_DIR` | `~/lk-tee` | 落盘目录 |
+| `LK_TEE_THRESH` | `180` | int16 平均绝对值，超过算在说话 |
+| `LK_TEE_HANG` | `0.9` | 静这么久算一句说完（只对进声那一路有意义，见下） |
+| `LK_TEE_PRE` | `0.35` | 前摇，不留会每句缺字头 |
+| `LK_TEE_MIN` | `0.7` | **有声部分**短于这个就当噪声扔掉 |
+| `LK_TEE_MAX` | `60` | 一句最长切到这 |
 
-1. **必须以 AGENT 身份进房间**（`with_kind("agent")`）。`agent.py` 里
-   `_wanted()` 挑哪几路进混音池送模型、`_humans()` 数房间里有没有人，两处都用
-   `DEFAULT_PARTICIPANT_KINDS`（CONNECTOR/SIP/STANDARD，**不含 AGENT**）。
-   挂成 standard 会同时触发两件事而且都不报错：录音机被当成一路输入送回模型
-   （模型开始跟自己说话），以及**房间常驻 + 录音机常驻 ⇒ Gemini 会话永远
-   放不掉**，一直烧配额。
-2. **只订阅不发布** —— grants 跟 `speak_into_room.py` 正好反过来
-   （`can_publish=False, can_subscribe=True`）。
-3. **自带死期**。`--wait-sec` 管「没人来」，`--max-sec` 管「录太久」，
-   `--grace` 管「最后一个人走了之后再等几秒」。远端起的进程不许无限期挂着。
+### 为什么不再派一个参与者进房间录
 
-### 混音怎么对齐
+第一版（`record_room.py`，已从本仓库移除，git 历史里还有）是拿 AGENT kind 的
+身份进房、订阅所有人的音轨、自己混一遍。能跑，但它是**另一条链路** ——
+混出来的东西只是「跟 Gemini 听到的很像」，不是同一份。麦克风换了、某条轨订阅
+晚了、混音参数差一点，你听到的就不是模型听到的，而这种偏差恰恰在你想排查
+「它为什么没听懂」的时候最要命。而且它还得自己处理 AGENT kind、自带死期、
+混音对齐这一堆只为「进得去房间」而存在的复杂度。
 
-SFU 把每个人拆成独立一路，各路开始时间不同。每路记一个相对录音起点的采样
-偏移，`AudioStream(track, sample_rate=48000, num_channels=1)` 统一重采样，
-最后按偏移叠加。**累加用 int32 再限幅** —— 两个人同时说话时 int16 直接加会
-溢出回绕，听感是爆音而不是过载。
+现在劈在两个隘口上，都是**进程内**、不增加参与者：
+
+| 路 | 挂在哪 | 拿到的是 |
+|---|---|---|
+| `in` | `MixedRoomAudioInput.__anext__` | 所有人混完、重采样完，逐帧交给 Gemini websocket 的**那一帧** |
+| `out` | `AudioOutput` 链（`session.output.audio`） | 模型吐出来、即将发布到房间的那一帧 |
+
+出声那侧挂完链要能退 —— `attach_output()` 整个包在 try 里，挂不上就原样放着。
+**宁可听不到回放，不能放不出声。**
+
+### 两路的「句号」不是同一个东西 —— 这里栽过一次
+
+进声是实时流：没人说话时照样每 50 毫秒来一帧静音，所以「静了 0.9 秒」是个
+能观察到的事件，拿它当句号成立。
+
+出声不是。模型**成段吐**，而且可以比实时快（框架原话 "frames can be pushed
+faster than real-time"），两段之间它根本不发帧、不是发静音帧。第一版两路共用
+能量门限，结果是 out 路帧收到了、**一句都切不出来**，日志里只有沉默。框架给
+的句号是 `flush()` —— 一次 flush 就是它说完一轮。
+
+被打断时框架调 `clear_buffer()`，那半句直接扔掉（`drop()`）：存了你回放会听到
+一句实际上**没被播出去**的话，比没有更误导。
+
+### 句子边界照搬 Discord 那套
+
+`closecrab/voice/discord_voice_sidecar.py` 里 `_utt_dir` 那段早就在做这件事。
+那份代码在 bot 进程、用的是另一个 venv，**这边 import 不到**，所以是照搬做法
+不是复用函数。两个细节来自它的经验：要留前摇（门限触发时字头已经过去了），
+以及太短的不要（咳嗽、键盘、桌子磕一下都能顶过门限）。
+
+门限判的是**有声部分**有多长，不是整段多长 —— 整段带着前摇和尾巴，0.2 秒的
+一声脆响也能凑够 `MIN_SEC`。离线测试里这条是被反例逼出来的。
 
 ### 推送
 
-走 `scripts/feishu-notify.py --voice <ogg>`（**零 LLM turn**）。录音是在任何
-一次对话之外结束的，所以不能用回复里的 `<voice-file>` 标签。上传路径跟
+走 `scripts/feishu-notify.py --voice <ogg>`（**零 LLM turn**）。收句发生在任何
+一次对话之外，所以不能用回复里的 `<voice-file>` 标签。上传路径跟
 `channels/feishu.py` 的 `_tts_and_send_one` 是同一条（`file_type("opus")` →
-`file_key` → `msg_type("audio")`），两处各写一遍是因为本脚本不进 bot 进程，
-**改一边记得看另一边**。
+`file_key` → `msg_type("audio")`），两处各写一遍是因为那个脚本不进 bot 进程，
+**改一边记得看另一边**。飞书只有 30MB 文件大小限制，没有公开的时长上限
+（60 秒那条是语音*识别*接口的限制，不是发送）。
 
-飞书那边只有 30MB 的文件大小限制，没有公开的时长上限（60 秒那条是语音
-*识别* 接口的限制，不是发送）。`--push-max-sec`（默认 900）超了就只推路径不推
-语音，并在日志里说明 —— 不做静默截断。
+> ⚠️ **调它必须用系统 `/usr/bin/python3`，不能用 `sys.executable`。**
+> agent 跑在自己的 venv 里，那里面没有 `google-cloud-firestore`。第一版旁录
+> 就栽在这：四段录音全部落盘、一段都没推出去，日志里是一路 ImportError。
 
 ## 哪些不进 git
 
