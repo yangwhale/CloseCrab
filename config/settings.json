@@ -35,7 +35,7 @@
     "ui-ux-pro-max@ui-ux-pro-max-skill": false
   },
   "extraKnownMarketplaces": {},
-  "autoCompactWindow": 300000,
+  "autoCompactWindow": 900000,
   "language": "中文",
   "skipDangerousModePermissionPrompt": true
 }
