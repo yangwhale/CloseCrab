@@ -621,6 +621,11 @@ _AGENT_NAME = "gemini-live"
 # 空一瞬，那种时候不该把对话历史一起丢掉，所以给一分钟缓冲。
 _IDLE_GRACE_SEC = float(os.getenv("GEMINI_IDLE_GRACE_SEC", "60"))
 
+# 一条 Gemini 连接活多久才算「健康过」。见 `_arm_reconnect_budget`。
+# 例行断线是约 170 秒一次，真故障是连上就掉（重试间隔 0.5 秒），中间隔着两个
+# 数量级 —— 30 秒放在这条鸿沟中间，两边都不挨边。
+_HEALTHY_CONNECTION_SEC = 30.0
+
 _MIX_SAMPLE_RATE = 24000      # 跟框架 AudioInputOptions 的默认值对齐
 _MIX_NUM_CHANNELS = 1
 _MIX_FRAME_MS = 50
@@ -969,6 +974,109 @@ def _arm_interrupt_cutoff(session: AgentSession) -> None:
     session.on("speech_created", _on_speech)
 
 
+def _arm_reconnect_budget(session: AgentSession) -> None:
+    """例行断线不许记在「重连预算」的账上 —— 否则闲置二十分钟必聋。
+
+    ## 现象
+
+    2026-09-14 09:59（HKT）bunny 对着麦克风说话完全没反应。进程活着、音频进得来
+    （混音池日志一直在涨），但一个字都不回。
+
+    ## 账是怎么算错的
+
+    `gemini-3.1-flash-live-preview` 每约 170 秒被服务端 1008 掐一次，这是已知的
+    （见 `_build_session` 里那段注释）。plugin 的重试计数只在**收到数据**的那一刻
+    清零（`realtime_api.py:1231-1233`）—— 没人说话就没有数据，计数便一路只涨不落：
+
+        01:22:51  会话起来
+        01:25:21  1008 #1   ← 之后每 151 秒一次，分秒不差
+        …
+        01:45:33  1008 #9 → `if self._num_retries == max_retries` 成立
+                  → APIConnectionError → AgentSession is closing due to
+                    unrecoverable error
+
+    9 × 151 秒 ≈ **22 分钟**。也就是说这个 agent 只要闲置二十二分钟就必然聋掉，
+    跟当时有没有故障、网络好不好一点关系都没有。把 `max_retry` 调大只是把这个
+    数字乘一个系数，病因还在：**它把「例行断线」和「连不上」记在同一本账上。**
+
+    ## 判据：这次连接活了多久
+
+    两种断线在时间轴上隔着两个数量级 —— 例行的是约 170 秒一次，真故障是连上就掉
+    （`retry_interval=0.5`）。所以看相邻两次报错的间隔就够了：
+
+        间隔 ≥ 30 秒  ⇒  中间那条连接正常服役过，把计数清零
+        间隔 <  30 秒  ⇒  连上就掉，是真出事了，让预算照常见底
+
+    这样 8 次的预算重新变回它本来的意思 ——「连续 8 次连都连不上」，而不是
+    「累计断了 8 次」。真故障时该死还是会死，不会把一个坏掉的 agent 装成活的。
+
+    不用定时器、不轮询：`error` 事件自带 `created_at`，算个差就行。
+    """
+    if not hasattr(session, "_activity"):
+        logger.error("AgentSession 没有 _activity，重连预算矫正没挂上")
+        return
+
+    prev_at: list[float | None] = [None]
+    complained = [False]
+
+    def _on_error(ev: object) -> None:
+        err = getattr(ev, "error", None)
+        # 只管「还能重试」的那种。recoverable=False 是已经宣判了，这里无事可做。
+        if not getattr(err, "recoverable", False):
+            return
+
+        now = getattr(ev, "created_at", None)
+        if now is None:
+            return
+        last, prev_at[0] = prev_at[0], now
+        # 第一次报错没有「上一次」可比 —— 没有证据就不动账。会话刚起来时计数本来
+        # 就是 0，这里少清一次没有代价；反过来无脑清零会把预算凭空放宽一格。
+        if last is None:
+            return
+        if now - last < _HEALTHY_CONNECTION_SEC:
+            logger.warning("连上 %.1f 秒就掉，判定为真故障，重连预算照常扣", now - last)
+            return
+
+        activity = getattr(session, "_activity", None)
+        rt = getattr(activity, "realtime_llm_session", None)
+        if rt is None or not hasattr(rt, "_num_retries"):
+            if not complained[0]:
+                complained[0] = True
+                logger.error("拿不到 RealtimeSession._num_retries，重连预算矫正失效")
+            return
+
+        if rt._num_retries:
+            logger.info("上一条连接服役正常，重连预算 %d → 0", rt._num_retries)
+        rt._num_retries = 0
+
+    session.on("error", _on_error)
+
+
+async def _serve_until_empty_or_closed(
+    presence: "_Presence", closed: asyncio.Event, grace: float
+) -> None:
+    """等到「房间空满 grace 秒」**或者**「会话自己死了」，谁先到算谁。
+
+    只等前者是 2026-09-14 那次聋掉的后半段病因：会话在 `_aclose_impl` 里自己关了，
+    而这个协程还在等房间清空 —— 房间里明明有人，永远等不到。于是 job 进程活着、
+    音频照收、一个字不回，而且**不会自愈**，只能重启整个 systemd 服务。
+
+    会话死了就退出，上层照原路收摊（回收音轨、擦 `lk.agent.state`），人还在就立刻
+    重建一条。跟「房间空了」走的是同一段收尾代码，不另开一条恢复路径。
+    """
+    waits = {
+        asyncio.create_task(presence.wait_until_empty(grace), name="empty"),
+        asyncio.create_task(closed.wait(), name="closed"),
+    }
+    try:
+        done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in waits:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*waits, return_exceptions=True)
+
+
 def _build_agent(persona: Persona) -> Agent:
     # `ask_<bot>` 排**第一个**，因为它是默认动作 —— 大活儿一律派出去，自己那
     # 五个工具是给「看一眼就能答」的小事用的。顺序是模型读到的顺序，摆在最后
@@ -1201,6 +1309,20 @@ async def entrypoint(ctx: JobContext) -> None:
         # 后者只在前者没挂上（上游改了私有名）或者有别的路把这一轮卡住时才发作。
         _arm_interrupt_cutoff(session)
         _arm_state_recovery(session)
+        _arm_reconnect_budget(session)
+
+        # 会话自己死掉也要能醒过来。`close` 是框架的确定性事件
+        # （`agent_session.py:1327`），比任何超时都准。
+        closed = asyncio.Event()
+
+        def _on_close(ev: object) -> None:
+            closed.set()
+            logger.error(
+                "会话自己关了（reason=%s error=%s）—— 人还在就立刻重建",
+                getattr(ev, "reason", "?"), getattr(ev, "error", None),
+            )
+
+        session.on("close", _on_close)
         dbg.arm_session(session, ctx.room.name)
 
         await session.start(agent=_build_agent(persona), room=ctx.room, room_options=_ROOM_OPTIONS)
@@ -1216,12 +1338,15 @@ async def entrypoint(ctx: JobContext) -> None:
         # （`session.say()` 同样不行：Gemini 的 supports_say 是 False。）
 
         try:
-            await presence.wait_until_empty(_IDLE_GRACE_SEC)
+            await _serve_until_empty_or_closed(presence, closed, _IDLE_GRACE_SEC)
         finally:
             await session.aclose()
             await _unpublish_agent_tracks(ctx.room)
             await _clear_agent_state(ctx.room)
-        logger.info("房间空满 %.0f 秒，放掉 Gemini 会话，等下一个人进来", _IDLE_GRACE_SEC)
+        if closed.is_set():
+            logger.info("会话已收摊，房间里还有 %d 人，回到循环重建", _humans(ctx.room))
+        else:
+            logger.info("房间空满 %.0f 秒，放掉 Gemini 会话，等下一个人进来", _IDLE_GRACE_SEC)
 
 
 if __name__ == "__main__":
