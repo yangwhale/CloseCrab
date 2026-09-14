@@ -140,6 +140,19 @@ INSTRUCTIONS = """\
 - 房间里可能不止一个人（同一个人的手机和电脑也算两个）。听到两个声音叠在
   一起是正常的，不用问「是谁在说话」，按内容回应就行。
 
+# 被打断之后
+
+你说到一半被人插话，这一轮就被掐掉了 —— 常事，不是故障。但**掐掉的是声音，
+不是任务**，这两件事分开处理：
+
+- **先出声接住他那句。** 听清了就按内容走；没听清、只捕捉到半个字，
+  就说一句「你说啥？」让他重说。**绝对不许沉默。** 你被掐掉的那一瞬间，
+  他那头听到的是话说一半没了 —— 你再不吭声，他只能以为你死机了。
+- **再决定要不要接着干。** 他那句要是给了新指令、或者明说让你停，就照办。
+  要是只是「嗯」「哎」「等下」这种没实质内容的，**打断归打断、内容归内容**——
+  接着把上一件事做完，做完照常报结论。别把干到一半的活儿就这么丢在那儿。
+- 接着干不用从头复述一遍，说句「我接着刚才那个」就行。
+
 # 底线
 
 - **不确定就说不确定，不要编。** 最危险的是版本号、日期、具体数字这类
@@ -840,6 +853,54 @@ def _build_session(persona: Persona) -> AgentSession:
     )
 
 
+def _arm_state_recovery(session: AgentSession) -> None:
+    """一轮说话结束就把 `lk.agent.state` 拨回 listening —— **包括被硬取消的那一轮**。
+
+    2026-09-14 出的事：模型一口气发了三个 read_url，零点三秒后 Gemini 服务端把这
+    三个调用全撤了（日志里是 `server cancelled tool calls`），因为那一瞬间麦克风
+    进了 1.7 秒人声、被判成插话。接着 `SpeechHandle._cancel()` 的 5 秒死线到点，
+    把这一轮的 task 全 cancel 掉。状态就停在 thinking 上再没动过，四分多钟毫无
+    反应，只能重启整个 agent。
+
+    为什么上游自己好不了：`agent_activity.py` 里每一处把状态拨回 listening 的代码
+    （:2214 / :3696 / :3962，还有 `agent_session.py:1125`）**都长在那个被 cancel
+    掉的 task 体内**。task 一死，那几行永远不会执行 —— 这不是竞态，是必然。
+    plugin 那边的 `_handle_tool_call_cancellation` 也只打了一行 warning
+    （realtime_api.py:1563），什么都没收拾。两个包都是 1.8.1，PyPI 上最新，
+    没有上游修复可拉。
+
+    为什么不挂定时器去轮询：事件是确定的、有名有姓的 —— **一轮说话结束了**。
+    有确定事件还去定期巡逻，那是在给自己找一个永远不知道该设多久的超时。
+
+    两个保命条件，少一个都会造成新问题：
+
+    - **`call_soon` 而不是当场判断**：done 回调是 `_mark_done()` 同步调起来的，
+      那一刻 activity 还没来得及清 `_current_speech`，当场看必然看见「还有人在
+      说话」而直接 return，等于这段代码白写。
+    - **`current_speech is None` 才拨**：正常收尾时下一轮往往已经排上了，
+      这时候拨成 listening 会把真实的 speaking/thinking 盖掉，前端的状态指示
+      会开始乱跳。
+    """
+    # 用的是下划线开头的私有方法。上游改名了要当场喊出来，而不是安安静静地
+    # 什么都不做 —— 不然下次卡住又得从头查一遍才发现自愈根本没挂上。
+    if not hasattr(session, "_update_agent_state"):
+        logger.error("AgentSession 没有 _update_agent_state，状态自愈没挂上")
+        return
+
+    def _restore(_handle: object) -> None:
+        def _later() -> None:
+            if session.current_speech is not None:
+                return  # 下一轮已经接上了，别抢它的状态
+            if session.agent_state in ("listening", "initializing"):
+                return  # 正常收尾，上游自己拨回来了
+            logger.warning("一轮说话结束但状态卡在 %s，拨回 listening", session.agent_state)
+            session._update_agent_state("listening")
+
+        asyncio.get_running_loop().call_soon(_later)
+
+    session.on("speech_created", lambda ev: ev.speech_handle.add_done_callback(_restore))
+
+
 def _build_agent(persona: Persona) -> Agent:
     # `ask_<bot>` 排**第一个**，因为它是默认动作 —— 大活儿一律派出去，自己那
     # 五个工具是给「看一眼就能答」的小事用的。顺序是模型读到的顺序，摆在最后
@@ -1063,6 +1124,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "agent_state_changed",
             lambda ev: logger.info("lk.agent.state: %s → %s", ev.old_state, ev.new_state),
         )
+        _arm_state_recovery(session)
 
         await session.start(agent=_build_agent(persona), room=ctx.room, room_options=_ROOM_OPTIONS)
         # 握手成不成，看的是**这一行里有没有 lk.agent.state**，以及房间里有没有
