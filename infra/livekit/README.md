@@ -49,6 +49,8 @@
 | `agent/ensure_rooms.py` | `~/lk-gemini-agent/ensure_rooms.py` | 建常驻房间 + 显式派 agent。**用系统 python3 跑**（要 `google.cloud.firestore`，agent 的 venv 里没有） |
 | `agent/speak_into_room.py` | `~/lk-gemini-agent/speak_into_room.py` | 往房间里推一段现成音频（bot 主动说话那条路） |
 | `agent/tee.py` | `~/lk-gemini-agent/tee.py` | 把你说的话在交给 Gemini 那一帧劈一路出来，按句推飞书，见下面「旁听」 |
+| `agent/dbg.py` | `~/lk-gemini-agent/dbg.py` | 调试日志层，`LK_DEBUG` 一个开关管三层，见下面「高密度 debug」 |
+| `lk-gemini-agent.service.d/debug.conf` | `/etc/systemd/system/lk-gemini-agent.service.d/debug.conf` | 配套的 journald 限流放宽。**debug 阶段专用**，稳定后删 |
 | `agent/tests/two_devices_test.py` | — | 端到端回归：两台「设备」进同一个房间，一台先走 |
 | `agent/tests/lk_probe.py` | — | 真 chromium 驱动生产前端，验 20 秒握手死线不误杀 |
 | `agent/tests/lk_probe2.py` | — | 同上，多一层 `setTimeout` 钩子，抓定时器上弦点 |
@@ -467,6 +469,51 @@ if idle >= _UTT_GAP:  # 1.0 秒 —— 这句说完了
 > ⚠️ **调它必须用系统 `/usr/bin/python3`，不能用 `sys.executable`。**
 > agent 跑在自己的 venv 里，那里面没有 `google-cloud-firestore`。第一版旁录
 > 就栽在这：四段录音全部落盘、一段都没推出去，日志里是一路 ImportError。
+
+## 高密度 debug（`agent/dbg.py`，2026-09-14）
+
+**现在是开着的（`LK_DEBUG` 默认 `1`）。** 等这条链路稳定了，把 `dbg.py` 顶上那行
+默认值改成 `"0"`，并删掉 `lk-gemini-agent.service.d/debug.conf`。
+
+探针集中在一个文件里而不是把 `logger.info` 撒进 `agent.py`，是因为这批东西是
+**临时**的：写进业务代码以后就分不清哪行是逻辑、哪行是当初为了查某个 bug 加的。
+
+三层，各管各的：
+
+| 层 | 是什么 | 日志前缀 |
+|---|---|---|
+| 1 | plugin 自带的**报文 dump**（`realtime_api.py` 的 `lk_google_debug`）。收到的每条 `LiveServerMessage`、发出去的每条非音频 client event，音频已替换成 `<audio>` | `<<< received response` / `>>> sent ...` |
+| 2 | plugin 内部状态机翻译成人话：generation 起止、tool call 下发/**撤销**、input speech 起止 | `[gen]` `[srv]` `[tool]` `[vad]` `[ctx]` |
+| 3 | 我们自己的工具协程：谁在跑、跑了多久、是正常结束还是**被撤了之后还在跑** | `工具开跑` / `工具结束` |
+
+第 3 层是 2026-09-14 那次卡死的盲区所在 —— 服务端撤了 tool call，本地协程毫不知情
+继续跑完。所以 `[tool] 服务端撤销` 那行会把**此刻还在跑的本地协程**一并打出来，
+两边对得上才说得清。
+
+补丁全是**包一层再调原函数**，不改行为；挂不上就打 `error` 然后放过。
+`_patch()` 那句 `log.error` 是故意的：上游哪天把私有方法改了名，要**当场喊出来**，
+而不是安安静静地什么都不做。
+
+### 两个都会让日志「看着一切正常」的坑
+
+**一、DEBUG 被过滤两次，两次在不同进程里。**
+`arm_logging()` 必须在 **worker 主进程**里调（`cli.run_app` 之前），只在
+`entrypoint` 里调不够：
+
+1. job 子进程照**自己**的 logger 级别决定发不发；
+2. 记录 pickle 回主进程之后，`LogQueueListener.handle()` 拿 `record.name`
+   **再查一次主进程的 logger**（`ipc/log_queue.py:49`），级别不够当场丢。
+
+只过第 1 关的话，日志里干干净净，看着像 dump 压根没打开。在主进程里设还顺手
+办了第 1 关 —— job 启动时会把主进程所有 logger 的级别快照带过去
+（`ipc/job_proc_executor.py:96-101`）。
+`install()` 里那句「报文 dump 自检」就是为这个留的：**它在不在，等价于 dump 通没通**。
+
+**二、journald 默认每 30 秒每服务只收 10000 条，超出的静默丢弃。**
+报文 dump 会给每个音频帧打一行，一通电话轻松冲破。出事那一刻正好被截掉，
+翻上去看到一段空白，会被读成「那会儿什么都没发生」。所以配套的 drop-in 把
+`LogRateLimitBurst` 抬到 200 万。**写大数字而不是 0**：这两项没设时
+`systemctl show` 也显示 0，两种情况看起来一模一样，没法确认改动生效没有。
 
 ## 哪些不进 git
 

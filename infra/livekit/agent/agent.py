@@ -66,8 +66,14 @@ from livekit.agents.voice.io import AudioInput
 from livekit.agents.voice.room_io import RoomOptions
 from livekit.plugins.google.realtime import RealtimeModel
 
+import dbg
 import tee as _tee
 from livekit.plugins.google.tools import GoogleSearch
+
+# 调试期给每个工具包一层「进/出/耗时/被取消」的日志。关掉（LK_DEBUG=0）时这行
+# 原样返回上游的 function_tool，一点开销都不留。
+# 必须在下面那堆 @function_tool 之前执行 —— 装饰器是在 import 时就跑掉的。
+function_tool = dbg.make_function_tool(function_tool)
 
 # override=True 不是可有可无的。load_dotenv 默认**不覆盖已存在的环境变量**，
 # 而本机 `~/.claude/settings.json` 里躺着一把早已失效的 GEMINI_API_KEY，
@@ -1094,6 +1100,11 @@ async def _clear_agent_state(room: rtc.Room) -> None:
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    # 给 plugin 挂调试探针。放在这儿而不是 __main__ 里，是因为 job 跑在**另一个
+    # 进程**（forkserver 派生），那边只会 import 这个模块然后调 entrypoint，
+    # __main__ 那段根本不执行。install() 自己幂等。
+    dbg.install()
+
     # 房间名就是 bot 名。一个 worker 伺候所有房间 —— LiveKit 给**每个房间**派一个
     # 独立的 job 进程，所以六个 bot 不需要六个 systemd unit，进来自己认房间就行。
     persona = load_persona(ctx.room.name)
@@ -1125,6 +1136,7 @@ async def entrypoint(ctx: JobContext) -> None:
             lambda ev: logger.info("lk.agent.state: %s → %s", ev.old_state, ev.new_state),
         )
         _arm_state_recovery(session)
+        dbg.arm_session(session, ctx.room.name)
 
         await session.start(agent=_build_agent(persona), room=ctx.room, room_options=_ROOM_OPTIONS)
         # 握手成不成，看的是**这一行里有没有 lk.agent.state**，以及房间里有没有
@@ -1168,6 +1180,10 @@ if __name__ == "__main__":
     # 直到 systemd 的 TimeoutStopSec 到点补一刀 SIGKILL。旧 job 拖着不走的这段
     # 时间里，它还挂在房间的参与者列表里，ensure_rooms.py 会把它误判成
     # 「agent 在岗」而不补派 —— 实测就这么漏了五个房间。给 5 秒，重启干净利落。
+    # 必须在 run_app **之前**：job 进程的 logger 级别是从这个进程快照过去的，
+    # 而且从 job 发回来的每条记录还要在这个进程里按级别再过一次闸。详见 dbg.py。
+    dbg.arm_logging()
+
     cli.run_app(
         WorkerOptions(entrypoint_fnc=entrypoint, agent_name=_AGENT_NAME, drain_timeout=5)
     )
