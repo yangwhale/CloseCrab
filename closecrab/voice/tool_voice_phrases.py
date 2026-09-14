@@ -203,7 +203,9 @@ _TOOL_PREFIX_HINTS = [
     ]),
     ("mcp__wiki__", [
         "[focus] 查我自己的知识库",
-        "[informative] 翻 wiki 看记过没有",
+        # 别写「记过」—— TTS 念出来像「记过处分」那个记过, Chris 09-14 听着别扭
+        # 要求换掉。同理避开跟中文挤在一起的 "wiki" 这种中英夹音。
+        "[informative] 看看知识库里写过没有",
         "[curiosity] 这事我 wiki 里应该有",
     ]),
     ("mcp__serena__", [
