@@ -245,6 +245,11 @@ def any_online() -> bool:
 # ── 对外：直播 ─────────────────────────────────────────────────────────
 
 def begin(fid: str) -> bool:
+    """开一段。**fid 为空 = 中间过程提示音**，只出声，不落盘不上进度条。
+
+    路由放在播放器里而不是这儿，是为了别再多一个「当前是哪种模式」的模块级
+    状态 —— 那种状态一旦跟真实轨道对不上，坏法是无声的（见 player.begin_live）。
+    """
     ensure_discord_playing()
     return get_player().begin_live(fid)
 
@@ -266,8 +271,9 @@ async def wait_playout(timeout: float) -> None:
     p = get_player()
     waited = 0.0
     while waited < timeout:
-        prog = p.progress()
-        if prog is None or not prog[2]:
+        # 用 is_busy 而不是 progress —— 提示音没有位置可报，progress 对它返回
+        # None，拿它判就会立刻放行，下一条把还没播完的提示音顶掉。
+        if not p.is_busy():
             return
         await asyncio.sleep(0.1)
         waited += 0.1

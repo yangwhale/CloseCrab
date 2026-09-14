@@ -102,7 +102,12 @@ class Sink:
 
 @dataclass
 class _Track:
-    """当前在播的这段音频。"""
+    """当前在播的这段音频。
+
+    `transient=True` 是**中间过程提示音**那一档（工具调用时「滋」的那一声）：
+    只出声，不落盘、不进度、不受按钮控制。判据就是**有没有 fid** —— 见
+    `begin_live` 的注释。
+    """
 
     fid: str = ""
     path: str = ""
@@ -111,6 +116,8 @@ class _Track:
     total: int = 0          # 已知总长（live 时是「目前落盘了多少」）
     fh: object = None       # 读句柄，seek 复用
     _w: object = None       # 写句柄（只有 live 用）
+    transient: bool = False
+    buf: bytearray = field(default_factory=bytearray)   # 只有 transient 用
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -169,7 +176,28 @@ class UnifiedPlayer:
     # ── 直播：TTS 边生成边播 ──────────────────────────────────────────
 
     def begin_live(self, fid: str) -> bool:
-        """开一段新的直播。落盘文件建好，位置归零，立刻进入播放态。"""
+        """开一段新的直播。落盘文件建好，位置归零，立刻进入播放态。
+
+        **fid 为空 = 中间过程提示音，走「只出声」那一档。** 工具调用时那一声
+        「滋」只有一句话长，给它配一条跟完整回复一样的进度条和五个按钮，卡片上
+        会乱成一团；而且它一旦占住播放器的位置，飞书那边的进度条就会跳到它身上
+        再跳回来。所以这一档：内存里过一遍，不落盘、不上报位置。
+
+        不上报位置这一件事就够了 —— `progress()` 本来就靠 fid 判空，
+        `seek()` 同理，于是按钮和状态栏自然抓不到它，不用另加开关。
+
+        2026-09-13 换统一播放器之前，空 fid 的含义是「照播，只是不存盘」；换完
+        变成了「建不了文件 → 整条跳过」，于是**提示音在三个出口上全哑了**，
+        Discord 也没有 —— 日志里 09-13 17:09 起每条都是「开播失败 fid=''」，
+        09-14 单日 jarvis 丢了 623 条。这里把那个语义补回来。
+        """
+        if not fid:
+            with self._lock:
+                self._close_handles()
+                self._track = _Track(live=True, transient=True)
+                self._state = PLAYING
+            return True
+
         path = self._buf_path(fid)
         if not path:
             log.warning("fid 不合法，拒绝开播: %r", fid)
@@ -187,10 +215,19 @@ class UnifiedPlayer:
         return True
 
     def feed(self, pcm: bytes) -> None:
-        """喂一段刚生成出来的 PCM。**不直接给出口**，落盘后由时钟顺读。"""
+        """喂一段刚生成出来的 PCM。**不直接给出口**，落盘后由时钟顺读。
+
+        提示音那一档不落盘，攒在内存里 —— 一句话几十 KB，不值得为它产生一个
+        磁盘文件再回收（何况它永远不会被回放，存了也没人读）。
+        """
         with self._lock:
             t = self._track
-            if not t.live or t._w is None:
+            if not t.live:
+                return
+            if t.transient:
+                t.buf.extend(pcm)
+                return          # 不上报：它没有位置可报
+            if t._w is None:
                 return
             t._w.write(pcm)
             t._w.flush()        # 读句柄是另一个 fd，不 flush 它看不到
@@ -204,6 +241,8 @@ class UnifiedPlayer:
             if not t.live:
                 return
             t.live = False
+            if t.transient:
+                return          # 缓冲里还剩多少就播多少，播完自然回 idle
             if t._w is not None:
                 try:
                     t._w.close()
@@ -220,7 +259,10 @@ class UnifiedPlayer:
 
     def pause(self) -> bool:
         with self._lock:
-            if self._state != PLAYING:
+            # 提示音不受按钮管。不挡的话会出现这种事：用户对着上一条回复按暂停，
+            # 按下去那一刻正好在放「让我查查」，于是暂停的是那一声，而卡片上
+            # 那条回复纹丝不动 —— 看起来就是按钮坏了。
+            if self._state != PLAYING or self._track.transient:
                 return False
             self._state = PAUSED
         self._report()
@@ -228,7 +270,7 @@ class UnifiedPlayer:
 
     def resume(self) -> bool:
         with self._lock:
-            if self._state != PAUSED:
+            if self._state != PAUSED or self._track.transient:
                 return False
             self._state = PLAYING
         self._report()
@@ -294,6 +336,16 @@ class UnifiedPlayer:
 
     # ── 进度 ──────────────────────────────────────────────────────────
 
+    def is_busy(self) -> bool:
+        """还有音频没播完（含提示音）。
+
+        跟 `progress()` 分开是必须的：`progress()` 对提示音返回 None（它没有
+        位置可报），上层拿它判「播完没」的话，提示音会被判成「早就播完了」，
+        下一条立刻开播把它顶掉 —— 听感就是每句提示只响半个字。
+        """
+        with self._lock:
+            return self._state != IDLE
+
     def progress(self):
         """(已播秒, 总秒, 是否在播, fid)；没在播返回 None。
 
@@ -335,10 +387,25 @@ class UnifiedPlayer:
         t.fh = t._w = None
 
     def _report(self) -> None:
+        """把位置捅给外面（飞书进度条 + Zello 收尾都挂在这个回调上）。
+
+        **提示音一声不吭。** 这是「不给它进度条」落地的地方：不上报，卡片上那条
+        回复的 fid 和位置就纹丝不动，不会被一句「让我查查」冲掉再冲回来。
+
+        代价说清楚：Zello 的「本条播完」信号也是从这个回调的 active 边沿推出来的
+        （见 `playback._on_progress`），所以提示音播完不会给 Zello 收尾，PTT 会
+        一直押到后面那条回复播完为止。**Zello 跟 Discord 是互斥的**（Discord 在
+        线时 Zello 出口直接判离线），当前部署走 Discord，够不着这条路；而且
+        「提示音和紧跟其后的回复算同一次发话」本身也说得通，所以不为它单开一套
+        收尾机制 —— 真要修，该做的是给 `Sink` 加一个收尾回调，把 Zello 从进度
+        回调上摘下来，那是另一件事。
+        """
         if self.on_progress is None:
             return
         with self._lock:
             t = self._track
+            if t.transient:
+                return
             args = (t.fid, t.pos, t.total, self._state != IDLE)
         try:
             self.on_progress(*args)
@@ -365,17 +432,24 @@ class UnifiedPlayer:
         with self._lock:
             state = self._state
             t = self._track
-            if state == IDLE or not t.fid:
+            if state == IDLE or not (t.fid or t.transient):
                 return
             if state == PAUSED:
                 self._emit(None)        # 只喂需要保活的出口，位置不动
                 return
 
-            chunk = t.fh.read(_FRAME_BYTES) if t.fh is not None else b""
+            if t.transient:
+                # 内存缓冲。**攒够一整帧才取**，不够就原样留着 —— 跟下面落盘
+                # 那一路「退回去等」是同一个道理，半帧发出去立体声就左右错位了。
+                chunk = bytes(t.buf[:_FRAME_BYTES]) if len(t.buf) >= _FRAME_BYTES else b""
+                if chunk:
+                    del t.buf[:_FRAME_BYTES]
+            else:
+                chunk = t.fh.read(_FRAME_BYTES) if t.fh is not None else b""
             if len(chunk) < _FRAME_BYTES:
                 # 读不满一帧：要么生成还没跟上（等），要么真播完了（收工）。
                 # **不能把半帧发出去** —— 半帧会让立体声左右错位，后面全是噪音。
-                if chunk:
+                if chunk and t.fh is not None:
                     t.fh.seek(t.pos)    # 退回去，下一帧连着这半帧一起读
                 if t.live:
                     self._emit(None)

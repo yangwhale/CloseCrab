@@ -258,10 +258,131 @@ def t_hot_join():
           f"livekit 收到 {len(lk.data)}B（全段 {len(src)}B）")
 
 
+# ── 8. 提示音：只出声，不落盘、不上进度条、按钮抓不到 ──────────────────
+#
+# 规则（Chris 09-14 17:28 定）：有名字的走原路不动；没名字的「就出个声」。
+# 工具调用那一声只有一句话长，给它配一条跟完整回复一样的状态栏 + 五个按钮
+# 会把卡片搞乱。
+def t_transient():
+    dc, lk = FakeSink("discord"), FakeSink("livekit")
+    reported = []
+    p = mk([dc, lk], on_progress=lambda *a: reported.append(a))
+    src = ramp(30)
+    # 前后快照比差集。**别按文件名前缀过滤** —— 前面几个用例各自留了文件在这个
+    # 目录里，按名字挑等于是拿「我猜它会叫什么」当判据，第一版就这么假红了一把。
+    os.makedirs(BUF, exist_ok=True)
+    before = set(os.listdir(BUF))
+
+    assert p.begin_live("") is True, "空 fid 该开得起来"
+    p.feed(src)
+    p.end_live()
+    wait_until(lambda: not p.is_busy(), 10)
+
+    # 正例：声音一字不差地到了每个在线出口 —— 这才是「出个声」的全部要求。
+    check("提示音正例：两个出口都收到完整音频",
+          dc.data == src and lk.data == src,
+          f"discord {len(dc.data)}B / livekit {len(lk.data)}B（源 {len(src)}B）")
+    # 反例 1：一个进度回调都不许有。飞书进度条和那五个按钮全靠它，
+    # 报了就会把卡片上那条回复的位置冲掉再冲回来。
+    check("提示音反例 1：一次进度都不上报", len(reported) == 0,
+          f"上报了 {len(reported)} 次: {reported[:3]}")
+    # 反例 2：不留文件。**数的是目录里多出来的文件，不是「fid 是空的」** ——
+    # 后者只要实现没建文件就恒真，测不出「换个名字偷偷存了一份」。
+    new_files = set(os.listdir(BUF)) - before
+    check("提示音反例 2：磁盘上不留东西", not new_files, f"多出来的文件: {new_files}")
+    p.close()
+
+    # 反例 3：按钮一个都不该认领它。正在播提示音时用户去点卡片上的按钮，
+    # 只能是点在上一条回复上 —— 提示音必须让开。
+    p2 = mk([FakeSink("discord")])
+    p2.begin_live("")
+    p2.feed(ramp(200))
+    wait_until(lambda: p2.is_busy())
+    got = (p2.pause(), p2.resume(), p2.seek(0.5), p2.replay(""), p2.progress())
+    check("提示音反例 3：暂停/继续/快进/重播/进度全部不认领",
+          got == (False, False, False, False, None), f"实际 {got}")
+    p2.close()
+
+    # 反例 4：is_busy 必须认提示音。拿 progress 判「播完没」的话它返回 None，
+    # 上层立刻放行，下一条开播把没播完的提示音顶掉 —— 听感是每句只响半个字。
+    p3 = mk([FakeSink("discord")])
+    p3.begin_live("")
+    p3.feed(ramp(200))
+    wait_until(lambda: p3.is_busy())
+    check("提示音反例 4：progress 说没在播，is_busy 说在播",
+          p3.progress() is None and p3.is_busy() is True,
+          f"progress={p3.progress()} busy={p3.is_busy()}")
+    p3.close()
+
+    # 反例 5：模式不许粘住。提示音之后紧接一条真回复，那条必须恢复上报，
+    # 否则一次提示音就能把整条会话的进度条废掉。
+    reported.clear()
+    dc2 = FakeSink("discord")
+    p4 = mk([dc2], on_progress=lambda *a: reported.append(a))
+    p4.begin_live("")
+    p4.feed(ramp(5))
+    p4.end_live()
+    wait_until(lambda: not p4.is_busy(), 10)
+    p4.begin_live("after")
+    p4.feed(ramp(5))
+    p4.end_live()
+    wait_until(lambda: not p4.is_busy(), 10)
+    p4.close()
+    check("提示音反例 5：紧接的真回复照常上报进度",
+          bool(reported) and all(a[0] == "after" for a in reported),
+          f"上报 {len(reported)} 次，fid={set(a[0] for a in reported)}")
+
+    # 反例 6：碎片喂进来也一个字节不丢。TTS 吐出来的块跟 20ms 帧边界没关系，
+    # 缓冲里经常剩小半帧。**把那小半帧直接发出去或者顺手扔掉都不会报错**，
+    # 听感是持续的细碎杂音/吞字，而帧数还对得上 —— 所以判据必须是逐字节相等。
+    dc3 = FakeSink("discord")
+    p5 = mk([dc3])
+    src2 = ramp(12)
+    p5.begin_live("")
+    for i in range(0, len(src2), 1000):          # 1000 不是 3840 的整数倍
+        p5.feed(src2[i:i + 1000])
+        time.sleep(TICK * 2)                     # 让时钟在半帧状态下转几圈
+    p5.end_live()
+    wait_until(lambda: not p5.is_busy(), 10)
+    p5.close()
+    check("提示音反例 6：非整帧碎片喂入，输出逐字节相同",
+          dc3.data == src2, f"收到 {len(dc3.data)}B / 源 {len(src2)}B，相等={dc3.data == src2}")
+
+
+# ── 9. wait_playout 必须等提示音播完 ───────────────────────────────────
+#
+# 这条单独拎出来是因为它不在 player 里，在 playback 的接线层。用假播放器替掉
+# 单例，就不用把 py-cord / zello / livekit 三个真出口拖进来。
+def t_wait_playout_waits_for_transient():
+    import asyncio
+    from closecrab.voice import playback
+
+    class FakeP:
+        """提示音的真实形状：progress 说「没在播」，is_busy 说「在播」。"""
+        def __init__(self):
+            self.calls = 0
+        def progress(self):
+            return None                  # 提示音没有位置可报
+        def is_busy(self):
+            self.calls += 1
+            return self.calls <= 3       # 前三次还在播，之后播完
+
+    saved = playback._player
+    fake = FakeP()
+    playback._player = fake
+    try:
+        asyncio.run(playback.wait_playout(5.0))
+    finally:
+        playback._player = saved
+    check("wait_playout 会等提示音播完，不拿 progress 判", fake.calls >= 4,
+          f"只问了 {fake.calls} 次就放行（progress 返回 None 会让它立刻走）")
+
+
 def main():
     try:
         for fn in (t_live_fanout, t_pause_resume, t_replay, t_seek,
-                   t_underrun, t_negative, t_hot_join):
+                   t_underrun, t_negative, t_hot_join, t_transient,
+                   t_wait_playout_waits_for_transient):
             print(f"\n── {fn.__name__} ──")
             fn()
     finally:

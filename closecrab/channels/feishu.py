@@ -3908,8 +3908,15 @@ class FeishuChannel(Channel):
                     return
 
             # voice mode 中间过程播报: opener + tool hint 同时推两条 TTS 通道 ——
-            #   路径 A: Discord 常驻语音频道 (sidecar, 内部判 connected, 无 fid 不落盘不重播)
-            #   路径 B: LiveKit broadcast (实时会话, 需 _voice_io + has_active_session)
+            #   路径 A: 统一播放器 (sidecar)。**无 fid = 只出声那一档** ——
+            #           Discord / Zello / LiveKit 房间三个在线出口都到得了，
+            #           但不落盘、不可回放、不占进度条。
+            #           ⚠️ 09-13 换统一播放器后这条曾整整哑了一天: 那边把「没名字」
+            #           当成「建不了文件 → 跳过」, 单日丢 623 条且只打 WARNING,
+            #           听感是「中间过程一声不吭」而日志看着一切正常。
+            #   路径 B: LiveKit broadcast (bot 自己那套实时会话, 需 _voice_io +
+            #           has_active_session)。跟路径 A 里的 LiveKit 出口**不是**
+            #           一回事: 那个是 /lkon 往房间推流, 这个是 broadcast page。
             # 之前只推 B, 导致 Chris 用 Discord 常驻频道听时听不到中间过程, 只有最终 ogg。
             # dedup 复刻 voice call (livekit_io.py:447): 同 tool 连发 ≥2 次跳过, 两路共用。
             _last_tool_hint = [None]
