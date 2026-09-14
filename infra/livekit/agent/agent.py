@@ -907,6 +907,68 @@ def _arm_state_recovery(session: AgentSession) -> None:
     session.on("speech_created", lambda ev: ev.speech_handle.add_done_callback(_restore))
 
 
+def _arm_interrupt_cutoff(session: AgentSession) -> None:
+    """打断的**那一瞬间**就把 `lk.agent.state` 拨回 listening，不等任何超时。
+
+    `_arm_state_recovery` 挂在「一轮说话结束」上，而被打断的这一轮**什么时候算
+    结束**不由我们说了算。实测（2026-09-14 01:00，UTC）：
+
+        01:00:34  服务端撤销工具调用，search_web 已跑 12.14 秒
+        01:00:39  状态才拨回 listening      ← 整整 5.0 秒之后
+        01:00:48  search_web 跑完 25.85 秒   ← 比它被撤销晚了 13.7 秒
+
+    那个 5.0 秒不是巧合，是 `speech_handle.py:14` 的 `INTERRUPTION_TIMEOUT`。
+    上游 `_cancel()` 立刻把 `_interrupt_fut` 置上，然后 `call_later(5.0, ...)`
+    兜底硬取消。**所以原来那版虽然挂的是事件不是定时器，迟到的时间跟看门狗
+    一模一样** —— 因为它等的那个事件，本身要等看门狗来发。
+
+    切口因此选在 `_interrupt_fut` 落地：那正是上游给自己起 5 秒倒计时的同一
+    时刻，这套机器里再没有比它更早的确定性瞬间。状态在这里拨，跟这一轮什么
+    时候真正收尾**彻底解耦** —— 工具跑多久都不影响前端看到的状态。
+
+    ## 为什么**不**顺手把还在跑的工具掐掉
+
+    技术上能掐（`tool_executor._RunningTasks` 里按 speech_handle 过一遍，
+    cancel 掉 `exe_task` 就行，跑通过）。**2026-09-14 Chris 定的：不掐，
+    by design。** 理由是让它跑完本身没错、也不会因为强行砍断出别的问题，
+    而它并不影响主线。
+
+    留个背景免得下次又有人来「修」这件事：上游也是故意让它跑完的 ——
+    `generation.py:1078` 是 `await asyncio.shield(asyncio.gather(*tasks))`，
+    被 cancel 时还专门绕一段「waiting for function call to finish before
+    fully cancelling」。（`ToolFlag.CANCELLABLE` 是另一回事，那管的是模型自己
+    调 `lk_agents_cancel_task`，跟用户插话无关。）
+
+    代价是知情接受的：那 5 秒死线照旧会到点，journal 里每次留一行上游的
+    ERROR「speech not done in time after interruption」。**看到那行不等于
+    状态卡住了** —— 状态早在打断那一瞬间就拨回来了。
+    """
+    if not hasattr(session, "_update_agent_state"):
+        logger.error("AgentSession 没有 _update_agent_state，打断即时处理没挂上")
+        return
+
+    def _cut(handle: object) -> None:
+        if session.agent_state in ("listening", "initializing"):
+            return
+        # 正常情况下 current_speech 就是被打断的这一轮。**只有**下一轮已经顶上来
+        # 的时候才让开 —— 那时候 thinking/speaking 是真的，拨掉会让前端乱跳。
+        cur = session.current_speech
+        if cur is not None and cur is not handle:
+            return
+        logger.info("被打断，状态 %s → listening（就地，不等超时）", session.agent_state)
+        session._update_agent_state("listening")
+
+    def _on_speech(ev: object) -> None:
+        handle = ev.speech_handle  # type: ignore[attr-defined]
+        fut = getattr(handle, "_interrupt_fut", None)
+        if fut is None:
+            logger.error("SpeechHandle 没有 _interrupt_fut，打断即时处理没挂上")
+            return
+        fut.add_done_callback(lambda _f: _cut(handle))
+
+    session.on("speech_created", _on_speech)
+
+
 def _build_agent(persona: Persona) -> Agent:
     # `ask_<bot>` 排**第一个**，因为它是默认动作 —— 大活儿一律派出去，自己那
     # 五个工具是给「看一眼就能答」的小事用的。顺序是模型读到的顺序，摆在最后
@@ -1135,6 +1197,9 @@ async def entrypoint(ctx: JobContext) -> None:
             "agent_state_changed",
             lambda ev: logger.info("lk.agent.state: %s → %s", ev.old_state, ev.new_state),
         )
+        # 顺序有意义：先挂即时切口，再挂兜底。前者让绝大多数情况在毫秒级收摊，
+        # 后者只在前者没挂上（上游改了私有名）或者有别的路把这一轮卡住时才发作。
+        _arm_interrupt_cutoff(session)
         _arm_state_recovery(session)
         dbg.arm_session(session, ctx.room.name)
 
