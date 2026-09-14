@@ -2124,6 +2124,47 @@ def interrupt_playback() -> None:
         log.debug("停播放器失败", exc_info=True)
 
 
+def barge_in(reason: str = "") -> None:
+    """新一轮用户输入到了 —— 停播 **并且** 清空还没播的队列。线程安全。
+
+    `interrupt_playback()` 只停「正在播的那一段」。停完队列里排着的下一条立刻顶
+    上来，听感上还是上一轮的声音，所以必须连队列一起清，这一轮才算真的翻篇。
+
+    为什么要单独有这个函数：清队列那套逻辑原本只长在
+    `_DiscordAudioOutput.clear_buffer()` 里 —— 那是 LiveKit AgentSession 的出口
+    对象，**只有开着语音通话才存在**。飞书语音消息走的是另一条路
+    （STT → BotCore → `stream_speak_text`），一路上没有任何地方碰得到这个队列，
+    于是上一轮的回复会一直排着队，等用户说完下一句才轮到它播。
+
+    出口那一半（`playback.stop`）线程安全，直接调；队列那一半属于 sidecar 自己的
+    loop，跨线程只能 `call_soon_threadsafe` 送进去。
+    """
+    interrupt_playback()
+    loop = _sidecar_loop
+    if loop is None or loop.is_closed():
+        return
+    try:
+        loop.call_soon_threadsafe(_drain_speak_queue, reason)
+    except RuntimeError:
+        log.debug("sidecar loop 已关，跳过清队列", exc_info=True)
+
+
+def _drain_speak_queue(reason: str = "") -> None:
+    """【sidecar loop 内】cancel 正在念的那条 + 丢掉队列里剩下的全部。"""
+    task = _current_speak_task
+    if task is not None and not task.done():
+        task.cancel()
+    dropped = 0
+    if _speak_queue is not None:
+        while not _speak_queue.empty():
+            try:
+                _speak_queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+    log.info("barge-in(%s): 停播 + 丢弃队列 %d 条", reason or "?", dropped)
+
+
 def pause_stream() -> bool:
     """【飞书线程调用】暂停推流。三路一起停。没在播 → False。"""
     from . import playback

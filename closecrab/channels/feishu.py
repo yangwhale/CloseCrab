@@ -3637,6 +3637,20 @@ class FeishuChannel(Channel):
             if not is_team_msg and chat_type == "group" and not is_mentioned and not is_auto_chat:
                 return
 
+            # ── barge-in：新一轮开口了，上一轮还没念完的全部作废 ───────────
+            # 语音通话那条路早就有 barge-in（`livekit_io.py` 里 CloseCrabLLM
+            # flush 时调），但飞书语音消息走的是 STT → BotCore 这条，一路上没有
+            # 任何地方碰得到 TTS 队列。而队列里的 reply 是**永不过期**的
+            # （`discord_voice_sidecar.py` 里 `is_reply` 那个判断），于是上一轮
+            # 的回复会一直排着，等这一轮说完才轮到它播 —— 听感就是「永远慢一拍」。
+            # 只对真人私聊触发：群里别人说话不该掐掉正在念给本人听的内容。
+            if sender_type == "user" and chat_type == "p2p":
+                try:
+                    from ..voice.discord_voice_sidecar import barge_in
+                    barge_in(f"feishu:{msg_type}")
+                except Exception:
+                    log.debug("barge-in 失败（语音栈可能没起）", exc_info=True)
+
             # 解析消息内容（单条或合并多模态消息）
             if merged_items:
                 extracted_parts = []
