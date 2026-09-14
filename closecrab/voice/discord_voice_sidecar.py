@@ -115,7 +115,16 @@ _CACHE_MAX_CHARS = 30
 
 
 def _cache_get_pcm(text: str, voice: str) -> bytes | None:
-    """读缓存: 48kHz stereo s16le PCM raw 文件。超过 30 字跳过 (长文本不会重复)。"""
+    """读缓存: 48kHz stereo s16le PCM raw 文件。超过 30 字跳过 (长文本不会重复)。
+
+    命中时**把 mtime 打到当下**，让它变成「最后一次被用到」的时间戳，
+    给下面的 GC 当判据。
+
+    为什么不用现成的 atime: 这台机器是 `relatime`, 理论上够用, 但 2026-09-14
+    实测 **7180 个文件的 atime 全都落在 7 天内**（mtime 却横跨三个月）——
+    有东西整目录扫读过一遍, atime 被污染成一片, 完全分不出谁常用。
+    ⇒ **自己写的时间戳才可信**, 别依赖文件系统顺带维护的那个。
+    """
     if len(text) > _CACHE_MAX_CHARS:
         return None
     key = _cache_key_for_batch(text, voice)
@@ -124,9 +133,14 @@ def _cache_get_pcm(text: str, voice: str) -> bytes | None:
         return None
     try:
         with open(path, "rb") as f:
-            return f.read()
+            data = f.read()
     except Exception:
         return None
+    try:
+        os.utime(path)          # 续命。失败不影响播放, 最多下轮 GC 早删一次
+    except OSError:
+        pass
+    return data
 
 
 def _cache_save_pcm(text: str, voice: str, pcm: bytes):
@@ -192,6 +206,56 @@ def _maybe_gc_buf_dir() -> None:
         return                        # 目录还不存在: 下次落盘会建
     if removed:
         log.info("TTS 重播缓存 GC: 删除 %d 个文件, 释放 %.2f GB",
+                 removed, freed / 1024 ** 3)
+
+
+_TTS_CACHE_RETENTION_SEC = 30 * 86400   # 合成缓存保留 30 天（按最后一次命中算）
+_last_tts_cache_gc = [0.0]
+
+
+def _maybe_gc_tts_cache() -> None:
+    """清掉长期没被命中的 TTS 合成缓存（每小时最多扫一次）。
+
+    跟上面那个重播缓存是**两个目录、两套语义**，别看混：
+    重播缓存存的是「某条回复的完整音频」，一次性的，7 天就够；
+    这里存的是「某句 ≤30 字短语的合成结果」，**存一次能用一辈子**
+    （工具提示那一套就全靠它，实测一天命中 32 次、零 API 调用）。
+    所以保留期长得多，30 天没被用到才算真的没人要了。
+
+    ⚠️ **判据是 mtime，而 mtime 由 `_cache_get_pcm` 命中时刷新**，
+    不是文件创建时间也不是 atime（atime 为什么不能用见那边的注释）。
+    第一次跑 GC 时老条目的 mtime 还是创建时间，会误删一批仍在用的 ——
+    可以接受：缓存是可再生的，被删的下次命中时重新合成一遍，
+    之后就带上正确的时间戳了。
+
+    这个目录**原先完全没有清理**：2026-09-14 查的时候 7180 个文件 / 3.82 GB，
+    最老的到 6 月 12 日。只涨不退，因为每换一句新短语就多一个永久文件。
+    """
+    now = time.time()
+    if now - _last_tts_cache_gc[0] < _BUF_GC_MIN_INTERVAL:
+        return
+    _last_tts_cache_gc[0] = now
+
+    cutoff = now - _TTS_CACHE_RETENTION_SEC
+    removed = freed = 0
+    try:
+        with os.scandir(_TTS_CACHE_DIR) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                    if st.st_mtime >= cutoff:
+                        continue
+                    os.unlink(entry.path)
+                    removed += 1
+                    freed += st.st_size
+                except OSError:
+                    continue
+    except OSError:
+        return
+    if removed:
+        log.info("TTS 合成缓存 GC: 删除 %d 个文件, 释放 %.2f GB",
                  removed, freed / 1024 ** 3)
 
 # 模块级状态：给飞书线程跨线程调用 speak_text() 用。sidecar 未启动时全为 None/0，
@@ -1857,6 +1921,7 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     try:
         os.makedirs(_BUF_DIR, exist_ok=True)
         _maybe_gc_buf_dir()      # 顺带回收过期缓存, 自带每小时节流
+        _maybe_gc_tts_cache()    # 合成缓存那一份, 30 天没命中才删
     except Exception:
         log.exception("准备 buffer 目录失败: %s", _BUF_DIR)
 
