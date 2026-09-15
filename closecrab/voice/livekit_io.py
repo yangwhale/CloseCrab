@@ -1033,8 +1033,61 @@ async def _voice_entrypoint(ctx: JobContext):
 
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
 
+    # ── agent 状态上报 ────────────────────────────────────────────────
+    #
+    # 客户端（iOS / 网页）判断「它在说话吗」只有一个来源：agent 参与者身上的
+    # `lk.agent.state` 属性。Swift SDK 那边是
+    #     agentState = _state.agentAttributes?.lkAgentState ?? .idle
+    # 读不到就当 idle —— 于是「谁在说话」这件事整个是死的。
+    #
+    # ## 框架其实注册了，但它的写法会丢状态
+    #
+    # `RoomIO` 确实监听了这个事件（1.5.16 的 room_io.py:195），
+    # 处理函数在 :438：
+    #
+    #     if self._update_state_atask is not None:
+    #         self._update_state_atask.cancel()      # ← 问题在这
+    #     self._update_state_atask = asyncio.create_task(_set_state())
+    #
+    # **后一个状态会把前一个还没写出去的任务直接取消。** 一轮对话里
+    # listening → thinking → speaking 常常在几十毫秒内连着发生，
+    # 而 `set_attributes` 要跑一趟信令往返 —— 中间那些状态的写入任务
+    # 在还没发出去时就被取消了。表现就是客户端「状态从来不变」。
+    #
+    # ## 这里走串行队列
+    #
+    # 不取消、按顺序写。多花几条信令（一轮对话也就三五次），
+    # 换的是每个状态都真的出得去、而且顺序不会乱。
+    # `set_attributes` 是覆盖语义，和框架那份并存不冲突 —— 两边写的是同一个值。
+    _state_q: asyncio.Queue[str] = asyncio.Queue()
+    _state_pub_task: asyncio.Task | None = None
+
+    async def _state_publisher():
+        while True:
+            state = await _state_q.get()
+            try:
+                if ctx.room.isconnected():
+                    await ctx.room.local_participant.set_attributes(
+                        {"lk.agent.state": state}
+                    )
+                    log.info(f"voice: lk.agent.state → {state}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning(f"voice: publish lk.agent.state={state} failed: {e}")
+
+    # **必须在 session.start() 之前注册** —— start() 里会走
+    # initializing → listening，晚注册就漏掉开头那几个。
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev) -> None:
+        # 事件回调是同步的，这里不能 await，只入队。
+        log.info(f"voice: agent_state {ev.old_state} → {ev.new_state}")
+        _state_q.put_nowait(ev.new_state)
+
     async def _shutdown_cleanup(reason: str):
         log.info(f"Voice job shutting down: {reason}")
+        if _state_pub_task is not None:
+            _state_pub_task.cancel()
         disconnect_event.set()
 
     ctx.add_shutdown_callback(_shutdown_cleanup)
@@ -1050,7 +1103,25 @@ async def _voice_entrypoint(ctx: JobContext):
         ),
     )
 
+    _state_pub_task = asyncio.create_task(_state_publisher())
+
     await session.start(agent=agent, room=ctx.room)
+
+    # 兜底补一次当前状态。
+    #
+    # 这一条原来在函数最末尾、在下面那句 broadcast 开场白 `say()` **之后** ——
+    # 而 `say()` 会把状态推到 speaking。于是这句硬写的 "listening"
+    # 正好在 agent 开口的同时把 speaking 盖掉，客户端那一整段都看不到它在说话。
+    #
+    # 现在提到 say() 之前，并且走同一个队列 —— 顺序由队列保证，
+    # 后面 speaking 一定排在它后面。
+    #
+    # 为什么还留着：SDK 1.5.x 的首次上报时机不稳，前端的 useAgent hook
+    # 在 20s 握手窗口里常收不到，然后显示「did not complete initializing」。
+    # 读 `session.agent_state` 而不是写死 "listening" —— 写死的话，
+    # 如果 start() 之后状态已经不是 listening 了，这句就成了谎报。
+    _state_q.put_nowait(session.agent_state)
+
     # 注册到全局 active_sessions, 让飞书文字 voice mode 的 _send_voice_summary
     # 能找到对应 open_id 的 session 调 say() 实时推 TTS。
     # 同时记下 voice loop, 跨 loop 调用时用。
@@ -1078,17 +1149,9 @@ async def _voice_entrypoint(ctx: JobContext):
     # warning, 但实测会让 livekit server 认为旧 room 还有 active agent 不派新 job,
     # 导致重启后第一次 /voice 就 "Agent did not join the room". 已回退.
 
-    # 兜底显式 publish lk.agent.state="listening" 到 local_participant attribute。
-    # SDK 内部 AgentSession.start() 完成会 emit "agent_state_changed" event,
-    # RoomIO 监听后调 set_attributes —— 但实测前端的 useAgent hook 在 20s 内常
-    # 收不到 (timing 不稳, SDK 1.5.x 已知现象)。frontend 没收到就显示
-    # "Agent state warning: did not complete initializing"。
-    # 这里多 publish 一次, set_attributes 是覆盖语义所以无害。
-    try:
-        await ctx.room.local_participant.set_attributes({"lk.agent.state": "listening"})
-        log.info("voice: published lk.agent.state=listening (manual fallback)")
-    except Exception as e:
-        log.warning(f"voice: failed to publish agent state attribute: {e}")
+    # （原来这里有一句硬写 "listening" 的兜底 —— 已经挪到 session.start()
+    #   紧后面、broadcast 开场白之前。它待在这儿的时候会把开场白的 speaking
+    #   状态盖掉，详见那边的注释。）
 
     # 阻塞 entrypoint 直到 participant 断开 (LiveKit 1.5.x 合约)
     log.info(f"Voice job holding for disconnect: {identity}")
