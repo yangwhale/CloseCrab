@@ -1246,7 +1246,11 @@ def is_voice_connected() -> bool:
 _SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?；;…])\s*|\n+")  # 句末标点切句(标点留句尾), 不切逗号保 prosody
 _SOLO_UNTIL_CHARS = 30    # 开头逐句单播, 累计播够这么多字之前每句独立成批(首字最快)
 _RAMP_BATCH_CHARS = 90    # 单播后第一包上限: 首字 ~6s 能被前面 cushion 盖住, 不留空档
-_MAX_BATCH_CHARS = 300    # 之后批上限: 300c 减少总批数避免 API 限流; 远低于 ~500c 吞尾阈值
+_MAX_BATCH_CHARS = 300    # 之后批上限: 300c 减少总批数避免 API 限流
+# ⚠️ 这里原来写「远低于 ~500c 吞尾阈值」—— 那条假设 2026-09-15 被证伪:
+#   实测 **260c 的批照样被截断**(只出 37.4s 就 finish=OTHER)。所以吞尾不是一条
+#   固定的字数线，压低 _MAX_BATCH_CHARS 只能降低概率、换来更多接缝，堵不死。
+#   正解是**出事了再劈**: 见 _generate_batch_pcm 里的 depth / _split_batch_text。
 
 
 def _plan_tts_batches(cleaned: str):
@@ -1282,10 +1286,45 @@ def _plan_tts_batches(cleaned: str):
     return batches
 
 
+_MAX_SPLIT_DEPTH = 3   # 劈开重合成的最大层数: 300c → 150 → 75 → 38, 再劈没意义
+
+
+def _is_truncated_finish(fin) -> bool:
+    """finish_reason 表示「模型中途放弃」而不是「正常说完」。"""
+    s = str(fin or "")
+    if not s or s in ("Qwen3-fallback", "cache", "STOP"):
+        return False
+    return not s.upper().endswith("STOP")
+
+
+def _split_batch_text(batch: str):
+    """把一批文本在**句子边界**上劈成字数尽量均等的两半; 劈不动返回 None。
+
+    只在检测到截断时才调。劈开的动机见 _generate_batch_pcm 里那段注释:
+    同一段文本重试 N 次会在**同一个地方**放弃(实测 37.4→31.8→22.3s 越试越短),
+    重试是错的药; 把它变成两段更短的文本才真正改变了输入。"""
+    sents = [s for s in _SENT_SPLIT_RE.split(batch) if s and s.strip()]
+    if len(sents) < 2:
+        return None
+    total = sum(len(s) for s in sents)
+    # 取**离一半最近**的那个句子边界，不是「越过一半就切」——
+    # 后者遇到长句会切出 220c + 40c 这种，等于没劈。
+    acc, cut, best = 0, 1, None
+    for i, s in enumerate(sents[:-1]):     # 至少给右半留一句
+        acc += len(s)
+        gap = abs(acc - total / 2)
+        if best is None or gap < best:
+            best, cut = gap, i + 1
+    left, right = "".join(sents[:cut]), "".join(sents[cut:])
+    if not left.strip() or not right.strip():
+        return None
+    return left, right
+
+
 _tts_client_per_loop: dict = {}  # per-event-loop genai client (aiohttp session 绑定 loop)
 
 async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
-                              idx: int, total: int) -> tuple[bytes, str]:
+                              idx: int, total: int, depth: int = 0) -> tuple[bytes, str]:
     """生成单个 batch 的完整 48kHz stereo PCM (含缓存检查 + retry + Qwen3 fallback)。"""
     cached = _cache_get_pcm(batch, voice)
     if cached is not None:
@@ -1337,8 +1376,37 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
             if chunks_24k and not _ok_finish:
                 _got = sum(len(c) for c in chunks_24k) / 2 / 24000
                 log.warning(
-                    "TTS 批 #%d/%d **截断** (%dc → 只有 %.1fs, finish=%s), retry %d/%d",
-                    idx, total, len(batch), _got, last_finish, attempt + 1, max_retries)
+                    "TTS 批 #%d/%d **截断** (%dc → 只有 %.1fs, finish=%s, depth=%d)",
+                    idx, total, len(batch), _got, last_finish, depth)
+                # ⛔⛔ 2026-09-15 第二版：**重试是错的药**。
+                #   第一版加了重试，实测 260c 那批三次全截断，而且一次比一次短：
+                #   37.4s → 31.8s → 22.3s。同样的文本喂回去，它还是会在同一个
+                #   地方放弃 —— 重试没有改变任何输入。
+                #   真正有效的是**把这一批劈开**：在句子边界切成两段更短的文本，
+                #   各自合成再首尾相接。切点在句末标点上，接缝听不出来。
+                halves = (_split_batch_text(batch)
+                          if depth < _MAX_SPLIT_DEPTH else None)
+                if halves:
+                    log.warning("TTS 批 #%d/%d 劈开重合成: %dc → %dc + %dc (depth %d→%d)",
+                                idx, total, len(batch), len(halves[0]), len(halves[1]),
+                                depth, depth + 1)
+                    out, all_ok = b"", True
+                    for half in halves:
+                        pcm_h, fin_h = await _generate_batch_pcm(
+                            client, model, config, half, voice, idx, total, depth + 1)
+                        if not pcm_h or _is_truncated_finish(fin_h):
+                            all_ok = False
+                        out += pcm_h
+                    if out:
+                        if all_ok:
+                            # 两半都完整 → 把拼好的整批也存一份，下次一发命中不用再劈
+                            _cache_save_pcm(batch, voice, out)
+                        log.info("TTS 批 #%d/%d 劈开后: %dc → %.1fs 音频 (%s)",
+                                 idx, total, len(batch), len(out) / 4 / 48000,
+                                 "完整" if all_ok else "仍有缺")
+                        return out, ("STOP" if all_ok else "split-partial")
+                    log.error("TTS 批 #%d/%d 劈开后两半都是空的", idx, total)
+                # 劈不动了（单句 / 到达深度上限）→ 这时候才值得重试一次
                 if attempt < max_retries:
                     chunks_24k = []          # ⛔ 残缺的整段丢掉，不要拼在下一次前面
                     last_finish = None
