@@ -1320,9 +1320,32 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
                                 log.info("TTS API 首帧 (prefetch): 批 #%d/%d, TTFB=%.0fms, %dc",
                                          idx, total, (_t_first_chunk - _t_api) * 1000, len(batch))
                             chunks_24k.append(bytes(inline.data))
-            if chunks_24k:
+            # ⛔⛔ 2026-09-15 定位到的老 bug：这里原来只判「有没有拿到字节」，
+            #   拿到一点就 break。可 Gemini TTS 会**中途放弃**：
+            #   返回 finish_reason=OTHER ＋ 一段**残缺**的音频，而不是报错。
+            #   实测那条被截断的回复：批 #5 是 163c，正常该出 ~25s，
+            #   实际只有 7.8s（三成一），finish=OTHER；批 #4 270c 出 28.3s（六成八）。
+            #   ⭐ 而 finish=STOP 的批，长度全都对得上。
+            #   → 判据改成「**拿到音频 且 finish 是 STOP**」才算成功。
+            #   （只看字节数的那版，症状就是「最后一节没了」——&nbsp;而且不报错。）
+            _fin = str(last_finish or "")
+            _ok_finish = (not _fin) or _fin.upper().endswith("STOP")
+            if chunks_24k and _ok_finish:
                 log.info("TTS API 完成 (prefetch): 批 #%d/%d, 总耗时=%.0fms, %dc",
                          idx, total, (_t_mod.monotonic() - _t_api) * 1000, len(batch))
+                break
+            if chunks_24k and not _ok_finish:
+                _got = sum(len(c) for c in chunks_24k) / 2 / 24000
+                log.warning(
+                    "TTS 批 #%d/%d **截断** (%dc → 只有 %.1fs, finish=%s), retry %d/%d",
+                    idx, total, len(batch), _got, last_finish, attempt + 1, max_retries)
+                if attempt < max_retries:
+                    chunks_24k = []          # ⛔ 残缺的整段丢掉，不要拼在下一次前面
+                    last_finish = None
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                # 重试用尽：残缺的还是播出去（有总比没有强），但下面**不写缓存**
+                log.error("TTS 批 #%d/%d 重试用尽仍截断，本批将缺一截", idx, total)
                 break
             log.warning("TTS 批 #%d/%d Gemini 返回 0 字节 (%.0fms, finish=%s), retry %d/%d",
                         idx, total, (_t_mod.monotonic() - _t_api) * 1000,
@@ -1351,7 +1374,17 @@ async def _generate_batch_pcm(client, model, config, batch: str, voice: str,
     if pcm_24k:
         pcm48, _ = audioop.ratecv(pcm_24k, 2, 1, 24000, 48000, None)
         stereo = audioop.tostereo(pcm48, 2, 1, 1)
-        _cache_save_pcm(batch, voice, stereo)
+        # ⛔⛔ 截断的音频**绝对不能进缓存** ——&nbsp;缓存键是 sha(文本+音色)，
+        #   一旦把残缺版写进去，同一句话以后**每次都放那个残缺版**，
+        #   而且永远不会再调 API 去纠正。这正是「这问题不是一天两天了」的原因：
+        #   它不是偶发，是**偶发一次之后就被固化了**。
+        _fin2 = str(last_finish or "")
+        _truncated = bool(_fin2) and not _fin2.upper().endswith("STOP") \
+            and _fin2 != "Qwen3-fallback" and _fin2 != "cache"
+        if _truncated:
+            log.warning("TTS 批 #%d/%d 残缺 (finish=%s)，**不写缓存**", idx, total, last_finish)
+        else:
+            _cache_save_pcm(batch, voice, stereo)
         log.info("TTS 批 #%d/%d: %dc → %.1fs 音频 finish=%s",
                  idx, total, len(batch), len(stereo) / 4 / 48000, last_finish)
         return stereo, str(last_finish)
