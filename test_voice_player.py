@@ -363,6 +363,8 @@ def t_wait_playout_waits_for_transient():
             self.calls = 0
         def progress(self):
             return None                  # 提示音没有位置可报
+        def is_paused(self):
+            return False                 # 2026-09-16 起 wait_playout 会问这个
         def is_busy(self):
             self.calls += 1
             return self.calls <= 3       # 前三次还在播，之后播完

@@ -278,6 +278,13 @@ class _SpeakItem:
 
 _speak_queue: "asyncio.Queue[_SpeakItem] | None" = None
 _speak_consumer_task: "asyncio.Task | None" = None
+# ⭐⭐⭐ 2026-09-16 现场原话：「工具调用说的话是为了填补空白的，它是 low
+#   priority 的。如果有正式的输出正在播放，那些工具调用的话就不用出声。」
+#   ⛔ 老逻辑只在**新 reply 入队那一刻**清洗队列里的 hint；至于「reply 正在播、
+#     这时候来了条新 hint」——&#160;它照样排在后面，reply 一播完就冒出来。
+#   ⭐ 判据：**低优先级的填空话，只在真的没人说话时才有价值。**
+#     正式输出在播 / 在排队，它就该**直接不生成**，而不是排队等着。
+_reply_in_flight: bool = False
 
 
 # ─── 语音「接收」(STT) 模块级状态 ────────────────────────────────────────────
@@ -1954,6 +1961,21 @@ def _get_persistent_source():
     return _persistent_source
 
 
+def _has_pending_reply() -> bool:
+    """队列里还压着没播的正式回复吗。
+
+    直接看 `_speak_queue._queue`（deque）而不是自己维护计数器 ——&nbsp;
+    `_flush_hints_from_queue` / `_drain_speak_queue` / barge-in 三处都会
+    从队列里拿走东西，计数器迟早对不上，而现场对不上是静默的。
+    """
+    if _speak_queue is None:
+        return False
+    try:
+        return any(it.is_reply for it in _speak_queue._queue)  # noqa: SLF001
+    except Exception:
+        return False
+
+
 def _flush_hints_from_queue():
     """从 _speak_queue 中移除所有 pending hint，保留 reply。
 
@@ -2133,8 +2155,10 @@ async def _speak_consumer():
             continue
         if queue_wait > 50:
             log.info("TTS 排队等待: %.0fms, %s", queue_wait, item.text[:30])
+        global _reply_in_flight
         try:
             _current_speak_task = asyncio.current_task()
+            _reply_in_flight = item.is_reply
             await _do_speak(item.text, item.fid, backend=item.backend)
         except asyncio.CancelledError:
             log.info("TTS _do_speak 被 cancel (barge-in): %s", item.text[:30])
@@ -2142,11 +2166,24 @@ async def _speak_consumer():
             log.exception("_speak_consumer: _do_speak 异常")
         finally:
             _current_speak_task = None
+            _reply_in_flight = False
 
 
 async def _enqueue_speak(text: str, fid: str = "", backend: str = ""):
-    """sidecar loop 内: 把 TTS 请求入队。reply 入队前先清洗过期 hint。"""
+    """sidecar loop 内: 把 TTS 请求入队。
+
+    两条优先级规则（2026-09-16 现场定的）：
+
+    · **hint 是填空用的，低优先级** ——&nbsp;正式回复正在播、或者还在队列里排着，
+      hint 就**直接丢掉，不入队**。它存在的意义是「别冷场」，而这会儿根本没冷场。
+    · **reply 之间严格排队** ——&nbsp;单 consumer ＋ `wait_playout` 已经保证了，
+      这里只负责在 reply 入队时把过期 hint 清掉。
+    """
     is_reply = bool(fid)
+    if not is_reply and (_reply_in_flight or _has_pending_reply()):
+        log.info("TTS 丢弃 hint（正式输出%s）: %s",
+                 "正在播" if _reply_in_flight else "在队列里排着", text[:30])
+        return
     if is_reply:
         _flush_hints_from_queue()
     import time as _time

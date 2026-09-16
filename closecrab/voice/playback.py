@@ -262,22 +262,64 @@ def end() -> None:
     get_player().end_live()
 
 
-async def wait_playout(timeout: float) -> None:
-    """等当前这段播完再返回。上层靠它把多条语音串起来，不让后一条盖住前一条。
+def is_paused() -> bool:
+    """当前这段是不是被用户按停了。"""
+    return get_player().is_paused()
 
-    有硬上限：用户按了暂停就走开的话，不能让整条 TTS 队列永远卡在这儿 ——
-    下一条来的时候接管就是了（旧实现靠固定 sleep，效果相同但看不出是故意的）。
+
+# ⭐ 连续 STALL_LIMIT 秒位置一点没动 = 真卡住了，不是在慢慢播。
+#   比 8s 大一截：网络抖动、sink 重连都可能让位置短暂不更新。
+_STALL_LIMIT = 15.0
+
+
+async def wait_playout(timeout: float) -> None:
+    """等当前这段真的播完再返回。上层靠它把多条语音串起来，不让后一条盖住前一条。
+
+    ⭐⭐ 2026-09-16 重写。老版本只有一个总时限（音频长度 + 10s），而实测
+    抓到过 `等播完超时 (191.1s)` ——&nbsp;181 秒的回复播到 191 秒还没播完，
+    时限到了就放行下一条，**于是正播着的正式回复被下一条顶掉**。
+    这正是现场那句「上一个还没说完呢，新的输出来了就把人家给打断」。
+
+    ⛔ 但也不能干脆不设上限：用户按了暂停就走开的话，整条队列会永远卡住。
+
+    ⭐ 所以把「一个时限」拆成**两个判据**，各管各的：
+      · **暂停** ——&nbsp;立刻放行（用户自己按的，他知道自己在干嘛）
+      · **卡死** ——&nbsp;位置连着 15 秒没动，判定这段废了，放行
+    只要还在往前播，就一直等下去。`timeout` 退化成一个兜底上限，
+    给得很宽（音频长度的两倍 ＋ 60s），正常永远走不到。
+
+    ⚠️ 提示音（transient）没有位置可报，`progress()` 对它返回 None ——
+    这种拿不到位置的情况**退回老行为**（只看 is_busy ＋ 兜底上限），
+    否则一条提示音会被误判成「15 秒没动」。
     """
     p = get_player()
+    hard = max(timeout * 2, timeout + 60.0)
     waited = 0.0
-    while waited < timeout:
+    stalled = 0.0
+    last_pos = None
+    while waited < hard:
         # 用 is_busy 而不是 progress —— 提示音没有位置可报，progress 对它返回
         # None，拿它判就会立刻放行，下一条把还没播完的提示音顶掉。
         if not p.is_busy():
             return
+        if p.is_paused():
+            log.info("等播完：用户暂停中，放行下一条")
+            return
+        pr = p.progress()
+        pos = pr[0] if pr else None
+        if pos is None:
+            stalled = 0.0            # 提示音：拿不到位置就不做卡死判定
+        elif pos != last_pos:
+            last_pos = pos
+            stalled = 0.0
+        else:
+            stalled += 0.1
+            if stalled >= _STALL_LIMIT:
+                log.info("等播完：位置 %.0fs 没动，判定卡住，继续下一条", stalled)
+                return
         await asyncio.sleep(0.1)
         waited += 0.1
-    log.info("等播完超时 (%.1fs)，继续下一条", timeout)
+    log.warning("等播完触到兜底上限 (%.1fs) —— 这不该发生，去看播放器", hard)
 
 
 # ── 对外：五个按钮 ─────────────────────────────────────────────────────

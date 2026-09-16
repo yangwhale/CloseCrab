@@ -346,6 +346,17 @@ class UnifiedPlayer:
         with self._lock:
             return self._state != IDLE
 
+    def is_paused(self) -> bool:
+        """用户按了暂停键、正停在那儿。
+
+        ⭐ 2026-09-16 加。`wait_playout` 原来只有一个总时限，分不清
+        「还在慢慢播」和「被用户按停了」——&nbsp;前者该继续等，后者该放行。
+        分不清的后果是**两头都做不好**：时限给小了，长回复没播完就被下一条顶掉；
+        给大了，用户一按暂停整条 TTS 队列就卡死在那儿。
+        """
+        with self._lock:
+            return self._state == PAUSED
+
     def progress(self):
         """(已播秒, 总秒, 是否在播, fid)；没在播返回 None。
 
