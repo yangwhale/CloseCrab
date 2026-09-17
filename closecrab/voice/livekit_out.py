@@ -452,7 +452,10 @@ async def _session(cfg: dict, identity: str) -> None:
     # 绝大多数声音是 bot 在念结果 —— 挂语音助手那版实测数字人一言不发，
     # worker 出块数停在预热不动。详见 `avatar_link` 里那段。
     avatar_link.attach(room, set_sink=_set_sink,
-                       livekit_url=cfg.get("url", ""), sink_rate=_OUT_RATE)
+                       livekit_url=cfg.get("url", ""),
+                       lk_key=cfg.get("api_key", ""),
+                       lk_secret=cfg.get("api_secret", ""),
+                       sink_rate=_OUT_RATE)
     # 下面这段留着是历史：
     #
     # `cc.avatar.state` 现在由房间里那个会说话的 agent（`lk-gemini-agent`）

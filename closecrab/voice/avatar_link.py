@@ -63,6 +63,8 @@ _set_sink = None
 """
 
 _LIVEKIT_URL = ""
+_LK_KEY = ""
+_LK_SECRET = ""
 _SINK_RATE = 48000
 
 _apply_lock: asyncio.Lock | None = None
@@ -337,9 +339,11 @@ async def _stop_avatar(room) -> None:  # noqa: ANN001
     try:
         from livekit import api
 
+        if not (_LK_KEY and _LK_SECRET):
+            log.warning("没有 LiveKit 凭据，踢不掉数字人 —— 房间里会留一张不动的脸")
+            raise RuntimeError("missing livekit credentials")
         lk = api.LiveKitAPI(_LIVEKIT_URL.replace("ws://", "http://").replace("wss://", "https://"),
-                            os.environ.get("LIVEKIT_API_KEY", ""),
-                            os.environ.get("LIVEKIT_API_SECRET", ""))
+                            _LK_KEY, _LK_SECRET)
         try:
             await lk.room.remove_participant(
                 api.RoomParticipantIdentity(room=room.name, identity=_AVATAR_IDENTITY))
@@ -369,6 +373,7 @@ async def _stop_avatar(room) -> None:  # noqa: ANN001
 
 
 def attach(room, *, set_sink=None, livekit_url: str = "",
+           lk_key: str = "", lk_secret: str = "",
            sink_rate: int = 48000) -> None:  # noqa: ANN001
     """挂到房间上。**在 `room.connect()` 之后调** —— 要读已经在房里的人。
 
@@ -377,8 +382,12 @@ def attach(room, *, set_sink=None, livekit_url: str = "",
     - `livekit_url` / `sink_rate`：建会话时要告诉控制面的两个参数。
       采样率**两边必须一致**，不一致的现象是口型对不上，不报错。
     """
-    global _set_sink, _LIVEKIT_URL, _SINK_RATE
+    global _set_sink, _LIVEKIT_URL, _LK_KEY, _LK_SECRET, _SINK_RATE
     _set_sink, _LIVEKIT_URL, _SINK_RATE = set_sink, livekit_url, sink_rate
+    # ⚠️ **凭据从调用方传进来，不读环境变量。** `livekit_out` 的那一对是从
+    #    Firestore `config/livekit` 读的，环境里根本没有 —— 去读环境的话
+    #    踢人那步会拿着空 key 去调 API，失败之后房间里留一张不动的脸。
+    _LK_KEY, _LK_SECRET = lk_key, lk_secret
 
     def _kick() -> None:
         asyncio.create_task(_apply(room))

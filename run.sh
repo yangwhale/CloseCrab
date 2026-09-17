@@ -95,6 +95,26 @@ if [ -z "${LITELLM_KEY:-}" ]; then
          "跑 ./deploy.sh 从 Firestore 拉, 或手动 export。"
 fi
 
+# 数字人（closecrab-avatar 控制面）的地址与凭据。
+#
+# **文件不存在 = 这台机器不接数字人**，这是正常配置不是故障 —— 控制面只在
+# 一台机器上跑，其余 bot 照常只出声。所以这里不 WARN。
+#
+# ⚠️ 2026-09-18 踩过：给语音助手和前端都配了这三个变量, **唯独漏了 bot 自己**,
+#    而数字人的归属那天刚挪到 bot 这一路。现象极具误导性 —— app 上显示
+#    「数字人这会儿用不了（服务没响应，或者并发满了）」, 看着像 GPU 那头出事,
+#    实际是这个进程连网关地址都没有, 探活当然失败。
+#    **判据：`tr '\0' '\n' < /proc/<pid>/environ | grep LIVEAVATAR`**,
+#    别看配置文件写没写 —— 要看进程手里到底有没有。
+LIVEAVATAR_ENV_FILE="$HOME/.closecrab-liveavatar"
+if [ -f "$LIVEAVATAR_ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$LIVEAVATAR_ENV_FILE"
+    set +a
+    echo "[$(date)] 数字人网关已配置: ${LIVEAVATAR_GATEWAY_URL:-?}"
+fi
+
 # ── gcsfuse 挂载检测 ─────────────────────────────────────────
 # gLinux 没有 fstab 权限，重启后 gcsfuse 挂载会丢失
 # 在 Bot 启动前自动检测并恢复，确保 CC Pages 和 shared memory 可用
