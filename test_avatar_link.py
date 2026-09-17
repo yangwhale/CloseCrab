@@ -45,6 +45,16 @@ class FakeLocal:
         self.raises = False
 
     async def set_attributes(self, d):
+        # ⚠️ **这个 sleep 不能删。**
+        #
+        # 真的 `set_attributes` 是一次信令往返，**一定会挂起** —— 那个空隙
+        # 就是竞态窗口。而一个「`async def` 里没有任何 await」的假货
+        # **根本不让出事件循环**：第一个任务会从判断一路跑到写完、改完状态，
+        # 全程不被打断，后面的任务再醒来时状态已经变了。
+        #
+        # 结果就是**假货比真货更原子，把并发测没了**。2026-09-17 实测：
+        # 没有这一行时，把互斥锁整个删掉，并发用例照样全绿。
+        await asyncio.sleep(0)
         if self.raises:
             raise RuntimeError("信令断了")
         self.written.append(dict(d))
@@ -150,6 +160,46 @@ asyncio.run(L._apply(r2))
 check("⭐ reset 之后新连接重新写一次 on",
       r2.local_participant.written == [{ATTR_STATE: "on"}],
       str(r2.local_participant.written))
+
+print("\n── 并发重算：同一次变化只能写一遍 ──")
+# ⭐ 2026-09-17 线上抓到的真 bug：一个客户端进房会同时触发
+#    participant_connected 和 participant_attributes_changed，两个 _apply
+#    并发跑，都读到旧的 _state、都算出同一个新值、都通过「没变就不写」，
+#    于是各发一次信令。日志里是同一个起点连着出现两次。
+L.reset()
+_probe_calls = {"n": 0}
+async def slow_gateway():
+    _probe_calls["n"] += 1
+    await asyncio.sleep(0.05)     # 制造一个让出点，放大竞态窗口
+    return True
+L._gateway_ok = slow_gateway
+room = FakeRoom(FakeParticipant("chris", WANT_VIS))
+
+async def five_at_once():
+    await asyncio.gather(*(L._apply(room) for _ in range(5)))
+asyncio.run(five_at_once())
+check("⭐ 五个并发重算只写一次（不加锁会写五次）",
+      room.local_participant.written == [{ATTR_STATE: "on"}],
+      str(room.local_participant.written))
+check("最终状态还是对的", L.current_state() is S.ON, L.current_state().value)
+
+# 并发之后再变一次，锁不能把后续的变化卡住。
+room.remote_participants["chris"].attributes = WANT_BG
+asyncio.run(L._apply(room))
+check("锁没卡住后续变化",
+      room.local_participant.written[-1] == {ATTR_STATE: "hidden"},
+      str(room.local_participant.written))
+
+# ⭐ reset 必须把锁也丢掉：重连后可能是另一个事件循环，
+#    旧锁绑在死循环上会让每一次重算都抛 RuntimeError ——
+#    表现是「重连之后状态再也不更新」，而且不会有人去看那条日志。
+L.reset()
+check("⭐ reset 会丢掉锁（换事件循环后还能用）", L._apply_lock is None)
+r3 = FakeRoom(FakeParticipant("chris", WANT_VIS))
+asyncio.run(L._apply(r3))        # 全新的事件循环
+check("⭐ 换一个事件循环后仍然写得出去",
+      r3.local_participant.written == [{ATTR_STATE: "on"}],
+      str(r3.local_participant.written))
 
 print("\n── 探活：缓存、超时、没配网关 ──")
 import closecrab.voice.avatar_link as _L

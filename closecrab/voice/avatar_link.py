@@ -52,6 +52,18 @@ _state: AvatarState = AvatarState.OFF
 _probe_at: float = 0.0
 _probe_ok: bool = False
 
+_apply_lock: asyncio.Lock | None = None
+"""`_apply` 的串行锁。**懒建** —— 模块导入时还没有事件循环，
+在这里直接 `asyncio.Lock()` 会绑到错的循环上（或者根本没有循环可绑）。
+"""
+
+
+def _lock() -> asyncio.Lock:
+    global _apply_lock
+    if _apply_lock is None:
+        _apply_lock = asyncio.Lock()
+    return _apply_lock
+
 
 def current_state() -> AvatarState:
     """当前状态。给 TTS 那一路问「这次要不要走数字人」。"""
@@ -120,7 +132,31 @@ def _collect(room) -> dict[str, dict[str, str]]:  # noqa: ANN001
 
 
 async def _apply(room) -> None:  # noqa: ANN001
-    """重算一次，变了就写回去。"""
+    """重算一次，变了就写回去。**整段串行** —— 理由见下。"""
+    async with _lock():
+        await _apply_locked(room)
+
+
+async def _apply_locked(room) -> None:  # noqa: ANN001
+    """⚠️ **必须在锁里跑。** 不加锁的话每次状态变化都会被写两遍。
+
+    2026-09-17 线上实测抓到的，日志长这样：
+
+        avatar: off → unavailable
+        avatar: off → unavailable      ← 同一个起点，写了两次
+        avatar: off → hidden
+        avatar: off → hidden
+
+    成因是经典的 check-then-act 跨 await：一个客户端进房会同时触发
+    `participant_connected` 和 `participant_attributes_changed`，
+    两个 `_apply` 任务并发跑。它们都读到 `_state == off`，都在
+    `await _gateway_ok()` 处让出，都算出同一个新值，都通过了
+    「没变就不写」那道门，于是各发一次信令。
+
+    **不是每次多花一条信令这么简单** —— LiveKit 文档明说属性不适合
+    高频写（每几秒一次以上就有服务端同步开销）。事件越多重得越厉害，
+    而且这种重复在功能上完全看不出来，只有数日志才发现。
+    """
     global _state
     try:
         new = decide_for_room(_collect(room), service_ok=await _gateway_ok())
@@ -132,8 +168,15 @@ async def _apply(room) -> None:  # noqa: ANN001
         return           # 没变就不写 —— 每次 set_attributes 都是一趟信令往返
     old = _state
 
-    # ⚠️ 只写自己这一个键。`set_attributes` 是**合并**不是整体覆盖
-    #    （LiveKit 服务端按键合并），所以不会碰掉 `lk.agent.state` 那些。
+    # 只写自己这一个键。属性是**按键合并**的，不会碰掉入场时带的
+    # `lk.publish_on_behalf`（那个键一丢，前端会重新把我们误认成语音助手本人）。
+    # 出处：LiveKit 文档 Participant attributes —— "allows fine-grained updates
+    # to different parts of the state without affecting or transmitting the
+    # values of other keys"，删除某个键要显式写空串。
+    #
+    # 同一篇文档还写着：属性**不适合每几秒一次以上的高频更新**（服务端要做
+    # 同步，开销在那儿）。所以上面那句「没变就不写」不是优化，是硬要求；
+    # 客户端那侧的去抖同理。
     try:
         await room.local_participant.set_attributes({ATTR_STATE: new.value})
     except Exception as e:
@@ -185,5 +228,9 @@ def reset() -> None:
     而 `_apply` 的「没变就不写」会让它**永远不再回报** —— 客户端拿到的是
     上一条连接留下的状态。
     """
-    global _state, _probe_at, _probe_ok
+    global _state, _probe_at, _probe_ok, _apply_lock
     _state, _probe_at, _probe_ok = AvatarState.OFF, 0.0, False
+    # 锁也要丢掉：重连后可能是另一个事件循环，旧锁绑在死循环上会直接抛
+    # RuntimeError，而那会让**每一次**重算都失败 —— 表现是重连之后
+    # 状态再也不更新。
+    _apply_lock = None
