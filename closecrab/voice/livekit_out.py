@@ -416,9 +416,20 @@ async def _session(cfg: dict, identity: str) -> None:
     )
 
     _register_playback_rpc(room)
-    # 必须在 connect 之后 —— 它要读已经在房里那批人的属性，
-    # 那批人不会补发 participant_connected。
-    avatar_link.attach(room)
+    # ⛔ **这张嘴不再报数字人状态了**（2026-09-18）。
+    #
+    # `cc.avatar.state` 现在由房间里那个会说话的 agent（`lk-gemini-agent`）
+    # 负责写 —— 判定和「把音频改道给数字人」必须同进程，只有它能改自己的
+    # 音频出口。这张嘴改不了，报出来的状态只能是猜的。
+    #
+    # 更要紧的是**客户端收状态不认发送者**（`CCAvatarDelegate` 里没有
+    # identity 过滤，谁写都收）。两个参与者各写各的，后到的那个赢 ——
+    # 实测过：agent 报 `on`、这张嘴报 `unavailable`，手机上显示「服务不可用」，
+    # 而数字人其实好好地在房间里。**一个属性只能有一个写入方。**
+    #
+    # 代码留着：这张嘴将来若要自己挂数字人（bot 主动播报那条路），
+    # 判定逻辑现成的。要用的话先解决「谁写」这个问题。
+    #   avatar_link.attach(room)
 
     _room, _source, _connected = room, source, True
     log.info("LiveKit 输出已连上房间 %s (identity=%s)", room.name, identity)
