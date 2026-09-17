@@ -193,6 +193,7 @@ class UnifiedPlayer:
         """
         if not fid:
             with self._lock:
+                self._warn_if_preempting(fid)
                 self._close_handles()
                 self._track = _Track(live=True, transient=True)
                 self._state = PLAYING
@@ -204,6 +205,7 @@ class UnifiedPlayer:
             return False
         os.makedirs(self.buf_dir, exist_ok=True)
         with self._lock:
+            self._warn_if_preempting(fid)
             self._close_handles()
             # "w+b" 而不是 "ab"：同 fid 重开就该是新的一段，追加会把上一段的
             # 尾巴接进来，听起来像 bot 把上句话又说了半截。
@@ -422,6 +424,43 @@ class UnifiedPlayer:
             return os.path.getsize(path)
         except OSError:
             return 0
+
+    # 低于这个秒数不报警：一句话刚起头就被换掉，多半是队列里正常的先后顺序，
+    # 不是「话说到一半被打断」。太敏感会把正常调度刷成一屏告警。
+    _PREEMPT_WARN_MIN_LEFT_S = 1.5
+
+    def _warn_if_preempting(self, new_fid: str) -> None:
+        """要顶掉一段**还在播**的音频时，喊一声。调用时已持锁。
+
+        ## 为什么值得单开一个函数
+
+        「上一条还没念完就被下一条顶掉」是 Chris 反复报的那个问题，而它在
+        代码里是**静默的**：`begin_live` 直接换掉 `self._track`，旧的那段
+        连一行日志都不留。2026-09-17 复盘时，我是靠事后写脚本扫 4936 段播放
+        才把 60 次打断找出来的 —— 这种事不该每次都要考古。
+
+        所以在**唯一那个会替换轨道的地方**留一条 WARNING：真复发时
+        `grep 播放被顶掉` 一下就有，不用再写分析脚本。
+
+        ⚠️ 这里**只报警不拦截**。要不要顶掉是上层的决策
+        （`_enqueue_speak` 的 hint 门控、`should_barge_in` 的开口判据），
+        播放器只负责把事实说出来。在这一层偷偷拦下来，会让真正需要打断的
+        场景（用户开口抢麦）也失灵，而且故障点更难找。
+        """
+        t = self._track
+        if self._state == IDLE or not t.fid or t.transient:
+            return
+        total = t.total if t.total > 0 else self._disk_size(t.path)
+        left = (total - t.pos) / _BYTES_PER_SEC
+        if left < self._PREEMPT_WARN_MIN_LEFT_S:
+            return
+        log.warning(
+            "播放被顶掉: fid=%s 还剩 %.1fs 没播（已播 %.1fs/%.1fs），"
+            "换成 %s —— 上层没拦住这次抢占，去查 _enqueue_speak 的 hint 门控"
+            "和 should_barge_in",
+            t.fid, left, t.pos / _BYTES_PER_SEC, total / _BYTES_PER_SEC,
+            new_fid or "提示音(无 fid)",
+        )
 
     def _close_handles(self) -> None:
         t = self._track

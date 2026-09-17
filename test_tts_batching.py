@@ -423,5 +423,111 @@ if _m:
           body.rindex("wait_voice_idle") < body.rindex("loop.stop()"),
           "顺序反了 = 没等到")
 
+
+# ── 顶掉正在播的音频时必须留痕 ──────────────────────────────────────
+print("\n── 抢占告警：被顶掉不能再是静默的 ──")
+
+_m = re.search(r"    def _warn_if_preempting\(self, new_fid: str\) -> None:.*?\n(?=    def )",
+               psrc, re.S)
+check("_warn_if_preempting 还在", _m is not None)
+
+if _m:
+    warns: list = []
+    wlog = type("L", (), {
+        "warning": staticmethod(lambda *a: warns.append(a[0] % a[1:] if len(a) > 1 else a[0])),
+        "info": staticmethod(lambda *a, **k: None),
+        "debug": staticmethod(lambda *a, **k: None)})()
+
+    wns = {"_Track": pns["_Track"], "os": os, "log": wlog,
+           "PLAYING": PLAYING, "IDLE": IDLE, "_BYTES_PER_SEC": 192000}
+    exec("class _W:\n" + _m.group(0), wns)
+
+    # ⚠️ 阈值必须**从源码抽**，不能在这儿写死。
+    # 第一版写了 `_PREEMPT_WARN_MIN_LEFT_S = 1.5` 常量字面量，于是把源码里的
+    # 阈值改成 0 或 999（等于「刷屏」和「等于关掉」）测试照样全绿 ——
+    # 测的是我抄过来的那份副本，不是被测代码。变异测试一跑就露馅。
+    _mt = re.search(r"_PREEMPT_WARN_MIN_LEFT_S = ([\d.]+)", psrc)
+    check("抽得到抢占告警阈值", _mt is not None)
+    _THRESH = float(_mt.group(1)) if _mt else 1.5
+
+    class _P2:
+        _PREEMPT_WARN_MIN_LEFT_S = _THRESH
+        _warn_if_preempting = wns["_W"]._warn_if_preempting
+        # ⚠️ 不能恒返回 0。第一版这么写，于是「total 未知时回落磁盘大小」
+        # 那条分支根本没被走到 —— 把它删掉测试照样绿（变异测试抓到的）。
+        # 这里让磁盘上「有 40 秒」，才测得出回落是否真的发生。
+        _DISK_S = 40
+        @staticmethod
+        def _disk_size(path):
+            return 40 * 192000
+        def __init__(self, track, state):
+            self._track, self._state = track, state
+
+    SEC = 192000
+
+    def fire(track, state):
+        warns.clear()
+        _P2(track, state)._warn_if_preempting("newfid")
+        return len(warns)
+
+    # 正在播一段长回复，还剩 60 秒 → 必须报警
+    t = pns["_Track"](fid="abc", path="/x", pos=10 * SEC, total=70 * SEC, live=True)
+    check("⭐ 顶掉还剩 60s 的回复 → 报警", fire(t, PLAYING) == 1)
+    # ⚠️ 这条必须紧跟上一句 —— `fire()` 每次都会清空 warns，
+    # 中间插任何一次 fire，这里读到的就是空列表（第一版就这么炸的）。
+    check("告警文本带得出剩余秒数", bool(warns) and "60.0s" in warns[0],
+          warns[0] if warns else "warns 是空的")
+
+    # 刚好跨过阈值两侧各取一点 —— 阈值被挪动（调大=形同关闭，调小=刷屏）就会红
+    _above = int((_THRESH + 1.0) * SEC)
+    _below = int(max(_THRESH - 0.5, 0.05) * SEC)
+    t = pns["_Track"](fid="a", path="/x", pos=0, total=_above, live=True)
+    check("⭐ 阈值之上必报（挡住「调大到形同关闭」）", fire(t, PLAYING) == 1,
+          f"阈值 {_THRESH}s，剩 {_above/SEC:.2f}s")
+    t = pns["_Track"](fid="a", path="/x", pos=0, total=_below, live=True)
+    check("⭐ 阈值之下必不报（挡住「调小到刷屏」）", fire(t, PLAYING) == 0,
+          f"阈值 {_THRESH}s，剩 {_below/SEC:.2f}s")
+    # 只剩 0.5 秒 → 正常先后顺序，不刷屏
+    t = pns["_Track"](fid="abc", path="/x", pos=int(69.5 * SEC), total=70 * SEC, live=True)
+    check("只剩 0.5s 不报（那是正常排队）", fire(t, PLAYING) == 0)
+
+    # 播放器空闲 → 没有谁被顶
+    t = pns["_Track"](fid="abc", path="/x", pos=0, total=70 * SEC, live=True)
+    check("IDLE 时不报", fire(t, IDLE) == 0)
+
+    # 提示音（transient）被顶掉无所谓，它本来就是填空的
+    # ⚠️ 要带 fid —— 不带的话 `not t.fid` 那一项就先把它挡了，
+    # 等于根本没测到 `t.transient` 这个条件（把它删掉测试照样绿）。
+    t = pns["_Track"](fid="hint1", path="/x", pos=0, total=50 * SEC,
+                      live=True, transient=True)
+    check("⭐ 提示音（transient）被顶不报", fire(t, PLAYING) == 0,
+          "transient 这一项被删掉也该红")
+
+    # 没有 fid 的轨（也是提示音那一档）
+    t = pns["_Track"](fid="", path="/x", pos=0, total=70 * SEC, live=True)
+    check("无 fid 不报", fire(t, PLAYING) == 0)
+
+    # total 还没定（live 刚起步）→ 回落磁盘大小；这里磁盘为 0 → 剩余为负 → 不报
+    # live 刚起步，t.total 还没定 → 必须回落到磁盘上已有的长度。
+    # 不回落的话 total=0 → 剩余为负 → 静默不报，而这恰恰是**直播段最需要
+    # 被保护的那一刻**（刚开始播、剩得最多）。
+    t = pns["_Track"](fid="abc", path="/x", pos=0, total=0, live=True)
+    check("⭐ total 未知时回落磁盘大小并照常报警", fire(t, PLAYING) == 1,
+          "不回落 = 直播段刚开播被顶掉时一声不吭")
+    # 磁盘上也快播完了 → 仍然不该报
+    t = pns["_Track"](fid="abc", path="/x", pos=int(39.8 * SEC), total=0, live=True)
+    check("回落后同样尊重阈值", fire(t, PLAYING) == 0)
+
+    # ⚠️ 它只报警**不拦截** —— 真要拦，用户开口抢麦也会被拦住
+    body = _m.group(0)
+    check("⭐ 只报警不返回布尔（不在播放器层偷偷拦截）",
+          "return True" not in body and "return False" not in body,
+          "在这层拦截会让真正该打断的场景失灵")
+
+# 调用点：两个替换轨道的地方都要挂
+check("⭐ begin_live 两条分支都调了（提示音档 + 正式档）",
+      psrc.count("self._warn_if_preempting(") == 2,
+      f"只找到 {psrc.count('self._warn_if_preempting(')} 处")
+
 print(f"\n{'='*52}\n通过 {ok} 条，失败 {fail} 条")
 sys.exit(1 if fail else 0)
