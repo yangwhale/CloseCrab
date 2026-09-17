@@ -33,7 +33,11 @@ fi
 # ~/.npm-global/bin: kilo/openclaw 等 npm 全局包. BotCore 进程通过 subprocess_exec
 # 启动 worker 时走 shutil.which (查 PATH), 必须加 (即便 deploy.sh 已 symlink 到
 # /usr/local/bin 作为兜底, 这里也加上确保两条路径都覆盖)
-export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:/usr/local/bin:/snap/bin:$PATH"
+# /opt/homebrew/bin: macOS (Apple Silicon) 的 brew 前缀。kilo 就装在这里，而
+# /snap/bin 是 gLinux 专有 —— 两边各加各的，互不影响（不存在的目录在 PATH 里无害）。
+# 从交互 shell 手动起时能靠继承侥幸拿到，但 cron / launchd / nohup 脱离 .zshrc 后
+# shutil.which("kilo") 直接找不到，worker 起不来。Intel Mac 走 /usr/local/bin，已在。
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:/usr/local/bin:/snap/bin:/opt/homebrew/bin:$PATH"
 
 # The nvm entry goes LAST so it wins. Prepending it before the block above put
 # ~/.local/bin ahead of it, and on gLinux that directory holds a node symlink
@@ -120,7 +124,14 @@ _ensure_cron_daemon() {
     fi
     rm -f "$pid_file"
     echo "[$(date)] cron-daemon 不在，拉起 (随 $BOT_NAME 同环境)"
-    setsid python3 "$script" start </dev/null >/dev/null 2>&1 &
+    # macOS 没有 setsid（util-linux 的东西）。缺了不会报错中断 —— 函数里 `&` 起的
+    # 后台任务，set -e 管不到，于是 "command not found" 静默吞掉，cron-daemon
+    # 永远拉不起来而 bot 主循环一切正常。nohup 是等价兜底：同样脱离终端、忽略 SIGHUP。
+    if command -v setsid >/dev/null 2>&1; then
+        setsid python3 "$script" start </dev/null >/dev/null 2>&1 &
+    else
+        nohup python3 "$script" start </dev/null >/dev/null 2>&1 &
+    fi
 }
 
 # ── Bot 重启循环 ──────────────────────────────────────────────
