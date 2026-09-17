@@ -28,7 +28,6 @@ from .avatar_policy import (
     AvatarState,
     decide_for_room,
     is_user_visible_problem,
-    should_generate,
 )
 
 log = logging.getLogger("closecrab.voice.avatar_link")
@@ -68,11 +67,6 @@ def _lock() -> asyncio.Lock:
 def current_state() -> AvatarState:
     """当前状态。给 TTS 那一路问「这次要不要走数字人」。"""
     return _state
-
-
-def wants_avatar() -> bool:
-    """这次说话要不要真的去占一路 worker。"""
-    return should_generate(_state)
 
 
 async def _gateway_ok() -> bool:
