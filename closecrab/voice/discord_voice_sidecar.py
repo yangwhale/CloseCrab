@@ -1612,6 +1612,39 @@ async def _gemini_tts_stream(text: str):
 
     current_prefetch = None  # asyncio.Task for the batch we're about to yield
 
+    # —— 欠载观测 ——
+    #
+    # `lead` = 已经交出去的音频秒数 − 从起播到现在过去的秒数，
+    # 也就是「播放器手上还剩多少余量」。**它转负就是用户听到的卡顿。**
+    #
+    # 为什么非要直接打出来：2026-09-17 那次排查，这个数是我从
+    # 「TTS API 完成 总耗时」和「→ Xs音频」两行分别抄出来、手工累加算的 ——
+    # 慢，而且只有出事之后才会有人去算。它是这条链路**唯一**的健康指标，
+    # 就该每批直接打在日志里，让「有没有欠载」变成搜一个词的事。
+    _t_play_start = None      # 第一批交出去的时刻 ＝ 播放起步
+    _audio_out_s = 0.0        # 累计交出去的音频秒数
+
+    def _acc(pcm_len: int) -> None:
+        """每次交出音频都记一笔。第一次交出的时刻就是播放起步时刻。"""
+        nonlocal _t_play_start, _audio_out_s
+        if _t_play_start is None:
+            _t_play_start = _t_mod.monotonic()
+        _audio_out_s += pcm_len / 4 / 48000
+
+    def _log_lead(idx0: int, batch_len: int) -> None:
+        """一批交完了，报一次余量。**负数就是用户听到的卡顿。**"""
+        if _t_play_start is None:
+            return
+        lead = _audio_out_s - (_t_mod.monotonic() - _t_play_start)
+        tag = f"批 #{idx0 + 1}/{n} ({batch_len}c)"
+        if lead < 0:
+            # 用 WARNING：这是用户真的听到「说着说着没声了」的那一刻，
+            # 不是调试信息。要能被 grep 出来、被告警规则抓到。
+            log.warning("TTS 欠载: %s 交完时余量 %.1fs —— 播放已断档 %.1fs",
+                        tag, lead, -lead)
+        else:
+            log.info("TTS 余量: %s 交完时 lead=%.1fs", tag, lead)
+
     for idx in range(n):
         batch = batches[idx]
 
@@ -1620,7 +1653,9 @@ async def _gemini_tts_stream(text: str):
             pcm, _ = await current_prefetch
             current_prefetch = None
             if pcm:
+                _acc(len(pcm))
                 yield pcm
+                _log_lead(idx, len(batch))
             # Prefetch NEXT batch AFTER current finishes (avoids concurrent API calls)
             if idx + 1 < n:
                 await asyncio.sleep(0.05)
@@ -1634,6 +1669,7 @@ async def _gemini_tts_stream(text: str):
             if cached is not None:
                 log.info("TTS 批 #%d/%d: cache hit (%dc → %.1fs)",
                          idx + 1, n, len(batch), len(cached) / 4 / 48000)
+                _acc(len(cached))
                 yield cached
             else:
                 pcm_accum = []
@@ -1666,6 +1702,7 @@ async def _gemini_tts_stream(text: str):
                                         pcm48, _cv_state = audioop.ratecv(d, 2, 1, 24000, 48000, _cv_state)
                                         stereo = audioop.tostereo(pcm48, 2, 1, 1)
                                         pcm_accum.append(stereo)
+                                        _acc(len(stereo))
                                         yield stereo
                         if pcm_accum:
                             log.info("TTS API 完成: 批 #%d/%d, 总耗时=%.0fms, %dc → %.1fs音频",
@@ -1693,6 +1730,7 @@ async def _gemini_tts_stream(text: str):
                             pcm48, _cv_state2 = audioop.ratecv(pcm24, 2, 1, 24000, 48000, _cv_state2)
                             stereo = audioop.tostereo(pcm48, 2, 1, 1)
                             pcm_accum.append(stereo)
+                            _acc(len(stereo))
                             yield stereo
                     except Exception:
                         pass
@@ -1702,6 +1740,7 @@ async def _gemini_tts_stream(text: str):
                 log.info("TTS 批 #%d/%d: %dc → %.1fs finish=%s",
                          idx + 1, n, len(batch),
                          len(full_stereo) / 4 / 48000 if full_stereo else 0, last_finish)
+            _log_lead(idx, len(batch))
             # First batch done, start prefetch for next (sequential, no concurrent API)
             if idx + 1 < n:
                 await asyncio.sleep(0.05)

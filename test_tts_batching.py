@@ -269,5 +269,57 @@ _m = re.search(r"total = 0 if t\.live else t\.total", psrc)
 check("⭐ _report 里 live 时把 total 归零", _m is not None,
       "没有这一行，卡片又会显示「已落盘长度」当总长")
 
+
+# ── 欠载观测：每条 yield 路径都必须记账 ────────────────────────────
+print("\n── 欠载观测：yield 路径全覆盖 ──")
+
+import ast
+
+tree = ast.parse(src)
+gen_fn = next((nd for nd in ast.walk(tree)
+               if isinstance(nd, (ast.AsyncFunctionDef, ast.FunctionDef))
+               and nd.name == "_gemini_tts_stream"), None)
+check("找得到 _gemini_tts_stream", gen_fn is not None)
+
+
+def _yield_stmts(node):
+    """收集 (父语句列表, 下标) —— 只看语句级的 `yield X`。"""
+    out = []
+    for nd in ast.walk(node):
+        body = getattr(nd, "body", None)
+        for attr in ("body", "orelse", "finalbody"):
+            seq = getattr(nd, attr, None)
+            if not isinstance(seq, list):
+                continue
+            for i, st in enumerate(seq):
+                if isinstance(st, ast.Expr) and isinstance(st.value, ast.Yield):
+                    out.append((seq, i, st.lineno))
+    return out
+
+
+if gen_fn is not None:
+    ys = _yield_stmts(gen_fn)
+    check("至少找到 3 条 yield 路径", len(ys) >= 3, f"只找到 {len(ys)}")
+    missing = []
+    for seq, i, lineno in ys:
+        prev = seq[i - 1] if i > 0 else None
+        acced = (isinstance(prev, ast.Expr) and isinstance(prev.value, ast.Call)
+                 and isinstance(prev.value.func, ast.Name)
+                 and prev.value.func.id == "_acc")
+        if not acced:
+            missing.append(lineno)
+    # ⭐ 漏一条 = 余量读数偏高 = 明明欠载了日志却说一切正常，
+    #    比没有这个指标更坏（它会让人相信一个错的数）。
+    check("⭐ 每条 yield 前面都有 _acc 记账", not missing,
+          f"这些行的 yield 没记账: {missing}")
+
+    logged = sum(1 for nd in ast.walk(gen_fn)
+                 if isinstance(nd, ast.Call) and isinstance(nd.func, ast.Name)
+                 and nd.func.id == "_log_lead")
+    check("批边界有报余量", logged >= 2, f"只有 {logged} 处 _log_lead")
+
+check("欠载走 WARNING 而不是 INFO（要能被 grep / 告警抓到）",
+      re.search(r'log\.warning\(\s*"TTS 欠载', src) is not None)
+
 print(f"\n{'='*52}\n通过 {ok} 条，失败 {fail} 条")
 sys.exit(1 if fail else 0)
