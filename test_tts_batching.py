@@ -321,5 +321,107 @@ if gen_fn is not None:
 check("欠载走 WARNING 而不是 INFO（要能被 grep / 告警抓到）",
       re.search(r'log\.warning\(\s*"TTS 欠载', src) is not None)
 
+
+# ── 自重启前必须等语音播完 ──────────────────────────────────────────
+print("\n── 自重启：exit-42 前等语音 ──")
+
+import asyncio
+
+_m = re.search(r"^async def wait_voice_idle\(.*?\n(?=\S)", src, re.M | re.S)
+check("wait_voice_idle 还在", _m is not None)
+
+if _m:
+    wns: dict = {"asyncio": asyncio,
+                 "log": type("L", (), {"info": staticmethod(lambda *a: None),
+                                       "warning": staticmethod(lambda *a: None)})()}
+    # 可控的假状态：队列长度 / 是否在说 / 播放器进度
+    state = {"q": 0, "task": None, "prog": None, "active": False}
+    wns["_speak_queue"] = type("Q", (), {"qsize": staticmethod(lambda: state["q"])})()
+    wns["get_playback_progress"] = lambda: state["prog"]
+    # _current_speak_task / _tts_active 在函数里是读全局，靠 exec 的 ns 提供
+    exec(_m.group(0), wns)
+    widle = wns["wait_voice_idle"]
+
+    def run(timeout=2.0):
+        wns["_current_speak_task"] = state["task"]
+        wns["_tts_active"] = state["active"]
+        return asyncio.run(widle(timeout=timeout, poll=0.01))
+
+    # 全闲 → 立刻返回（两次采样，约 0.02s）
+    state.update(q=0, task=None, prog=None, active=False)
+    t = run()
+    check("全闲时几乎立刻返回", t < 0.5, f"等了 {t:.2f}s")
+
+    # 队列里还压着 → 一直等到超时
+    state.update(q=3, task=None, prog=None, active=False)
+    t = run(timeout=0.3)
+    check("⭐ 队列非空时不放行", t >= 0.28, f"只等了 {t:.2f}s")
+
+    # 正在说 → 等
+    state.update(q=0, task=object(), prog=None, active=False)
+    t = run(timeout=0.3)
+    check("⭐ _do_speak 在跑时不放行", t >= 0.28, f"只等了 {t:.2f}s")
+
+    # 播放器还在放 → 等（prog = (played, total, active, fid)）
+    state.update(q=0, task=None, prog=(5.0, 0.0, True, "abc"), active=False)
+    t = run(timeout=0.3)
+    check("⭐ 播放器 active 时不放行", t >= 0.28, f"只等了 {t:.2f}s")
+
+    # 生成还没结束（_tts_active）→ 等。这一条单独测：
+    # 队列空、任务 None、播放器空档，全都成立，**只有它**能挡住 ——
+    # 正是「批间空隙」那一瞬间的样子，漏了就会在批与批之间退出。
+    state.update(q=0, task=None, prog=None, active=True)
+    t = run(timeout=0.3)
+    check("⭐ 批间空隙（_tts_active）也不放行", t >= 0.28, f"只等了 {t:.2f}s")
+
+    # 播放器已停 → 放行
+    state.update(q=0, task=None, prog=(9.0, 9.0, False, "abc"), active=False)
+    t = run()
+    check("播放器 active=False 时放行", t < 0.5, f"等了 {t:.2f}s")
+
+    # ⭐ 双采样：第一次看着闲、第二次又忙起来 —— 不能放行。
+    #
+    # 这正是 `_speak_queue.get()` 取出 item 到 `_current_speak_task` 赋值
+    # 之间那个窗口的样子。只采样一次就会**正好从那个缝里穿过去**，
+    # 而且这种 race 在生产上是偶发的，事后根本复现不了。
+    # 静态假状态测不出它，必须让状态在采样之间真的翻一次。
+    seq = [None, (5.0, 0.0, True, "x"), (5.0, 0.0, True, "x")]
+    calls = {"n": 0}
+
+    def _flaky():
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i] if i < len(seq) else (5.0, 0.0, True, "x")
+
+    wns["get_playback_progress"] = _flaky
+    state.update(q=0, task=None, prog=None, active=False)
+    t = run(timeout=0.3)
+    check("⭐ 第一次采样闲、第二次转忙 → 不放行", t >= 0.28, f"只等了 {t:.2f}s")
+    wns["get_playback_progress"] = lambda: state["prog"]   # 还原
+
+    # 超时必须返回，不能挂死
+    state.update(q=1, task=None, prog=None, active=False)
+    t = run(timeout=0.2)
+    check("超时一定返回（不挂死）", 0.18 <= t < 1.0, f"{t:.2f}s")
+
+# 调用点也要钉住 —— 函数还在但没人调等于没修
+fsrc2 = io.open("closecrab/channels/feishu.py", encoding="utf-8").read()
+_m = re.search(r"def _check_self_restart\(.*?\n(?=    (?:async )?def )", fsrc2, re.S)
+# ⚠️ 必须断言**真的 await 了**，不能只看名字出现过 ——
+# 把 `waited = await wait_voice_idle(...)` 换成 `waited = 0.0`
+# 之后 import 行还在，只查名字的断言会照样绿。
+check("⭐ _check_self_restart 里真的 await 了 wait_voice_idle",
+      _m is not None and re.search(r"await\s+wait_voice_idle\s*\(", _m.group(0)),
+      "加了函数但没接上，等于没修")
+if _m:
+    body = _m.group(0)
+    # ⚠️ 用 rindex 不用 index：这个方法的 docstring 里就写着
+    # 「_restart_requested=True + loop.stop() → exit 42」，naive 的 index()
+    # 会命中那句说明而不是真调用，于是顺序判反。
+    # 两边都取**最后一次出现** —— 真正的 await 和真正的 stop 都在方法末尾。
+    check("⭐ 等待发生在 loop.stop() 之前",
+          body.rindex("wait_voice_idle") < body.rindex("loop.stop()"),
+          "顺序反了 = 没等到")
+
 print(f"\n{'='*52}\n通过 {ok} 条，失败 {fail} 条")
 sys.exit(1 if fail else 0)

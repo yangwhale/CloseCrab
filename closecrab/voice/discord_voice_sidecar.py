@@ -2370,6 +2370,58 @@ def stream_speak_text(text: str, fid: str = "", backend: str = "") -> bool:
         return False
 
 
+async def wait_voice_idle(timeout: float = 180.0, *, poll: float = 0.25) -> float:
+    """【飞书线程调用】等当前播报真的播完。返回实际等了多少秒。
+
+    ## 为什么需要它：`stream_speak_text` 是 fire-and-forget
+
+    发语音那条路是故意不阻塞的 —— 调用方发完文字就走，让声音自己慢慢念。
+    平时没问题，**但进程要退出的时候就致命了**：一条两分钟的播报刚生成完
+    第一批，进程没了，用户听到一句半就断。
+
+    2026-09-17 实测：自重启在 `TTS 分批: 561c → 5 批` 之后 **4 毫秒**
+    就 `loop.stop()`，那条播报连第一批都没生成完。而「重启前那条回复」
+    恰恰是最长的一类（要交代改了什么、为什么重启），**最需要被听完的
+    那一条，是最必然被切掉的那一条。**
+
+    ## 判据
+
+    三个都满足才算闲下来：队列空、没有 `_do_speak` 在跑、播放器不在放。
+    并且要**连续两次采样都满足** —— 队列 `get()` 出来到 `_current_speak_task`
+    赋值之间有一个窗口，只看一次会正好从那个缝里穿过去。
+
+    超时就返回，**不会永远挡着退出** —— 宁可切掉尾巴也不能让进程卡死。
+    """
+    import time as _t
+
+    started = _t.monotonic()
+    clean = 0
+    while _t.monotonic() - started < timeout:
+        q = _speak_queue
+        queued = q.qsize() if q is not None else 0
+        speaking = _current_speak_task is not None
+        try:
+            prog = get_playback_progress()
+        except Exception:
+            prog = None
+        playing = bool(prog and prog[2])       # prog = (played, total, active, fid)
+
+        if not queued and not speaking and not playing and not _tts_active:
+            clean += 1
+            if clean >= 2:
+                break
+        else:
+            clean = 0
+        await asyncio.sleep(poll)
+
+    waited = _t.monotonic() - started
+    if waited >= timeout:
+        log.warning("等语音播完超时 (%.0fs)，仍继续 —— 尾巴会被切掉", waited)
+    elif waited > 1.0:
+        log.info("等语音播完: %.1fs", waited)
+    return waited
+
+
 _ipc_server = None
 
 

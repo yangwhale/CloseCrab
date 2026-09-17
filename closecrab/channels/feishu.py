@@ -4296,6 +4296,31 @@ class FeishuChannel(Channel):
             )
         except Exception:
             pass
+
+        # ⚠️ **必须等语音播完再退出。**
+        #
+        # 发语音那条路（`stream_speak_text`）是 fire-and-forget，文字一发完就
+        # 返回，声音在后台慢慢念。平时没问题，进程要退出时就致命：
+        #
+        #   2026-09-17 实测 —— `Self-restart triggered` 打在 04:55:17,929，
+        #   `TTS 分批: 561c → 5 批` 打在 04:55:17,933，**相隔 4 毫秒**，
+        #   随即 loop.stop()。那条播报连第一批都没生成完。
+        #
+        # 而「重启前那条回复」恰恰是最长的一类（要交代改了什么、为什么重启）——
+        # **最需要被听完的那一条，是最必然被切掉的那一条。**
+        #
+        # 用户看到的现象跟 TTS 分批欠载一模一样（「只播出第一句」），
+        # 所以这个 bug 一直藏在那个 bug 后面。
+        #
+        # 超时上限 180s：宁可切掉尾巴也不能让进程永远退不掉。
+        try:
+            from ..voice.discord_voice_sidecar import wait_voice_idle
+            waited = await wait_voice_idle(timeout=180.0)
+            if waited > 1.0:
+                log.info("自重启前等语音播完: %.1fs", waited)
+        except Exception:
+            log.debug("等语音播完失败，直接重启", exc_info=True)
+
         self._restart_requested = True
         if self._loop:
             self._loop.stop()
