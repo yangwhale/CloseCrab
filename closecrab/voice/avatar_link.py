@@ -113,11 +113,21 @@ async def _gateway_ok() -> bool:
         timeout = aiohttp.ClientTimeout(total=_PROBE_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.get(url.rstrip("/") + "/healthz") as r:
-                if r.status == 200:
-                    body = await r.json()
-                    ok = int(body.get("slots_free", 0)) > 0
-                    if not ok:
-                        log.info("数字人网关槽位满了（slots_free=0）")
+                # ⚠️ **只看通不通，不看还剩几个槽位。**
+                #
+                # 原来这里是 `slots_free > 0`。它造出过一个自己咬自己的竞态：
+                #
+                #   07:55:07  on → off            摘掉数字人，槽位还回去
+                #   07:55:22  off → unavailable   ← 15 秒后
+                #
+                # 探活结果缓存 15 秒，而摘掉那一瞬间槽位还占着，于是缓存了一个
+                # 「满了」。接下来 15 秒内再判定就报「用不了」，客户端弹出
+                # 「服务没响应或者并发满了」—— 而槽位其实早就还回来了。
+                #
+                # 更要紧的是这个预检**本来就多余**：真正的判据是去建会话看它
+                # 收不收（满了返回 429，`_start_avatar` 已经按 429 退回
+                # UNAVAILABLE）。预检唯一的贡献就是多一个假故障。
+                ok = r.status == 200
     except Exception as e:
         # 探活失败只降级、不上抛。上抛会让整次属性变更丢掉。
         log.debug("探数字人网关失败: %s", e)
