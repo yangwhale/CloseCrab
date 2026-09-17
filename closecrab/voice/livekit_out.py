@@ -243,12 +243,26 @@ def _enqueue(mono: bytes) -> None:
 
 
 def clear() -> None:
-    """丢掉还没播出去的音频。barge-in 时用 —— 用户已经打断了，队列里那些
-    话再播出来就是自说自话。"""
+    """丢掉还没播出去的音频。
+
+    三个地方会调：barge-in（用户开口了）、重播（从头讲，旧的那段作废）、
+    拖动进度条。共同点是**队列里那些话已经不作数了**，再播出来就是自说自话。
+
+    ⚠️ **挂了数字人的话，这里必须连它一起清。**
+    只清本地缓冲的话，已经发给数字人的那几百毫秒还在它手里 ——
+    它会接着对完口型再停。现象是「我已经在讲新的了，屏幕上那张脸还在念
+    上一句」，而且嘴型跟声音完全对不上。这正是数字人最掉价的那种失效。
+    """
     if _loop is None or _loop.is_closed():
         return
     def _do():
         _pending.clear()
+        # 顺序无所谓，两个各清各的：本地音轨的队列、数字人那边的在途缓冲。
+        if _sink is not None:
+            try:
+                _sink.clear_buffer()
+            except Exception:
+                log.debug("清数字人缓冲失败", exc_info=True)
         if _source is not None:
             try:
                 _source.clear_queue()
