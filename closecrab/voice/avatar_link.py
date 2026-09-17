@@ -51,6 +51,20 @@ _state: AvatarState = AvatarState.OFF
 _probe_at: float = 0.0
 _probe_ok: bool = False
 
+_avatar: "_AvatarSession | None" = None
+"""当前挂着的那一路数字人。None = 没挂。"""
+
+_set_sink = None
+"""把音频出口换掉的钩子，由 `attach()` 传进来（`livekit_out` 提供）。
+
+挂了数字人之后，TTS 的 PCM **不再直接发布成音轨**，而是定向发给数字人，
+由它对口型再发布。不换的话房间里会同时有两路声音 —— 我们自己的和
+数字人的，听起来是回声。
+"""
+
+_LIVEKIT_URL = ""
+_SINK_RATE = 48000
+
 _apply_lock: asyncio.Lock | None = None
 """`_apply` 的串行锁。**懒建** —— 模块导入时还没有事件循环，
 在这里直接 `asyncio.Lock()` 会绑到错的循环上（或者根本没有循环可绑）。
@@ -162,6 +176,14 @@ async def _apply_locked(room) -> None:  # noqa: ANN001
         return           # 没变就不写 —— 每次 set_attributes 都是一趟信令往返
     old = _state
 
+    # ⚠️ **先把数字人挂上/摘掉，再回报状态。** 反过来的话客户端会收到
+    #    `on` 却看不到人 —— 那几秒它会以为是自己网络的问题。
+    if new is AvatarState.ON:
+        if not await _start_avatar(room):
+            new = AvatarState.UNAVAILABLE      # 挂不上就如实说，别报 on
+    elif _avatar is not None:
+        await _stop_avatar(room)
+
     # 只写自己这一个键。属性是**按键合并**的，不会碰掉入场时带的
     # `lk.publish_on_behalf`（那个键一丢，前端会重新把我们误认成语音助手本人）。
     # 出处：LiveKit 文档 Participant attributes —— "allows fine-grained updates
@@ -195,8 +217,168 @@ async def _apply_locked(room) -> None:  # noqa: ANN001
     )
 
 
-def attach(room) -> None:  # noqa: ANN001
-    """挂到房间上。**在 `room.connect()` 之后调** —— 要读已经在房里的人。"""
+
+# ── 真正挂上数字人 ────────────────────────────────────────────────────
+#
+# ## 为什么这一段在**这个**进程里，不在语音助手那边
+#
+# 数字人对口型的音频只认**一个**发送方。房间里有两条会出声的路：
+#
+#   语音助手（Gemini Live）  你按住说话跟它实时对话那条
+#   本体播报（就是这里）      bot 查完东西把结论念进房间那条
+#
+# 2026-09-18 实测：数字人挂在语音助手上时，Chris 听到的其实是本体播报，
+# 于是数字人站在房间里一言不发 —— worker 出块数停在预热的 8 不动。
+# 他定了挂本体这一路，因为**日常绝大多数声音是 bot 在念结果**。
+#
+# 而「挂」这件事必须跟「发声」同进程：要把自己的音频改道给数字人，
+# 只有自己能改。
+
+_AVATAR_IDENTITY = "cc-avatar"
+_HTTP_TIMEOUT = 10.0
+
+
+class _AvatarSession:
+    """一路数字人：网关那边的会话 ＋ 本地的音频改道。"""
+
+    def __init__(self, session_id: str, terminate_token: str, sink) -> None:
+        self.session_id = session_id
+        self.terminate_token = terminate_token
+        self.sink = sink
+
+
+def _gw_headers() -> dict[str, str] | None:
+    """铸一张控制面的客户端票。**缺配置返回 None**，调用方据此跳过。"""
+    import time
+
+    import jwt
+
+    key_id = os.environ.get("LIVEAVATAR_KEY_ID", "")
+    secret = os.environ.get("LIVEAVATAR_SECRET", "")
+    if not key_id or not secret:
+        return None
+    now = int(time.time())
+    tok = jwt.encode({"iss": key_id, "sub": key_id, "nbf": now - 5, "exp": now + 120},
+                     secret, algorithm="HS256")
+    return {"Authorization": f"Bearer {tok}"}
+
+
+async def _start_avatar(room) -> bool:  # noqa: ANN001
+    """派一个数字人进房，并把 TTS 音频改道给它。挂不上返回 False。"""
+    global _avatar
+    import aiohttp
+    from livekit.agents.voice.avatar import DataStreamAudioOutput
+
+    if _avatar is not None:
+        return True
+    gw = os.environ.get(_GATEWAY_ENV, "").rstrip("/")
+    headers = _gw_headers()
+    if not gw or headers is None or _set_sink is None or not _LIVEKIT_URL:
+        log.info("数字人没启用（网关地址 / 凭据 / LiveKit 地址 / 音频钩子 缺一）")
+        return False
+
+    sid = room.sid
+    if hasattr(sid, "__await__"):
+        sid = await sid
+    body = {
+        "provider": "liveavatar",
+        "livekit_url": _LIVEKIT_URL,
+        "room_name": room.name,
+        "room_sid": str(sid),
+        "avatar_identity": _AVATAR_IDENTITY,
+        "avatar_name": "CloseCrab Avatar",
+        # ⭐ **发送方是我们自己。** worker 那边的
+        #    `DataStreamAudioReceiver(sender_identity=...)` 按这个过滤，
+        #    填错就是「数字人在房间里但一个字都收不到」。
+        "agent_identity": room.local_participant.identity,
+        "sample_rate": _SINK_RATE,
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.post(f"{gw}/avatar/sessions", json=body, headers=headers) as r:
+                if r.status != 200:
+                    # 429 = 槽位满。**是容量不是故障** —— 如实报 unavailable，
+                    # 别让它看起来像坏了。
+                    log.warning("挂数字人失败 %s：%s", r.status, (await r.text())[:200])
+                    return False
+                data = await r.json()
+    except Exception as e:                      # noqa: BLE001
+        log.warning("挂数字人时连不上控制面：%s", e)
+        return False
+
+    sink = DataStreamAudioOutput(room, destination_identity=_AVATAR_IDENTITY,
+                                 sample_rate=_SINK_RATE)
+    _set_sink(sink)
+    _avatar = _AvatarSession(data["provider_session_id"],
+                             data.get("terminate_token", ""), sink)
+    log.info("数字人已挂上：会话 %s，音频改道给 %s",
+             _avatar.session_id, _AVATAR_IDENTITY)
+    return True
+
+
+async def _stop_avatar(room) -> None:  # noqa: ANN001
+    """摘掉：音频改回直接发布、把数字人踢出房间、还槽位。
+
+    **三件事都要做。** 少第一件 bot 从此哑巴（音频发给一个走了的人），
+    少第二件房间里留一张不动的脸，少第三件下次 429。
+    """
+    global _avatar
+    import aiohttp
+
+    cur, _avatar = _avatar, None
+    if _set_sink is not None:
+        _set_sink(None)
+    if cur is None:
+        return
+
+    # 踢人。**不能只通知控制面** —— worker 在等我们离开才收摊，
+    # 控制面结不结账它不知道，于是它就一直站在房间里。
+    try:
+        from livekit import api
+
+        lk = api.LiveKitAPI(_LIVEKIT_URL.replace("ws://", "http://").replace("wss://", "https://"),
+                            os.environ.get("LIVEKIT_API_KEY", ""),
+                            os.environ.get("LIVEKIT_API_SECRET", ""))
+        try:
+            await lk.room.remove_participant(
+                api.RoomParticipantIdentity(room=room.name, identity=_AVATAR_IDENTITY))
+        finally:
+            await lk.aclose()
+    except Exception:                           # noqa: BLE001
+        log.warning("没能把数字人踢出房间，靠控制面兜底", exc_info=True)
+
+    gw = os.environ.get(_GATEWAY_ENV, "").rstrip("/")
+    headers = _gw_headers()
+    if not gw or headers is None:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.post(
+                f"{gw}/avatar/sessions/terminate",
+                json={"provider": "liveavatar", "provider_session_id": cur.session_id,
+                      "terminate_token": cur.terminate_token},
+                headers=headers,
+            ) as r:
+                if r.status != 200:
+                    log.warning("数字人会话 %s 没还干净（%s）", cur.session_id, r.status)
+    except Exception:                           # noqa: BLE001
+        log.warning("还数字人会话时出错，靠控制面 reaper 兜底", exc_info=True)
+    log.info("数字人已摘掉：会话 %s", cur.session_id)
+
+
+def attach(room, *, set_sink=None, livekit_url: str = "",
+           sink_rate: int = 48000) -> None:  # noqa: ANN001
+    """挂到房间上。**在 `room.connect()` 之后调** —— 要读已经在房里的人。
+
+    - `set_sink`：换音频出口的钩子。传 `None` 表示这一路不支持挂数字人，
+      只回报状态（比如没装 livekit-agents 的环境）。
+    - `livekit_url` / `sink_rate`：建会话时要告诉控制面的两个参数。
+      采样率**两边必须一致**，不一致的现象是口型对不上，不报错。
+    """
+    global _set_sink, _LIVEKIT_URL, _SINK_RATE
+    _set_sink, _LIVEKIT_URL, _SINK_RATE = set_sink, livekit_url, sink_rate
 
     def _kick() -> None:
         asyncio.create_task(_apply(room))
@@ -222,8 +404,12 @@ def reset() -> None:
     而 `_apply` 的「没变就不写」会让它**永远不再回报** —— 客户端拿到的是
     上一条连接留下的状态。
     """
-    global _state, _probe_at, _probe_ok, _apply_lock
+    global _state, _probe_at, _probe_ok, _apply_lock, _avatar
     _state, _probe_at, _probe_ok = AvatarState.OFF, 0.0, False
+    # 连接没了，那一路数字人也就没了。**不要在这里 await 去摘** ——
+    # `reset()` 是在 finally 里同步调的，房间对象已经在断开途中，
+    # 发请求只会挂住收尾。控制面的 idle reaper 会兜住。
+    _avatar = None
     # 锁也要丢掉：重连后可能是另一个事件循环，旧锁绑在死循环上会直接抛
     # RuntimeError，而那会让**每一次**重算都失败 —— 表现是重连之后
     # 状态再也不更新。

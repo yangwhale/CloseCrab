@@ -62,6 +62,7 @@ _thread: threading.Thread | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _room = None          # rtc.Room
 _source = None        # rtc.AudioSource
+_sink = None          # 非 None 时音频改道给它（数字人），否则直接发布
 _connected = False
 _stopping = False
 _pending = bytearray()          # 只在 _loop 线程里碰
@@ -271,6 +272,17 @@ def _reason_name(reason) -> str:  # noqa: ANN001
         return str(reason)
 
 
+def _set_sink(sink) -> None:  # noqa: ANN001
+    """换音频出口。`None` = 改回直接发布自己的音轨。
+
+    给 `avatar_link` 用。**只换出口、不动 `_pending`** —— 切换那一刻
+    缓冲里可能还有半句话，丢掉的话听起来是「说到一半被掐了」。
+    """
+    global _sink
+    _sink = sink
+    log.info("音频出口切到 %s", "数字人" if sink is not None else "本地音轨")
+
+
 async def _pump(dead: asyncio.Event) -> None:
     """把攒下的 PCM 按 20ms 一帧喂给 LiveKit。
 
@@ -293,10 +305,13 @@ async def _pump(dead: asyncio.Event) -> None:
             continue
         chunk = bytes(_pending[:_FRAME_BYTES])
         del _pending[:_FRAME_BYTES]
-        if _source is None:
+        # 挂了数字人就改道给它，由它对口型再发布；否则直接发自己的音轨。
+        # **两者只能走一个** —— 同时走房间里会有两路声音，听着像回声。
+        out = _sink if _sink is not None else _source
+        if out is None:
             continue
         try:
-            await _source.capture_frame(
+            await out.capture_frame(
                 rtc.AudioFrame(chunk, _OUT_RATE, _OUT_CHANNELS, _FRAME_BYTES // 2)
             )
         except Exception:
@@ -402,6 +417,7 @@ async def _session(cfg: dict, identity: str) -> None:
     def _on_disconnected(reason):  # noqa: ANN001
         global _connected
         _connected = False
+        _set_sink(None)      # 连接没了，出口必须回到本地，否则重连后哑巴
         dead.set()
         log.warning("LiveKit 输出连接断开: %s", _reason_name(reason))
 
@@ -416,7 +432,14 @@ async def _session(cfg: dict, identity: str) -> None:
     )
 
     _register_playback_rpc(room)
-    # ⛔ **这张嘴不再报数字人状态了**（2026-09-18）。
+    # 数字人：读客户端开关 → 要开就派一个进来，并把 TTS 音频改道给它。
+    #
+    # 2026-09-18 定的归属：数字人挂**这一路**，不挂语音助手。理由是日常
+    # 绝大多数声音是 bot 在念结果 —— 挂语音助手那版实测数字人一言不发，
+    # worker 出块数停在预热不动。详见 `avatar_link` 里那段。
+    avatar_link.attach(room, set_sink=_set_sink,
+                       livekit_url=cfg.get("url", ""), sink_rate=_OUT_RATE)
+    # 下面这段留着是历史：
     #
     # `cc.avatar.state` 现在由房间里那个会说话的 agent（`lk-gemini-agent`）
     # 负责写 —— 判定和「把音频改道给数字人」必须同进程，只有它能改自己的
@@ -427,9 +450,8 @@ async def _session(cfg: dict, identity: str) -> None:
     # 实测过：agent 报 `on`、这张嘴报 `unavailable`，手机上显示「服务不可用」，
     # 而数字人其实好好地在房间里。**一个属性只能有一个写入方。**
     #
-    # 代码留着：这张嘴将来若要自己挂数字人（bot 主动播报那条路），
-    # 判定逻辑现成的。要用的话先解决「谁写」这个问题。
-    #   avatar_link.attach(room)
+    # 「谁写 cc.avatar.state」这个问题的答案就是这一路 —— 全房间只有一个
+    # 写入方，客户端收状态不认发送者，两个人写后到的赢。
 
     _room, _source, _connected = room, source, True
     log.info("LiveKit 输出已连上房间 %s (identity=%s)", room.name, identity)
