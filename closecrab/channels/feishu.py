@@ -560,6 +560,36 @@ def _format_interactive_prompt(info: dict) -> str:
     return f"🔧 Claude 需要你的输入 ({tool})。回复任意内容继续。"
 
 
+def should_barge_in(sender_type: str, chat_type: str, msg_type: str,
+                    merged_items=None) -> bool:
+    """用户这条消息该不该掐掉正在念的语音。
+
+    ⭐⭐⭐ 判据：**barge-in 的触发条件是「同一个通道被抢占」，
+    不是「有新输入进来」。** 用嘴抢麦 →&nbsp;该停；用手打字 →&nbsp;该排队。
+
+    ⛔⛔ 2026-09-17 之前这里只判「私聊 ＋ 发消息的是真人」，
+      **没有区分他是用嘴还是用手**。于是上一轮的正式回复念到一半，
+      用户在飞书里敲一行字，那段语音就被当场掐断 ——&nbsp;而他压根没开口，
+      两个通道根本不冲突。现场原话：
+      「这东西得排队输出，你不能把上一个正在输出的突然给停。」
+
+    ⭐ 排队那条链本来就是通的（单 consumer ＋ `playback.wait_playout`），
+      所以这里只要**不去掐它**，队列自己会把两段前后串好。
+
+    ⚠️ 合并消息里只要有一条是语音，就算开口。
+    """
+    if sender_type != "user" or chat_type != "p2p":
+        return False            # 群里别人说话，不该掐正念给本人听的内容
+    if msg_type == "audio":
+        return True
+    for it in (merged_items or []):
+        ev = getattr(it, "event", None)
+        msg = getattr(ev, "message", None) if ev else None
+        if getattr(msg, "message_type", "") == "audio":
+            return True
+    return False
+
+
 class _LogBuffer:
     """日志攒批器（复用 Discord 版逻辑，适配飞书发送）。"""
 
@@ -3637,19 +3667,35 @@ class FeishuChannel(Channel):
             if not is_team_msg and chat_type == "group" and not is_mentioned and not is_auto_chat:
                 return
 
-            # ── barge-in：新一轮开口了，上一轮还没念完的全部作废 ───────────
+            # ── barge-in：**只在用户真的开口时**才掐掉正在念的 ──────────────
             # 语音通话那条路早就有 barge-in（`livekit_io.py` 里 CloseCrabLLM
             # flush 时调），但飞书语音消息走的是 STT → BotCore 这条，一路上没有
             # 任何地方碰得到 TTS 队列。而队列里的 reply 是**永不过期**的
             # （`discord_voice_sidecar.py` 里 `is_reply` 那个判断），于是上一轮
             # 的回复会一直排着，等这一轮说完才轮到它播 —— 听感就是「永远慢一拍」。
             # 只对真人私聊触发：群里别人说话不该掐掉正在念给本人听的内容。
-            if sender_type == "user" and chat_type == "p2p":
+            #
+            # ⛔⛔ 2026-09-17 现场报的 bug：**打字也被当成了抢麦。**
+            #   原来的判据是「私聊里用户发了消息」，没有区分他是用嘴还是用手。
+            #   于是上一轮的正式回复正念到一半，用户在飞书里敲一行字，
+            #   那一段语音就被当场掐断 —— 而他压根没开口，两个通道根本不冲突。
+            #   现场原话：「这东西得排队输出，你不能把上一个正在输出的突然给停。」
+            #
+            # ⭐⭐⭐ 判据：**barge-in 的触发条件是「同一个通道被抢占」，
+            #   不是「有新输入进来」。** 用嘴抢麦 → 该停；用手打字 → 该排队。
+            #   ⭐ 排队这条链本来就是通的（单 consumer ＋ `wait_playout`），
+            #     所以这里只要**不去掐它**，队列自己会把两段前后串好。
+            #
+            # ⚠️ 合并消息（同时发了语音和图）里只要有一条是语音，就算开口。
+            if should_barge_in(sender_type, chat_type, msg_type, merged_items):
                 try:
                     from ..voice.discord_voice_sidecar import barge_in
                     barge_in(f"feishu:{msg_type}")
                 except Exception:
                     log.debug("barge-in 失败（语音栈可能没起）", exc_info=True)
+            elif sender_type == "user" and chat_type == "p2p":
+                log.info("不 barge-in：用户是打字不是开口（msg_type=%s）—— "
+                         "让上一段念完，这一轮排在它后面", msg_type)
 
             # 解析消息内容（单条或合并多模态消息）
             if merged_items:
