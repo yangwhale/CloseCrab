@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import json as _json
 import logging
 import threading
 
@@ -184,7 +185,16 @@ def _build_token(cfg: dict, identity: str) -> str:
                 room=cfg["room"],
                 can_publish=True,
                 can_subscribe=False,      # 服务端强制的「只说不听」
-                can_publish_data=False,
+                # ⚠️ **data 必须放开，否则客户端遥控播放器这件事根本不成立。**
+                #
+                # LiveKit 的 RPC 是架在数据通道上的：客户端 performRpc 过来，
+                # 我们**必须回一个响应**，而回响应就是一次 data publish。
+                # 关着的话现象是「客户端一直等到超时」，而服务端这边毫无动静 ——
+                # 看起来像 RPC 没注册上，其实是回不去。
+                #
+                # 「只说不听」那条原则没破：`can_subscribe=False` 还在，
+                # 我们仍然订阅不到房间里任何音视频轨。放开的只是**控制字**这一格。
+                can_publish_data=True,
             )
         )
         .to_jwt()
@@ -281,6 +291,92 @@ async def _pump(dead: asyncio.Event) -> None:
             return
 
 
+# ── 客户端遥控播放器（RPC） ────────────────────────────────────────────
+
+# 方法名统一前缀，别跟 LiveKit 自己的 `lk.*` 撞。
+_RPC_PREFIX = "cc.playback."
+
+
+def _register_playback_rpc(room) -> None:  # noqa: ANN001
+    """把服务端播放器的那几个控制暴露成 RPC，让 app 能遥控。
+
+    ## 为什么是 RPC 而不是数据消息
+
+    这几个都是**动作**，而且调用方要知道成没成 —— 暂停在「已经播完了」
+    之后按下去应该返回 false，不是静默无事发生。数据消息是单向的，
+    给不了这个回执。
+
+    ## 为什么挂在这条流上
+
+    `playback` 管的就是**这条出口在播什么**，控制它的入口挂在同一个
+    参与者身上最直白。飞书卡片上那五个按钮操作的也是同一个播放器 ——
+    所以手机上按暂停、飞书卡片上的进度条会跟着停，两边本来就是一个东西。
+
+    ⚠️ **不在这一层做鉴权。** 能进这个房间就说明已经拿到过房间 token，
+    而房间 token 是 bot 自己签给指定用户的。在这儿再判一次 identity
+    只会多一处会跟签发逻辑跑偏的地方。
+    """
+    from . import playback
+
+    def _reply(ok: bool, **extra) -> str:
+        return _json.dumps({"ok": bool(ok), **extra})
+
+    async def _pause(data) -> str:      # noqa: ANN001
+        return _reply(playback.pause())
+
+    async def _resume(data) -> str:     # noqa: ANN001
+        return _reply(playback.resume())
+
+    async def _stop(data) -> str:       # noqa: ANN001
+        return _reply(playback.stop())
+
+    async def _replay(data) -> str:     # noqa: ANN001
+        # 不带 fid 就重播当前这段 —— app 那边通常不知道 fid，
+        # 让它必须先查一次进度才能重播是没必要的往返。
+        fid = ""
+        try:
+            fid = (_json.loads(data.payload or "{}") or {}).get("fid", "") or ""
+        except Exception:
+            pass
+        if not fid:
+            pr = playback.progress()
+            fid = pr[3] if pr else ""
+        if not fid:
+            return _reply(False, error="没有可重播的段")
+        return _reply(playback.replay(fid))
+
+    async def _seek(data) -> str:       # noqa: ANN001
+        try:
+            frac = float((_json.loads(data.payload or "{}") or {}).get("delta", 0))
+        except Exception:
+            return _reply(False, error="delta 不是数字")
+        if not -1.0 <= frac <= 1.0:
+            return _reply(False, error="delta 要在 -1..1 之间")
+        return _reply(playback.seek(frac))
+
+    async def _progress(data) -> str:   # noqa: ANN001
+        # (played_s, total_s, active, fid)；拿不到就是现在没在播。
+        pr = playback.progress()
+        if not pr:
+            return _reply(True, active=False)
+        played, total, active, fid = pr
+        # total<=0 表示还在生成、总长未知 —— 如实传，**别编一个分母**，
+        # 客户端才不会把「15/16s」显示成快播完了。
+        return _reply(True, active=bool(active), played=round(played, 2),
+                      total=(round(total, 2) if total > 0 else None), fid=fid)
+
+    handlers = {
+        "pause": _pause, "resume": _resume, "stop": _stop,
+        "replay": _replay, "seek": _seek, "progress": _progress,
+    }
+    for name, fn in handlers.items():
+        try:
+            room.local_participant.register_rpc_method(_RPC_PREFIX + name, fn)
+        except Exception:
+            log.exception("注册 RPC 失败: %s%s", _RPC_PREFIX, name)
+    log.info("播放控制 RPC 已注册: %s", ", ".join(_RPC_PREFIX + n for n in handlers))
+
+
 async def _session(cfg: dict, identity: str) -> None:
     """连一次房间，推到断为止。断开就正常返回，由 `_run` 决定要不要再连。"""
     global _room, _source, _connected
@@ -305,6 +401,8 @@ async def _session(cfg: dict, identity: str) -> None:
     await room.local_participant.publish_track(
         track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
     )
+
+    _register_playback_rpc(room)
 
     _room, _source, _connected = room, source, True
     log.info("LiveKit 输出已连上房间 %s (identity=%s)", room.name, identity)
