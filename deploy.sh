@@ -160,8 +160,18 @@ persist_to_zshenv() {
 
     # 如果已有同名 export 行，替换它；否则追加
     if [[ -f "$zshenv" ]] && grep -q "^export ${var_name}=" "$zshenv"; then
-        # 用 sed 原地替换
-        sed -i "s|^export ${var_name}=.*|export ${var_name}=\"${var_value}\"|" "$zshenv"
+        # 用 sed 原地替换。
+        # ⚠️ **BSD sed（macOS）的 `-i` 必须带备份后缀参数**，GNU sed 不用。
+        #    写成 `sed -i "s|...|"` 在 macOS 上会把后面那串当成备份后缀、
+        #    把文件名当成脚本，报 `command c expects \ followed by text`，
+        #    然后整个 deploy 在 [3/13] 就退出，走不到部署 skills 那一步。
+        #    只在「.zshenv 里已有同名 export 行」时才走这条分支 —— 所以
+        #    第一次装的人碰不到，**装过一次之后必踩**（2026-09-17 tommy 在 Mac 上撞到）。
+        if sed --version >/dev/null 2>&1; then
+            sed -i "s|^export ${var_name}=.*|export ${var_name}=\"${var_value}\"|" "$zshenv"
+        else
+            sed -i '' "s|^export ${var_name}=.*|export ${var_name}=\"${var_value}\"|" "$zshenv"
+        fi
     else
         # 首次写入时加注释头
         if [[ ! -f "$zshenv" ]] || ! grep -q "# CloseCrab deploy secrets" "$zshenv"; then
@@ -775,8 +785,50 @@ install_cc() {
         rm -rf ~/.claude/skills/"$skill_name"
         cp -a "$skill_dir" ~/.claude/skills/
     done
+    local _private_blocked=0
     # 私有 skills — 同样按 allowlist 过滤。目录由 PRIVATE_SKILLS_DIR 指定
+    #
+    # ⛔⛔ 落点若在 git 工作区里，**拒绝部署私有 skill**。
+    #
+    # 2026-09-17 实测：某台机器上 `~/.claude/skills` 是个软链，指向
+    # **公开仓库**的工作区。`cp -a` 于是把私有 skill 的实体文件拷进了那个
+    # 公开仓库 —— 内容包括证书来源、密码库名、内部系统名。当时还是 untracked
+    # 没泄出去，但只要有人在那个仓库里跑一次 `git add -A` 就进公开历史了，
+    # 而**公开仓库的历史是清不干净的**（旧 commit 仍可匿名下载）。
+    #
+    # 不用 .gitignore 兜：那只挡 `git add`，挡不住 `git add -f`，
+    # 更挡不住「实体内部文件就躺在公开工作区里」这件事本身。
+    # 判据取「在不在 git 工作区」而不是「仓库公不公开」—— 后者要联网要 auth，
+    # 而且**判错的代价是不可逆的**。宁可对私有仓库也误报，让人显式放行。
     if [[ -d "$PRIVATE_SKILLS_DIR" ]]; then
+        local _skills_real; _skills_real="$(cd ~/.claude/skills 2>/dev/null && pwd -P || echo "")"
+        local _repo_top=""
+        [[ -n "$_skills_real" ]] && _repo_top="$(git -C "$_skills_real" rev-parse --show-toplevel 2>/dev/null || true)"
+        if [[ -n "$_repo_top" && "${ALLOW_PRIVATE_SKILLS_IN_REPO:-0}" != "1" ]]; then
+            echo "" >&2
+            echo "  ⛔ 拒绝部署私有 skills：落点在一个 git 工作区里" >&2
+            echo "     ~/.claude/skills → $_skills_real" >&2
+            echo "     所属仓库          $_repo_top" >&2
+            echo "     remote           $(git -C "$_repo_top" remote get-url origin 2>/dev/null || echo '(无)')" >&2
+            echo "" >&2
+            echo "     私有 skill 含内部信息，不能躺在任何仓库的工作区里。三条路：" >&2
+            echo "       1) 把 ~/.claude/skills 改成普通目录（治本，推荐）" >&2
+            echo "       2) 确认该仓库确为私有后，ALLOW_PRIVATE_SKILLS_IN_REPO=1 重跑" >&2
+            echo "       3) 不装私有 skill：unset PRIVATE_SKILLS_DIR" >&2
+            echo "" >&2
+            echo "     ⚠️ 公共 skills 已部署，私有的全部跳过。" >&2
+            echo "" >&2
+            _private_blocked=1
+        fi
+    fi
+    #
+    # ⚠️ **只跳过私有 skills，不中止整个 deploy。**
+    #    脚本开头是 `set -euo pipefail` 且 install_cc 是裸调用 —— 在这里
+    #    `return 1` 会让 deploy 停在 [4/13]，后面九步全不跑。那样的话，
+    #    赶时间的人会直接 ALLOW_PRIVATE_SKILLS_IN_REPO=1 绕过去，
+    #    **闸门反而变成了促使人绕过它的理由**。
+    #    所以：公共 skills 照装、其余步骤照跑，私有的跳过并在结尾再喊一次。
+    if [[ -d "$PRIVATE_SKILLS_DIR" && "${_private_blocked:-0}" != "1" ]]; then
         for skill_dir in "$PRIVATE_SKILLS_DIR"/*/; do
             [[ -d "$skill_dir" ]] || continue
             local skill_name="$(basename "$skill_dir")"
@@ -785,6 +837,8 @@ install_cc() {
             cp -a "$skill_dir" ~/.claude/skills/
         done
         echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, 含私有 skills, allowlist 过滤)"
+    elif [[ "${_private_blocked:-0}" == "1" ]]; then
+        echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, ⛔ 私有 skills 被安全闸门拦下, 见上面)"
     else
         echo "  Skills 已部署 ($(ls ~/.claude/skills/ | wc -l) 个, allowlist 过滤)"
     fi
