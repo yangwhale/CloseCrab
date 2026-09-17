@@ -90,3 +90,7 @@ tpuguru
 
 # 让麻瓜去学习一下我们的课程 —— 派多视角 subagent 评审教材/讲义（2026-09-13 加）
 muggle-review
+
+# 受管控 Mac 上用企业证书编译 iOS app 并装真机（2026-09-17 加）
+#   私有 skill，内容在 PRIVATE_SKILLS_DIR，不在本仓库
+ios-device-build
