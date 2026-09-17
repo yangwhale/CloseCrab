@@ -169,12 +169,12 @@ from .tool_voice_phrases import pick_tool_voice_phrase  # noqa: F401
 _BROADCAST_OPENERS = [
     "[playful] 各位听众朋友, 欢迎来到天猫精灵的免费付费电台。",
     "[amused] 别紧张, 你麦没开, 我听不见你, 只能你听我念。",
-    "[whispers] 嘘, 你偷偷听就行, 不许聊天。",
+    "[playful] 嘘, 你偷偷听就行, 不许聊天。",
     "[cheerfully] 直播间开张, 一个发字一个念, 这就叫互联网早期的浪漫。",
     "[playful] 欢迎收听天猫精灵广播站, 本台节目由飞书私聊全程驱动。",
     "[friendly] 收音机调好啦, 你只管在飞书唠, 我这边念。",
     "[amused] 这是我作为 LLM 离脱口秀演员最近的一次。",
-    "[whispers] 单声道直播, 双向断网, 享受闭嘴的快乐。",
+    "[amused] 单声道直播, 双向断网, 享受闭嘴的快乐。",
     "[playful] 飞书发字, 我念出来, 中间隔着一整个 LiveKit 和一个 TTS。",
     "[cheerfully] 节目开始, 请系好安全带, 准备听我念点废话。",
 ]

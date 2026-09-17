@@ -93,9 +93,42 @@ _RE_LIST_BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
 _RE_BLANK_LINES = re.compile(r"\n{3,}")
 _RE_BARE_URL = re.compile(r"https?://\S+")
 
+# —— 会把音量压到听不见的标签，统一换掉 ——
+#
+# `[whispers]` 是 Gemini 官方标签，模型会**老老实实照做** —— 而照做的结果是
+# 音量小到在手机外放、车里、地铁上根本听不见。
+# Chris 2026-09-17 原话：「那个 Whisper 它经常就声特别小，听不见，
+# 以后输出的时候就把 Whisper 去掉呗」。
+#
+# ## 为什么是确定性替换，不是只从 prompt 的标签清单里删掉
+#
+# 跟 `channels/web.py` 里 `sanitize_outbound()` 同一个道理：**prompt 压不住
+# prompt**。这个标签同时出现在 Gemini 官方文档、模型的训练分布、以及本仓库
+# 一堆历史台词里 —— 从清单里删掉只降低概率，堵不死。
+# 而它失效的样子是**静默的**：没有报错，只是这一段用户没听见。
+#
+# ## 为什么换成 `[casually]` 而不是直接删掉
+#
+# 删掉标签这一段就没有情绪指示了，模型会自己挑一个，结果不可控。
+# `[casually]` 语气最接近原意（悄悄话多半是随口补一句），而且音量正常。
+_RE_INAUDIBLE_TAG = re.compile(r"\[whispers?\]", re.IGNORECASE)
+_AUDIBLE_REPLACEMENT = "[casually]"
+
+
+def normalize_tts_tags(text: str) -> str:
+    """把「会让人听不见」的情绪标签换成音量正常的等价物。
+
+    **所有通往 TTS 的路都要过这一道。** 目前有两个入口：
+    `_clean_text_for_tts`（gemini / cloud_tts 两条路用）和 `_do_speak` 开头
+    （qwen3 那条路直接拿原始 text 去 `_split_by_emotion`，不经过前者）。
+    漏掉任何一条，那条后端就还会小声说话。
+    """
+    return _RE_INAUDIBLE_TAG.sub(_AUDIBLE_REPLACEMENT, text)
+
 
 def _clean_text_for_tts(text: str) -> str:
     """Strip markdown / Sources / code blocks / URLs before TTS, keep emotion tags."""
+    text = normalize_tts_tags(text)
     text = _RE_SOURCES_SECTION.sub("", text)
     text = _RE_CODE_BLOCK.sub("", text)
     text = _RE_TABLE_ROW.sub("", text)

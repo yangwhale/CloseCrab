@@ -76,7 +76,12 @@ Gemini TTS 支持 inline audio tags 控制情感和风格。**有两种工作模
 
 **自信类**：`[confidence] [determination] [assertive] [pride]`
 
-**特效类**：`[whispers] [laughs] [sighs] [slow] [fast]`
+**特效类**：`[laughs] [sighs] [slow] [fast]`
+
+> ⛔ **不要用 `[whispers]`。** 它是 Gemini 官方标签、模型会照做，而照做的结果是
+> 音量小到在手机外放、车里、地铁上根本听不见（Chris 2026-09-17 明确要求去掉）。
+> CloseCrab 的 TTS 链路里 `normalize_tts_tags()` 会把它换成 `[casually]`，
+> 所以写了也不生效 —— 但走本 skill 直接调 API 的场合没有那层兜底，别写。
 
 **说明类**：`[informative] [explaining] [summary] [instruction] [suggestion]`
 
