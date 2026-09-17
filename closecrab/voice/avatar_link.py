@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import pathlib
 
 from .avatar_policy import (
     ATTR_STATE,
@@ -97,6 +98,7 @@ async def _gateway_ok() -> bool:
     if now - _probe_at < _PROBE_TTL_S:
         return _probe_ok
 
+    _load_env_file()
     url = os.environ.get(_GATEWAY_ENV, "").strip()
     if not url:
         # 没配网关不是异常，是「这个功能还没部署」。它会如实变成
@@ -249,12 +251,47 @@ class _AvatarSession:
         self.sink = sink
 
 
+_ENV_FILE = os.path.expanduser("~/.closecrab-liveavatar")
+_env_loaded = False
+
+
+def _load_env_file() -> None:
+    """配置从文件读，**不依赖 run.sh 把它 export 进来**。
+
+    ⚠️ 这条是踩出来的：把 export 写进 `run.sh` 之后，自重启（exit 42）
+    **只重启 python 进程，不重新执行 wrapper** —— 那个 bash 进程是改代码
+    之前起的，早就把脚本解析完了。于是配置改了、重启了、日志也正常，
+    进程手里还是什么都没有。
+    要让 wrapper 重新读，只能连它一起重启，而它是 bot 的父进程。
+
+    所以配置的**真实来源是这个文件**，run.sh 那份 export 只是顺带。
+    两边读同一个文件，谁先谁后都一样。
+    """
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+    try:
+        for line in pathlib.Path(_ENV_FILE).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+    except FileNotFoundError:
+        # 这台机器不接数字人 —— 正常配置，不是故障。
+        log.debug("没有 %s，这台机器不接数字人", _ENV_FILE)
+    except Exception:                               # noqa: BLE001
+        log.warning("读 %s 失败", _ENV_FILE, exc_info=True)
+
+
 def _gw_headers() -> dict[str, str] | None:
     """铸一张控制面的客户端票。**缺配置返回 None**，调用方据此跳过。"""
     import time
 
     import jwt
 
+    _load_env_file()
     key_id = os.environ.get("LIVEAVATAR_KEY_ID", "")
     secret = os.environ.get("LIVEAVATAR_SECRET", "")
     if not key_id or not secret:
@@ -273,6 +310,7 @@ async def _start_avatar(room) -> bool:  # noqa: ANN001
 
     if _avatar is not None:
         return True
+    _load_env_file()
     gw = os.environ.get(_GATEWAY_ENV, "").rstrip("/")
     headers = _gw_headers()
     if not gw or headers is None or _set_sink is None or not _LIVEKIT_URL:
