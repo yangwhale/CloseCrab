@@ -42,6 +42,8 @@ import json as _json
 import logging
 import threading
 
+from . import avatar_link
+
 log = logging.getLogger("closecrab.voice.livekit_out")
 
 # 进来的是 Discord 那条链路的通用格式：48kHz 立体声 s16。
@@ -195,6 +197,17 @@ def _build_token(cfg: dict, identity: str) -> str:
                 # 「只说不听」那条原则没破：`can_subscribe=False` 还在，
                 # 我们仍然订阅不到房间里任何音视频轨。放开的只是**控制字**这一格。
                 can_publish_data=True,
+                # ⚠️ **不给这个权限，回报数字人状态会静默失效。**
+                #
+                # `set_attributes()` 需要 `canUpdateOwnMetadata`，而它在
+                # `VideoGrants` 里默认是 `None` —— 序列化时整个键都不进 JWT，
+                # 服务端按 false 处理。跟上面 `can_publish_data` 那次是同一个坑：
+                # 客户端永远收不到 `cc.avatar.state`，现象是「开关拨了没反应」，
+                # 而服务端日志里状态明明在变。
+                #
+                # 注意 token 里那句 `with_attributes(...)` 是**入场时**带的初始值，
+                # 不需要这个权限 —— 所以「初始属性写得进去」不能证明运行时也行。
+                can_update_own_metadata=True,
             )
         )
         .to_jwt()
@@ -403,6 +416,9 @@ async def _session(cfg: dict, identity: str) -> None:
     )
 
     _register_playback_rpc(room)
+    # 必须在 connect 之后 —— 它要读已经在房里那批人的属性，
+    # 那批人不会补发 participant_connected。
+    avatar_link.attach(room)
 
     _room, _source, _connected = room, source, True
     log.info("LiveKit 输出已连上房间 %s (identity=%s)", room.name, identity)
@@ -411,6 +427,9 @@ async def _session(cfg: dict, identity: str) -> None:
         await _pump(dead)
     finally:
         _connected = False
+        # 重连后房间对象是新的，状态缓存必须跟着清 —— 否则 `_apply` 的
+        # 「没变就不写」会认为还是上次那个值，永远不再回报。
+        avatar_link.reset()
         try:
             await room.disconnect()
         except Exception:
