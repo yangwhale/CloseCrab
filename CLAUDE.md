@@ -37,6 +37,14 @@ rules/ 是各 area 单源真理，本文件不重复其内容。
 ======================================================================
 -->
 
+## 全栈总览（整套横跨 6 个仓库）
+
+⚠️ **动手前先看 [`docs/stack-overview.md`](docs/stack-overview.md)** —— 别猜某块代码住在哪。
+CloseCrab 只是其中一个；语音助手、iOS 客户端、数字人网关、数字人模型 fork、
+知识库各有各的仓库和各自不同的测试跑法。
+部署见 [`docs/stack-deploy.md`](docs/stack-deploy.md)，
+状态巡检 `scripts/stack-check.sh [--gateway URL]`。
+
 ## 项目概述
 CloseCrab 将 Claude Code CLI 包装为多平台 AI Bot（Discord/飞书/钉钉）。每个 bot 是独立进程，通过 Unix socketpair 与 Claude CLI 通信，Firestore 存配置和日志。支持 5 种 worker（claude/gemini/openclaw/kilo/dsh），由 Firestore `bots/{name}.worker_type` 切换。
 
@@ -71,6 +79,7 @@ scripts/dispatch-bot.sh deploy|recall|move|check
 scripts/sync-memory.sh --push|--pull
 scripts/send-to-discord.sh --channel <id> "<msg>"
 scripts/closecrab-smoke-test.sh <bot> [--json] [--actions]
+scripts/stack-check.sh [--gateway URL]      # 全栈巡检：6 个仓库 + 在跑的服务 + 控制面槽位
 scripts/dsh-setup.sh [--check]               # 建 dsh worker 用的 cordis profile（幂等）
                                              # 部署指南（含 LiteLLM 网关要求）见 docs/dsh-worker-deploy.md
 
