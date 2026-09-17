@@ -1252,45 +1252,135 @@ def is_voice_connected() -> bool:
 #  前一批累积的 buffer 盖住; 欠载时 _StreamPCMSource 给静音帧不会断流。
 _SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?；;…])\s*|\n+")  # 句末标点切句(标点留句尾), 不切逗号保 prosody
 _SOLO_UNTIL_CHARS = 30    # 开头逐句单播, 累计播够这么多字之前每句独立成批(首字最快)
-_RAMP_BATCH_CHARS = 90    # 单播后第一包上限: 首字 ~6s 能被前面 cushion 盖住, 不留空档
-_MAX_BATCH_CHARS = 300    # 之后批上限: 300c 减少总批数避免 API 限流
-# ⚠️ 这里原来写「远低于 ~500c 吞尾阈值」—— 那条假设 2026-09-15 被证伪:
+_MAX_BATCH_CHARS = 300    # 硬上限: 再大只是徒增吞尾概率, 换不到连续性
+_MIN_BATCH_CHARS = 40     # 硬下限: 每批都有 ~0.6s 固定开销, 切太碎总时间反而更长
+# ⚠️ 上限这里原来写「远低于 ~500c 吞尾阈值」—— 那条假设 2026-09-15 被证伪:
 #   实测 **260c 的批照样被截断**(只出 37.4s 就 finish=OTHER)。所以吞尾不是一条
 #   固定的字数线，压低 _MAX_BATCH_CHARS 只能降低概率、换来更多接缝，堵不死。
 #   正解是**出事了再劈**: 见 _generate_batch_pcm 里的 depth / _split_batch_text。
 
+# —— 生成耗时 / 音频时长的经验模型 ——
+#
+# 两条都是**一次线性拟合**，数据来自 2026-09-17 04:35 那条 827c 播报的日志
+# （每批都打了 `TTS API 完成: 总耗时` 和 `→ Xs音频`）：
+#
+#   字数   生成耗时    产出音频
+#    27     1780ms      3.5s
+#    27     1945ms      3.6s
+#    45     3108ms      8.8s
+#   299    13689ms     53.6s
+#   290    13527ms      —
+#   119     6331ms      —
+#
+# 生成耗时：取 (27,1780) 和 (299,13689) 两点定直线 →
+#   斜率 (13689-1780)/(299-27) = 43.8 ms/字，截距 1780-27×43.8 ≈ 600ms
+#   回代校验：290 字 → 600+290×43.8 = 13302ms（实测 13527，差 1.7%）
+#            119 字 → 600+119×43.8 = 5812ms（实测 6331，差 8%，偏保守）
+#   ⇒ 取 **0.6s 固定开销 + 0.050 s/字**（斜率往上取整，宁可高估）
+#
+# 音频时长：299→53.6 得 0.179 s/字，45→8.8 得 0.196，27→3.5 得 0.130。
+#   短批偏低是因为情绪标签占字数但不发音。
+#   ⇒ 取 **0.15 s/字**（往低取，宁可低估 cushion）
+#
+# 两条合起来：稳态生成速度约 0.15/0.050 = **3 倍实时**。
+_GEN_FIXED_S = 0.6        # 每批固定开销（TTFB ＋ 建流）
+_GEN_PER_CHAR_S = 0.050   # 每字生成耗时
+_AUDIO_PER_CHAR_S = 0.15  # 每字产出音频（保守低估）
+_LEAD_SAFETY = 0.75       # 只敢用 cushion 的这个比例，留余量给抖动
+
 
 def _plan_tts_batches(cleaned: str):
-    """切句 → 三段渐进打包。
-      阶段1 单播: 累计 <30c 时每句独立成批(首字最快, 接缝最小);
-      阶段2 第一包: 凑够 30c 后剩余句子先打包成 ≤90c 一包(首字 ~6s 被 cushion 盖住);
-      阶段3 大包: 此后每批 ≤200c(已有大 buffer, 放大减接缝 + 防吞尾)。
+    """切句 → 按**播放余量**自适应打包。
 
-    动机(Chris 2026-06-01): 旧版第一批小但第二批吞掉后面全部 → 187c 批首字 7.8s
-    出现 ~6s 空档。改成开头一句一句播建 cushion, 再用渐进上限让后续每批首字都
-    被已播 buffer 盖住, 实测接缝从 6s → <0.6s。"""
+    ## 为什么不是固定的 30 / 90 / 300 三档
+
+    旧版是三档固定上限，2026-09-17 出事：827c 的播报被切成
+    27 / 27 / 45 / **299** / 290 / 119，第四批一步从 45 跳到 299。
+
+    对着日志算一遍就看出来了 —— 记 lead = 已生成但还没播的音频秒数：
+
+        批1  27c  生成 1.78s  产出 3.5s   → lead 3.5
+        批2  27c  生成 1.95s  产出 3.6s   → lead 3.5-1.95+3.6  = 5.2
+        批3  45c  生成 3.11s  产出 8.8s   → lead 5.2-3.11+8.8  = 10.9
+        批4 299c  生成 13.7s              → **13.7 > 10.9，欠载 ~3 秒**
+
+    也就是说：**这一批能有多大，取决于上一批给你攒了多少余量**，
+    跟它是第几批没关系。固定档位的问题是它假装知道余量，其实不知道 ——
+    句子长短一变，同样的档位就可能踩空。
+
+    所以改成每一批现算：
+
+        这批预算 = lead × 安全系数 − 固定开销
+        这批字数 = 预算 ÷ 每字生成耗时        （再夹在 [40, 300] 之间）
+
+    lead 会滚雪球（生成 3 倍于实时），所以实际形态是
+    27 → 45 → 100 → 245 → 300 → 300…，**平滑爬到上限而不是一步跳过去**。
+
+    ## 第一批仍然单独处理
+
+    lead 一开始是 0，算出来会撞下限。但首批要的是**首字最快**，
+    不是「凑够 40 字」—— 所以开头照旧逐句单播，累计够 `_SOLO_UNTIL_CHARS`
+    才进入自适应阶段。这条是 Chris 2026-06-01 定的，没变。
+
+    ⚠️ **一批太大的代价不是「慢一点」，是播放直接卡住。** 播放器欠载时
+    只能发静音帧干等，用户听到的是「说了两句就没声了」；如果他这时按了
+    重播（进度条那会儿显示得像已播完），还会踩到 `player.replay()` 把
+    直播段冻结成定长的坑 —— 那才是后面整段彻底丢掉的原因。
+    """
     sents = [s for s in _SENT_SPLIT_RE.split(cleaned) if s and s.strip()]
     if not sents:
         return [cleaned] if cleaned.strip() else []
-    batches = []
-    acc, i = 0, 0
-    # 阶段1: 逐句单播, 直到累计字数够 cushion
+
+    batches: list[str] = []
+    lead = 0.0          # 已生成但还没播出去的音频秒数
+    i = 0
+
+    def _account(n_chars: int) -> None:
+        """记一批的账：生成它花掉 lead，产出的音频又补回 lead。"""
+        nonlocal lead
+        gen = _GEN_FIXED_S + n_chars * _GEN_PER_CHAR_S
+        audio = n_chars * _AUDIO_PER_CHAR_S
+        # 第一批之前还没开始播，不消耗 lead —— 播放是它到了才起步的。
+        lead = max(0.0, lead - (gen if batches else 0.0)) + audio
+
+    # 阶段1: 逐句单播, 直到累计字数够 cushion（首字最快）
+    acc = 0
     while i < len(sents) and acc < _SOLO_UNTIL_CHARS:
         batches.append(sents[i])
         acc += len(sents[i])
+        _account(len(sents[i]))
         i += 1
-    # 阶段2/3: 剩余句子渐进打包, 第一包用小 cap, 之后放大
-    cur, cur_n, cap = [], 0, _RAMP_BATCH_CHARS
+
+    # 阶段2: 按 lead 自适应
+    cur: list[str] = []
+    cur_n = 0
+    cap = _batch_cap_for_lead(lead)
     for s in sents[i:]:
+        # 空批永远接受当前句，哪怕它自己就超了 cap —— 不然长句会死循环。
         if cur and cur_n + len(s) > cap:
             batches.append("".join(cur))
-            cur, cur_n, cap = [s], len(s), _MAX_BATCH_CHARS
+            _account(cur_n)
+            cap = _batch_cap_for_lead(lead)
+            cur, cur_n = [s], len(s)
         else:
             cur.append(s)
             cur_n += len(s)
     if cur:
         batches.append("".join(cur))
     return batches
+
+
+def _batch_cap_for_lead(lead_s: float) -> int:
+    """当前有 `lead_s` 秒余量时，下一批最多放多少字。
+
+    预算 = 余量 × 安全系数 − 固定开销，再换算成字数并夹进 [下限, 上限]。
+    夹下限是因为每批都有 ~0.6s 固定开销：切得太碎，总生成时间反而更长，
+    接缝也更多。宁可在最开头欠载一点点（那时 buffer 本来就薄），
+    也不要切出一串 10 字的碎批。
+    """
+    budget = lead_s * _LEAD_SAFETY - _GEN_FIXED_S
+    cap = int(budget / _GEN_PER_CHAR_S) if budget > 0 else 0
+    return max(_MIN_BATCH_CHARS, min(_MAX_BATCH_CHARS, cap))
 
 
 _MAX_SPLIT_DEPTH = 3   # 劈开重合成的最大层数: 300c → 150 → 75 → 38, 再劈没意义

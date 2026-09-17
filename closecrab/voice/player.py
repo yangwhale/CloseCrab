@@ -277,21 +277,57 @@ class UnifiedPlayer:
         return True
 
     def replay(self, fid: str) -> bool:
-        """从头重播某一段。这段可以不是当前这段 —— 卡片上翻旧消息就是这种。"""
+        """从头重播某一段。这段可以不是当前这段 —— 卡片上翻旧消息就是这种。
+
+        ## ⚠️ 还在生成的那一段，只能倒回去，不能重建
+
+        2026-09-17 的事故就出在这儿。原来这个方法**无条件**把目标段重建成一条
+        `live=False` 的定长轨，于是重播一段**正在生成**的直播时：
+
+        1. `_close_handles()` 把**写句柄**一起关掉了；
+        2. 新轨 `live=False`，于是后续 `feed()` 第一行 `if not t.live: return`
+           直接丢弃 —— **后面生成出来的音频连磁盘都没写进去**；
+        3. 播放读到当时的文件末尾就判定播完收工。
+
+        那天一条 141 秒的播报，用户在第 16 秒按了重播（进度条显示 15/16s，
+        看着就是播完了），**剩下的 125 秒凭空消失**，日志里连一行错误都没有。
+
+        所以这里要分两种：目标就是当前这条直播 → **只把读句柄倒回开头**，
+        live、写句柄、total 一概不动；目标是别的（已经生成完的旧段）→
+        照旧重建定长轨。
+
+        判据是 `t.live` 而不是「文件还在不在长」—— 后者要轮询文件大小，
+        而且有竞态；`live` 本来就是「还在生成」的单一真相。
+        """
         path = self._buf_path(fid)
         if not path or not os.path.exists(path):
             return False
-        try:
-            total = os.path.getsize(path)
-        except OSError:
-            return False
-        if total <= 0:
-            return False
+
         with self._lock:
-            self._close_handles()
-            self._track = _Track(fid=fid, path=path, total=total,
-                                 live=False, fh=open(path, "rb"))
-            self._state = PLAYING
+            t = self._track
+            if t.fid == fid and t.live and not t.transient and t.fh is not None:
+                # 正在生成的这一段：倒回开头接着放，生成侧完全不受影响。
+                try:
+                    t.fh.seek(0)
+                except OSError:
+                    log.warning("重播直播段 seek 失败 fid=%s", fid)
+                    return False
+                t.pos = 0
+                self._state = PLAYING
+                live_replay = True
+            else:
+                try:
+                    total = os.path.getsize(path)
+                except OSError:
+                    return False
+                if total <= 0:
+                    return False
+                self._close_handles()
+                self._track = _Track(fid=fid, path=path, total=total,
+                                     live=False, fh=open(path, "rb"))
+                self._state = PLAYING
+                live_replay = False
+        log.info("重播 fid=%s (%s)", fid, "直播段倒带" if live_replay else "定长段")
         self._report()
         return True
 
@@ -417,7 +453,20 @@ class UnifiedPlayer:
             t = self._track
             if t.transient:
                 return
-            args = (t.fid, t.pos, t.total, self._state != IDLE)
+            # ⚠️ **还在生成时不报总长。**
+            #
+            # `t.total` 在 live 阶段的含义是「目前落盘了多少」，不是最终长度。
+            # 把它当总长报出去，卡片上就会显示 `15/16s` —— 看着**就是播完了**，
+            # 而真相是后面还有两分钟没生成出来。
+            #
+            # 2026-09-17 用户正是被这个数字骗去按了重播，连锁触发了
+            # `replay()` 冻结直播段那个 bug，整条回复只剩前 16 秒。
+            #
+            # 报 0 是双方早就约好的「总长未知」（见 `get_playback_progress`
+            # 的 docstring 和 `_fmt_progress_note` 的 `total <= 0` 分支），
+            # 不需要改回调签名。
+            total = 0 if t.live else t.total
+            args = (t.fid, t.pos, total, self._state != IDLE)
         try:
             self.on_progress(*args)
         except Exception:
