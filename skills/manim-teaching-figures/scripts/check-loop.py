@@ -127,7 +127,14 @@ def check_captions():
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", p], capture_output=True, text=True)
-        dur[os.path.basename(p)] = float(out.stdout.strip())
+        # ⛔ 这一步会扫**整个 media 目录**。拿 /tmp 当草稿输出目录时，
+        #   它会去 ffprobe 别人留在那儿的垃圾 mp4，拿到空串直接 ValueError 崩掉 ——
+        #   而接缝那一步其实已经跑完并打印了结论，只是被 traceback 盖住。
+        # ⭐ 判据：**顺带扫到的文件不该有能力让主流程失败**（跟读 .html 那处同一条）。
+        try:
+            dur[os.path.basename(p)] = float(out.stdout.strip())
+        except ValueError:
+            continue
     bad = []
     for page in pages:
         # ⛔ 这里会扫到旁边目录里任何 .html —— 包括不是 UTF-8 的（实测撞上过
