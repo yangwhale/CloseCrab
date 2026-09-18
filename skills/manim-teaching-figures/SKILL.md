@@ -72,7 +72,26 @@ from manim import BLUE, RED, GREEN, YELLOW, WHITE, GREY, GREY_B
 - **黄不能当正负号用。** 他讲分量符号那一幕用的也是蓝／红；黄是**强调色**不是语义色。
 - **黑底的辅助线要比白底亮。** `GREY_D #444444` 在黑底上整幕消失，得用 `GREY #888888`。
   对比度是**相对背景**的，不是绝对的。
-- **`rate_func` 不要显式传 `linear`。** 默认就是 `smooth` ——&nbsp;匀速是「机器感」的主要来源。
+- ⛔⛔ **`rate_func` 要分两种 play，不能一刀切**（2026-09-19 实测打脸，原来这里写的是
+  「不要显式传 linear，匀速是机器感的来源」——&nbsp;**那条一刀切是错的**）：
+
+  | play 在动什么 | `rate_func` |
+  |---|---|
+  | **一个物体**（`mob.animate.*`、`FadeIn`、`Write`、`Indicate`、镜头推拉…） | `smooth`（默认，别显式写 linear） |
+  | **一个时钟**（`ValueTracker.animate.set_value`，后面挂 `always_redraw` / `clock()`） | ⭐ **必须显式 `rate_func=linear`** |
+
+  ⭐⭐ 为什么：`smooth` 把 play **两端的速度压到零**。动物体时那是自然的收势；
+  **驱动时钟时那是让时间停摆。** 而本 skill 的主力写法（`ValueTracker` ＋ `always_redraw`）
+  几乎每个 play 都在驱动时钟 ——&nbsp;一刀切换成 smooth，等于让画面在每个段界卡住。
+
+  实测（`anim-descend`，段界在 4.6 秒，量 50 ms 内整帧平均变化）：
+
+  ```
+  t=3.6 … 4.6   变化 0.00   ← 段界前整整一秒画面完全静止
+  t=5.2 … 6.0   变化 0.0x   ← 下一段开头又是慢启动
+  ```
+
+  ⛔ 复位段尤其不能碰：`clock()` 倒放、三角波对称，**都建立在时钟匀速上**。
 
 ⭐ 判据（这一轮学到的）：**「作者怎么用」是证据，不是结论。**
 先看约束对不对得上 ——&nbsp;他的默认是为**全屏播放的独立视频**调的。
