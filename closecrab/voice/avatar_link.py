@@ -357,8 +357,22 @@ async def _start_avatar(room) -> bool:  # noqa: ANN001
         log.warning("挂数字人时连不上控制面：%s", e)
         return False
 
+    # ⚠️ `wait_playback_start=True` 不是可选项 —— **数字人那一侧无条件会发
+    #    `lk.playback_started` 这个 RPC**，而这个参数决定我们注册不注册它的处理器。
+    #    默认 False 的后果是每段音频都往我们这儿打一个没人接的 RPC：
+    #
+    #      ERROR livekit.agents remote participant didn't register lk.playback_started RPC
+    #
+    #    库里对 UNSUPPORTED_METHOD 是「记一条 ERROR 然后跳过」，所以它**不会
+    #    让功能坏掉，只会一直刷错**；但别的 RpcError（比如拆会话那一瞬间的
+    #    「Failed to send」）会重试到上限后抛出去，把整个音频接收任务带走。
+    #    少注册一个处理器，等于给一条本来能走通的路留了一个随机的雷。
+    #
+    #    顺带一个真收益：注册了之后「播放真正开始」的时间戳是数字人报上来的，
+    #    不再是我们自己按「推出去的那一刻」估的。
     sink = DataStreamAudioOutput(room, destination_identity=_AVATAR_IDENTITY,
-                                 sample_rate=_SINK_RATE)
+                                 sample_rate=_SINK_RATE,
+                                 wait_playback_start=True)
     _set_sink(sink)
     _avatar = _AvatarSession(data["provider_session_id"],
                              data.get("terminate_token", ""), sink)
