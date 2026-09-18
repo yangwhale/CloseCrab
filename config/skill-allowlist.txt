@@ -94,3 +94,7 @@ muggle-review
 # 受管控 Mac 上用企业证书编译 iOS app 并装真机（2026-09-17 加）
 #   私有 skill，内容在 PRIVATE_SKILLS_DIR，不在本仓库
 ios-device-build
+
+# 用 Manim 画教学动画（矩阵/线性变换/梯度场/loss 地形/降维表示）＋ 循环接缝守卫
+#   2026-09-18 加。起因：课程里三支已上线的动画首尾全对不上、而从没人量过
+manim-teaching-figures
