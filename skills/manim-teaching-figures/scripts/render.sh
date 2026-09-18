@@ -45,5 +45,11 @@ printf '   %s  %.1f 秒  %s\n' "$(basename "$OUT")" \
   "$(du -h "$OUT" | cut -f1)"
 
 echo "▸ 查首尾接缝"
-python3 "$HERE/check-loop.py" --media "$(dirname "$OUT")" "$OUT" || true
+# ⛔ 基线默认存在 mp4 旁边，但项目常把它跟脚本放一起（例如 tools/manim/）。
+#   不给出路的话，走 render.sh 时**永远显示「没有基线」** —— 而同一个项目
+#   直接跑 check-loop.py 却能找到，两边说法不一致，非常误导。
+#   ⭐ 判据：**同一件事有两个入口时，它们对「配置在哪」必须有同一个答案。**
+BASELINE_ARG=()
+[ -n "${LOOP_BASELINE:-}" ] && BASELINE_ARG=(--baseline "$LOOP_BASELINE")
+python3 "$HERE/check-loop.py" --media "$(dirname "$OUT")"   "${BASELINE_ARG[@]}" "$OUT" || true
 echo "   ⭐ 拼接图：/tmp/loopdiff-$(basename "$OUT" .mp4).png —— **务必看一眼**，数字分不开「差一整幕」和「偏一像素」。"
