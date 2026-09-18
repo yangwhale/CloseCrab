@@ -75,13 +75,30 @@ def _frame(mp4, tail):
     return a
 
 
+def _bg(a):
+    """从画面自己测背景色 ——&#160;取四个角 12x12 的中位数。
+
+    ⛔⛔ 原来这里写死了「白」：`ink = (255 - a).max(2) > INK`。
+      2026-09-19 把动画改成作者默认的**黑底**之后，整帧都满足「不是白」，
+      于是分母从三千涨到五十万，不一致度塌成一个看着很漂亮的小数 ——&#160;
+      **守卫在深色片子上静默失效，而且是往「看起来更好」的方向失效。**
+    ⭐ 判据：**凡是「跟背景比」的度量，背景必须从画面里测，不能写死。**
+      写死的那一刻，这个工具就只对一种配色有效了。
+    """
+    h, w = a.shape[:2]
+    corners = np.concatenate([a[:12, :12].reshape(-1, 3), a[:12, -12:].reshape(-1, 3),
+                              a[-12:, :12].reshape(-1, 3), a[-12:, -12:].reshape(-1, 3)])
+    return np.median(corners, axis=0)
+
+
 def measure(mp4):
     """返回 (不一致度 %, 首帧墨水, 末帧墨水)，并落一张上下拼接图。"""
     a, z = _frame(mp4, False), _frame(mp4, True)
     if a.shape != z.shape:
         return 100.0, 0, 0
-    ink_a = (255 - a).max(2) > INK
-    ink_z = (255 - z).max(2) > INK
+    bg = _bg(a)
+    ink_a = np.abs(a - bg).max(2) > INK
+    ink_z = np.abs(z - bg).max(2) > INK
     both = ink_a | ink_z
     n = int(both.sum())
     bad = 0.0 if n == 0 else float((np.abs(a - z).max(2) > DIFF).sum()) / n * 100
