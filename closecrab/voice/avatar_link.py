@@ -1,20 +1,28 @@
-"""把 `avatar_policy` 的判定接到真实房间上。
+"""把数字人契约接到真实房间上 —— **本进程只管「本人」那一路**。
 
 分工很清楚，别混：
 
-    avatar_policy.py   纯判定，不碰网络，能离线穷举
-    avatar_link.py     ← 本文件。读房间属性、探网关、把结果写回去
+    closecrab_avatar/policy.py   契约与纯判定，不碰网络，能离线穷举
+    avatar_policy.py             一层转发（历史上它是契约本身）
+    avatar_link.py               ← 本文件。读房间属性、探网关、挂/摘数字人
 
-## 现在这一层只走到「算出状态并回报」
+## ⭐ 一个角色一个数字人，两个进程各管各的
 
-真正「挂上数字人」的那个分支**还是占位的** —— 网关的 worker
-（`liveavatar-gateway` 的 P1）还没做完，`LiveAvatarGenerator` 现在直接抛
-`NotImplementedError`。所以今天把客户端开关拨开，能看到的是：
+房间里有两条会出声的路，各自挂各自的数字人：
 
-    服务端日志打出 `avatar: → unavailable`，客户端收到同样的状态并提示
+    本人播报（本进程）        bot 把结论念进房间那条 —— cc-avatar-principal
+    语音助手（另一个进程）     你按住说话实时对话那条 —— cc-avatar-assistant
+                             实现在 ~/lk-gemini-agent/cc_avatar.py
 
-**这是对的行为，不是没做完的 bug** —— 服务确实不可用。等 P1 落地，
-`should_generate()` 为真时在 `_apply()` 里接上 worker 即可，本文件其余部分不用动。
+分进程不是历史包袱，是硬约束：**把音频改道给数字人，只有发声的那个进程
+自己能做**。判定和改道分在两个进程里，结果就是「状态写着 on，却没人改道」。
+
+两个进程读同一份客户端属性、跑同一个 `allocate()`（纯函数），所以
+**不需要互相通信也不会打架** —— 只有一路 GPU 时本体优先，助手那边自己站住。
+
+> 2026-09-18 之前两边用的是**同一个 identity `cc-avatar`**，又都盯同一个
+> 老开关。开关一拨两个进程同时去建会话、抢同一个名字，后进的把先进的踢掉
+> —— 而那看起来像「切换成功了」。
 """
 
 from __future__ import annotations
@@ -24,14 +32,47 @@ import logging
 import os
 import pathlib
 
-from .avatar_policy import (
-    ATTR_STATE,
-    AvatarState,
-    decide_for_room,
-    is_user_visible_problem,
-)
-
 log = logging.getLogger("closecrab.voice.avatar_link")
+
+# ⚠️ 契约在产品仓库里（`avatar_policy` 只是转发）。**这台机器没装就把数字人
+#    整体关掉，别让语音跟着一起坏** —— `livekit_out` 在模块级 import 本文件，
+#    这里抛出去等于整条语音出口起不来。
+#
+#    这不是「静默兜底」：下面会打一条 WARNING，而且降级结果（没有数字人）
+#    对一台没装产品仓库的机器本来就是事实 —— 它也没有网关配置。
+try:
+    from .avatar_policy import (
+        ATTR_STATE,
+        ATTR_STATE_BY_ROLE,
+        AvatarRole,
+        AvatarState,
+        allocate,
+        any_visible,
+        avatar_identity,
+        decide,
+        is_user_visible_problem,
+        wanted_roles,
+    )
+    _CONTRACT_OK = True
+except ImportError as _e:                        # pragma: no cover - 部署形态
+    _CONTRACT_OK = False
+    _CONTRACT_ERR = str(_e)
+    log.warning("没有 closecrab_avatar 契约（%s），这台机器不提供数字人", _e)
+
+# ⭐ **这个进程只负责「本人」这一路。**
+#
+# 房间里有两条会出声的路，各自挂各自的数字人：
+#
+#     本人播报（本进程）        bot 把结论念进房间那条 —— cc-avatar-principal
+#     语音助手（另一个进程）     你按住说话实时对话那条 —— cc-avatar-assistant
+#
+# 分进程不是历史包袱，是硬约束：**把音频改道给数字人，只有发声的那个进程
+# 自己能做**。判定和改道分在两个进程里，结果就是「状态写着 on，却没人改道」。
+#
+# 两个进程读同一份属性、跑同一个 `allocate()`，所以**不需要互相通信也不会打架**：
+# 输入一样、纯函数一样，算出来的分配就一样。只有一路 GPU 时本体优先，
+# 助手那个进程会自己站住不动。
+_ROLE = AvatarRole.PRINCIPAL if _CONTRACT_OK else None
 
 _GATEWAY_ENV = "LIVEAVATAR_GATEWAY_URL"
 
@@ -48,7 +89,7 @@ _PROBE_TIMEOUT_S = 2.0
 而用户那边的表现是「拨了开关没反应」，比直接报不可用还难查。
 """
 
-_state: AvatarState = AvatarState.OFF
+_state = AvatarState.OFF if _CONTRACT_OK else None
 _probe_at: float = 0.0
 _probe_ok: bool = False
 
@@ -155,6 +196,8 @@ def _collect(room) -> dict[str, dict[str, str]]:  # noqa: ANN001
 
 async def _apply(room) -> None:  # noqa: ANN001
     """重算一次，变了就写回去。**整段串行** —— 理由见下。"""
+    if not _CONTRACT_OK:
+        return
     async with _lock():
         await _apply_locked(room)
 
@@ -181,7 +224,15 @@ async def _apply_locked(room) -> None:  # noqa: ANN001
     """
     global _state
     try:
-        new = decide_for_room(_collect(room), service_ok=await _gateway_ok())
+        people = _collect(room)
+        # ⭐ 三步：谁被要了 → 现有资源给谁 → 本体在不在里面。
+        #
+        # `allocate()` 是**纯函数**，语音助手那个进程跑同一个，输入也一样
+        # （都是房里真人的属性），所以两边的结论天然一致，不需要任何协调。
+        # 容量写死 1 是现在只有一路 GPU；多一路时改这一个数，协议不用动。
+        mine = _ROLE in allocate(wanted_roles(people), capacity=1)
+        new = decide(want=mine, visible=any_visible(people),
+                     service_ok=await _gateway_ok())
     except Exception:
         log.exception("算数字人状态失败，保持原状 %s", _state.value)
         return
@@ -207,8 +258,19 @@ async def _apply_locked(room) -> None:  # noqa: ANN001
     # 同一篇文档还写着：属性**不适合每几秒一次以上的高频更新**（服务端要做
     # 同步，开销在那儿）。所以上面那句「没变就不写」不是优化，是硬要求；
     # 客户端那侧的去抖同理。
+    #
+    # ⭐ **按角色的键每次都写，老的全房键只有「被分配到的那一路」才写。**
+    #
+    # 老键 `cc.avatar.state` 是全房共享的一份。两路同时在的时候，站住不动的
+    # 那一路会把 `off` 写上去，盖掉正在工作那一路的 `on` —— 客户端看到的是
+    # 「开着却显示关」，像开关失灵。按角色的键各写各的，谁也盖不掉谁。
+    #
+    # 老键还得留着：iOS 那侧现在读的还是它，三层不可能同一秒切换。
+    attrs = {ATTR_STATE_BY_ROLE[_ROLE]: new.value}
+    if mine:
+        attrs[ATTR_STATE] = new.value
     try:
-        await room.local_participant.set_attributes({ATTR_STATE: new.value})
+        await room.local_participant.set_attributes(attrs)
     except Exception as e:
         # ⚠️ **写失败必须把 `_state` 留在旧值上，不能先改后写。**
         #
@@ -248,7 +310,18 @@ async def _apply_locked(room) -> None:  # noqa: ANN001
 # 而「挂」这件事必须跟「发声」同进程：要把自己的音频改道给数字人，
 # 只有自己能改。
 
-_AVATAR_IDENTITY = "cc-avatar"
+_AVATAR_IDENTITY = avatar_identity(_ROLE) if _CONTRACT_OK else "cc-avatar"
+"""这一路数字人在房间里叫什么 —— `cc-avatar-principal`。
+
+⚠️ **必须带角色后缀。** 两路同时在房间里的时候，固定用 `cc-avatar` 会撞名字：
+LiveKit 里 identity 是唯一键，后进的把先进的踢掉，**而且看起来像切换成功了**
+—— 房间里确实只剩一个数字人，只是不是你以为的那个。
+
+2026-09-18 之前这里和语音助手进程用的**是同一个字符串**，两边又都读同一个
+老开关，所以开关一拨两个进程都去建会话、抢同一个名字。名字由契约层的
+`avatar_identity()` 生成，三处（本进程 / 助手进程 / iOS）不各拼各的。
+"""
+
 _HTTP_TIMEOUT = 10.0
 
 
@@ -444,6 +517,10 @@ def attach(room, *, set_sink=None, livekit_url: str = "",
     - `livekit_url` / `sink_rate`：建会话时要告诉控制面的两个参数。
       采样率**两边必须一致**，不一致的现象是口型对不上，不报错。
     """
+    if not _CONTRACT_OK:
+        # 已经在 import 处打过 WARNING，这里不再刷屏。**什么都不挂** ——
+        # 挂了回调却在回调里早退，等于每次房间事件都白跑一趟。
+        return
     global _set_sink, _LIVEKIT_URL, _LK_KEY, _LK_SECRET, _SINK_RATE
     _set_sink, _LIVEKIT_URL, _SINK_RATE = set_sink, livekit_url, sink_rate
     # ⚠️ **凭据从调用方传进来，不读环境变量。** `livekit_out` 的那一对是从
@@ -476,7 +553,8 @@ def reset() -> None:
     上一条连接留下的状态。
     """
     global _state, _probe_at, _probe_ok, _apply_lock, _avatar
-    _state, _probe_at, _probe_ok = AvatarState.OFF, 0.0, False
+    _state = AvatarState.OFF if _CONTRACT_OK else None
+    _probe_at, _probe_ok = 0.0, False
     # 连接没了，那一路数字人也就没了。**不要在这里 await 去摘** ——
     # `reset()` 是在 finally 里同步调的，房间对象已经在断开途中，
     # 发请求只会挂住收尾。控制面的 idle reaper 会兜住。
