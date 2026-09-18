@@ -60,6 +60,11 @@ class FakeSink:
     def flush(self):
         self.calls.append("flush")
 
+    async def capture_frame(self, frame):
+        # 只记一次，免得一段音频把 calls 撑成几百条。
+        if "capture_frame" not in self.calls:
+            self.calls.append("capture_frame")
+
 
 class ExplodingSink(FakeSink):
     """clear_buffer 抛异常 —— 不能因此把 flush 吞掉。"""
@@ -146,6 +151,182 @@ M._sink = c
 M._set_sink(c)
 check("⭐ 设成同一个 sink 不 flush（否则会掐断正在写的流）",
       c.calls == [], str(c.calls))
+
+print("\n── 一句说完：空闲一秒就换新流 ──")
+# 为什么要主动换：不换也能用（写进同一条开着的流，对端接着读）。但那让
+# 「隔一会儿再说下一句」依赖一条开了很久的流还活着 —— 而今天查出来的 bug
+# 正是「以为流还活着，其实对端早判死了」。换掉之后，每一句都是一条新流，
+# 跟「第一句总是好使」走同一条路。
+
+def idle(sink, dirty=True, pending=b""):
+    M._sink = sink
+    M._sink_dirty = dirty
+    M._pending.clear()
+    M._pending.extend(pending)
+    M._flush_sink_after_utterance()
+
+s1 = FakeSink()
+idle(s1)
+check("⭐ 写过东西 + 缓冲空 → 关流", s1.calls == ["flush"], str(s1.calls))
+check("关完脏标记清掉", M._sink_dirty is False)
+
+# 安静时 _pump 每秒醒一次。不挡的话会对着一条空流每秒开一次关流任务。
+s2 = FakeSink()
+idle(s2, dirty=False)
+check("⭐ 没写过东西就别关（否则空闲时每秒 flush 一次）", s2.calls == [], str(s2.calls))
+
+# 不足 20ms 的尾巴还在缓冲里。这时候关流，那点尾巴会落到**下一条流**开头 ——
+# 下一句话前面挂着上一句的半个字，两边都不报错。
+s3 = FakeSink()
+idle(s3, pending=b"\x00" * 8)
+check("⭐ 还剩半帧没凑齐 → 不关（否则尾巴会挂到下一句开头）",
+      s3.calls == [], str(s3.calls))
+check("没关成时脏标记要留着，下次空转再试 —— 清掉的话这一句永远换不了流",
+      M._sink_dirty is True)
+
+M._sink = None
+M._sink_dirty = True
+M._pending.clear()
+try:
+    M._flush_sink_after_utterance()
+    check("没挂数字人时安静通过", True)
+except Exception as ex:                                  # noqa: BLE001
+    check("没挂数字人时安静通过", False, repr(ex))
+
+# 连着调两次只关一次 —— 第二次 dirty 已经是 False。
+s4 = FakeSink()
+idle(s4)
+M._flush_sink_after_utterance()
+check("⭐ 连调两次只关一次", s4.calls == ["flush"], str(s4.calls))
+
+print("\n── ⭐ 真的接进 _pump 了吗（上面测的是函数，这里测接线）──")
+# 变异测试抓到的缺口：把 `_pump` 里那一句调用删掉，上面那几条**全绿**。
+# 「函数是对的」和「函数会被调到」是两件事，而后者才是功能。
+import asyncio  # noqa: E402
+
+
+async def drive_pump_idle():
+    M._has_data = asyncio.Event()      # 没数据，_pump 会走等待→超时那条
+    M._pending.clear()
+    M._stopping = False
+    sink = FakeSink("pumped")
+    M._sink = sink
+    M._sink_dirty = True               # 假装刚说完一句
+    dead = asyncio.Event()
+    task = asyncio.create_task(M._pump(dead))
+    await asyncio.sleep(1.4)           # 超时是 1.0 秒，留点余量
+    dead.set()
+    M._has_data.set()                  # 把它从 wait 里叫醒，好干净退出
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+    return sink
+
+
+pumped = asyncio.run(drive_pump_idle())
+check("⭐ _pump 空闲一秒后真的把流关了（钉住调用点，不只是函数）",
+      pumped.calls == ["flush"], str(pumped.calls))
+
+
+# ⭐ 上面那条是手动把脏标记设上的，测不到「写帧时会置标记」那一步。
+#    变异测试抓到的：把 `_sink_dirty = True` 删掉，上面全绿 —— 而那个 bug
+#    的后果是**空闲永远不关流**，正好退回今天这个毛病。
+#    所以这一条走完整条链：喂一帧真音频 → 它写出去 → 安静 → 关流。
+async def drive_pump_full():
+    M._has_data = asyncio.Event()
+    M._pending.clear()
+    M._pending.extend(b"\x00" * M._FRAME_BYTES)
+    M._has_data.set()
+    M._stopping = False
+    sink = FakeSink("full")
+    M._sink = sink
+    M._sink_dirty = False              # **不预设** —— 要靠写帧那一步自己置上
+    dead = asyncio.Event()
+    task = asyncio.create_task(M._pump(dead))
+    await asyncio.sleep(1.5)
+    dead.set()
+    M._has_data.set()
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+    return sink
+
+
+full = asyncio.run(drive_pump_full())
+check("⭐ 写一帧 → 安静 → 关流，整条链走通（不预设脏标记）",
+      full.calls == ["capture_frame", "flush"], str(full.calls))
+
+M._sink_dirty = False
+
+print("\n── ⭐ 真的跑一遍 _pump：接线本身也要测 ──")
+# ⚠️ 上面那些只测了 `_flush_sink_after_utterance` 这个函数**自己**。
+#    做变异时漏掉了两条，而且漏的正是最要紧的两条：
+#
+#      把 `_pump` 里那句 `_flush_sink_after_utterance()` 整个删掉   → 全绿
+#      把 `_pump` 里那句 `_sink_dirty = True` 整个删掉             → 全绿
+#
+#    因为测试自己手动设脏标记、自己直接调那个函数 —— **接线一行都没走到**。
+#    两处任缺其一，这个功能就是彻底的 no-op，而测试一句话都不说。
+#
+#    所以这一段真的把 `_pump` 跑起来：喂一帧音频，等它空转一秒，看它
+#    有没有自己把流关掉。慢一点（约 1.3 秒）值得。
+import asyncio
+
+
+class RecordingSink(FakeSink):
+    """连 `capture_frame` 一起记 —— 要确认音频真写进去了才谈得上关流。"""
+
+    def __init__(self):
+        super().__init__("pump")
+        self.frames = 0
+
+    async def capture_frame(self, frame):
+        self.frames += 1
+        self.calls.append("capture_frame")
+
+
+async def drive_pump():
+    sink = RecordingSink()
+    M._sink = sink
+    M._source = None
+    M._sink_dirty = False
+    M._stopping = False
+    M._pending.clear()
+    M._has_data = asyncio.Event()
+    dead = asyncio.Event()
+
+    task = asyncio.create_task(M._pump(dead))
+    # 喂两帧的量，让它走一遍「有数据 → capture_frame」。
+    M._pending.extend(b"\x00" * (M._FRAME_BYTES * 2))
+    M._has_data.set()
+    await asyncio.sleep(0.1)
+    mid = list(sink.calls)
+    # 之后一直安静。`_pump` 的空转超时是 1 秒，等够它。
+    await asyncio.sleep(1.4)
+    dead.set()
+    M._has_data.set()
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+    return sink, mid
+
+
+sink, mid = asyncio.run(drive_pump())
+check("⭐ _pump 真的把音频写给了 sink", sink.frames == 2, f"{sink.frames} 帧")
+check("写的时候还没关流", "flush" not in mid, str(mid))
+# ⭐ 这一条堵的是「删掉 _pump 里那句调用」那个变异。
+check("⭐ 安静一秒后，_pump 自己把流关了", sink.calls[-1] == "flush", str(sink.calls))
+# ⭐ 这一条堵的是「删掉 _pump 里那句置脏标记」那个变异 ——
+#    没置脏的话上面那个 flush 根本不会发生，两条互为佐证。
+check("⭐ 一共只关一次（不是每秒一次）",
+      sink.calls.count("flush") == 1, str(sink.calls))
+
+M._sink = None
+M._sink_dirty = False
+M._has_data = None
 
 M._sink = None
 print(f"\n{'=' * 52}\n通过 {ok} 条，失败 {fail} 条")

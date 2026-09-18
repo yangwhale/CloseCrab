@@ -63,6 +63,13 @@ _loop: asyncio.AbstractEventLoop | None = None
 _room = None          # rtc.Room
 _source = None        # rtc.AudioSource
 _sink = None          # 非 None 时音频改道给它（数字人），否则直接发布
+
+_sink_dirty = False
+"""自上次 `flush()` 以来往数字人那条流里写过东西没有。
+
+只为了**别对着一条空流反复 flush** —— 安静的时候 `_pump` 每秒醒一次，
+不记这个状态就会每秒开一次关流任务。
+"""
 _connected = False
 _stopping = False
 _pending = bytearray()          # 只在 _loop 线程里碰
@@ -291,6 +298,7 @@ def clear() -> None:
                 _sink.flush()
             except Exception:
                 log.debug("关数字人音频流失败", exc_info=True)
+            globals()["_sink_dirty"] = False
         if _source is not None:
             try:
                 _source.clear_queue()
@@ -325,14 +333,36 @@ def _set_sink(sink) -> None:  # noqa: ANN001
     「数字人走了，但网关那边的会话要等空闲回收才还槽位」——
     而槽位一共就一路。
     """
-    global _sink
+    global _sink, _sink_dirty
     if _sink is not None and _sink is not sink:
         try:
             _sink.flush()
         except Exception:
             log.debug("摘出口时关流失败", exc_info=True)
+        _sink_dirty = False
     _sink = sink
     log.info("音频出口切到 %s", "数字人" if sink is not None else "本地音轨")
+
+
+def _flush_sink_after_utterance() -> None:
+    """一句说完了：把数字人那条字节流关掉，下一句开新的。
+
+    三道门，缺一个都会变成毛病：
+
+    - **没挂数字人就不做。** 本地音轨那条路没有「流」这个概念。
+    - **`_sink_dirty` 为假就不做。** 安静时 `_pump` 每秒醒一次，
+      不挡的话会对着一条空流每秒开一次关流任务。
+    - **`_pending` 非空就不做。** 那说明还剩小半帧没凑齐（不足 20ms
+      的尾巴）。这时候关流，那点尾巴会落到**下一条流**的开头 ——
+      下一句话前面挂着上一句的半个字，而且两边都不报错。
+    """
+    global _sink_dirty
+    if _sink is None or not _sink_dirty or _pending:
+        return
+    try:
+        _sink.flush()
+    except Exception:
+        log.debug("说完一句关流失败", exc_info=True)
 
 
 async def _pump(dead: asyncio.Event) -> None:
@@ -346,6 +376,7 @@ async def _pump(dead: asyncio.Event) -> None:
     往一个已经断开的 source 里灌帧不报错，于是外面永远等不到「该重连了」。
     """
     from livekit import rtc
+    global _sink_dirty
     assert _has_data is not None
     while not _stopping and not dead.is_set():
         if len(_pending) < _FRAME_BYTES:
@@ -353,6 +384,20 @@ async def _pump(dead: asyncio.Event) -> None:
             try:
                 await asyncio.wait_for(_has_data.wait(), timeout=1.0)
             except asyncio.TimeoutError:
+                # ⭐ 一整秒没有新音频 ＝ 这句说完了。**把流关掉，下一句开新的。**
+                #
+                # 不关也能用：写进同一条开着的流里，对端接着读 —— 今天线上跑的
+                # 就是这样，好几条回复会拼成一段一百多秒的音频。
+                #
+                # 但那让「隔一会儿再说下一句」和「第一次说话」走**不同的路**：
+                # 前者依赖一条已经开了很久的流还活着。而今天刚查出来的那个 bug
+                # 正是「以为流还活着，其实对端早判死了」—— 同一类，静默、不报错。
+                #
+                # 关掉之后两者结构上就一样了：**每一句都是一条新流**，
+                # 而「第一句总是好使」是已经反复验证过的路径。
+                #
+                # 代价只有一次 `stream_bytes()`，比一次静默失效便宜太多。
+                _flush_sink_after_utterance()
                 continue
             continue
         chunk = bytes(_pending[:_FRAME_BYTES])
