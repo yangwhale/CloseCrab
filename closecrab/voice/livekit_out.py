@@ -252,6 +252,28 @@ def clear() -> None:
     只清本地缓冲的话，已经发给数字人的那几百毫秒还在它手里 ——
     它会接着对完口型再停。现象是「我已经在讲新的了，屏幕上那张脸还在念
     上一句」，而且嘴型跟声音完全对不上。这正是数字人最掉价的那种失效。
+
+    ## ⭐⭐ 清完必须 `flush()` 换一条流，只 `clear_buffer()` 是不够的
+
+    `DataStreamAudioOutput` 有两个方法，干的**不是一件事**：
+
+        clear_buffer()  只发一条 `lk.clear_buffer` RPC 通知对端把缓冲丢掉，
+                        **`_stream_writer` 一个字都不碰**
+        flush()         关掉当前这条字节流、置空，下一次 `capture_frame`
+                        才会 `stream_bytes()` 重开一条
+
+    对端收到 clear_buffer 就把那条流当作作废了。我们这边流还开着，于是
+    **之后写进去的每一帧都掉进黑洞** —— 不报错、不抛异常、不断线。
+
+    Chris 2026-09-18 测出来的四条现象，全是这一个因：
+
+        1. 第一次播放好使（流是新的）
+        2. 开着 Avatar 点重播 → 卡住（走 clear()，流被判死还继续写）
+        3. 把 Avatar 关掉 → 语音模式接着播（出口切回本地音轨，绕开那条死流）
+        4. 再打开 Avatar → 又好了（重建会话 ＝ 新的 sink ＝ 新的流）
+
+    所以顺序是**先通知对端丢、再把流关掉**：反过来的话 clear_buffer 发出去时
+    流已经没了，`_started` 那道门会让它直接 return，对端手里那几百毫秒就留下了。
     """
     if _loop is None or _loop.is_closed():
         return
@@ -263,6 +285,12 @@ def clear() -> None:
                 _sink.clear_buffer()
             except Exception:
                 log.debug("清数字人缓冲失败", exc_info=True)
+            try:
+                # ⭐ 换一条流。见上面那段 —— 少了这一句，重播之后数字人永远
+                #    收不到音频，而且整条链路一个错都不报。
+                _sink.flush()
+            except Exception:
+                log.debug("关数字人音频流失败", exc_info=True)
         if _source is not None:
             try:
                 _source.clear_queue()
@@ -291,8 +319,18 @@ def _set_sink(sink) -> None:  # noqa: ANN001
 
     给 `avatar_link` 用。**只换出口、不动 `_pending`** —— 切换那一刻
     缓冲里可能还有半句话，丢掉的话听起来是「说到一半被掐了」。
+
+    ⚠️ **摘掉旧出口前先把它那条字节流关上。** 不关的话流一直开着，对端
+    （已经在收摊的 worker）那条 reader 也就一直等着结束标记。表现是
+    「数字人走了，但网关那边的会话要等空闲回收才还槽位」——
+    而槽位一共就一路。
     """
     global _sink
+    if _sink is not None and _sink is not sink:
+        try:
+            _sink.flush()
+        except Exception:
+            log.debug("摘出口时关流失败", exc_info=True)
     _sink = sink
     log.info("音频出口切到 %s", "数字人" if sink is not None else "本地音轨")
 
