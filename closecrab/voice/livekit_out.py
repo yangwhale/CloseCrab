@@ -64,12 +64,6 @@ _room = None          # rtc.Room
 _source = None        # rtc.AudioSource
 _sink = None          # 非 None 时音频改道给它（数字人），否则直接发布
 
-_sink_dirty = False
-"""自上次 `flush()` 以来往数字人那条流里写过东西没有。
-
-只为了**别对着一条空流反复 flush** —— 安静的时候 `_pump` 每秒醒一次，
-不记这个状态就会每秒开一次关流任务。
-"""
 _connected = False
 _stopping = False
 _pending = bytearray()          # 只在 _loop 线程里碰
@@ -289,16 +283,11 @@ def clear() -> None:
         # 顺序无所谓，两个各清各的：本地音轨的队列、数字人那边的在途缓冲。
         if _sink is not None:
             try:
-                _sink.clear_buffer()
+                # ⭐ 先通知对端丢缓冲、再换一条流。**两步的顺序和理由都在
+                #    `AvatarAudioSink` 里**，这边只说「被打断了」。
+                _sink.interrupt()
             except Exception:
-                log.debug("清数字人缓冲失败", exc_info=True)
-            try:
-                # ⭐ 换一条流。见上面那段 —— 少了这一句，重播之后数字人永远
-                #    收不到音频，而且整条链路一个错都不报。
-                _sink.flush()
-            except Exception:
-                log.debug("关数字人音频流失败", exc_info=True)
-            globals()["_sink_dirty"] = False
+                log.debug("打断数字人失败", exc_info=True)
         if _source is not None:
             try:
                 _source.clear_queue()
@@ -333,37 +322,11 @@ def _set_sink(sink) -> None:  # noqa: ANN001
     「数字人走了，但网关那边的会话要等空闲回收才还槽位」——
     而槽位一共就一路。
     """
-    global _sink, _sink_dirty
+    global _sink
     if _sink is not None and _sink is not sink:
-        try:
-            _sink.flush()
-        except Exception:
-            log.debug("摘出口时关流失败", exc_info=True)
-        _sink_dirty = False
+        _sink.aclose()
     _sink = sink
     log.info("音频出口切到 %s", "数字人" if sink is not None else "本地音轨")
-
-
-def _flush_sink_after_utterance() -> None:
-    """一句说完了：把数字人那条字节流关掉，下一句开新的。
-
-    三道门，缺一个都会变成毛病：
-
-    - **没挂数字人就不做。** 本地音轨那条路没有「流」这个概念。
-    - **`_sink_dirty` 为假就不做。** 安静时 `_pump` 每秒醒一次，
-      不挡的话会对着一条空流每秒开一次关流任务。
-    - **`_pending` 非空就不做。** 那说明还剩小半帧没凑齐（不足 20ms
-      的尾巴）。这时候关流，那点尾巴会落到**下一条流**的开头 ——
-      下一句话前面挂着上一句的半个字，而且两边都不报错。
-    """
-    global _sink_dirty
-    if _sink is None or not _sink_dirty or _pending:
-        return
-    _sink_dirty = False
-    try:
-        _sink.flush()
-    except Exception:
-        log.debug("说完一句关流失败", exc_info=True)
 
 
 async def _pump(dead: asyncio.Event) -> None:
@@ -377,7 +340,6 @@ async def _pump(dead: asyncio.Event) -> None:
     往一个已经断开的 source 里灌帧不报错，于是外面永远等不到「该重连了」。
     """
     from livekit import rtc
-    global _sink_dirty
     assert _has_data is not None
     while not _stopping and not dead.is_set():
         if len(_pending) < _FRAME_BYTES:
@@ -398,7 +360,8 @@ async def _pump(dead: asyncio.Event) -> None:
                 # 而「第一句总是好使」是已经反复验证过的路径。
                 #
                 # 代价只有一次 `stream_bytes()`，比一次静默失效便宜太多。
-                _flush_sink_after_utterance()
+                if _sink is not None:
+                    _sink.end_utterance()
                 continue
             continue
         chunk = bytes(_pending[:_FRAME_BYTES])
@@ -412,8 +375,6 @@ async def _pump(dead: asyncio.Event) -> None:
             await out.capture_frame(
                 rtc.AudioFrame(chunk, _OUT_RATE, _OUT_CHANNELS, _FRAME_BYTES // 2)
             )
-            if out is _sink:
-                _sink_dirty = True
         except Exception:
             log.exception("capture_frame 失败，停止本轮推流")
             return

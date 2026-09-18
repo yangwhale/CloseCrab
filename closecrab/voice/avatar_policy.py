@@ -36,6 +36,7 @@ if _REPO not in sys.path:
 
 # ⚠️ 逐个显式转发，**不用 `import *`**：上游哪天改了名字，这里立刻 ImportError，
 #    而 `import *` 只会让符号悄悄消失，报错点落在几百行之外的调用处。
+from closecrab_avatar.audio_sink import AvatarAudioSink  # noqa: E402
 from closecrab_avatar.policy import (  # noqa: E402  (sys.path 必须先垫好)
     ALLOC_PRIORITY,
     ATTR_STATE,
@@ -60,6 +61,7 @@ from closecrab_avatar.policy import (  # noqa: E402  (sys.path 必须先垫好)
 
 __all__ = [
     "ALLOC_PRIORITY",
+    "AvatarAudioSink",
     "ATTR_STATE",
     "ATTR_STATE_BY_ROLE",
     "ATTR_VISIBLE",

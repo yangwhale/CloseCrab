@@ -44,6 +44,7 @@ try:
     from .avatar_policy import (
         ATTR_STATE,
         ATTR_STATE_BY_ROLE,
+        AvatarAudioSink,
         AvatarRole,
         AvatarState,
         allocate,
@@ -443,9 +444,19 @@ async def _start_avatar(room) -> bool:  # noqa: ANN001
     #
     #    顺带一个真收益：注册了之后「播放真正开始」的时间戳是数字人报上来的，
     #    不再是我们自己按「推出去的那一刻」估的。
-    sink = DataStreamAudioOutput(room, destination_identity=_AVATAR_IDENTITY,
-                                 sample_rate=_SINK_RATE,
-                                 wait_playback_start=True)
+    # ⭐ 包一层 `AvatarAudioSink`（产品仓库里的）。**那条字节流什么时候该换，
+    #    归它管，不归 CloseCrab 管。**
+    #
+    #    2026-09-18 的教训：`clear_buffer()` 只通知对端丢缓冲、不换流，只有
+    #    `flush()` 才换。这个语义原来在 `livekit_out` 里手写了一遍 —— 写漏了
+    #    一处，于是重播之后音频全掉进黑洞，而助手那一路（走插件）是对的。
+    #    同一个语义在两个地方各实现一次，迟早有一个是错的。
+    sink = AvatarAudioSink(
+        DataStreamAudioOutput(room, destination_identity=_AVATAR_IDENTITY,
+                              sample_rate=_SINK_RATE,
+                              wait_playback_start=True),
+        label=_AVATAR_IDENTITY,
+    )
     _set_sink(sink)
     _avatar = _AvatarSession(data["provider_session_id"],
                              data.get("terminate_token", ""), sink)
