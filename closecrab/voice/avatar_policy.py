@@ -29,6 +29,7 @@ PiP 锁屏即停、CallKit 显示不了远端画面、Live Activity 是快照）
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 
 
@@ -52,21 +53,43 @@ class AvatarState(str, Enum):
     **这一条必须让用户看见** —— 否则他只会觉得「怎么没有脸」。"""
 
 
-def decide(*, want: bool, visible: bool, service_ok: bool) -> AvatarState:
-    """三个输入合成一个状态。
+RESPECT_VISIBILITY = os.environ.get("CC_AVATAR_RESPECT_VISIBILITY", "0") == "1"
+"""要不要把「app 在不在前台」算进判定。**2026-09-18 起默认关掉。**
+
+Chris 的原话：「app 那个前台判断也先不要了，简化逻辑先，就看数字人手动开关」。
+
+关掉的理由不只是省事 —— 它跟实际用法冲突：数字人由 bot 的播报驱动，而让
+bot 播报得先去飞书里说话，一说话 app 就进后台了。于是「想看数字人」和
+「能让它说话」这两件事**在操作上互斥**，判定结果永远停在 `hidden`。
+
+代价说清楚：锁屏和后台时照样会挂一路 GPU 渲染，而屏幕上根本看不见 ——
+那正是当初加这一条要省的东西。所以它是暂时关掉，不是删掉：
+设 `CC_AVATAR_RESPECT_VISIBILITY=1` 就回来。
+
+客户端**仍然照常上报** `cc.client.visible`，只是这一层不再据此决策 ——
+数据留着，将来要恢复不用改客户端。
+"""
+
+
+def decide(*, want: bool, visible: bool, service_ok: bool,
+           respect_visibility: bool | None = None) -> AvatarState:
+    """把输入合成一个状态。
 
     判断顺序是有讲究的，**不能换**：
 
     1. `want` 最先 —— 用户关掉了就到此为止。后面两条再怎么样都不该
        让客户端看到 `unavailable` 之类的提示：他没要，服务好不好跟他无关。
-    2. `visible` 其次 —— 他看不见就别生成。这一条**排在 service 前面**是故意的：
-       服务正好挂了、而用户又在后台时，该报的是 `hidden` 不是 `unavailable`。
-       报后者会让他回前台后看到一条「暂不可用」的假警报。
-    3. `service_ok` 最后 —— 到这儿才是真的「想要、看得见、但给不了」。
+    2. `visible` 其次（**默认已停用**，见 `RESPECT_VISIBILITY`）—— 启用时
+       它**必须排在 service 前面**：服务正好挂了、而用户又在后台时，
+       该报的是 `hidden` 不是 `unavailable`；报后者会让他回前台后看到
+       一条「暂不可用」的假警报。
+    3. `service_ok` 最后 —— 到这儿才是真的「想要、能看见、但给不了」。
     """
+    if respect_visibility is None:
+        respect_visibility = RESPECT_VISIBILITY
     if not want:
         return AvatarState.OFF
-    if not visible:
+    if respect_visibility and not visible:
         return AvatarState.HIDDEN
     if not service_ok:
         return AvatarState.UNAVAILABLE

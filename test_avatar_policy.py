@@ -57,8 +57,11 @@ TRUTH = {
     (False, False, True): S.OFF,
     (False, False, False): S.OFF,
 }
+# ⚠️ 显式 respect_visibility=True：这条分支 2026-09-18 起**默认关闭**
+#    （Chris：「前台判断先不要了，就看手动开关」），但分支本身留着，
+#    所以真值表照测 —— 免得将来打开时才发现它悄悄坏了。
 for want, visible, svc in itertools.product([True, False], repeat=3):
-    got = decide(want=want, visible=visible, service_ok=svc)
+    got = decide(want=want, visible=visible, service_ok=svc, respect_visibility=True)
     exp = TRUTH[(want, visible, svc)]
     check(f"want={want:<5} visible={visible:<5} svc={svc:<5} → {exp.value}",
           got is exp, f"实得 {got.value}")
@@ -68,14 +71,14 @@ print("\n── 判断顺序：visible 必须排在 service_ok 前面 ──")
 #    而它恰好是最容易被当成「无所谓」的那格。
 #    后果：用户在后台时服务恰好挂了 → 报 unavailable → 他回到前台，
 #    界面上挂着一条「数字人暂不可用」的假警报，而服务其实早恢复了。
-r = decide(want=True, visible=False, service_ok=False)
+r = decide(want=True, visible=False, service_ok=False, respect_visibility=True)
 check("⭐ 后台 + 服务挂了 → hidden（不是 unavailable）",
       r is S.HIDDEN, f"实得 {r.value} —— 分支顺序被换了？")
 
 # ⭐ want 必须能一票否决。用户自己关掉的功能，不该因为服务器状态
 #    而向他报任何错 —— 那是在为他没要的东西道歉。
 for visible, svc in itertools.product([True, False], repeat=2):
-    r = decide(want=False, visible=visible, service_ok=svc)
+    r = decide(want=False, visible=visible, service_ok=svc, respect_visibility=True)
     check(f"⭐ want=False 一票否决（visible={visible} svc={svc}）", r is S.OFF, r.value)
 
 print("\n── 哪些状态要占资源 / 要报错 ──")
@@ -111,9 +114,11 @@ check("⭐ 什么都没发的老客户端 → OFF（不抢槽位）",
 check("⭐ 只发了 want、没发 visible → ON（不卡死在 hidden）",
       decide_from_attributes({ATTR_WANT: "true"}, service_ok=True) is S.ON)
 
-check("want+visible 都发了，照常走",
+# 2026-09-18 起默认不看 visible，所以这里是 ON 而不是 HIDDEN。
+# 属性照收照存，只是不再据此决策。
+check("want=true + visible=false → ON（默认不看前台）",
       decide_from_attributes(
-          {ATTR_WANT: "true", ATTR_VISIBLE: "false"}, service_ok=True) is S.HIDDEN)
+          {ATTR_WANT: "true", ATTR_VISIBLE: "false"}, service_ok=True) is S.ON)
 check("发了 want=false，visible 是什么都无所谓",
       decide_from_attributes(
           {ATTR_WANT: "false", ATTR_VISIBLE: "true"}, service_ok=True) is S.OFF)
@@ -136,8 +141,11 @@ check("⭐ 一人开一人关 → ON（关的那个不能掐别人）",
       decide_for_room({"a": WANT_VIS, "b": NOPE}, service_ok=True) is S.ON)
 check("⭐ 顺序反过来结果一样（聚合不能依赖字典顺序）",
       decide_for_room({"b": NOPE, "a": WANT_VIS}, service_ok=True) is S.ON)
-check("都在后台 → HIDDEN（不占槽位）",
-      decide_for_room({"a": WANT_BG, "b": WANT_BG}, service_ok=True) is S.HIDDEN)
+# 原来这条是「都在后台 → HIDDEN（不占槽位）」。2026-09-18 默认关掉前台判断
+# 之后变成 ON —— **代价就在这儿**：锁屏/后台时照样挂一路 GPU。
+# 这是明知的取舍，不是回归；要还原设 CC_AVATAR_RESPECT_VISIBILITY=1。
+check("都在后台 → ON（前台判断已停用，代价是照样占槽位）",
+      decide_for_room({"a": WANT_BG, "b": WANT_BG}, service_ok=True) is S.ON)
 # ⭐ 一个在前台一个在后台：前台那位要看，必须开。
 check("⭐ 一前台一后台 → ON",
       decide_for_room({"a": WANT_BG, "b": WANT_VIS}, service_ok=True) is S.ON)
@@ -165,6 +173,21 @@ check("三个键都带 cc. 前缀（别跟 LiveKit 的 lk.* 撞）",
 #    客户端解不出来 —— 而服务端这边毫无异常。
 check("⭐ 状态能直接当字符串写进 attributes",
       isinstance(S.ON, str) and f"{S.ON.value}" == "on" and str(S.ON.value) == "on")
+
+print("\n── ⭐ 默认不看前台（2026-09-18 起）──")
+# Chris：「app 那个前台判断也先不要了，简化逻辑先，就看数字人手动开关」。
+# 关掉的理由不只是省事 —— 它跟实际用法冲突：数字人由 bot 的播报驱动，
+# 而让 bot 播报得先去飞书说话，一说话 app 就进后台，于是「想看」和
+# 「能让它说话」在操作上互斥，判定永远停在 hidden。
+for svc, exp in ((True, S.ON), (False, S.UNAVAILABLE)):
+    r = decide(want=True, visible=False, service_ok=svc)
+    check(f"⭐ 后台 + 服务{'好' if svc else '挂'} → {exp.value}（默认不看 visible）",
+          r is exp, f"实得 {r.value}")
+check("要恢复只要传 respect_visibility=True",
+      decide(want=True, visible=False, service_ok=True,
+             respect_visibility=True) is S.HIDDEN)
+check("want=False 仍然一票否决",
+      decide(want=False, visible=True, service_ok=True) is S.OFF)
 
 print(f"\n{'=' * 52}\n通过 {ok} 条，失败 {fail} 条")
 sys.exit(1 if fail else 0)
