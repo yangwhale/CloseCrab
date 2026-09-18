@@ -359,6 +359,7 @@ def _flush_sink_after_utterance() -> None:
     global _sink_dirty
     if _sink is None or not _sink_dirty or _pending:
         return
+    _sink_dirty = False
     try:
         _sink.flush()
     except Exception:
@@ -411,6 +412,8 @@ async def _pump(dead: asyncio.Event) -> None:
             await out.capture_frame(
                 rtc.AudioFrame(chunk, _OUT_RATE, _OUT_CHANNELS, _FRAME_BYTES // 2)
             )
+            if out is _sink:
+                _sink_dirty = True
         except Exception:
             log.exception("capture_frame 失败，停止本轮推流")
             return
