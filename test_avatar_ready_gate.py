@@ -15,8 +15,15 @@
 **两样同时没有是同一个原因**，不是两个毛病：没图是 worker 还没发轨，
 没声是音频已经改道给了那个还没起来的它。
 
-所以：后台等「它发布了视频轨」再切；等不到就收掉这一路、一直留在本地音轨。
-**等待期间零代价** —— 音频照常出，最坏只是这一句没有画面。
+所以后台等就绪再切。**但判据分两层，而且弱的那层只许抢时间、不许判死刑：**
+
+    看到视频轨    → 立刻切（快）
+    只看到人进房  → 等满超时也切（退回老行为，绝不比改之前差）
+    连人都没进来  → 这才收掉这一路
+
+第二层是 2026-09-19 当天加的：我的强判据**自己坏过一次** —— worker 日志
+写着已发布视频轨，bot 这侧 45 s 都读不到，于是把一路好会话收掉了，
+**比它要防的 bug 还糟**。一条自己可能坏的尺子，不能拿来判死刑。
 
 跑法：`python3 test_avatar_ready_gate.py`（不起 LiveKit、不发 HTTP）。
 """
@@ -86,7 +93,7 @@ class FakeSink:
 
 
 def drive(room, *, ready_after: float, timeout: float = 1.0,
-          cancel_after: float | None = None):
+          cancel_after: float | None = None, join_timeout: float | None = None):
     """跑一遍后台等待，返回 (被装上的 sink 列表, 有没有收掉这一路, sink)。"""
     switched, stopped = [], []
     sink = FakeSink()
@@ -96,6 +103,7 @@ def drive(room, *, ready_after: float, timeout: float = 1.0,
                                           terminate_token="", sink=sink)
         L._set_sink = switched.append
         L._READY_TIMEOUT_S = timeout
+        L._JOIN_TIMEOUT_S = join_timeout if join_timeout is not None else 60.0
 
         async def fake_stop(_room):
             stopped.append(True)
@@ -134,12 +142,21 @@ sw, stopped, sink = drive(Room(**{ID: Participant()}), ready_after=0.3, timeout=
 check("⭐ 就绪之后才改道", len(sw) == 1 and sw[0] is sink, f"{sw}")
 check("就绪路径不收会话", not stopped)
 
+# ⭐ 人**在房里**但一直读不到视频轨 → 放行（退回老行为），**不能收掉**。
+#    2026-09-19 实测过一次反例：worker 明明发了轨，bot 这侧就是读不到，
+#    结果我的门把一路好会话收掉了 —— 比它要防的 bug 还糟。
+#    这条尺子自己可能是坏的，所以它只许「抢时间」，不许「判死刑」。
 sw, stopped, sink = drive(Room(**{ID: Participant()}), ready_after=99, timeout=0.6)
-# ⭐ 超时**绝不能**改道 —— 改了就是「没图也没声」，比没有数字人糟得多。
-check("⭐ 一直不就绪 → **一次都不改道**", sw == [], f"{sw}")
-check("⭐ 一直不就绪 → 收掉这一路（还槽位）", stopped)
-check("⭐ 没用上的那条出口要自己关（_stop_avatar 收的不是它）", sink.closed == 1,
-      f"closed={sink.closed}")
+check("⭐ 人在房里但读不到轨 → 超时后仍然改道（不比改之前差）",
+      len(sw) == 1 and sw[0] is sink, f"{sw}")
+check("⭐ 人在房里 → **绝不收掉这一路**", not stopped)
+
+# ⭐ 连人都没进来，那才是真起不来。
+sw2, stopped2, sink2 = drive(Room(), ready_after=99, timeout=0.6, join_timeout=0.6)
+check("⭐ 连房都没进 → 不改道", sw2 == [], f"{sw2}")
+check("⭐ 连房都没进 → 收掉这一路（还槽位）", stopped2)
+check("⭐ 没用上的那条出口要自己关（_stop_avatar 收的不是它）", sink2.closed == 1,
+      f"closed={sink2.closed}")
 
 sw, stopped, sink = drive(Room(**{ID: Participant()}), ready_after=0.8,
                           timeout=3.0, cancel_after=0.2)

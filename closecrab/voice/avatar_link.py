@@ -479,11 +479,10 @@ async def _start_avatar(room) -> bool:  # noqa: ANN001
 
 
 _READY_TIMEOUT_S = 45.0
-"""等数字人就绪的上限。
+"""看不到视频轨也要放行的上限。见 `_spawn_switch_when_ready` 里那段。"""
 
-比实测最慢的 28.8 s 留足余量 —— 宁可多等，也别在它马上就要好的时候放弃。
-等待期间**没有任何代价**：音频照常从本地音轨出，用户听得见。
-"""
+_JOIN_TIMEOUT_S = 25.0
+"""连**进房**都等不到就真的算起不来了。worker 实测进房约 3 s。"""
 
 
 def _avatar_ready(room) -> bool:  # noqa: ANN001
@@ -515,37 +514,87 @@ def _spawn_switch_when_ready(room, sink, session_id: str) -> None:  # noqa: ANN0
 
     async def _wait() -> None:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _READY_TIMEOUT_S
-        while loop.time() < deadline:
+        t0 = loop.time()
+        joined_at: float | None = None
+        while True:
+            waited = loop.time() - t0
             # 等的过程中用户可能已经把开关关了 / 换了房间 —— 那就别切了，
             # 否则会把音频改道给一个刚被拆掉的会话。
             if _avatar is None or _avatar.session_id != session_id:
                 log.info("数字人 %s 等待期间已被取消，不改道", session_id)
                 return
-            if _avatar_ready(room):
-                if _set_sink is not None:
-                    _set_sink(sink)
-                log.info("数字人 %s 就绪（等了 %.1f s），音频改道给 %s",
-                         session_id, _READY_TIMEOUT_S - (deadline - loop.time()),
-                         _AVATAR_IDENTITY)
+
+            present = _AVATAR_IDENTITY in room.remote_participants
+            if present and joined_at is None:
+                joined_at = waited
+            if present and _avatar_ready(room):
+                _switch(sink, session_id, waited, "看到视频轨")
+                return
+
+            # ⚠️ **看不到视频轨不等于它没起来 —— 这条尺子本身可能是坏的。**
+            #
+            #   2026-09-19 实测：worker 日志白纸黑字写着 01:38:58.331
+            #   「音视频轨已发布」，而 bot 这侧 45 s 都没在
+            #   `remote_participants[...].track_publications` 里看见它，
+            #   于是把一路好端端的会话收掉了 —— **我的门比它要防的 bug 还糟**。
+            #   （为什么读不到还没定位，下面会把看到的东西打出来。）
+            #
+            #   所以判据分两层，**强信号用来抢时间，弱信号用来兜底**：
+            #     看到视频轨      → 立刻切（快，通常几秒内）
+            #     只看到人进房    → 等满 `_READY_TIMEOUT_S` 也切（慢，但绝不比
+            #                       改之前差 —— 改之前是一拿到会话 id 就切）
+            #     连人都没进来    → 这才判定起不来，收掉
+            #
+            #   **宁可退回老行为，也不能主动把能用的一路弄没。**
+            if present and waited >= _READY_TIMEOUT_S:
+                _switch(sink, session_id, waited,
+                        f"⚠️ 一直没读到视频轨（人在房里 {waited - (joined_at or 0):.0f} s），"
+                        f"按老行为放行 —— 就绪判据这条链路有问题，待查。"
+                        f"本次看到的发布：{_describe_pubs(room)}")
+                return
+            if not present and waited >= _JOIN_TIMEOUT_S:
+                log.warning("数字人 %s 等了 %.0f s 连房都没进，判定起不来："
+                            "不改道、收掉这一路，本轮只出声",
+                            session_id, _JOIN_TIMEOUT_S)
+                # 这条 sink 从没被 `_set_sink` 装上过，所以 `_stop_avatar` 里
+                # 那句 `_set_sink(None)` 收的**不是它** —— 得自己关。
+                try:
+                    sink.aclose()
+                except Exception:               # noqa: BLE001
+                    log.debug("关没用上的数字人出口失败", exc_info=True)
+                try:
+                    await _stop_avatar(room)
+                except Exception:               # noqa: BLE001
+                    log.warning("收掉没起来的数字人时出错", exc_info=True)
                 return
             await asyncio.sleep(0.4)
-        # ⚠️ 超时**不能**改道 —— 那正是「没图也没声」的成因。
-        #    把这一路收掉（顺带还槽位），音频一直留在本地音轨。
-        log.warning("数字人 %s 等了 %.0f s 还没发视频轨，判定起不来："
-                    "不改道、收掉这一路，本轮只出声", session_id, _READY_TIMEOUT_S)
-        # 这条 sink 从来没被 `_set_sink` 装上过，所以 `_stop_avatar` 里那句
-        # `_set_sink(None)` 收的**不是它** —— 得自己关，否则那条字节流没人收尾。
-        try:
-            sink.aclose()
-        except Exception:                       # noqa: BLE001
-            log.debug("关没用上的数字人出口失败", exc_info=True)
-        try:
-            await _stop_avatar(room)
-        except Exception:                       # noqa: BLE001
-            log.warning("收掉没起来的数字人时出错", exc_info=True)
 
     asyncio.create_task(_wait())
+
+
+def _switch(sink, session_id: str, waited: float, why: str) -> None:  # noqa: ANN001
+    if _set_sink is not None:
+        _set_sink(sink)
+    log.info("数字人 %s 改道给 %s（等了 %.1f s，%s）",
+             session_id, _AVATAR_IDENTITY, waited, why)
+
+
+def _describe_pubs(room) -> str:  # noqa: ANN001
+    """把 bot 这侧**实际看到的**发布情况打出来。
+
+    「读不到视频轨」有好几种可能（没进房 / 进了没发 / 发了但我们这侧的
+    `track_publications` 是空的 / `kind` 对不上）。**不打出来就只能猜**，
+    而我已经因为猜错一次把生产弄坏了。
+    """
+    try:
+        p = room.remote_participants.get(_AVATAR_IDENTITY)
+        if p is None:
+            return f"房里没有 {_AVATAR_IDENTITY}；有的是 {list(room.remote_participants)}"
+        pubs = [f"{getattr(pub, 'kind', '?')}/{getattr(pub, 'source', '?')}"
+                for pub in p.track_publications.values()]
+        return f"{_AVATAR_IDENTITY} 的发布 = {pubs or '空'}"
+    except Exception as e:                      # noqa: BLE001
+        return f"读不出来：{type(e).__name__}: {e}"
 
 
 async def _stop_avatar(room) -> None:  # noqa: ANN001
