@@ -482,6 +482,9 @@ _READY_TIMEOUT_S = 45.0
 """看不到视频轨也要放行的上限。见 `_spawn_switch_when_ready` 里那段。"""
 
 _JOIN_TIMEOUT_S = 25.0
+
+_ready_warned = False
+"""就绪判据抛过异常没有 —— 只警告一次，否则每 0.4 s 刷一条。"""
 """连**进房**都等不到就真的算起不来了。worker 实测进房约 3 s。"""
 
 
@@ -505,6 +508,15 @@ def _avatar_ready(room) -> bool:  # noqa: ANN001
         return any(pub.kind == rtc.TrackKind.KIND_VIDEO
                    for pub in p.track_publications.values())
     except Exception:                           # noqa: BLE001
+        # ⚠️ **不能静默吞。** 这里 return False 会让上层一直等下去，
+        #    而「一直等」和「读到了但没轨」长得一模一样 —— 上一版就是因为
+        #    分不清这两者，我按错的那个猜，把生产改坏了。
+        #    只记一次：这条真坏了的话每 0.4 s 一次会把日志刷爆。
+        global _ready_warned
+        if not _ready_warned:
+            _ready_warned = True
+            log.warning("读数字人的发布列表时抛异常 —— 就绪判据这条尺子坏了，"
+                        "会一路退化到超时兜底", exc_info=True)
         return False
 
 
@@ -527,6 +539,15 @@ def _spawn_switch_when_ready(room, sink, session_id: str) -> None:  # noqa: ANN0
             present = _AVATAR_IDENTITY in room.remote_participants
             if present and joined_at is None:
                 joined_at = waited
+                log.info("数字人 %s 进房了（%.1f s）—— %s",
+                         session_id, waited, _describe_pubs(room))
+            # ⚠️ **中途也要把看到的东西打出来，不能只在超时那一刻打。**
+            #    上一版就是只在超时打，于是「45 s 都读不到视频轨」这句话里
+            #    **分不清是「人没进来」还是「人进来了但轨读不到」** ——
+            #    两者的修法完全不同，而我当时按后者猜，猜错了还改坏了生产。
+            if int(waited * 10) % 50 == 0 and waited >= 5:      # 每 5 s 一条
+                log.info("数字人 %s 等了 %.0f s：present=%s，%s",
+                         session_id, waited, present, _describe_pubs(room))
             if present and _avatar_ready(room):
                 _switch(sink, session_id, waited, "看到视频轨")
                 return
