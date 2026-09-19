@@ -487,138 +487,68 @@ worker 的 `runner.start()` 第一件事就是挂音频接收回调，实测整�
 """
 
 _JOIN_TIMEOUT_S = 25.0
-
-_ready_warned = False
-"""就绪判据抛过异常没有 —— 只警告一次，否则每 0.4 s 刷一条。"""
 """连**进房**都等不到就真的算起不来了。worker 实测进房约 3 s。"""
 
 
-def _avatar_ready(room) -> bool:  # noqa: ANN001
-    """⛔ **不要拿「有没有视频轨」当就绪判据 —— 那是个死锁。**
-
-    2026-09-19 我这么写过，现象是「开了 Avatar 只有声音没有图」，
-    而且要卡满 45 s 兜底才动。真因在 `AvatarRunner.__init__` 的默认值：
-
-        _lazy_publish: bool = True
-        # publish video and audio tracks until the first frame pushed
-
-    **轨是等第一帧推进来才发布的。** 于是：
-
-        发视频轨  ← 要有第一帧  ← 要有音频  ← 要我改道  ← 我在等视频轨
-        └────────────────────── 转圈了 ──────────────────────┘
-
-    服务端 API 实测坐实：等待的整整 45 s 里 `cc-avatar-principal` 的
-    `tracks=0`；worker 日志那句「音视频轨已发布」只花了 **1 毫秒** ——
-    那正是 `_lazy_publish` 把发布跳过去了，不是它真发了。
-
-    这个函数留着只是给排障看（**真发了轨没有**），
-    `_spawn_switch_when_ready` 已经不拿它当放行条件。
-    """
-    p = room.remote_participants.get(_AVATAR_IDENTITY)
-    if p is None:
-        return False
-    try:
-        from livekit import rtc
-        return any(pub.kind == rtc.TrackKind.KIND_VIDEO
-                   for pub in p.track_publications.values())
-    except Exception:                           # noqa: BLE001
-        # ⚠️ **不能静默吞。** 这里 return False 会让上层一直等下去，
-        #    而「一直等」和「读到了但没轨」长得一模一样 —— 上一版就是因为
-        #    分不清这两者，我按错的那个猜，把生产改坏了。
-        #    只记一次：这条真坏了的话每 0.4 s 一次会把日志刷爆。
-        global _ready_warned
-        if not _ready_warned:
-            _ready_warned = True
-            log.warning("读数字人的发布列表时抛异常 —— 就绪判据这条尺子坏了，"
-                        "会一路退化到超时兜底", exc_info=True)
-        return False
-
-
 def _spawn_switch_when_ready(room, sink, session_id: str) -> None:  # noqa: ANN001
-    """后台等就绪 → 改道。超时就把这一路收掉，退化成只出声。"""
+    """后台等数字人进房，进房了才把音频改道给它。
+
+    ## 为什么不能拿到会话 id 就改道
+
+    控制面返回的只是「派了一路」，此时 worker 还没进房。那段窗口里说的每个字
+    都写进一条**对端不存在**的字节流 —— 不报错、不重试，直接没了。
+    Chris 2026-09-19 看到的「开了 Avatar 什么都没有」就是它。
+
+    ## ⛔ 判据是「进房了」，不是「发了视频轨」—— 后者是死锁
+
+    `AvatarRunner.__init__` 的默认值 `_lazy_publish=True`
+    （官方注释：publish tracks **until the first frame pushed**）：
+
+        发视频轨 ← 要第一帧 ← 要音频 ← 要这次改道 ← 在等视频轨
+        └──────────────────── 转圈 ────────────────────┘
+
+    这条弯路走了三版才走对，每版都上过线。**别再拿轨当判据。**
+
+    进房后再稳 `_SETTLE_S`：worker 的 `runner.start()` 第一件事就是挂音频
+    接收回调，整个 start() 实测 1 ms，而进房通知传到我们这儿要上百毫秒 ——
+    进房基本就等于能收。半秒是买保险。
+    """
     import asyncio
 
     async def _wait() -> None:
         loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        joined_at: float | None = None
-        while True:
-            waited = loop.time() - t0
-            # 等的过程中用户可能已经把开关关了 / 换了房间 —— 那就别切了，
-            # 否则会把音频改道给一个刚被拆掉的会话。
+        deadline = loop.time() + _JOIN_TIMEOUT_S
+        while loop.time() < deadline:
+            # 等的过程中用户可能已经把开关关了 —— 再切就是把音频送给一个
+            # 已经拆掉的会话。
             if _avatar is None or _avatar.session_id != session_id:
                 log.info("数字人 %s 等待期间已被取消，不改道", session_id)
                 return
-
-            present = _AVATAR_IDENTITY in room.remote_participants
-            if present and joined_at is None:
-                joined_at = waited
-                log.info("数字人 %s 进房了（%.1f s）—— %s",
-                         session_id, waited, _describe_pubs(room))
-
-            # ⭐ **判据是「人进房了」，不是「发了视频轨」。**
-            #
-            #   轨是 `_lazy_publish=True` 等第一帧才发的，而第一帧要有音频、
-            #   音频要等我改道 —— 拿轨当判据就是自己等自己（详见
-            #   `_avatar_ready` 的文档）。这条弯路走了两版，别再走第三遍。
-            #
-            #   进房之后再稳一下 `_SETTLE_S` 才切：worker 那边
-            #   `runner.start()` 里第一件事就是挂 `lk.audio_stream` 的回调，
-            #   实测整个 start() 只要 1 ms，而「进房」的通知传到我们这儿要
-            #   上百毫秒 —— 所以进房基本就等于能收了。留半秒是买个保险，
-            #   代价只有半秒，而赌输的代价是第一句话静默丢掉。
-            if present and waited - (joined_at or 0) >= _SETTLE_S:
-                _switch(sink, session_id, waited,
-                        f"进房 {waited - (joined_at or 0):.1f} s 后；"
-                        f"{_describe_pubs(room)}")
+            if _AVATAR_IDENTITY in room.remote_participants:
+                await asyncio.sleep(_SETTLE_S)
+                if _avatar is None or _avatar.session_id != session_id:
+                    return
+                if _set_sink is not None:
+                    _set_sink(sink)
+                log.info("数字人 %s 已进房，音频改道给 %s",
+                         session_id, _AVATAR_IDENTITY)
                 return
+            await asyncio.sleep(0.2)
 
-            if int(waited * 10) % 50 == 0 and waited >= 5:      # 每 5 s 一条
-                log.info("数字人 %s 等了 %.0f s：present=%s，%s",
-                         session_id, waited, present, _describe_pubs(room))
-            if not present and waited >= _JOIN_TIMEOUT_S:
-                log.warning("数字人 %s 等了 %.0f s 连房都没进，判定起不来："
-                            "不改道、收掉这一路，本轮只出声",
-                            session_id, _JOIN_TIMEOUT_S)
-                # 这条 sink 从没被 `_set_sink` 装上过，所以 `_stop_avatar` 里
-                # 那句 `_set_sink(None)` 收的**不是它** —— 得自己关。
-                try:
-                    sink.aclose()
-                except Exception:               # noqa: BLE001
-                    log.debug("关没用上的数字人出口失败", exc_info=True)
-                try:
-                    await _stop_avatar(room)
-                except Exception:               # noqa: BLE001
-                    log.warning("收掉没起来的数字人时出错", exc_info=True)
-                return
-            await asyncio.sleep(0.4)
+        log.warning("数字人 %s 等了 %.0f s 连房都没进，收掉这一路，本轮只出声",
+                    session_id, _JOIN_TIMEOUT_S)
+        # 这条 sink 从没被 `_set_sink` 装上过，`_stop_avatar` 里那句
+        # `_set_sink(None)` 收的**不是它** —— 得自己关。
+        try:
+            sink.aclose()
+        except Exception:                       # noqa: BLE001
+            log.debug("关没用上的数字人出口失败", exc_info=True)
+        try:
+            await _stop_avatar(room)
+        except Exception:                       # noqa: BLE001
+            log.warning("收掉没起来的数字人时出错", exc_info=True)
 
     asyncio.create_task(_wait())
-
-
-def _switch(sink, session_id: str, waited: float, why: str) -> None:  # noqa: ANN001
-    if _set_sink is not None:
-        _set_sink(sink)
-    log.info("数字人 %s 改道给 %s（等了 %.1f s，%s）",
-             session_id, _AVATAR_IDENTITY, waited, why)
-
-
-def _describe_pubs(room) -> str:  # noqa: ANN001
-    """把 bot 这侧**实际看到的**发布情况打出来。
-
-    「读不到视频轨」有好几种可能（没进房 / 进了没发 / 发了但我们这侧的
-    `track_publications` 是空的 / `kind` 对不上）。**不打出来就只能猜**，
-    而我已经因为猜错一次把生产弄坏了。
-    """
-    try:
-        p = room.remote_participants.get(_AVATAR_IDENTITY)
-        if p is None:
-            return f"房里没有 {_AVATAR_IDENTITY}；有的是 {list(room.remote_participants)}"
-        pubs = [f"{getattr(pub, 'kind', '?')}/{getattr(pub, 'source', '?')}"
-                for pub in p.track_publications.values()]
-        return f"{_AVATAR_IDENTITY} 的发布 = {pubs or '空'}"
-    except Exception as e:                      # noqa: BLE001
-        return f"读不出来：{type(e).__name__}: {e}"
 
 
 async def _stop_avatar(room) -> None:  # noqa: ANN001

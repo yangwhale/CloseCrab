@@ -41,7 +41,7 @@ import sys
 import types
 
 from closecrab.voice import avatar_link as L
-from livekit import rtc
+from livekit import rtc  # noqa: F401
 
 ok = fail = 0
 
@@ -72,22 +72,8 @@ class Room:
         self.remote_participants = people
 
 
-VIDEO = Pub(rtc.TrackKind.KIND_VIDEO)
 AUDIO = Pub(rtc.TrackKind.KIND_AUDIO)
 ID = L._AVATAR_IDENTITY
-
-
-print("\n── 就绪判据：看视频轨，不是看进没进房 ──")
-check("房间里没有它 → 没就绪", not L._avatar_ready(Room()))
-# ⭐ 这一条是整份测试的核心。只看「进房了」的话，判定会在 runner.start()
-#    还没开始时就返回 True —— 那正是要修的 bug。
-check("⭐ 进房了但一条轨都没发 → **没就绪**",
-      not L._avatar_ready(Room(**{ID: Participant()})))
-check("⭐ 只发了音频轨 → 还没就绪（发轨顺序是音频在前）",
-      not L._avatar_ready(Room(**{ID: Participant(AUDIO)})))
-check("发了视频轨 → 就绪", L._avatar_ready(Room(**{ID: Participant(AUDIO, VIDEO)})))
-check("只看我们那个 identity，别人发轨不算",
-      not L._avatar_ready(Room(**{"someone-else": Participant(VIDEO)})))
 
 
 print("\n── 切换时机 ──")
@@ -126,7 +112,7 @@ def drive(room, *, ready_after: float, timeout: float = 1.0,
 
             async def become_ready():
                 await asyncio.sleep(ready_after)
-                room.remote_participants[ID] = Participant(AUDIO, VIDEO)
+                room.remote_participants[ID] = Participant(AUDIO)
 
             async def cancel():
                 await asyncio.sleep(cancel_after)
