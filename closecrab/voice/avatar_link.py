@@ -478,8 +478,13 @@ async def _start_avatar(room) -> bool:  # noqa: ANN001
     return True
 
 
-_READY_TIMEOUT_S = 45.0
-"""看不到视频轨也要放行的上限。见 `_spawn_switch_when_ready` 里那段。"""
+_SETTLE_S = 0.5
+"""进房之后再稳多久才改道。
+
+worker 的 `runner.start()` 第一件事就是挂音频接收回调，实测整个 start()
+只要 1 ms，而「进房」的通知传到我们这儿要上百毫秒 —— 所以进房基本就等于
+能收了。这半秒是买保险：代价半秒，赌输的代价是第一句话静默丢掉。
+"""
 
 _JOIN_TIMEOUT_S = 25.0
 
@@ -489,16 +494,25 @@ _ready_warned = False
 
 
 def _avatar_ready(room) -> bool:  # noqa: ANN001
-    """数字人**能收音频了**没有。
+    """⛔ **不要拿「有没有视频轨」当就绪判据 —— 那是个死锁。**
 
-    判据是「它发布了视频轨」而不是「它进房了」。理由在
-    `AvatarRunner.start()` 的顺序里：
+    2026-09-19 我这么写过，现象是「开了 Avatar 只有声音没有图」，
+    而且要卡满 45 s 兜底才动。真因在 `AvatarRunner.__init__` 的默认值：
 
-        1. `audio_recv.start()`   挂上 `lk.audio_stream` 的回调
-        2. `_publish_track()`     发布音视频轨
+        _lazy_publish: bool = True
+        # publish video and audio tracks until the first frame pushed
 
-    所以**看见视频轨就等于第 1 步已经做完**。反过来只看「进房了」不行 ——
-    那两步都还没开始，中间是好几十秒。
+    **轨是等第一帧推进来才发布的。** 于是：
+
+        发视频轨  ← 要有第一帧  ← 要有音频  ← 要我改道  ← 我在等视频轨
+        └────────────────────── 转圈了 ──────────────────────┘
+
+    服务端 API 实测坐实：等待的整整 45 s 里 `cc-avatar-principal` 的
+    `tracks=0`；worker 日志那句「音视频轨已发布」只花了 **1 毫秒** ——
+    那正是 `_lazy_publish` 把发布跳过去了，不是它真发了。
+
+    这个函数留着只是给排障看（**真发了轨没有**），
+    `_spawn_switch_when_ready` 已经不拿它当放行条件。
     """
     p = room.remote_participants.get(_AVATAR_IDENTITY)
     if p is None:
@@ -541,38 +555,27 @@ def _spawn_switch_when_ready(room, sink, session_id: str) -> None:  # noqa: ANN0
                 joined_at = waited
                 log.info("数字人 %s 进房了（%.1f s）—— %s",
                          session_id, waited, _describe_pubs(room))
-            # ⚠️ **中途也要把看到的东西打出来，不能只在超时那一刻打。**
-            #    上一版就是只在超时打，于是「45 s 都读不到视频轨」这句话里
-            #    **分不清是「人没进来」还是「人进来了但轨读不到」** ——
-            #    两者的修法完全不同，而我当时按后者猜，猜错了还改坏了生产。
+
+            # ⭐ **判据是「人进房了」，不是「发了视频轨」。**
+            #
+            #   轨是 `_lazy_publish=True` 等第一帧才发的，而第一帧要有音频、
+            #   音频要等我改道 —— 拿轨当判据就是自己等自己（详见
+            #   `_avatar_ready` 的文档）。这条弯路走了两版，别再走第三遍。
+            #
+            #   进房之后再稳一下 `_SETTLE_S` 才切：worker 那边
+            #   `runner.start()` 里第一件事就是挂 `lk.audio_stream` 的回调，
+            #   实测整个 start() 只要 1 ms，而「进房」的通知传到我们这儿要
+            #   上百毫秒 —— 所以进房基本就等于能收了。留半秒是买个保险，
+            #   代价只有半秒，而赌输的代价是第一句话静默丢掉。
+            if present and waited - (joined_at or 0) >= _SETTLE_S:
+                _switch(sink, session_id, waited,
+                        f"进房 {waited - (joined_at or 0):.1f} s 后；"
+                        f"{_describe_pubs(room)}")
+                return
+
             if int(waited * 10) % 50 == 0 and waited >= 5:      # 每 5 s 一条
                 log.info("数字人 %s 等了 %.0f s：present=%s，%s",
                          session_id, waited, present, _describe_pubs(room))
-            if present and _avatar_ready(room):
-                _switch(sink, session_id, waited, "看到视频轨")
-                return
-
-            # ⚠️ **看不到视频轨不等于它没起来 —— 这条尺子本身可能是坏的。**
-            #
-            #   2026-09-19 实测：worker 日志白纸黑字写着 01:38:58.331
-            #   「音视频轨已发布」，而 bot 这侧 45 s 都没在
-            #   `remote_participants[...].track_publications` 里看见它，
-            #   于是把一路好端端的会话收掉了 —— **我的门比它要防的 bug 还糟**。
-            #   （为什么读不到还没定位，下面会把看到的东西打出来。）
-            #
-            #   所以判据分两层，**强信号用来抢时间，弱信号用来兜底**：
-            #     看到视频轨      → 立刻切（快，通常几秒内）
-            #     只看到人进房    → 等满 `_READY_TIMEOUT_S` 也切（慢，但绝不比
-            #                       改之前差 —— 改之前是一拿到会话 id 就切）
-            #     连人都没进来    → 这才判定起不来，收掉
-            #
-            #   **宁可退回老行为，也不能主动把能用的一路弄没。**
-            if present and waited >= _READY_TIMEOUT_S:
-                _switch(sink, session_id, waited,
-                        f"⚠️ 一直没读到视频轨（人在房里 {waited - (joined_at or 0):.0f} s），"
-                        f"按老行为放行 —— 就绪判据这条链路有问题，待查。"
-                        f"本次看到的发布：{_describe_pubs(room)}")
-                return
             if not present and waited >= _JOIN_TIMEOUT_S:
                 log.warning("数字人 %s 等了 %.0f s 连房都没进，判定起不来："
                             "不改道、收掉这一路，本轮只出声",
