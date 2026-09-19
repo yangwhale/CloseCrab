@@ -188,6 +188,16 @@ def main(argv):
     BASE = os.path.abspath(_opt(argv, "--baseline",
                                 os.path.join(MEDIA, "loop-baseline.json")))
     files = argv or sorted(glob.glob(os.path.join(MEDIA, "*.mp4")))
+    # ⛔⛔ 2026-09-19：**空集合绝不能当成通过。**
+    #   把通用版直接覆盖到项目里之后，默认目录从 `WebPages/media` 变成了 `cwd`，
+    #   而 build 是在 `tools/` 下调它的 —— 扫不到任何 mp4，`fail` 保持 0，
+    #   于是**守卫连着好几轮报绿，其实一支片子都没查**。
+    #   ⭐ 判据：**「没找到要检查的东西」是配置错，不是检查通过。**
+    if not files:
+        print("   ⛔ 在 %s 下一个 mp4 都没找到 —— 这是路径配错了，不是通过。"
+              % MEDIA)
+        print("      用 --media 指到放 mp4 的目录。")
+        return 1
     base = json.load(open(BASE, encoding="utf-8")) if os.path.exists(BASE) else {}
 
     print("\n\033[1m▸ 动画首尾一致性\033[0m   基线回归：只问「有没有比记录的更糟」")

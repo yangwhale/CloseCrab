@@ -457,12 +457,95 @@ async def _start_avatar(room) -> bool:  # noqa: ANN001
                               wait_playback_start=True),
         label=_AVATAR_IDENTITY,
     )
-    _set_sink(sink)
     _avatar = _AvatarSession(data["provider_session_id"],
                              data.get("terminate_token", ""), sink)
-    log.info("数字人已挂上：会话 %s，音频改道给 %s",
-             _avatar.session_id, _AVATAR_IDENTITY)
+
+    # ⭐⭐ **改道必须等数字人真的起来，不能拿到会话 id 就改。**
+    #
+    #   控制面返回的只是「派了一路」，此时 worker 还没进房、更没挂上音频接收。
+    #   实测那段窗口有多长：进房约 3 s，`AvatarRunner.start()` 最慢量到 28.8 s。
+    #   在那之前改道，说的每个字都写进一条**对端不存在**的字节流 ——
+    #   不报错、不重试、直接没了。
+    #
+    #   Chris 2026-09-19：「开了 Avatar 以后没有任何的图像和音频。」
+    #   **两样同时没有**正是这一个原因，不是两个毛病：没图是 worker 还没发轨，
+    #   没声是音频已经被改道给了那个还没起来的它。
+    #
+    #   所以在后台等「真的能收了」再切。等待期间 sink 还是本地音轨，
+    #   **一个字都不会掉**，最坏情况只是这一句没有数字人画面。
+    _spawn_switch_when_ready(room, sink, _avatar.session_id)
+    log.info("数字人已派出：会话 %s，等它就绪后再改道", _avatar.session_id)
     return True
+
+
+_READY_TIMEOUT_S = 45.0
+"""等数字人就绪的上限。
+
+比实测最慢的 28.8 s 留足余量 —— 宁可多等，也别在它马上就要好的时候放弃。
+等待期间**没有任何代价**：音频照常从本地音轨出，用户听得见。
+"""
+
+
+def _avatar_ready(room) -> bool:  # noqa: ANN001
+    """数字人**能收音频了**没有。
+
+    判据是「它发布了视频轨」而不是「它进房了」。理由在
+    `AvatarRunner.start()` 的顺序里：
+
+        1. `audio_recv.start()`   挂上 `lk.audio_stream` 的回调
+        2. `_publish_track()`     发布音视频轨
+
+    所以**看见视频轨就等于第 1 步已经做完**。反过来只看「进房了」不行 ——
+    那两步都还没开始，中间是好几十秒。
+    """
+    p = room.remote_participants.get(_AVATAR_IDENTITY)
+    if p is None:
+        return False
+    try:
+        from livekit import rtc
+        return any(pub.kind == rtc.TrackKind.KIND_VIDEO
+                   for pub in p.track_publications.values())
+    except Exception:                           # noqa: BLE001
+        return False
+
+
+def _spawn_switch_when_ready(room, sink, session_id: str) -> None:  # noqa: ANN001
+    """后台等就绪 → 改道。超时就把这一路收掉，退化成只出声。"""
+    import asyncio
+
+    async def _wait() -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _READY_TIMEOUT_S
+        while loop.time() < deadline:
+            # 等的过程中用户可能已经把开关关了 / 换了房间 —— 那就别切了，
+            # 否则会把音频改道给一个刚被拆掉的会话。
+            if _avatar is None or _avatar.session_id != session_id:
+                log.info("数字人 %s 等待期间已被取消，不改道", session_id)
+                return
+            if _avatar_ready(room):
+                if _set_sink is not None:
+                    _set_sink(sink)
+                log.info("数字人 %s 就绪（等了 %.1f s），音频改道给 %s",
+                         session_id, _READY_TIMEOUT_S - (deadline - loop.time()),
+                         _AVATAR_IDENTITY)
+                return
+            await asyncio.sleep(0.4)
+        # ⚠️ 超时**不能**改道 —— 那正是「没图也没声」的成因。
+        #    把这一路收掉（顺带还槽位），音频一直留在本地音轨。
+        log.warning("数字人 %s 等了 %.0f s 还没发视频轨，判定起不来："
+                    "不改道、收掉这一路，本轮只出声", session_id, _READY_TIMEOUT_S)
+        # 这条 sink 从来没被 `_set_sink` 装上过，所以 `_stop_avatar` 里那句
+        # `_set_sink(None)` 收的**不是它** —— 得自己关，否则那条字节流没人收尾。
+        try:
+            sink.aclose()
+        except Exception:                       # noqa: BLE001
+            log.debug("关没用上的数字人出口失败", exc_info=True)
+        try:
+            await _stop_avatar(room)
+        except Exception:                       # noqa: BLE001
+            log.warning("收掉没起来的数字人时出错", exc_info=True)
+
+    asyncio.create_task(_wait())
 
 
 async def _stop_avatar(room) -> None:  # noqa: ANN001
