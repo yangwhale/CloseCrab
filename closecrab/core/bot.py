@@ -271,6 +271,24 @@ class BotCore:
         # 收集中间步骤用于 Firestore 日志
         steps: list[str] = []
 
+        # 这一轮 bot 在忙什么 —— 发给 iOS 那块大屏。
+        # **纯逻辑对象，不碰 IO**，发送在下面 `_publish_bot_state` 里，
+        # 而且发不出去不影响这一轮（那一路是旁路）。
+        from closecrab.core.agent_state import AgentState
+        agent_state = AgentState()
+        agent_state.begin_turn()
+
+        def _publish_bot_state() -> None:
+            try:
+                from closecrab.voice import livekit_out
+                livekit_out.publish_state(agent_state.snapshot())
+            except Exception:
+                # ⚠️ 状态显示坏了**绝不能**影响回答。这里吞掉是故意的，
+                #    但要留一行 debug —— 悄悄不发和「发了没人收」得分得开。
+                log.debug("发 bot 状态失败", exc_info=True)
+
+        _publish_bot_state()
+
         # 实时日志：对话开始时创建 log doc，每个 step 实时追加
         # fire-and-forget: 不阻塞 worker.send()，后台写 Firestore
         log_ref = None
@@ -375,6 +393,14 @@ class BotCore:
             return new_steps
 
         async def _on_step(d: dict):
+            # ⭐ 先喂状态机再做别的。它是纯逻辑、不会抛，放最前面是为了
+            #    **哪怕后面的格式化出问题，状态也已经更新过了**。
+            try:
+                if agent_state.on_event(d):
+                    _publish_bot_state()
+            except Exception:
+                log.debug("状态机吃事件出错", exc_info=True)
+
             # voice hook: 在 d 还是 raw 的时候, 同时处理两个 voice 信号:
             #   (1) 第一个 tool_use 之前的第一段 text → opening 立即推 TTS
             #   (2) 每个 tool_use → tool hint 立即推 TTS
@@ -422,6 +448,19 @@ class BotCore:
                 return
             for s in new_steps:
                 steps.append(s[:500])
+
+            # 流水也发一份给大屏。**走不可靠档** —— 这类东西过期就没用，
+            # 丢了也无所谓，而且频率高，走属性等于拿信令刷屏。
+            # 带上是不是子 agent 干的，客户端才分得开泳道。
+            try:
+                from closecrab.voice import livekit_out
+                livekit_out.publish_step({
+                    "v": 1,
+                    "sub": (d.get("parent_tool_use_id") or "")[:12],
+                    "lines": [x[:180] for x in new_steps],
+                })
+            except Exception:
+                log.debug("发流水失败", exc_info=True)
 
             # TUI 进度推送到 channel（直接复用 steps，和 Firestore 日志一致）
             if on_tui_step:
@@ -487,6 +526,17 @@ class BotCore:
         except Exception:
             raise
         finally:
+            # ⚠️ **无论怎么结束，都要把「跑完了」发出去。**
+            #    正常路径上 `result` 事件会让状态机自己收尾，但被打断、
+            #    抛异常、或者哪个 worker 压根不发 result 的时候就到不了 ——
+            #    那时候屏幕会永远停在「还在跑」，而那比不显示更糟。
+            try:
+                if agent_state.turn_active:
+                    agent_state.end_turn()
+                _publish_bot_state()
+            except Exception:
+                log.debug("收尾发 bot 状态失败", exc_info=True)
+
             # 无论成功/异常/中断，都 finalize log doc
             if log_ref:
                 try:

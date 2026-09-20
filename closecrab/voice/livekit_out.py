@@ -41,6 +41,7 @@ import audioop
 import json as _json
 import logging
 import threading
+import time
 
 from . import avatar_link
 
@@ -235,6 +236,99 @@ def write_threadsafe(stereo_pcm48: bytes) -> None:
         _loop.call_soon_threadsafe(_enqueue, mono)
     except RuntimeError:
         pass  # loop 正在关，丢掉就行
+
+
+# ── Bot 状态：发给 iOS 那块大屏 ──────────────────────────────────────
+#
+# 两条出口，**故意不同**，因为这两类东西的性质不一样：
+#
+#   publish_state  当下的状态（在跑吗、几个子 agent、在等你吗）
+#                  → 参与者属性。**有持久性**：客户端中途进来立刻看到现况。
+#                    代价是每改一次走一趟信令，所以要去重、要限频。
+#   publish_step   滚动的流水（刚读了哪个文件）
+#                  → 数据包，**不可靠档**。过期就没用，丢了也无所谓，
+#                    而且频率高，走属性会拿信令刷屏。
+#
+# 判据是「客户端晚来一秒还需要它吗」：需要 → 属性；不需要 → 数据包。
+
+_STATE_ATTR = "cc.bot.state"
+_STEP_TOPIC = "cc.bot.step"
+
+_last_state_json: str | None = None
+_last_state_at: float = 0.0
+#: 属性最快多久发一次。**不是画面流畅度旋钮，是信令预算** ——
+#: 属性走的是信令通道，跟音视频抢的不是同一条路，但房间里每个人都要收。
+_STATE_MIN_INTERVAL = 0.5
+
+
+def publish_state(payload: dict) -> None:
+    """发一份「此刻的状态」。**没连上就静默丢弃**，这一路是旁路。
+
+    同样的内容不重发（属性是覆盖语义，重发只是白花一趟信令）。
+    """
+    global _last_state_json, _last_state_at
+    if not _connected or _loop is None or _loop.is_closed():
+        return
+    try:
+        text = _json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        log.exception("状态序列化失败，丢弃")
+        return
+    now = time.monotonic()
+    if text == _last_state_json:
+        return
+    # ⚠️ 限频这里**只拦「没结束」的中间态**。turn 结束那一下必须立刻发出去，
+    #    否则屏幕会停在「还在跑」上直到下一次状态变化 —— 而那可能是几分钟后。
+    if payload.get("on") and now - _last_state_at < _STATE_MIN_INTERVAL:
+        return
+    _last_state_json, _last_state_at = text, now
+    try:
+        _loop.call_soon_threadsafe(_spawn_publish_state, text)
+    except RuntimeError:
+        pass
+
+
+def publish_step(payload: dict) -> None:
+    """发一条流水。丢了就丢了 —— 走不可靠档，别为它重传。"""
+    if not _connected or _loop is None or _loop.is_closed():
+        return
+    try:
+        text = _json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return
+    try:
+        _loop.call_soon_threadsafe(_spawn_publish_step, text)
+    except RuntimeError:
+        pass
+
+
+def _spawn_publish_state(text: str) -> None:
+    if _room is None or _loop is None:
+        return
+    _loop.create_task(_do_publish_state(text))
+
+
+def _spawn_publish_step(text: str) -> None:
+    if _room is None or _loop is None:
+        return
+    _loop.create_task(_do_publish_step(text))
+
+
+async def _do_publish_state(text: str) -> None:
+    try:
+        await _room.local_participant.set_attributes({_STATE_ATTR: text})
+    except Exception as e:      # noqa: BLE001
+        # 发不出去不该把语音那一路带走，记一笔就算。
+        log.warning("发状态失败: %s", e)
+
+
+async def _do_publish_step(text: str) -> None:
+    from livekit import rtc
+    try:
+        await _room.local_participant.publish_data(
+            text.encode("utf-8"), reliable=False, topic=_STEP_TOPIC)
+    except Exception as e:      # noqa: BLE001
+        log.debug("发流水失败（不可靠档，忽略）: %s", e)
 
 
 def _enqueue(mono: bytes) -> None:
