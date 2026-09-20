@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import shutil
 import signal
@@ -124,8 +125,17 @@ def _resolve_config(bot_name: str) -> dict:
     }
 
 
+#: 单个 bot.log 的上限与保留份数。64 MiB × (1 ＋ 3) ＝ 每个 bot 最多 256 MiB。
+#: ⛔ 2026-09-20 加的。在这之前这里是裸的 FileHandler，**全 fleet 一个轮转都没有**：
+#:   jarvis 557 MiB、bunny 230、xiaoaitongxue 137、tianmaojingling 88 —— 快 1 GiB。
+#:   ⭐ 判据：**任何只增不减的文件都要有上限。** 「平时也没多大」不是上限，
+#:     它只是说明还没遇上会刷屏的那条日志（这次就是 sidecar 那条每 3 秒一行的诊断）。
+_LOG_MAX_BYTES = 64 * 1024 * 1024
+_LOG_BACKUPS = 3
+
+
 def _setup_logging(log_file: Path, bot_name: str):
-    """配置日志，每个 bot 独立 log 文件。"""
+    """配置日志，每个 bot 独立 log 文件，带大小轮转。"""
     log_file = Path(log_file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -139,7 +149,10 @@ def _setup_logging(log_file: Path, bot_name: str):
         format=fmt,
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(log_file, encoding="utf-8"),
+            RotatingFileHandler(
+                log_file, maxBytes=_LOG_MAX_BYTES,
+                backupCount=_LOG_BACKUPS, encoding="utf-8",
+            ),
         ],
     )
 
