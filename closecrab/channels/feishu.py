@@ -3086,6 +3086,33 @@ class FeishuChannel(Channel):
             except Exception as e:
                 log.error(f"Watchdog ticker iteration failed: {e}", exc_info=True)
 
+    def _heartbeat_ages(self, workers: list[str]) -> dict[str, float | None]:
+        """每个 worker 的心跳距今多少秒。查不到给 `None`。
+
+        **阻塞调用**（Firestore 同步客户端），调用方负责丢进 executor。
+        """
+        from closecrab.constants import FIRESTORE_DATABASE, FIRESTORE_PROJECT
+        from google.cloud import firestore
+
+        db = firestore.Client(project=FIRESTORE_PROJECT, database=FIRESTORE_DATABASE)
+        now = datetime.now(timezone.utc).timestamp()
+        out: dict[str, float | None] = {}
+        for w in workers:
+            try:
+                d = db.collection("registry").document(w).get()
+                ls = (d.to_dict() or {}).get("last_seen") if d.exists else None
+                if ls is None:
+                    out[w] = None
+                elif hasattr(ls, "timestamp"):
+                    out[w] = now - ls.timestamp()
+                else:
+                    out[w] = now - float(ls)
+            except Exception:       # noqa: BLE001
+                # 单个查不到不该让整条报警失败 —— 它落进 unknown 那一档，
+                # 文案里会如实写「查不到」。
+                out[w] = None
+        return out
+
     async def _fire_global_watchdog(
         self, chat_id: str, tasks: list[_TaskState], silent_for: float,
     ) -> None:
@@ -3093,11 +3120,31 @@ class FeishuChannel(Channel):
         now = datetime.now(timezone.utc)
         silent_min = silent_for / 60
         worker_set = sorted({t.worker_bot for t in tasks})
+
+        # ⭐ **先分清是「挂了」还是「活干完没闭环」，再决定怎么说。**
+        #
+        #    这两种情况同时满足 fire 条件（有 active task ＋ 全 fleet 静默），
+        #    原来的文案都说「大概率有 worker 挂了」。tommy 2026-09-20 连着
+        #    两次被叫起来，两次都得手动跑 registry ＋ 翻日志排除，两次都是
+        #    后者。**假警报的代价不是浪费一次诊断，是把真警报变得不可信。**
+        #
+        #    判据就是它每次手动查的那个：registry 的心跳。挪到报警之前。
+        from closecrab.core.fleet_health import advice, classify_silence, headline
+        try:
+            ago = await asyncio.get_running_loop().run_in_executor(
+                None, self._heartbeat_ages, worker_set)
+        except Exception as e:      # noqa: BLE001
+            # 查不到心跳**不能不报** —— 宁可退回旧文案，也不能把一次可能是
+            # 真故障的静默吞掉。
+            log.warning(f"Watchdog 查心跳失败，退回不分类的文案: {e}")
+            ago = {w: None for w in worker_set}
+        verdict = classify_silence(ago)
+
         lines = [
-            f"# ⚠️ Fleet 静默 {silent_min:.0f} 分钟",
+            headline(verdict, len(tasks), silent_min),
             "",
-            f"派出去的 **{len(tasks)} 个任务** 都还没收到 done, 且 fleet 里**任何 bot** "
-            f"都没在最近 {silent_min:.0f} min 发消息回来. 大概率有 worker 挂了.",
+            f"派出去的 **{len(tasks)} 个任务** 都还没收到 done，"
+            f"而且 fleet 里**任何 bot** 都没在最近 {silent_min:.0f} min 发消息回来。",
             "",
             f"涉及 worker: {', '.join(f'`{w}`' for w in worker_set)}",
             "",
@@ -3125,7 +3172,9 @@ class FeishuChannel(Channel):
             "## 建议下一步",
             "",
         ])
-        if len(worker_set) > 1:
+        lines.extend(advice(verdict, [t.task_id for t in tasks]))
+        lines.append("")
+        if verdict.needs_rescue and len(worker_set) > 1:
             lines.append(
                 f"⚠️ **{len(worker_set)} 个 worker 都静默** — 可能是共享基础设施问题 "
                 f"(host 死 / OpenClaw Gateway port 18789 死 / Anthropic API 全 region 5xx). "
