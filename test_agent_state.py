@@ -191,3 +191,49 @@ def test_only_durable_changes_report_true():
     assert s.on_event({"type": "system", "subtype": "hook_started"}, now=1) is False
     assert s.on_event({"type": "user", "message": {"content": "x"}}, now=1) is False
     assert s.on_event(tool("Read", {"file_path": "/a.py"}), now=1) is True
+
+
+def test_main_turn_carries_task_and_summary():
+    """主 turn 也该有「被派去干什么」和「做成了什么」。
+
+    ⚠️ Chris 2026-09-20 指出的：状态屏上主 turn 那一格填的是
+    「此刻在调哪个工具」——**那是过程不是任务**，看不出这一轮在干啥。
+    子 agent 早就有这两样（派活描述 ＋ 回报摘要），主 turn 的对应物
+    是「用户原话」和「回复第一句」，只是之前没送。
+    """
+    st = AgentState()
+    st.begin_turn(1000.0, task="把今天的 commit 过一遍写成时间线")
+    snap = st.snapshot(1005.0)
+    assert snap["task"] == "把今天的 commit 过一遍写成时间线"
+    assert snap["sum"] == ""          # 还没干完，没有摘要
+    assert snap["on"] is True
+
+    st.end_turn(1060.0, summary="四个根因假设，三个被推翻")
+    done = st.snapshot(1060.0)
+    assert done["task"] == "把今天的 commit 过一遍写成时间线"   # 任务不因结束而消失
+    assert done["sum"] == "四个根因假设，三个被推翻"
+    assert done["on"] is False
+
+
+def test_task_and_summary_are_truncated():
+    """两个都要截断 —— 它们要塞进参与者属性，而用户那句话可能很长。"""
+    st = AgentState()
+    st.begin_turn(1000.0, task="很长" * 200)
+    assert len(st.snapshot(1000.0)["task"]) == 80
+    st.end_turn(1001.0, summary="也很长" * 200)
+    assert len(st.snapshot(1001.0)["sum"]) == 80
+
+
+def test_new_turn_clears_last_summary():
+    """新一轮开始时上一轮的摘要必须清掉。
+
+    不清的话屏幕上会是「在忙 ＋ 上一轮的结论」—— 那比没有更糟，
+    因为它看起来完全合理。
+    """
+    st = AgentState()
+    st.begin_turn(1000.0, task="第一件事")
+    st.end_turn(1010.0, summary="第一件事的结论")
+    st.begin_turn(1020.0, task="第二件事")
+    snap = st.snapshot(1021.0)
+    assert snap["task"] == "第二件事"
+    assert snap["sum"] == "", "上一轮的摘要漏进了新一轮"

@@ -135,14 +135,28 @@ class AgentState:
     tasks: dict[str, TaskView] = field(default_factory=dict)
     #: 有子 agent 的活动挂不到任何一条任务上的次数。**不藏起来。**
     unlinked: int = 0
+    #: 这一轮**被派去干什么** —— 就是用户那句话。
+    #:
+    #: ⚠️ Chris 2026-09-20：「这个主 agent 为什么不能拥有 Task 和 Summary？
+    #: 后面总是跟着一句『在跑命令』之类的，那也看不出来任务到底在干啥。」
+    #: 他说得对，而且**不是「做不到」是「没送」** —— 子 agent 的任务来自
+    #: 派活时那句描述、摘要来自它的回报，主 turn 这两样都有对应物：
+    #:   任务 = 用户原话（`_pure_text`，去掉 channel / 时间那些标记之后）
+    #:   摘要 = 回复的第一句
+    #: 之前那一格填的是「此刻在调哪个工具」，那是**过程**不是**任务**。
+    task: str = ""
+    #: 这一轮**做成了什么** —— 回复的第一句。turn 结束时才有。
+    summary: str = ""
 
     _pending_agent_tool: list = field(default_factory=list, repr=False)
     _by_tool_use: dict = field(default_factory=dict, repr=False)
 
     # ── 生命周期 ──────────────────────────────────────────────
 
-    def begin_turn(self, now: Optional[float] = None) -> None:
+    def begin_turn(self, now: Optional[float] = None, *, task: str = "") -> None:
         now = time.time() if now is None else now
+        self.task = task[:80]
+        self.summary = ""
         self.turn_active = True
         self.turn_started_at = now
         self.turn_ended_at = None
@@ -153,8 +167,10 @@ class AgentState:
         self._pending_agent_tool.clear()
         self._by_tool_use.clear()
 
-    def end_turn(self, now: Optional[float] = None) -> None:
+    def end_turn(self, now: Optional[float] = None, *, summary: str = "") -> None:
         now = time.time() if now is None else now
+        if summary:
+            self.summary = summary[:80]
         self.turn_active = False
         self.turn_ended_at = now
         self.waiting_for = ""
@@ -291,6 +307,10 @@ class AgentState:
             "on": self.turn_active,
             "wait": self.waiting_for,
             "act": self.main_activity,
+            # 主 turn 的任务和摘要。**跟子 agent 那两格是同一个语义** ——
+            # 跑着的时候看「被派去干什么」，干完了看「做成了什么」。
+            "task": self.task,
+            "sum": self.summary,
             "sec": round((self.turn_ended_at or now) - self.turn_started_at, 1)
                    if self.turn_started_at else 0.0,
             # 子 agent 和后台任务**分开数**。混在一起的话，跑一条后台命令

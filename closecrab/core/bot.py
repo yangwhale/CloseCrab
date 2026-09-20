@@ -276,7 +276,8 @@ class BotCore:
         # 而且发不出去不影响这一轮（那一路是旁路）。
         from closecrab.core.agent_state import AgentState
         agent_state = AgentState()
-        agent_state.begin_turn()
+        # 这一轮的「任务」就是用户那句话（去掉 channel / 时间那些前缀）。
+        agent_state.begin_turn(task=_pure_text)
 
         def _publish_bot_state() -> None:
             try:
@@ -532,7 +533,10 @@ class BotCore:
             #    那时候屏幕会永远停在「还在跑」，而那比不显示更糟。
             try:
                 if agent_state.turn_active:
-                    agent_state.end_turn()
+                    # 「摘要」取回复的第一句 —— 不做二次总结（那要再调一次
+                    # 模型，为一行状态不值），第一句通常就是结论。
+                    _first = (result or "").strip().split("\n")[0].strip()
+                    agent_state.end_turn(summary=_first)
                 _publish_bot_state()
             except Exception:
                 log.debug("收尾发 bot 状态失败", exc_info=True)
