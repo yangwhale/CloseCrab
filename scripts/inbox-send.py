@@ -97,6 +97,30 @@ def _validate_protocol(args: argparse.Namespace) -> None:
             f"(实际 {len(args.phase_label)})"
         )
 
+    # ⚠️ **kickoff / progress 不会唤醒对方。**
+    #
+    # 这套多阶段协议是**干活的人向上汇报**用的：kickoff 只登记一张聚合卡片、
+    # progress 只往卡片上追加，两者都 `mark_done` 之后**不触发对方的 turn**
+    # （见 `feishu.py::_handle_task_kickoff` 的 docstring）。只有 `done`
+    # 和「不带 phase 的普通消息」才会让对方真的醒过来干活。
+    #
+    # 2026-09-20 我拿 `--phase kickoff` 去**派活**，消息完整写进了 Firestore、
+    # 状态也成了 done，但 tommy 那边一直没醒 —— 最后是它的 watchdog 报
+    # 「静默 24 分钟」才发现有活。**整条链上没有任何一处报错**，
+    # 这正是最难查的那类：查发送方看到成功，查数据库看到消息在，
+    # 查接收方看到已处理。
+    #
+    # 所以这里吼一声。不 exit —— worker 向 leader 报 kickoff 是**合法用法**，
+    # 拦掉是错的；但派活的人几乎总是想要对方醒。
+    if args.phase in ("kickoff", "progress"):
+        print(
+            f"[inbox-send] ⚠️  --phase {args.phase} **不会唤醒 {args.target_bot}** ——\n"
+            f"             它只登记/更新卡片，不触发对方的 turn。\n"
+            f"             这是给「干活的人向上汇报」用的。\n"
+            f"             **要派活请不要带 --phase**（普通消息才会让对方醒）。",
+            file=sys.stderr,
+        )
+
     # phase-specific 必填项
     if args.phase == "kickoff":
         if not args.task_name:
