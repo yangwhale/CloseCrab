@@ -125,12 +125,36 @@ def test_unlinkable_activity_is_counted_not_swallowed():
     assert s.snapshot(now=2)["unlinked"] == 1
 
 
-def test_orphan_completion_still_shows_up():
-    """只收到收尾、没收到开始 —— 也得显示，不能丢。"""
+def test_orphan_completion_lands_in_background_not_subagents():
+    """只收到收尾、没收到开始 —— 显示，但**算后台任务不算子 agent**。
+
+    因为它没有 subagent_type。见下面那条测试。"""
     s = AgentState(); s.begin_turn(now=0)
     s.on_event({"type": "system", "subtype": "task_notification",
                 "task_id": "task_Z", "status": "completed", "summary": "好了"}, now=2)
-    assert s.snapshot(now=3)["subs"] == {"run": 0, "done": 1}
+    snap = s.snapshot(now=3)
+    assert snap["subs"] == {"run": 0, "done": 0}
+    assert snap["bg"] == {"run": 0, "done": 1}
+
+
+def test_background_bash_is_not_counted_as_a_subagent():
+    """⚠️ **上线第一分钟被真实数据抓到的 bug。**
+
+    `task_started` 不只发给子 agent，**后台 Bash 也发**。屏幕上当时显示
+    「1 个子 agent 已完成」，而那其实是一条后台命令。
+
+    判别依据是 `subagent_type`：真子 agent 带，后台任务不带。"""
+    s = AgentState(); s.begin_turn(now=0)
+    # 后台命令：task_started 不带 subagent_type
+    s.on_event({"type": "system", "subtype": "task_started",
+                "task_id": "bg1"}, now=1)
+    # 真子 agent：带
+    _spawn(s, "toolu_A", "sub1", desc="查东西", now=1)
+    snap = s.snapshot(now=2)
+    assert snap["subs"] == {"run": 1, "done": 0}, "后台命令被算成子 agent 了"
+    assert snap["bg"] == {"run": 1, "done": 0}
+    kinds = {t["id"]: t["sub"] for t in snap["tasks"]}
+    assert kinds["bg1"] is False and kinds["sub1"] is True
 
 
 def test_turn_end_marks_dangling_subagents_unknown_not_completed():

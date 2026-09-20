@@ -97,6 +97,19 @@ class TaskView:
     tool_use_id: str = ""       # 跟 parent_tool_use_id 对上用的
 
     @property
+    def is_subagent(self) -> bool:
+        """真子 agent，还是后台任务。
+
+        ⚠️ **`task_started` 不只发给子 agent** —— 后台 Bash 也发。
+        2026-09-20 上线第一分钟就被真实数据抓到：屏幕上显示「1 个子 agent
+        已完成」，而那其实是一条后台命令，摘要写的是那条命令的描述。
+
+        判别依据是 `subagent_type`：真子 agent 带（`general-purpose` 之类），
+        后台任务不带。**这条是从实测事件里读出来的，不是约定。**
+        """
+        return bool(self.kind)
+
+    @property
     def running(self) -> bool:
         return self.done_at is None
 
@@ -203,7 +216,8 @@ class AgentState:
         if sub in ("task_notification", "task_completed") and tid:
             task = self.tasks.get(tid)
             if task is None:
-                # 收尾事件先到、开始事件没见着。补一条，别丢。
+                # 收尾先到、开始没见着。补一条，别丢 —— 但它没有
+                # `subagent_type`，所以会落进「后台任务」那一栏，不算子 agent。
                 task = TaskView(task_id=tid, started_at=now)
                 self.tasks[tid] = task
             status = d.get("status") or "completed"
@@ -270,8 +284,8 @@ class AgentState:
     def snapshot(self, now: Optional[float] = None) -> dict:
         """给客户端看的一份。**字段短，因为要塞进参与者属性。**"""
         now = time.time() if now is None else now
-        running = [t for t in self.tasks.values() if t.running]
-        done = [t for t in self.tasks.values() if not t.running]
+        subs = [t for t in self.tasks.values() if t.is_subagent]
+        bgs = [t for t in self.tasks.values() if not t.is_subagent]
         return {
             "v": 1,
             "on": self.turn_active,
@@ -279,10 +293,16 @@ class AgentState:
             "act": self.main_activity,
             "sec": round((self.turn_ended_at or now) - self.turn_started_at, 1)
                    if self.turn_started_at else 0.0,
-            "subs": {"run": len(running), "done": len(done)},
+            # 子 agent 和后台任务**分开数**。混在一起的话，跑一条后台命令
+            # 屏幕上就多一个「子 agent」，而那是假的。
+            "subs": {"run": sum(1 for t in subs if t.running),
+                     "done": sum(1 for t in subs if not t.running)},
+            "bg": {"run": sum(1 for t in bgs if t.running),
+                   "done": sum(1 for t in bgs if not t.running)},
             "tasks": [
                 {
                     "id": t.task_id[:8],
+                    "sub": t.is_subagent,
                     "kind": t.kind,
                     "what": t.what,
                     "act": t.activity,
