@@ -258,7 +258,36 @@ _last_state_json: str | None = None
 _last_state_at: float = 0.0
 #: 属性最快多久发一次。**不是画面流畅度旋钮，是信令预算** ——
 #: 属性走的是信令通道，跟音视频抢的不是同一条路，但房间里每个人都要收。
-_STATE_MIN_INTERVAL = 0.5
+#:
+#: 2026-09-20 从 0.5 提到 1.0：iOS 那边每收一次属性就重算一次界面，
+#: 一忙起来就持续满转。见下面 `_state_key` 那段。
+_STATE_MIN_INTERVAL = 1.0
+
+#: 流水最快多久发一次。它是**氛围不是信息**，丢几条无所谓（本来就走不可靠档），
+#: 但每一条到客户端都会触发一次界面重算 —— 一轮里几十条就是几十次。
+_STEP_MIN_INTERVAL = 0.5
+_last_step_at: float = 0.0
+
+
+def _state_key(payload: dict) -> str:
+    """去重用的指纹：**把所有计时字段剔掉之后**的那份内容。
+
+    ## 为什么不能直接比整个 payload
+
+    `sec` 每次快照都在变（它就是「跑了多久」），所以拿整份 JSON 去比，
+    **去重永远不会命中** —— 每一个事件都会真的发出去，只剩限频挡着。
+    2026-09-20 实测：我一忙起来就是持续 2 Hz 往房间里写属性，
+    iOS 那边每收一次重算一次界面，于是「一从空闲变在忙就卡死」。
+    Chris 自己找出的这条规律，比我们查了一下午的崩溃日志都准。
+
+    **客户端的计时本来就是本地外推的**（收到那一刻记个时间戳往前推，
+    见 `CCBotStatusPanel.elapsed`），所以 `sec` 晚几秒到完全没关系 ——
+    它根本不该是触发重发的理由。
+    """
+    slim = {k: v for k, v in payload.items() if k != "sec"}
+    slim["tasks"] = [{k: v for k, v in t.items() if k != "sec"}
+                     for t in payload.get("tasks", [])]
+    return _json.dumps(slim, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def publish_state(payload: dict) -> None:
@@ -275,13 +304,16 @@ def publish_state(payload: dict) -> None:
         log.exception("状态序列化失败，丢弃")
         return
     now = time.monotonic()
-    if text == _last_state_json:
+    # ⚠️ 比的是**剔掉计时字段之后**的指纹，不是整份 JSON。理由见 `_state_key`。
+    #    拿整份比的话 `sec` 每次都变，去重等于没写。
+    key = _state_key(payload)
+    if key == _last_state_json:
         return
     # ⚠️ 限频这里**只拦「没结束」的中间态**。turn 结束那一下必须立刻发出去，
     #    否则屏幕会停在「还在跑」上直到下一次状态变化 —— 而那可能是几分钟后。
     if payload.get("on") and now - _last_state_at < _STATE_MIN_INTERVAL:
         return
-    _last_state_json, _last_state_at = text, now
+    _last_state_json, _last_state_at = key, now
     try:
         _loop.call_soon_threadsafe(_spawn_publish_state, text)
     except RuntimeError:
@@ -289,9 +321,19 @@ def publish_state(payload: dict) -> None:
 
 
 def publish_step(payload: dict) -> None:
-    """发一条流水。丢了就丢了 —— 走不可靠档，别为它重传。"""
+    """发一条流水。丢了就丢了 —— 走不可靠档，别为它重传。
+
+    ⚠️ **也要限频。** 它虽然走不可靠档、不占信令，但客户端每收一条就
+    重算一次界面。一轮里几十条工具调用 = 几十次重算，跟属性那条是同一个病。
+    它本来就是「氛围不是信息」，掉几条完全无所谓。
+    """
+    global _last_step_at
     if not _connected or _loop is None or _loop.is_closed():
         return
+    now = time.monotonic()
+    if now - _last_step_at < _STEP_MIN_INTERVAL:
+        return
+    _last_step_at = now
     try:
         text = _json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     except Exception:
