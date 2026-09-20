@@ -170,11 +170,11 @@ result      subtype=success              num_turns=2
 | 这一半 | 仓库 | 文件 |
 |---|---|---|
 | 攒状态（纯逻辑，无 IO） | CloseCrab | `closecrab/core/agent_state.py` |
-| 测试（16 例，杀 5 个变异体） | CloseCrab | `test_agent_state.py` |
+| 测试（19 例，杀 5 个变异体） | CloseCrab | `test_agent_state.py` |
 | 发出去 | CloseCrab | `closecrab/voice/livekit_out.py` |
 | 接进事件流 | CloseCrab | `closecrab/core/bot.py` 的 `_on_step` ＋ `finally` |
 | 收 | agent-starter-swift | `VoiceAgent/CloseCrab/CCBotStatus.swift` |
-| 画 | agent-starter-swift | `VoiceAgent/CloseCrab/CCBotStatusPanel.swift` |
+| 画 | agent-starter-swift | `VoiceAgent/CloseCrab/CCBotStatusStrip.swift` |
 
 **状态机单独一个模块、不 import 任何 IO**，所以能在开发机上直接跑测试。
 状态机错一格的后果是「屏幕上显示的和实际不符」—— 那种错只能靠测试拦，
