@@ -42,6 +42,12 @@ def _parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument("target_bot", help="目标 bot 名称 (e.g. jarvis, hulk)")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="只校验和打印，**不写 Firestore**。验证参数/警告时用这个 —— "
+             "真发一条 kickoff 会登记一个永远等不到 done 的任务，"
+             "十分钟后 fleet watchdog 就会报「有 worker 挂了」（2026-09-20 实测）",
+    )
     parser.add_argument("message", help="消息内容")
 
     # 多阶段任务协议字段 (全部可选, 不传走 fallback = 老行为)
@@ -163,6 +169,15 @@ def main() -> int:
             pass
     if not sender:
         sender = "unknown"
+
+    if args.dry_run:
+        # ⚠️ **在连 Firestore 之前就退。** 放在后面的话仍然要建 client、
+        #    仍然可能因为凭据问题失败 —— 那就不是「干跑」了。
+        print(f"[inbox-send] --dry-run：不会写任何东西\n"
+              f"  to={args.target_bot} from={sender} phase={args.phase or '(无)'}\n"
+              f"  task_id={task_id}{' (自动生成)' if auto_generated else ''}\n"
+              f"  正文 {len(args.message)} 字符: {args.message[:60]!r}")
+        return 0
 
     from closecrab.constants import FIRESTORE_DATABASE, FIRESTORE_PROJECT
     from google.cloud import firestore
