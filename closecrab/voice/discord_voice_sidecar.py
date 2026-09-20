@@ -281,7 +281,7 @@ _speak_consumer_task: "asyncio.Task | None" = None
 # ⭐⭐⭐ 2026-09-16 现场原话：「工具调用说的话是为了填补空白的，它是 low
 #   priority 的。如果有正式的输出正在播放，那些工具调用的话就不用出声。」
 #   ⛔ 老逻辑只在**新 reply 入队那一刻**清洗队列里的 hint；至于「reply 正在播、
-#     这时候来了条新 hint」——&#160;它照样排在后面，reply 一播完就冒出来。
+#     这时候来了条新 hint」—— 它照样排在后面，reply 一播完就冒出来。
 #   ⭐ 判据：**低优先级的填空话，只在真的没人说话时才有价值。**
 #     正式输出在播 / 在排队，它就该**直接不生成**，而不是排队等着。
 _reply_in_flight: bool = False
@@ -4373,7 +4373,17 @@ async def _ssrc_infer_loop(period: float = 0.3):
                 cur_diag = (cur_hits, tuple(sorted(cur_map.items())), tuple(sorted(seen)))
                 changed = cur_diag != _diag_last
                 diag_n += 1
-                if changed or diag_n % 10 == 0:
+                # ⛔⛔ 2026-09-20：这一行原来是 `if changed or diag_n % 10 == 0`
+                #   —— **没变化也每 3 秒打一条 INFO**。实测近 20 MB 日志里
+                #   心跳 8,670 条、真变化 9 条，**99.9% 是噪声**，bot.log 撑到 557 MB。
+                #   ⭐ 而这一段自己下面十行就写着「房间里只有 bot 自己时
+                #     ready=False 是空闲态的正常值」—— **明知是正常态，还按 INFO 每 3 秒喊。**
+                #   ⛔ 判据：**一个恒定不变的失败态不配占 INFO。** INFO 是给
+                #     「值得有人看一眼」的事留的；一直不变的东西只在**变的那一刻**值钱。
+                #   ⚠️ 心跳没有删，只是降级 —— 它仍然是「守护还活着」的唯一证据，
+                #     所以 DEBUG 每 3 秒照打，INFO 每 200 轮（约 60 秒）留一条。
+                _hb_info = diag_n % 200 == 0
+                if changed or _hb_info or diag_n % 10 == 0:
                     # 解密账本: davey 自己数成功/失败/passthrough。**这是唯一能把
                     # 「零帧是对端发的静音」和「零帧是解密失败被吞了」分开的证据** ——
                     # 失败的包会被换成一帧静音继续跑, 上层一个异常都看不到。
@@ -4381,7 +4391,9 @@ async def _ssrc_infer_loop(period: float = 0.3):
                     # (get_decryption_stats(user_id, media_type=audio))，
                     # 不传 uid 会 TypeError。uid 从 ssrc_map 拿，正好只有在场的人。
                     dstats = _decryption_ledger(dave, cur_map.values())
-                    log.info(
+                    # 变化 → INFO（它是证据）；纯心跳 → DEBUG，每 200 轮抬一次 INFO
+                    _emit = log.info if (changed or _hb_info) else log.debug
+                    _emit(
                         "诊断#%d: ready=%s epoch=%s ssrc_map=%s hits=%s 全零帧=%s 换号=%s "
                         "实收ssrc=%s 解密账=%s 失败原因=%s 包形状=%s Opus模式=%s%s",
                         diag_n, getattr(dave, "ready", None), getattr(dave, "epoch", None),
