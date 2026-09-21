@@ -1804,6 +1804,26 @@ def _split_by_emotion(text: str) -> list:
 
 _qwen3_session = None  # requests.Session for HTTP keep-alive
 
+#: TTS 后端的**运行时覆盖**。⛔ 2026-09-21 加的，起因很具体：
+#:   `DISCORD_TTS_BACKEND` 由 run.sh export，而 **run.sh 那个 wrapper 一跑就是好几天**
+#:   —— exit-42 只是在同一个 shell 里重跑 python，**不会重新读 run.sh**。
+#:   于是「改了 run.sh ＋ 自重启」看起来做完了，实际环境一点没变（实测中招）。
+#:   ⭐ 判据：**配置的生效周期不能长于它的修改周期。**
+#:     env var 的生效周期 ＝ wrapper 的寿命；而我们想按分钟切后端。两者对不上。
+#:   ⚠️ 优先级：显式传参 > 覆盖文件 > 环境变量 > 默认。
+_TTS_OVERRIDE_FILE = os.path.expanduser("~/.closecrab/tts-backend")
+
+
+def _tts_backend_override() -> str:
+    """读一次覆盖文件。**每次调用都读** —— 这样切后端不用重启任何东西。"""
+    try:
+        with open(_TTS_OVERRIDE_FILE, encoding="utf-8") as fh:
+            v = fh.read().strip()
+        return v if v in ("gemini", "qwen3", "cloud_tts") else ""
+    except OSError:
+        return ""
+
+
 async def _qwen3_tts_stream(text: str, instructions: str = ""):
     """流式调 Qwen3-TTS (vLLM-Omni), 逐 chunk yield 24kHz mono s16 PCM bytes。
     instructions: Qwen3 TTS instruct 参数，控制情感/语速/音高等。"""
@@ -2178,7 +2198,8 @@ async def _do_speak(text: str, fid: str = "", backend: str = ""):
     _tts_interrupted = False  # 新一轮生成，重置中断标志
     _tts_active = True        # 抑制 source idle 停播
 
-    tts_backend = backend or os.environ.get("DISCORD_TTS_BACKEND", "gemini")
+    tts_backend = (backend or _tts_backend_override()
+                   or os.environ.get("DISCORD_TTS_BACKEND", "gemini"))
 
     try:
         os.makedirs(_BUF_DIR, exist_ok=True)

@@ -946,7 +946,9 @@ async def _speak_consumer():
             player.stream_timeout = 3.0  # TTS 进行中：批间间隔最多 ~2s，3s 够且不跨消息
             t0 = time.monotonic()
             fid = item.fid or f"{int(time.time() * 1000):x}"
-            tts_backend = os.environ.get("DISCORD_TTS_BACKEND", "gemini")
+            from .discord_voice_sidecar import _tts_backend_override
+            tts_backend = (_tts_backend_override()
+                           or os.environ.get("DISCORD_TTS_BACKEND", "gemini"))
             wrote = 0
             t_first = None
             buf_f = None
