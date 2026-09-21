@@ -142,7 +142,17 @@ def _clean_text_for_tts(text: str) -> str:
     return text.strip()
 
 
+# ⛔⛔ 2026-09-20 事故：`gemini-3.1-flash-tts-preview` 被 Vertex 下架后
+#   **不返回 404，而是挂住**。3 个字的请求实测跑了 81 秒才回来。
+#   后果不是「慢」，是**下游的 qwen3 / cloud_tts 兜底链永远走不到** ——
+#   ⭐ 没有超时的调用不会失败，它只会一直等；而「一直等」不触发任何 fallback。
+#   所以这里给客户端钉一个硬上限。判据：实测一段 15 秒音频要 7-10 秒，
+#   90 秒是 10 倍余量，够慢不够挂。
+_TTS_TIMEOUT_MS = int(os.environ.get("TTS_TIMEOUT_MS", "90000"))
+
+
 def _build_genai_client(api_key: str | None) -> genai.Client:
+    http_options = genai_types.HttpOptions(timeout=_TTS_TIMEOUT_MS)
     # Vertex AI 优先 — 从 asia-east1 到 global endpoint 比 aistudio 快 2x
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
     if project:
@@ -150,13 +160,14 @@ def _build_genai_client(api_key: str | None) -> genai.Client:
             vertexai=True,
             project=project,
             location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
+            http_options=http_options,
         )
     api_key = api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError(
             "Set GOOGLE_CLOUD_PROJECT for Vertex AI, or GEMINI_API_KEY for aistudio."
         )
-    return genai.Client(api_key=api_key)
+    return genai.Client(api_key=api_key, http_options=http_options)
 
 
 @dataclass
