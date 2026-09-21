@@ -64,7 +64,20 @@ export BOT_NAME
 
 # Discord 语音 TTS 后端: 强制 Gemini 3.1 Flash TTS (走 Vertex AI, 因 GOOGLE_CLOUD_PROJECT
 # 已设)。显式 export 覆盖启动 shell 可能继承的旧值 (如手动 export 的 qwen3)。
-export DISCORD_TTS_BACKEND="gemini"
+# ⛔ 2026-09-21 19:40 HKT 临时切到自建千问。原因：Gemini TTS 实测挂了 ——
+#   同一句「测试。」三个字，响应 23s / 81s / >120s（还超时杀过一次），
+#   而 sidecar 日志里已经出现「播放已断档 316.9s」。
+#   ⭐ 顺带查到一条更硬的：我们调的 `gemini-3.1-flash-tts-preview`
+#     **已经不在 Vertex 的模型列表里了**（那边现在只有 2.5-flash-tts /
+#     2.5-pro-tts / live-2.5-flash-native-audio，3.x 一个 TTS 都没有）。
+#     preview 模型被撤掉是常事，而它**不报 404、只是挂着**，看起来像「慢」。
+#   ⭐ 自建千问同一句实测 **1.76s**（10.101.0.3:8091，九个嗓音齐）。
+#   ⚠️ 这是**临时**改动。回 gemini 之前先做两件事：
+#     ① 把模型名换成还在列表里的 `gemini-2.5-flash-tts`
+#     ② 给 Vertex 那一层加客户端超时 —— 现在它**没有死期**，
+#        所以后面 curl / Edge 两层降级永远轮不到（实测：不给超时 >120s 不返回，
+#        手动加 25s 超时反而 23.4s 就回来了）。
+export DISCORD_TTS_BACKEND="qwen3"
 
 # Discord 语音音色**不在这里设** —— 它是每 bot 一份的配置，跟 token / 频道号
 # 一样存在 Firestore `bots/{name}.channels.discord.tts_voice`，由 sidecar 启动时
