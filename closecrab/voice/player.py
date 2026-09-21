@@ -395,6 +395,22 @@ class UnifiedPlayer:
         with self._lock:
             return self._state == PAUSED
 
+    @property
+    def is_paused(self) -> bool:
+        """**暂停 ≠ 空闲。** 单独给一个属性，别让调用方去猜。
+
+        `progress()` 第三项那个「是否在播」是 `_state != IDLE` ——
+        **暂停时它也是 True**（播放器还咬着这段音频，随时能继续）。
+        那个语义对「要不要显示控制条」是对的，
+        对「按钮该画暂停还是播放」就是错的。
+
+        2026-09-22 就栽在这上面：app 的按钮读了那一位，
+        于是**暂停之后图标不变**，用户找不到继续的入口
+        —— 功能全在，就是回不去。
+        """
+        with self._lock:
+            return self._state == PAUSED
+
     def progress(self):
         """(已播秒, 总秒, 是否在播, fid)；没在播返回 None。
 

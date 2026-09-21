@@ -355,3 +355,8 @@ def stop() -> bool:
 
 def progress():
     return get_player().progress()
+
+
+def is_paused() -> bool:
+    """跟 `progress()` 第三项**不是一回事**，见 `UnifiedPlayer.is_paused`。"""
+    return get_player().is_paused

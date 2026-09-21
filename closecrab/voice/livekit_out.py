@@ -550,7 +550,14 @@ def _register_playback_rpc(room) -> None:  # noqa: ANN001
         played, total, active, fid = pr
         # total<=0 表示还在生成、总长未知 —— 如实传，**别编一个分母**，
         # 客户端才不会把「15/16s」显示成快播完了。
-        return _reply(True, active=bool(active), played=round(played, 2),
+        # ⚠️ `active` 和 `paused` 是**两位独立的信息**，不要用一位去推另一位：
+        #      active=True,  paused=False → 正在出声
+        #      active=True,  paused=True  → 停住了，但随时能继续
+        #      active=False               → 空了，没东西可继续
+        #    只发 `active` 的话，客户端分不出前两种 —— 2026-09-22 的
+        #    「暂停之后按钮不变成播放」就是这么来的。
+        return _reply(True, active=bool(active), paused=playback.is_paused(),
+                      played=round(played, 2),
                       total=(round(total, 2) if total > 0 else None), fid=fid)
 
     handlers = {
