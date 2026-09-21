@@ -192,6 +192,12 @@ Leader（协调派活）/ Teammate（执行汇报）两种角色，配置存 `bo
 ## CC Wiki v2
 Wiki 路径 `~/my-wiki-v2/`，在线地址由 `WIKI_URL` 配置。**主动识别知识价值**：用户分享有长期价值的文章/分析时，问"要录入 Wiki 吗？"；每 10 次 ingest 或超一周提醒跑 `/wiki lint`。具体 ingest/query/lint 操作在 wiki skill 的 SKILL.md。
 
+## 跨端接口（LiveKit）
+服务端暴露给 app 的 RPC / 参与者属性 / 数据消息，**一处看全**：
+[`docs/livekit-cross-end-contract.md`](docs/livekit-cross-end-contract.md)。
+加新接口时回来改那张表 —— 「做好了但没人用」在日志里是隐形的
+（播放控制那六个 RPC 就这么躺了很久）。
+
 ## 编码规范
 - **Python**: 全异步（asyncio）；日志用 `logging.getLogger("closecrab.{module}")` 不用 print；错误 log + graceful degradation，不要 silent `except:`。
 - **Channel 开发** → 必读 `.claude/rules/channels.md`（三平台同步、`_format_interactive_prompt`、ExitPlanMode/AskUserQuestion）
