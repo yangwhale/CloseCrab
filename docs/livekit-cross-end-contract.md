@@ -27,9 +27,15 @@
 | `cc.playback.stop` | — | `{ok}` | ✅ |
 | `cc.playback.replay` | `{fid?}` 不传＝当前段 | `{ok}` | ✅ |
 | `cc.playback.seek` | `{delta}` **比例** −1…1 | `{ok}` | ✅ |
-| `cc.playback.progress` | — | `{ok, active, played?, total?, fid?}` | ✅ |
+| `cc.playback.progress` | — | `{ok, active, paused, played?, total?, fid?}` | ✅ |
 
-⚠️ 两条容易写错的约定：
+⚠️ 三条容易写错的约定：
+
+- **`active` 和 `paused` 是两位独立的信息**，不要用一位推另一位：
+  `active=T,paused=F` 正在出声 ／ `active=T,paused=T` 停住了随时能继续 ／
+  `active=F` 空了。只发 `active` 的话客户端分不出前两种 ——
+  2026-09-22 的「暂停后图标不变」就是这么来的。
+  **播完之后 `active` 翻假但 `fid` 保留**，客户端要靠它显示「重播」。
 
 - **`ok: false` 不是错误**，是「这个动作现在做不了」（例：播完了还按暂停）。
   客户端要如实反映，但别当故障。
