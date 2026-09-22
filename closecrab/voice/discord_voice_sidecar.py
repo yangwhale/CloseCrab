@@ -2329,6 +2329,56 @@ async def _speak_consumer():
             _reply_in_flight = False
 
 
+# 路径 B（LiveKit `AgentSession.say`）此刻在不在播正式回复。
+#
+# ⚠️ **必须单独记一位。** `_reply_in_flight` 只反映路径 A（统一播放器）——
+# 而飞书文字 voice mode 的最终回复**只走路径 B**。
+# 不记这一位的话，`hint_allowed()` 在正式回复播着的时候仍然返回 True，
+# 闸门形同虚设 —— 这正是 2026-09-22 那个「长回复被步骤提示打断」的真因。
+_broadcast_reply_in_flight: bool = False
+
+
+def set_broadcast_reply(active: bool) -> None:
+    """路径 B 开始/结束播正式回复。**必须配 try/finally 用**，
+    漏掉 False 的话中间播报会被永久静音，而那是个静默故障。"""
+    global _broadcast_reply_in_flight
+    _broadcast_reply_in_flight = active
+
+
+def hint_allowed() -> tuple[bool, str]:
+    """现在放一句「中间步骤」的低优先级语音，合适吗。
+
+    返回 `(允许吗, 不允许的原因)` —— 原因是给日志用的，别丢掉。
+
+    ## 为什么要把这个判断**暴露出来**
+
+    这条规则本来只活在 `_enqueue_speak` 里面，而它只管得住**一条**语音通路
+    （统一播放器那条）。飞书 voice mode 的中间播报其实是**双发**：
+
+        路径 A  `stream_speak_text(text)`        → 统一播放器（本模块，有闸门）
+        路径 B  `voice_io.say_to_user(...)`      → LiveKit AgentSession.say
+                                                   **完全没有这道闸门**
+
+    两条队列互相不知道对方在播什么。所以「长回复正在播的时候蹦出一句
+    『我看看啊』」这种事，路径 A 挡得住，**路径 B 挡不住** ——
+    而它们最终进的是同一双耳朵。
+
+    ⇒ Chris 2026-09-22 08:25：「不要让这个 step 中间步骤的语音输出
+       打断那个长的最终结果的输出。」
+
+    ⇒ 判断逻辑只此一份，**两条路径都来问它**。
+       复制一份到飞书那边迟早会分叉，而分叉的表现是
+       「有时候挡得住有时候挡不住」，最难查。
+    """
+    if _reply_in_flight:
+        return False, "正式输出正在播（播放器）"
+    if _broadcast_reply_in_flight:
+        return False, "正式输出正在播（LiveKit broadcast）"
+    if _has_pending_reply():
+        return False, "正式输出在队列里排着"
+    return True, ""
+
+
 async def _enqueue_speak(text: str, fid: str = "", backend: str = ""):
     """sidecar loop 内: 把 TTS 请求入队。
 
@@ -2340,10 +2390,11 @@ async def _enqueue_speak(text: str, fid: str = "", backend: str = ""):
       这里只负责在 reply 入队时把过期 hint 清掉。
     """
     is_reply = bool(fid)
-    if not is_reply and (_reply_in_flight or _has_pending_reply()):
-        log.info("TTS 丢弃 hint（正式输出%s）: %s",
-                 "正在播" if _reply_in_flight else "在队列里排着", text[:30])
-        return
+    if not is_reply:
+        ok, why = hint_allowed()
+        if not ok:
+            log.info("TTS 丢弃 hint（%s）: %s", why, text[:30])
+            return
     if is_reply:
         _flush_hints_from_queue()
     import time as _time

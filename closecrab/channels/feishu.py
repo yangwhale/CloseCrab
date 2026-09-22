@@ -4018,15 +4018,42 @@ class FeishuChannel(Channel):
             _tool_hint_repeat = [0]
 
             def _broadcast_intermediate(text: str, *, is_opener: bool):
+                """中间步骤的低优先级播报。**正式回复在播的时候整条丢掉。**
+
+                Chris 2026-09-22 08:25：
+                「长的播报代表他正在忙着；中间那个步骤的语音是为了在闲着的时候
+                 告诉我他正在干活。所以有语音播报的时候，不需要中间步骤的输出。」
+
+                ⚠️ **两条路径都要问闸门，这是这次改动的全部内容。**
+                以前只有路径 A 问（判断写在 `_enqueue_speak` 里面），
+                路径 B 直接 `say_to_user`，**完全绕过** ——
+                而两条队列互不知情、最终进的是同一双耳朵。
+                于是「长回复播到一半蹦出一句『我看看啊』」就发生了。
+
+                ⇒ 在**这里**统一挡掉，而不是各自挡各自的：
+                  判断只此一份，复制一份迟早分叉，
+                  而分叉的表现是「有时候挡得住有时候挡不住」，最难查。
+                """
                 if not text or not text.strip():
                     return
-                # 路径 A: Discord sidecar (无 fid → 不进 buffer 不可重播, 中间过程不需要)
+
+                try:
+                    from ..voice.discord_voice_sidecar import hint_allowed
+                    ok, why = hint_allowed()
+                except Exception:
+                    # 问不到就照原样放行 —— 闸门坏掉不该让中间播报整个哑掉。
+                    ok, why = True, ""
+                if not ok:
+                    log.info("中间播报丢弃（%s）: %s", why, text[:30])
+                    return
+
+                # 路径 A: 统一播放器（无 fid → 不进 buffer 不可重播, 中间过程不需要）
                 try:
                     from ..voice.discord_voice_sidecar import stream_speak_text
                     stream_speak_text(text)
                 except Exception:
                     pass
-                # 路径 B: LiveKit broadcast
+                # 路径 B: LiveKit broadcast（AgentSession 自己那条 FIFO 队列）
                 if self._voice_io is not None and self._voice_io.has_active_session(user_key):
                     asyncio.create_task(self._voice_io.say_to_user(user_key, text))
 
@@ -5076,7 +5103,23 @@ class FeishuChannel(Channel):
         # 排队的 hint 都已播完。没开 broadcast 时 say_to_user 立刻 return False。
         if self._voice_io is not None and text and text.strip():
             if open_id and self._voice_io.has_active_session(open_id):
-                await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
+                # ⚠️ **播之前先举旗。** 这条路（AgentSession.say）跟统一播放器
+                #    是两条互不知情的队列，而中间播报的闸门原来只看播放器那条 ——
+                #    于是「最终回复正在这儿播」对闸门是不可见的，
+                #    步骤提示照样挤进来。2026-09-22 的真因就是这个。
+                #
+                # ⚠️ `try/finally` 不能省：漏掉落旗会把中间播报**永久静音**，
+                #    而那是个没有任何报错的静默故障。
+                try:
+                    from ..voice.discord_voice_sidecar import set_broadcast_reply
+                    set_broadcast_reply(True)
+                except Exception:
+                    set_broadcast_reply = None  # type: ignore[assignment]
+                try:
+                    await self._voice_io.say_to_user(open_id, text, wait_for_playout=True)
+                finally:
+                    if set_broadcast_reply is not None:
+                        set_broadcast_reply(False)
 
         # ── 3. 飞书 ogg 兜底 (**有人真在流式听**才跳过) ──
         # 判据是 heard_live 不是 streaming：常驻的 LiveKit 音轨会让 streaming

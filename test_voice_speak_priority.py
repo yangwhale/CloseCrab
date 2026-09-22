@@ -136,8 +136,58 @@ def t_wait_playout():
         playback._STALL_LIMIT = saved_stall
 
 
+
+# ── 规则③：闸门要盖住**两条**语音通路 ────────────────────────────────
+def t_broadcast_path_gate():
+    """2026-09-22：飞书文字 voice mode 的最终回复走的是**另一条队列**。
+
+    Chris：「不要让 step 中间步骤的语音输出打断那个长的最终结果的输出。」
+
+    那天的真因不是闸门写错了，是**闸门只装在一条路上**：
+
+        路径 A  统一播放器（`_speak_queue`）       ← 闸门原来只看这条
+        路径 B  LiveKit `AgentSession.say`        ← 最终回复实际走这条
+
+    于是最终回复播着的时候 `_reply_in_flight` 是 False，
+    `hint_allowed()` 照样放行 —— 闸门形同虚设。
+
+    ⛔ 反例是这条测试的重点：**一个永远返回 False 的闸门也能让前两条全绿**，
+       而它会把所有中间播报永久静音。
+    """
+    from closecrab.voice import discord_voice_sidecar as dvs
+
+    _fresh_queue(dvs)
+    dvs._reply_in_flight = False
+    dvs.set_broadcast_reply(False)
+
+    # 反例：两条路都闲着 → 必须放行
+    ok, why = dvs.hint_allowed()
+    check("反例：两条路都闲着时，中间播报放行", ok, f"被挡了，理由={why!r}")
+
+    # 路径 B 在播 → 挡
+    dvs.set_broadcast_reply(True)
+    ok, why = dvs.hint_allowed()
+    check("路径 B（LiveKit broadcast）在播时被挡", not ok and "broadcast" in why,
+          f"ok={ok} why={why!r}")
+
+    # 落旗之后要能恢复 —— 漏掉 False 会把中间播报永久静音
+    dvs.set_broadcast_reply(False)
+    ok, _ = dvs.hint_allowed()
+    check("路径 B 播完落旗后恢复放行", ok, "落旗没生效 = 中间播报被永久静音")
+
+    # 路径 A 在播 → 也挡（回归，别被这次改动搞坏）
+    dvs._reply_in_flight = True
+    ok, why = dvs.hint_allowed()
+    check("路径 A（播放器）在播时仍被挡", not ok and "播放器" in why,
+          f"ok={ok} why={why!r}")
+
+    dvs._reply_in_flight = False
+    dvs.set_broadcast_reply(False)
+    dvs._speak_queue = None
+
+
 def main():
-    for fn in (t_hint_priority, t_wait_playout):
+    for fn in (t_hint_priority, t_wait_playout, t_broadcast_path_gate):
         print(f"\n── {fn.__name__} ──")
         fn()
     bad = [n for n, ok, _ in results if not ok]
