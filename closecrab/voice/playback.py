@@ -262,9 +262,6 @@ def end() -> None:
     get_player().end_live()
 
 
-def is_paused() -> bool:
-    """当前这段是不是被用户按停了。"""
-    return get_player().is_paused()
 
 
 # ⭐ 连续 STALL_LIMIT 秒位置一点没动 = 真卡住了，不是在慢慢播。
@@ -302,7 +299,13 @@ async def wait_playout(timeout: float) -> None:
         # None，拿它判就会立刻放行，下一条把还没播完的提示音顶掉。
         if not p.is_busy():
             return
-        if p.is_paused():
+        # ⛔⛔ 2026-09-22：这里原来写的是 `p.is_paused()`。
+        #   `UnifiedPlayer.is_paused` 是 **@property**，不是方法 ——
+        #   于是每一次 wait_playout 都抛 TypeError，`_do_speak` 半路崩掉，
+        #   `_speak_consumer` 记一条 ERROR 就**接着放下一条**。
+        #   ⭐⭐ 表现出来就是：一段 345 秒的正式回复播到 31.8 秒被提示音顶掉。
+        #   而它伪装成了「闸门没拦住」—— 前后修过两轮闸门，全修错了地方。
+        if p.is_paused:
             log.info("等播完：用户暂停中，放行下一条")
             return
         pr = p.progress()

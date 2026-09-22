@@ -384,16 +384,12 @@ class UnifiedPlayer:
         with self._lock:
             return self._state != IDLE
 
-    def is_paused(self) -> bool:
-        """用户按了暂停键、正停在那儿。
-
-        ⭐ 2026-09-16 加。`wait_playout` 原来只有一个总时限，分不清
-        「还在慢慢播」和「被用户按停了」——&nbsp;前者该继续等，后者该放行。
-        分不清的后果是**两头都做不好**：时限给小了，长回复没播完就被下一条顶掉；
-        给大了，用户一按暂停整条 TTS 队列就卡死在那儿。
-        """
-        with self._lock:
-            return self._state == PAUSED
+    # ⛔⛔ 2026-09-22：这里原来**同名定义了两次** —— 先一个 `def is_paused()`，
+    #   紧接着一个 `@property is_paused`。Python 只留后定义的那个，
+    #   于是 `is_paused` 是**属性**，而所有写成 `p.is_paused()` 的调用点
+    #   全都 `TypeError: 'bool' object is not callable`。
+    #   ⭐ 而 Python **不会为重复定义报任何警告**。已删掉方法版，只留属性版。
+    #   （方法版的那段文档说明已经并进下面这条属性的注释里。）
 
     @property
     def is_paused(self) -> bool:
@@ -470,10 +466,19 @@ class UnifiedPlayer:
         left = (total - t.pos) / _BYTES_PER_SEC
         if left < self._PREEMPT_WARN_MIN_LEFT_S:
             return
+        # ⛔⛔ 2026-09-22：这条警告原来只点了「闸门」一个嫌疑人，
+        #   而 2026-09-22 那次真凶根本不在闸门 —— 是 `wait_playout` 里
+        #   `p.is_paused()` 抛 TypeError，`_do_speak` 半路崩掉，
+        #   消费者记一条 ERROR 就接着放下一条。闸门从头到尾是好的。
+        # ⭐ 判据：**一条诊断信息如果只点一个嫌疑人，它就会把人锁死在那儿。**
+        #   前后两轮都在改闸门，就是被这句话带偏的。所以现在两条都列，
+        #   而且把「先 grep 什么」写进去。
         log.warning(
-            "播放被顶掉: fid=%s 还剩 %.1fs 没播（已播 %.1fs/%.1fs），"
-            "换成 %s —— 上层没拦住这次抢占，去查 _enqueue_speak 的 hint 门控"
-            "和 should_barge_in",
+            "播放被顶掉: fid=%s 还剩 %.1fs 没播（已播 %.1fs/%.1fs），换成 %s\n"
+            "    先查这两条，顺序别反：\n"
+            "    ① 上一条是不是**崩了**而不是播完了 —— grep '_do_speak 异常'。"
+            "崩掉的话消费者会直接放下一条，看起来就像被抢占。\n"
+            "    ② 真是抢占的话，再查 _enqueue_speak 的 hint 门控和 should_barge_in。",
             t.fid, left, t.pos / _BYTES_PER_SEC, total / _BYTES_PER_SEC,
             new_fid or "提示音(无 fid)",
         )
@@ -610,3 +615,35 @@ class UnifiedPlayer:
             self.frames_emitted += 1
             if chunk is None:
                 self.frames_silence += 1
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ⛔⛔ 2026-09-22：本文件里 `is_paused` 被**定义了两次**（一个方法、一个
+#   property）。Python 只留后定义的那个，**不报错、不警告、不留痕迹**，
+#   于是所有 `p.is_paused()` 的调用点在运行时才炸，而且炸在别人家里。
+#
+# ⭐ 判据：**一个语言不替你检查的东西，就得自己检查。**
+#   下面这段在 import 时扫一遍本文件的类定义，发现同名就当场失败 ——
+#   比在运行时收一条 TypeError 早得多，也不会伪装成别的故障。
+def _lint_no_dup_defs() -> None:
+    import ast as _ast
+    import inspect as _inspect
+    try:
+        src = _inspect.getsource(_inspect.getmodule(_lint_no_dup_defs))
+    except Exception:
+        return                      # 打包/压缩场景拿不到源码，跳过就好
+    for node in _ast.walk(_ast.parse(src)):
+        if not isinstance(node, _ast.ClassDef):
+            continue
+        seen, dup = set(), []
+        for b in node.body:
+            if isinstance(b, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                if b.name in seen:
+                    dup.append(b.name)
+                seen.add(b.name)
+        assert not dup, (
+            "%s 里这些名字定义了不止一次：%s —— Python 只留最后一个，"
+            "而调用方按先定义的那个写就会在运行时炸。" % (node.name, dup))
+
+
+_lint_no_dup_defs()
