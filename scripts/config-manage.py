@@ -321,6 +321,12 @@ VALID_WORKER_TYPES = ("claude", "gemini", "kilo", "openclaw", "dsh")
 MODEL_PRESETS = {
     # dsh routes through the LiteLLM gateway declared in its cordis profile, so
     # its ids are plain gateway aliases -- no provider prefix, no @default.
+    "claude-opus-5-5": {
+        "claude": "claude-opus-5-5@default",
+        "kilo":   "google-vertex-anthropic/claude-opus-5-5@default",
+        "gemini": None,
+        "dsh":    "claude-opus-5-5",
+    },
     "claude-opus-5": {
         "claude": "claude-opus-5@default",
         "kilo":   "google-vertex-anthropic/claude-opus-5@default",

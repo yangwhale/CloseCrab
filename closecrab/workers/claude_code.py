@@ -34,6 +34,13 @@ from .base import Worker
 log = logging.getLogger("closecrab.workers.claude_code")
 
 
+# 模型 → 默认 effort level（low/medium/high/xhigh）。表里没有的模型不注入，
+# 由 binary 自己按模型默认值走。写错的值 binary 会静默当没设，所以只写这四个。
+_MODEL_DEFAULT_EFFORT: dict[str, str] = {
+    "claude-opus-5-5": "medium",
+}
+
+
 class ClaudeCodeWorker(Worker):
     """管理一个持久的 Claude Code 进程，通过 socketpair 通信。
 
@@ -165,6 +172,16 @@ class ClaudeCodeWorker(Worker):
             log.info("Stripped ANTHROPIC_BETAS for Haiku (1M context unsupported)")
         else:
             env.setdefault("ANTHROPIC_BETAS", "context-1m-2025-08-07")
+        effort = _MODEL_DEFAULT_EFFORT.get(
+            (self._model or "").split("@", 1)[0].replace("[1m]", "")
+        )
+        if effort:
+            # 按模型统一定档，不做 per-bot 配置：同一个模型在所有 bot 上的思考量
+            # 应该一样，否则同一个问题在不同 bot 上答得深浅不一，还查不出原因。
+            # 这个 env 的优先级高于 settings.json 的 effortLevel（那份是全机共用的，
+            # 改它等于改所有模型）。运行时 /effort 仍可临时覆盖当前 session。
+            env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+            log.info(f"Claude CLI effort level: {effort} (model default)")
         if self._model:
             prev = env.get("ANTHROPIC_MODEL", "")
             env["ANTHROPIC_MODEL"] = self._model
