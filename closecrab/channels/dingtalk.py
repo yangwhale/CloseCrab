@@ -41,6 +41,7 @@ from dingtalk_stream import (
 )
 
 from .base import Channel
+from ..utils.model_display import shorten_model_name
 from ..core.types import UnifiedMessage
 from ..utils.stt import STTEngine
 
@@ -505,7 +506,7 @@ class DingTalkChannel(Channel):
                 f"### Bot Status: {info.get('bot_name', 'default')}\n\n"
                 f"**Status:** Online\n"
                 f"**Workers:** {info.get('active_workers', 0)}\n"
-                f"**Model:** {info.get('backbone_model', '?')}\n"
+                f"**Model:** {shorten_model_name(info.get('backbone_model', '')) or '?'}\n"
                 f"**Worker:** {info.get('worker_type', 'claude')}\n\n"
                 f"---\nChecked at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )

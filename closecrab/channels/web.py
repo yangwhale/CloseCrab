@@ -42,6 +42,7 @@ from pathlib import Path
 from aiohttp import web as aioweb
 
 from .base import Channel
+from ..utils.model_display import shorten_model_name
 from ..core.types import UnifiedMessage
 
 log = logging.getLogger("closecrab.channels.web")
@@ -310,7 +311,7 @@ class WebChannel(Channel):
             return (
                 f"**{info.get('bot_name', '?')}** · online\n"
                 f"- worker: {info.get('worker_type', '?')}\n"
-                f"- model: {info.get('backbone_model', '?')}\n"
+                f"- model: {shorten_model_name(info.get('backbone_model', '')) or '?'}\n"
                 f"- active workers: {info.get('active_workers', 0)}"
             )
         if c == "/end":

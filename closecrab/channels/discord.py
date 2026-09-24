@@ -35,6 +35,7 @@ import discord
 from discord.ext import commands
 
 from .base import Channel
+from ..utils.model_display import shorten_model_name
 from ..core.types import UnifiedMessage
 from ..utils.stt import STTEngine
 
@@ -360,7 +361,7 @@ class DiscordChannel(Channel):
             embed = discord.Embed(title=f"Bot Status: {bot_name}", color=discord.Color.green())
             embed.add_field(name="Status", value="Online", inline=True)
             embed.add_field(name="Active Workers", value=str(info.get("active_workers", 0)), inline=True)
-            embed.add_field(name="Model", value=str(info.get("backbone_model", "unknown")), inline=True)
+            embed.add_field(name="Model", value=shorten_model_name(info.get("backbone_model", "")) or "unknown", inline=True)
             embed.add_field(name="Worker", value=str(info.get("worker_type", "claude")), inline=True)
             embed.set_footer(text=f"Checked at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             await ctx.respond(embed=embed)
