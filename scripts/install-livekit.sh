@@ -118,6 +118,7 @@ usage() {
   --agent-name NAME        显式派发的 agent 名。**Gemini Live agent 要留空**
                            (它匿名注册) —— 名字对不上时两边都不报错, 谁也等不到谁
   --allowed-rooms a,b,c    允许用 ?room= 进的房间白名单 (== bot 名 == persona 文件名)
+                           会写回 Firestore config/livekit.allowed_rooms; 不传则读那里的
   --admin-url http://...   /admin 调 RoomService 用的内网地址
   --allow-insecure-token   打开无鉴权的 token 端点 (前面必须有 IAP/basicauth 挡着)
 
@@ -248,7 +249,7 @@ unit_state() { systemctl is-active "$1" 2>/dev/null || echo "absent"; }
 # 三个字段: url (SFU 内网 ws 地址) / api_key / api_secret.
 # closecrab/voice/livekit_out.py 读的就是这个文档, 部署侧现在跟它同源.
 
-LK_API_KEY=""; LK_API_SECRET=""; LK_URL=""; LK_NATIVE_SECRET=""
+LK_API_KEY=""; LK_API_SECRET=""; LK_URL=""; LK_NATIVE_SECRET=""; FS_ALLOWED_ROOMS=""
 
 # ── 怎么访问 Firestore: REST + gcloud token, **不用 google-cloud-firestore** ──
 #
@@ -297,13 +298,14 @@ try:
     f = (json.loads(os.environ["FS_BODY"]) or {}).get("fields", {})
 except Exception:
     f = {}
-for k in ("api_key", "api_secret", "url", "native_secret"):
+for k in ("api_key", "api_secret", "url", "native_secret", "allowed_rooms"):
     print(f.get(k, {}).get("stringValue", ""))
 ' 2>/dev/null || true)"
     LK_API_KEY="$(echo "$out"       | sed -n 1p)"
     LK_API_SECRET="$(echo "$out"    | sed -n 2p)"
     LK_URL="$(echo "$out"           | sed -n 3p)"
     LK_NATIVE_SECRET="$(echo "$out" | sed -n 4p)"
+    FS_ALLOWED_ROOMS="$(echo "$out" | sed -n 5p)"
 }
 
 fs_put_keys() {
@@ -344,6 +346,51 @@ native_ensure_secret() {
         fs_put_keys
     else
         log "  复用 Firestore 里已有的 native 共享密钥"
+    fi
+}
+
+# ── 房间白名单：也以 Firestore config/livekit.allowed_rooms 为准 ────────
+#
+# 原来它只活在 frontend 那台机器的 .env.local 里, 来源是安装时的 --allowed-rooms.
+# 于是**加一个 bot 要手改那台机器上的文件**, 而下一次谁不带参数(或带着旧参数)
+# 重跑本脚本, 就会把它悄悄改回去 —— 名单里少了谁, 那个房间在 app 里直接消失,
+# 两边日志全绿. 2026-09-24 就是这么发现「列表里怎么没有某个 bot」的.
+#
+# 规则(跟 key/secret 同一套思路, 只多一条「显式参数胜出并回写」):
+#   传了 --allowed-rooms  → 用它, 并写回 Firestore(以后不带参数重跑也不会丢)
+#   没传                  → 用 Firestore 里的
+#   两边都没有            → **停**. 渲染一个空名单, /api/rooms 会直接抛异常,
+#                           而那个异常只在有人打开 app 时才看得到.
+fs_put_allowed_rooms() {
+    fs_bootstrap
+    local url; url="$(_fs_doc_url)?updateMask.fieldPaths=allowed_rooms"
+    local payload
+    payload="$(AR="$ALLOWED_ROOMS" python3 -c '
+import json, os
+print(json.dumps({"fields": {"allowed_rooms": {"stringValue": os.environ["AR"]}}}))')"
+    local code
+    code="$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$url" \
+        -H "Authorization: Bearer $FS_TOKEN" -H "Content-Type: application/json" \
+        -d "$payload" || true)"
+    [[ "$code" == 200 ]] || die "写 Firestore config/livekit.allowed_rooms 失败 (HTTP $code)"
+    log "  房间白名单已写回 Firestore config/livekit.allowed_rooms"
+}
+
+resolve_allowed_rooms() {
+    # 统一成「逗号分隔、无空格、无空项」, 不然 "a, b" 和 "a,b" 会被当成不同而反复回写
+    norm() { echo "$1" | tr -d ' ' | tr -s ',' | sed 's/^,//; s/,$//'; }
+    if [[ -n "$ALLOWED_ROOMS" ]]; then
+        ALLOWED_ROOMS="$(norm "$ALLOWED_ROOMS")"
+        if [[ "$ALLOWED_ROOMS" != "$(norm "$FS_ALLOWED_ROOMS")" ]]; then
+            log "  房间白名单以参数为准: $ALLOWED_ROOMS (Firestore 原来是: ${FS_ALLOWED_ROOMS:-空})"
+            fs_put_allowed_rooms
+        fi
+    elif [[ -n "$FS_ALLOWED_ROOMS" ]]; then
+        ALLOWED_ROOMS="$(norm "$FS_ALLOWED_ROOMS")"
+        log "  房间白名单取自 Firestore: $ALLOWED_ROOMS"
+    else
+        die "不知道放哪些房间。给 --allowed-rooms a,b,c (== bot 名),
+       它会同时写进 Firestore config/livekit.allowed_rooms, 以后重跑不用再带。"
     fi
 }
 
@@ -492,6 +539,7 @@ write_frontend_env() {
     # 有这条路才需要密钥. direct 形态下不生成, 免得 Firestore 里多一个没人用的 secret.
     [[ -z "$native_wss" ]] || native_ensure_secret
 
+    resolve_allowed_rooms
     local tmp; tmp="$(mktemp)"
     render_template "$INFRA_DIR/frontend-env.local.tmpl" "$tmp" \
         "API_KEY=$LK_API_KEY" "API_SECRET=$LK_API_SECRET" \

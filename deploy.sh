@@ -120,6 +120,7 @@ Voice IO (LiveKit) 选项 (任何 mode 都可叠加):
   --voice-email EMAIL              Let's Encrypt 邮箱 (只有 direct 模式要)
   --voice-public-wss-url URL       浏览器侧 signaling URL (gclb-iap 下是 wss://<域名>/lk)
   --voice-allowed-rooms LIST       网页入口的房间白名单 (== bot 名)
+                                   会写回 Firestore config/livekit.allowed_rooms；不传则沿用那里的
   --voice-frontend-upstream H:P    Caddy 回源前端的地址。**跨机时必须给** ——
                                    反代跟前端常常不在一台机器上
   --voice-sfu-url ws://H:P         frontend/agent 连 SFU 的内网地址
