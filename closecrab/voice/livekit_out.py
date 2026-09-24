@@ -434,6 +434,22 @@ def _set_sink(sink) -> None:  # noqa: ANN001
 _WARMUP_MS = 200
 
 
+def _still_playing() -> bool:
+    """播放器是不是还在播当前这一段（在播 ＝ 有段在、没 IDLE、没暂停）。
+
+    暂停算「不在播」—— 暂停时就该静音：不发包，客户端也才知道真停了。
+    问不到就当不在播：宁可偶尔多关一次（下次开口会重新打开），
+    也别因为一个异常让轨一直开着白发包。
+    """
+    try:
+        from . import playback
+        p = playback.progress()
+        return bool(p and p[2]) and not playback.is_paused()
+    except Exception:
+        log.debug("问播放器状态失败，按不在播处理", exc_info=True)
+        return False
+
+
 def _gate(open_: bool, why: str) -> bool:
     """开 / 关这条本地音轨。返回这次是不是**刚从关变成开**（调用方据此垫预热）。
 
@@ -502,7 +518,16 @@ async def _pump(dead: asyncio.Event) -> None:
                 if _sink is not None:
                     _sink.end_utterance()
                 # 说完了就不发包。见 `_gate`。
-                _gate(False, "一秒没有新音频，这句说完了")
+                #
+                # ⚠️ 「一秒没新数据」**不等于**「说完了」。2026-09-24 实测：一段 36 秒的
+                #    回复，TTS 是按句生成的，第 8 秒处停了 5 秒才吐下一句 —— 这里把轨
+                #    关了，5 秒后再开、再垫 200ms 预热。Chris 听到的是「播报被打断」。
+                #    所以关之前**问播放器**：它还在播这一段（哪怕缓冲暂时空着）就别关；
+                #    真播完了、或者用户按了暂停，才关。
+                if _still_playing():
+                    log.debug("缓冲空了一秒但播放器还在播这一段（TTS 句间停顿），不关轨")
+                else:
+                    _gate(False, "这一段播完了")
                 continue
             continue
         chunk = bytes(_pending[:_FRAME_BYTES])

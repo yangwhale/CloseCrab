@@ -8,7 +8,8 @@
   1. 刚连上 → 轨是静音的
   2. 来了音频 → 先打开，再放
   3. 打开后**先垫 _WARMUP_MS 的静音**再放真声音（不垫会削第一个字）
-  4. 一秒没新音频 → 关掉（不然跟没做一样）
+  4. 一秒没新音频、且播放器说这段播完了 → 关掉（不然跟没做一样）
+  6/7. TTS 句间停顿、播放器还在播 → 不许关；播完才关（09-24 的事故）
   5. 数字人接管出口时 → 本地轨**不许**被打开（打开了就是两路声音 + 白发包）
 
 跑法：`python3 test_livekit_out_gate.py`（不起 LiveKit、不发网络）。
@@ -113,7 +114,32 @@ async def scenario_avatar():
     await asyncio.wait_for(pump, 3)
 
 
+async def scenario_tts_gap():
+    """6. 2026-09-24 的真实事故：TTS 句间停了好几秒，播放器仍在播这一段 → **不许关**。
+       7. 播放器说播完了（或暂停了）→ 才关。"""
+    trk, src = _reset()
+    M._gate(False, "刚连上")
+    playing = {"v": True}
+    orig = M._still_playing
+    M._still_playing = lambda: playing["v"]
+    try:
+        dead = asyncio.Event()
+        pump = asyncio.create_task(M._pump(dead))
+        await asyncio.sleep(0.05)
+        await _feed(100)
+        await asyncio.sleep(1.5)            # 缓冲空了超过一秒，但播放器还在播
+        check("6. 句间停顿（播放器仍在播）不许关轨", not trk.muted, trk.log)
+        playing["v"] = False                # 这一段真播完了
+        await asyncio.sleep(1.3)
+        check("7. 播放器说播完了才关", trk.muted, trk.log)
+        dead.set()
+        await asyncio.wait_for(pump, 3)
+    finally:
+        M._still_playing = orig
+
+
 asyncio.run(scenario_main())
+asyncio.run(scenario_tts_gap())
 asyncio.run(scenario_avatar())
 print(f"\n{ok} ✅  {fail} ❌")
 sys.exit(1 if fail else 0)
