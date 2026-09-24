@@ -931,6 +931,13 @@ class ClaudeCodeWorker(Worker):
                             log.info("send() interrupted, returning empty result")
                             return ""
                         log.warning("Claude process exited unexpectedly")
+                        # ⛔ 不能只扔句柄。reader 退出不等于进程退出 —— stop() 取消
+                        #   reader 时也会走到这里，而那一刻进程还活着。只写
+                        #   `self.proc = None` 会让随后的 stop() 以为没东西可停，
+                        #   进程就成了挂在 init 下的孤儿，继续往同一个 session 写。
+                        #   2026-09-24 实测：一次自重启漏掉的 CLI 带着 100+ 个子进程
+                        #   活了 20 分钟，跟新 CLI 同时往一个 jsonl 里写两个模型的回包。
+                        self._reap(self.proc)
                         self.proc = None
                         return "[Error] Claude process exited"
 
@@ -1218,8 +1225,25 @@ class ClaudeCodeWorker(Worker):
         log.info(f"Claude session hard-interrupted (session_id preserved): {self._session_id}")
         return True
 
+    @staticmethod
+    def _reap(proc: Optional[subprocess.Popen]) -> None:
+        """SIGTERM → 等 5s → SIGKILL。进程已退出时什么都不做。"""
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()  # SIGTERM first (graceful, VS Code pattern)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning(f"Claude process {proc.pid} didn't exit after SIGTERM, sending SIGKILL")
+            proc.kill()
+            proc.wait()
+
     async def stop(self):
         """停止 Claude 进程。"""
+        # ⛔ 必须在第一个 await 之前把句柄攥在本地。下面 `await self._reader_task`
+        #   会让出控制权，挂着的 send() 此时收到 reader 的 _eof，会把 self.proc
+        #   置成 None —— 等回到这里再读 self.proc，进程还活着、句柄却没了。
+        proc = self.proc
         # Cancel reader task first
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
@@ -1234,14 +1258,9 @@ class ClaudeCodeWorker(Worker):
         if self.sock_out:
             self.sock_out.close()
             self.sock_out = None
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()  # SIGTERM first (graceful, VS Code pattern)
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                log.warning(f"Claude process didn't exit after SIGTERM, sending SIGKILL")
-                self.proc.kill()
-                self.proc.wait()
+        self._reap(proc)
+        self._reap(self.proc)  # 万一 stop 期间又被换成了新进程
+        self.proc = None
         # P3: clean up the stderr tempfile so /tmp doesn't bloat across
         # bot restarts. Each _start_process() creates a fresh mkstemp file
         # but stop() never unlinked it, so every claude restart leaked
