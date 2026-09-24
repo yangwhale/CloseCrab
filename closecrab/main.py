@@ -114,6 +114,9 @@ def _resolve_config(bot_name: str) -> dict:
         "log_chat_id": cfg.get("log_chat_id", ""),
         "accelerator_override": cfg.get("accelerator_override", ""),
         "worker_type": cfg.get("worker_type", "claude"),
+        # ⛔ 加字段要同时改 config_store.py 的 cfg 和这里 —— 这个 return 是
+        #    手工列举的白名单，漏了不报错，只是那个字段永远读不到。
+        "effort_level": cfg.get("effort_level", ""),
         # web channel 专属
         "web_host": cfg.get("web_host", "127.0.0.1"),
         "web_port": int(cfg.get("web_port", 8800)),
