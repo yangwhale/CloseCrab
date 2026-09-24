@@ -60,6 +60,7 @@ class ClaudeCodeWorker(Worker):
         system_prompt: str = "",
         session_id: Optional[str] = None,
         model: Optional[str] = None,
+        effort_level: Optional[str] = None,
     ):
         self._claude_bin = claude_bin or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         self._work_dir = work_dir or str(Path.home())
@@ -71,6 +72,8 @@ class ClaudeCodeWorker(Worker):
         # spawning the Claude CLI subprocess — making config-manage.py
         # set-model name-and-actuality consistent.
         self._model = model
+        # per-bot 覆盖 _MODEL_DEFAULT_EFFORT（Firestore bots/{name}.effort_level）。
+        self._effort_level = effort_level
         # Actual model running in the spawned binary (extracted from
         # stream-JSON assistant messages). Populated after first assistant
         # event. Used by get_context_usage() so the feishu card shows the
@@ -172,16 +175,23 @@ class ClaudeCodeWorker(Worker):
             log.info("Stripped ANTHROPIC_BETAS for Haiku (1M context unsupported)")
         else:
             env.setdefault("ANTHROPIC_BETAS", "context-1m-2025-08-07")
-        effort = _MODEL_DEFAULT_EFFORT.get(
+        model_default = _MODEL_DEFAULT_EFFORT.get(
             (self._model or "").split("@", 1)[0].replace("[1m]", "")
         )
+        effort = self._effort_level or model_default
         if effort:
-            # 按模型统一定档，不做 per-bot 配置：同一个模型在所有 bot 上的思考量
-            # 应该一样，否则同一个问题在不同 bot 上答得深浅不一，还查不出原因。
+            # 默认**按模型统一定档**：同一个模型在所有 bot 上的思考量应该一样，
+            # 否则同一个问题在不同 bot 上答得深浅不一，还查不出原因。
+            # ⭐ 2026-09-24 开了一个 per-bot 口子（Firestore bots/{name}.effort_level），
+            #   给的是**跨部署**的场景：athena / doraemon 是对外公开版，独立机器、
+            #   独立 Firestore 库，跟内部 bot team 不在一个池子里比较，所以上面那条
+            #   「深浅不一查不出原因」的顾虑对它们不成立。
+            #   ⛔ 同一个池子里的 bot 不要用它调出差异 —— 那正是上面要避免的。
             # 这个 env 的优先级高于 settings.json 的 effortLevel（那份是全机共用的，
-            # 改它等于改所有模型）。运行时 /effort 仍可临时覆盖当前 session。
+            # 改它等于改所有模型）。运行时 /high 等命令仍可临时覆盖当前 session。
             env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
-            log.info(f"Claude CLI effort level: {effort} (model default)")
+            src = "per-bot" if self._effort_level else "model default"
+            log.info(f"Claude CLI effort level: {effort} ({src})")
         if self._model:
             prev = env.get("ANTHROPIC_MODEL", "")
             env["ANTHROPIC_MODEL"] = self._model

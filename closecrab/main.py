@@ -682,6 +682,7 @@ def main():
         system_prompt=system_prompt,
         stt_engine_name=stt_engine_name,
         backbone_model=cfg["model"],
+        effort_level=cfg.get("effort_level", ""),
         bot_name=bot_name,
         state_dir=cfg["state_dir"],
         db=db,

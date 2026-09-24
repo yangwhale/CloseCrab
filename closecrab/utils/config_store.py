@@ -108,6 +108,9 @@ def load_bot_config_from_firestore(bot_name: str) -> dict | None:
         "email": data.get("email"),
         "accelerator_override": data.get("accelerator_override", ""),
         "worker_type": data.get("worker_type", "claude"),
+        # 覆盖 _MODEL_DEFAULT_EFFORT 里那个按模型定的档（low/medium/high/xhigh）。
+        # 留空＝跟模型默认走，这是绝大多数 bot 该有的状态。
+        "effort_level": data.get("effort_level", ""),
         "claude_proxy_url": data.get("claude_proxy_url"),
         # LiveKit voice IO 配置 (顶层, 跟 channel 解耦):
         # {url, api_key, api_secret, frontend_url, enabled}

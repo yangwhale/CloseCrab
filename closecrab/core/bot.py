@@ -66,6 +66,7 @@ class BotCore:
         system_prompt: str = "",
         stt_engine_name: str = "gemini",
         backbone_model: str = "",
+        effort_level: str = "",
         bot_name: str = "default",
         state_dir: str | None = None,
         db: Optional["FirestoreClient"] = None,
@@ -82,6 +83,8 @@ class BotCore:
         self._system_prompt = system_prompt
         self._stt_engine_name = stt_engine_name
         self._backbone_model = backbone_model
+        # per-bot thinking 档覆盖（Firestore bots/{name}.effort_level）。
+        self._effort_level = effort_level
         self._db = db
         self._worker_type = worker_type
         self._claude_proxy_url = claude_proxy_url
@@ -1154,6 +1157,7 @@ class BotCore:
             system_prompt=self._system_prompt,
             session_id=session_id,
             model=self._backbone_model or None,
+            effort_level=self._effort_level or None,
         )
 
     def _save_active_sessions(self):
