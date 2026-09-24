@@ -63,6 +63,7 @@ _thread: threading.Thread | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _room = None          # rtc.Room
 _source = None        # rtc.AudioSource
+_track = None         # rtc.LocalAudioTrack —— 没在说话时 mute 掉，见 `_gate`
 _sink = None          # 非 None 时音频改道给它（数字人），否则直接发布
 
 _connected = False
@@ -428,12 +429,51 @@ def _set_sink(sink) -> None:  # noqa: ANN001
     log.info("音频出口切到 %s", "数字人" if sink is not None else "本地音轨")
 
 
+# 打开之后先垫多少静音再放真声音。**给客户端的抖动缓冲一点时间攒起来** ——
+# 不垫的话，刚恢复转发的头几个包可能落在对端还没准备好的窗口里，第一个字被削。
+_WARMUP_MS = 200
+
+
+def _gate(open_: bool, why: str) -> bool:
+    """开 / 关这条本地音轨。返回这次是不是**刚从关变成开**（调用方据此垫预热）。
+
+    ## 为什么要关（2026-09-24）
+
+    `_pump` 注释里原来写着「不补静音，安静就该真安静」—— **这个前提不成立**。
+    `rtc.AudioSource` 是原生源，契约是按采样率持续产出 10ms 帧，**队列空了就产零**。
+    所以不喂数据也在发，而且这一路连 DTX 都没开 ⇒ 没人说话时满速约 50 包/秒发静音，
+    整天不停。客户端于是永远觉得「有声音在放」：手机不能歇，iOS 也一直以为我们在播
+    （耳机按键永远发 pause 就是这么来的）。
+
+    `LocalAudioTrack.mute()` 是真停。实测订阅端：6 秒 30 包 → mute 后 1 包 →
+    unmute 立刻恢复。**不撤轨、不重新协商**，SFU 还会给客户端发「这条轨静音了」
+    的信令，客户端可以据此停掉自己的音频引擎。
+
+    数字人接管出口时（`_sink` 非 None）本地轨根本不用，一直关着。
+    """
+    trk = _track
+    if trk is None:
+        return False
+    want_muted = not open_
+    if trk.muted == want_muted:
+        return False
+    try:
+        trk.unmute() if open_ else trk.mute()
+    except Exception:
+        log.warning("音轨%s失败（%s）", "打开" if open_ else "静音", why, exc_info=True)
+        return False
+    log.info("本地音轨%s（%s）", "打开" if open_ else "静音 —— 不发包了", why)
+    return open_
+
+
 async def _pump(dead: asyncio.Event) -> None:
     """把攒下的 PCM 按 20ms 一帧喂给 LiveKit。
 
     `capture_frame` 内部有队列、满了会 await —— 节奏就是靠它定的，
-    这边不用自己 sleep 限速。喂不满一帧就等着，**不补静音**：
-    LiveKit 这条路没有 Zello 那种「不发包就掉线」的毛病，安静就该真安静。
+    这边不用自己 sleep 限速。喂不满一帧就等着，不补静音。
+
+    ⚠️ 「不补静音」**不等于**「不发包」—— 原生 AudioSource 队列空了会自己产零帧。
+    真正让它安静的是 `_gate` 把轨 mute 掉（2026-09-24 才发现这个前提不成立）。
 
     `dead` 是本次连接的墓碑。没有它的话房间塌了这个循环还在原地转 ——
     往一个已经断开的 source 里灌帧不报错，于是外面永远等不到「该重连了」。
@@ -461,6 +501,8 @@ async def _pump(dead: asyncio.Event) -> None:
                 # 代价只有一次 `stream_bytes()`，比一次静默失效便宜太多。
                 if _sink is not None:
                     _sink.end_utterance()
+                # 说完了就不发包。见 `_gate`。
+                _gate(False, "一秒没有新音频，这句说完了")
                 continue
             continue
         chunk = bytes(_pending[:_FRAME_BYTES])
@@ -470,6 +512,13 @@ async def _pump(dead: asyncio.Event) -> None:
         out = _sink if _sink is not None else _source
         if out is None:
             continue
+        if out is _source and _gate(True, "有音频要播"):
+            # 刚打开：先垫一小段静音，让对端缓冲攒起来再放真声音，不削第一个字。
+            silence = bytes(_FRAME_BYTES)
+            for _ in range(_WARMUP_MS // _FRAME_MS):
+                await _source.capture_frame(
+                    rtc.AudioFrame(silence, _OUT_RATE, _OUT_CHANNELS, _FRAME_BYTES // 2)
+                )
         try:
             await out.capture_frame(
                 rtc.AudioFrame(chunk, _OUT_RATE, _OUT_CHANNELS, _FRAME_BYTES // 2)
@@ -574,7 +623,7 @@ def _register_playback_rpc(room) -> None:  # noqa: ANN001
 
 async def _session(cfg: dict, identity: str) -> None:
     """连一次房间，推到断为止。断开就正常返回，由 `_run` 决定要不要再连。"""
-    global _room, _source, _connected
+    global _room, _source, _track, _connected
     from livekit import rtc
 
     room = rtc.Room()
@@ -623,7 +672,9 @@ async def _session(cfg: dict, identity: str) -> None:
     # 「谁写 cc.avatar.state」这个问题的答案就是这一路 —— 全房间只有一个
     # 写入方，客户端收状态不认发送者，两个人写后到的赢。
 
-    _room, _source, _connected = room, source, True
+    _room, _source, _track, _connected = room, source, track, True
+    # 一连上先静音 —— 这时候没东西可说，不该往外发包。见 `_gate`。
+    _gate(False, "刚连上，还没有要说的")
     log.info("LiveKit 输出已连上房间 %s (identity=%s)", room.name, identity)
 
     try:
@@ -637,7 +688,7 @@ async def _session(cfg: dict, identity: str) -> None:
             await room.disconnect()
         except Exception:
             log.debug("disconnect 失败", exc_info=True)
-        _room = _source = None
+        _room = _source = _track = None
 
 
 async def _run(cfg: dict, identity: str) -> None:

@@ -80,6 +80,12 @@ class FakePlayback:
     def progress(self):
         self.calls.append("progress"); return self.prog
 
+    # 2026-09-22 progress 回包加了 `paused`（客户端靠它画暂停/播放图标），
+    # 真 playback 早就有 is_paused()，这个假货当时没跟着补 —— 这个文件从那天起
+    # 一直是红的，没人跑。**改接口时顺手 grep 一遍谁 mock 了它。**
+    def is_paused(self):
+        return False
+
 
 def build():
     """装出一套 handler。把 `from . import playback` 换成我们的假货。"""
