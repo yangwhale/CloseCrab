@@ -267,6 +267,9 @@ CC BY-NC-SA 4.0**（署名 / 非商业 / 相同方式共享）——&nbsp;跟 ma
 | `references/toolbox.md` | 按教学主题选类；哪些实测过、哪些没有 |
 | `references/traps.md` | 踩过的坑 |
 
+> 📖 课程仓库 `Courses/构建手册/10-Manim动画.md` 是这份房规的**公开版**（外部读者看不到本 skill）。
+> **改了这里的房规，同步改那一篇**，否则就是「一条规矩复制 N 份，N 份会过期」。
+>
 > 课程仓库 `Courses/tools/manim/` 下另有一份**钉在那个项目上的
 > `check-loop.py` 副本**（已接进它的 `build-all.sh`）。两份是故意的：
 > 那边是部署好的守卫，这边是拿去装进新项目的模板。
