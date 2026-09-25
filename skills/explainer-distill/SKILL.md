@@ -31,6 +31,19 @@ description: 全网找把同一个话题讲得最好的高手，蒸馏他们的�
 
 **典型配额**：N 节 → 先 N 轮①，再 2 轮②，再 N/2 轮③，再 3 轮④，最后 1 轮收尾（写设计笔记）。
 
+## 先翻本地书架，再上网
+
+本机 `~/learning/` 已经存了几套讲得好的中文材料，**研究 agent 先 grep 这里，再去网上**（快、不怕登录墙、不会被搜索降级）：
+
+| 路径 | 是什么 | 适合借什么 |
+|---|---|---|
+| `~/learning/zartbot/` | 扎哥（zartbot）公众号文章离线备份，11 个专栏约 360 篇；`README.md` 有索引和 Top 10 | AI 基础设施、互联、RDMA、DeepEP／EP、推理系统、GPU 架构的工程视角讲法 |
+| `~/learning/scaling-book-cn/` | Google《How to Scale Your Model》中文版（自己翻译的，GitHub `yangwhale/scaling-book-cn`）；章节即 `roofline.md` `sharding.md` `training.md` `inference.md` `tpus.md` `gpus.md` 等 | roofline、四种集合通信、FSDP／TP 的临界 batch、TPU 与 GPU 网络；图和「为什么是 50 ms」式的开场 |
+| `~/learning/moe-tour/` | 苏剑林「MoE 环游记」系列精读 | MoE 负载均衡、Loss-Free、几何视角 |
+| `~/learning/DeepSeek/` `cs336*/` `transformer-circuits/` | DeepSeek 论文、CS336 课程、Transformer Circuits | 模型结构、训练、可解释性 |
+
+`grep -rl "关键词" ~/learning/<目录>` 找到篇目后整篇读；引用时写公众号／书名 ＋ 篇名。新存进来的书架，补进这张表。
+
 ## 派研究 agent 的五条纪律
 
 1. **点名来源，写清要借什么。** 例：「苏剑林怎么讲负载均衡」「Playbook 流水线那章有什么反转」「李宏毅怎么开场」。只说「找好文章」只会拿回综述。

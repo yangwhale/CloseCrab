@@ -27,7 +27,8 @@
 我们现有的讲法（供对照，别把这些当新发现报回来）：
 {{现有讲法：主线句、比方、图的名字}}
 
-工具：mcp__jina-ai__search_web、mcp__jina-ai__read_url（带 question 只取相关段落；可一次传多个 URL 并发）。
+先翻本地书架（grep 找篇目、整篇读）：~/learning/zartbot/（扎哥公众号，看 README 索引）、~/learning/scaling-book-cn/（Scaling Book 中文版）、~/learning/moe-tour/（苏剑林 MoE 环游记精读），以及 ~/learning/ 下其他目录。
+再上网：mcp__jina-ai__search_web、mcp__jina-ai__read_url（带 question 只取相关段落；可一次传多个 URL 并发）。
 未加载先用 ToolSearch 查 "jina"。一种搜法没结果就换中英文关键词。
 
 输出写到 {{笔记路径}}：
@@ -37,7 +38,7 @@
 ⛔ 不编造：没读到原文就写「没找到」；二手笔记标二手。回复里给 300 字内摘要。
 ```
 
-⭐ 高手清单的起点（按话题换）：中文有李宏毅（课程讲义）、苏剑林（科学空间）、李沐（论文精读）；
+⭐ 高手清单的起点（按话题换）：中文有李宏毅（课程讲义）、苏剑林（科学空间）、李沐（论文精读）、扎哥（zartbot 公众号，本地有备份）；
 英文有 3Blue1Brown、Andrej Karpathy、Lilian Weng、Hugging Face 长文、Google《How to Scale Your Model》、Horace He、Stas Bekman；
 论文作者自己的博客往往比论文好懂。
 
