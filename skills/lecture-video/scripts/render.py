@@ -189,7 +189,7 @@ def shard(args):
                           stdin=subprocess.PIPE)
     with sync_playwright() as p:
         b = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
-        pg = b.new_page(viewport={"width": W, "height": H}, device_scale_factor=scale)
+        pg = b.new_page(viewport={"width": W, "height": H}, device_scale_factor=ow / W)
         pg.goto("file://" + html)
         pg.wait_for_timeout(1500)
         addcls = [pair for c in cues for pair in c.get("addclass", [])]
@@ -224,6 +224,11 @@ def main():
     shards = int(sys.argv[sys.argv.index("--shards") + 1]) if "--shards" in sys.argv else 8
     fps = int(sys.argv[sys.argv.index("--fps") + 1]) if "--fps" in sys.argv else FPS
     scale = int(sys.argv[sys.argv.index("--scale") + 1]) if "--scale" in sys.argv else 1
+    # --vw：课件 CSS 视口宽度（默认 2200）。正文栏窄、没有通栏大图的页面（如专题一）在 2200 下两侧大片留白，
+    #   调小视口让内容铺满画面；像素密度按输出分辨率自动换算，清晰度不变。
+    global W, H
+    if "--vw" in sys.argv:
+        W = int(sys.argv[sys.argv.index("--vw") + 1]); H = round(W * 1238 / 2200)
     only = float(sys.argv[sys.argv.index("--until") + 1]) if "--until" in sys.argv else None
     cfg = json.load(open(cues_path))
     html, audio = os.path.abspath(cfg["html"]), os.path.abspath(cfg["audio"])
