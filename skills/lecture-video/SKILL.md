@@ -49,3 +49,8 @@ $SK/finalize.sh out.mp4 s<N>.srt media/<课>-video-s<N>.mp4
 - 折叠在 `<details>` 里的动画要在 `open` 里点名打开，否则量不到位置。
 - 课件上的录音/视频条渲染时会藏掉（`.lecaudio,.lecmedia`），免得画中画。
 - 视频要进 git：用 finalize 压（crf 28 + stillimage，8 分钟约 20 MB），别直接提交渲染原片（40 MB+）。
+- **要传 YouTube / B 站，单独出一版 4K，别拿网页版凑合**：`render.py … --scale 2` ＋ `finalize.sh --hd`。
+  `--scale 2` 是把设备像素比设成 2：版面不变，字和线条按两倍像素重画（不是放大），出 3840×2160。
+  网页版糊有两个原因：一是 1080p 本身把小字压到只有几个像素高，二是 crf 28 把灰色小字压出了块状噪点。
+  而平台会按上传分辨率分配码率，传 1080p 二压后更糊。4K 成片不进 git，字幕 .srt 另外单独上传，
+  平台上观众就能开关字幕。
