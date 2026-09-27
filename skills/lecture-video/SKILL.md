@@ -12,14 +12,16 @@ description: 把「一节课的讲课录音 ＋ 课件网页」做成讲课视�
 ```bash
 SK=~/.claude/skills/lecture-video/scripts
 # 0. 录音：由 lecture-voice skill 产出（一节一节讲、认可后存现场原声）；这里默认它已经在 media/ 里
-# 1. 逐字时间戳（faster-whisper large-v3，CPU 约 1× 实时，8 分钟录音约 15 分钟 —— 后台跑）
+# 1. 逐字时间戳（faster-whisper large-v3）。⭐ 有 GPU 就用 GPU：八节一起、一卡一节，90 秒全部跑完；
+#    CPU 只有 0.3× 实时左右（8 分钟录音要二十多分钟）。GPU 版把 WhisperModel 改成 device="cuda", compute_type="float16"，
+#    并把 venv 里 nvidia/cublas、nvidia/cudnn 的 lib 目录加进 LD_LIBRARY_PATH
 setsid nohup ~/.venvs/fw/bin/python $SK/align.py s<N>.wav s<N>-words.json > align.log 2>&1 &
 # 2. 句级字幕：文字用原稿（术语准），时间用识别结果
 python3 $SK/srt.py s<N>.txt s<N>-words.json s<N>.srt
 # 3. 看页面结构、给每张图截 PNG，量子区域
 python3 $SK/inspect_page.py 页面.html '#s<N>的id' /tmp/lv [--open 'details:has(#某动画)']
 # 4. 写提示表 s<N>-cues.json（格式见 references/cues.md），at 用台词开头几个字
-python3 $SK/resolve.py s<N>-cues.json s<N>-words.json s<N>-timed.json   # at → 秒；模糊命中会打印出来，核一眼
+python3 $SK/resolve.py s<N>-cues.json s<N>-words.json s<N>.txt s<N>-timed.json   # at 必须照抄文字稿；时间来自全局对齐
 # 5. 渲染（12 片并行，8 分钟一节约 2 分半）；先 --until 40 出个短片看构图
 python3 $SK/render.py s<N>-timed.json out.mp4 --shards 12
 # 6. 加字幕、压体积 → 进课件
@@ -41,7 +43,8 @@ $SK/finalize.sh out.mp4 s<N>.srt media/<课>-video-s<N>.mp4
 
 ## 坑
 
-- whisper 会把术语听成同音字（归约→规约、请看→数凭），resolve 用模糊匹配兜住；**at 别挑太短、太常见的词**。
+- whisper 会把术语听成同音字（归约→规约）、把中文数字写成阿拉伯数字（百分之九十七→97%）。逐句找开头会在这些地方跑偏、一偏后面全挤到结尾 —— 所以 srt/resolve 都走 `tmap.py` 的**整篇全局对齐**，对不上的段落两头插值。
+- **TTS 偶尔会漏念整句**（第零节就漏了三句）：srt.py 会打印「录音里像是没念」，这些句子不出字幕；要补就重录那一节。
 - 页面自带的分步播放器会自己暂停：render 把 video 全换成没挂监听的新节点、逐帧设 `currentTime`，**不要**让页面自己播。
 - 折叠在 `<details>` 里的动画要在 `open` 里点名打开，否则量不到位置。
 - 课件上的录音/视频条渲染时会藏掉（`.lecaudio,.lecmedia`），免得画中画。
