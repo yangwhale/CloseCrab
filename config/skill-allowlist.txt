@@ -99,3 +99,4 @@ ios-device-build
 #   2026-09-18 加。起因：课程里三支已上线的动画首尾全对不上、而从没人量过
 manim-teaching-figures
 lecture-video
+lecture-voice

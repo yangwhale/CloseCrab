@@ -130,7 +130,7 @@ def plan(cues, geo, vdur):
         if c.get("scroll") is not None:
             y = geo[c["target"]][1] - NAV - c["scroll"]
         y = max(0, y)
-        out.append(dict(c, r=r, y=y, y0=prev_y))
+        out.append(dict(c, r=r, y=y, y0=prev_y if i else y))   # 第一条不从页顶滚下来：片头第一帧就停在该讲的位置
         prev_y = y
     return out
 

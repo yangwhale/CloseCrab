@@ -11,8 +11,7 @@ description: 把「一节课的讲课录音 ＋ 课件网页」做成讲课视�
 
 ```bash
 SK=~/.claude/skills/lecture-video/scripts
-# 0. 录音：现场讲完、对方认可后，取飞书「重播」那段原声（开头若有与课无关的交代，按静音点剪掉）
-$SK/pcm2mp3.sh media/<课>-lecture-s<N>.mp3 [剪掉秒数]
+# 0. 录音：由 lecture-voice skill 产出（一节一节讲、认可后存现场原声）；这里默认它已经在 media/ 里
 # 1. 逐字时间戳（faster-whisper large-v3，CPU 约 1× 实时，8 分钟录音约 15 分钟 —— 后台跑）
 setsid nohup ~/.venvs/fw/bin/python $SK/align.py s<N>.wav s<N>-words.json > align.log 2>&1 &
 # 2. 句级字幕：文字用原稿（术语准），时间用识别结果
