@@ -24,12 +24,14 @@ def ease(x):
 
 
 SETUP_JS = r"""
-async (opens) => {
+async ([opens, addcls]) => {
   const st = document.createElement('style');
   st.textContent = `*{transition:none!important;animation:none!important;scroll-behavior:auto!important}
     .lecaudio,.lecmedia{display:none!important}`;
   document.head.appendChild(st);
   for (const sel of opens) document.querySelectorAll(sel).forEach(d => d.open = true);
+  // 提示里 addclass 要加的类：先全部加上再量位置（按「揭开后」的版面排），出现之前的帧再临时摘掉
+  for (const [sel, c] of addcls) document.querySelectorAll(sel).forEach(e => e.classList.add(c));
   // 页面自带的分步播放器会自己暂停/跳转 —— 换成没挂监听的新 video，由我们逐帧设 currentTime
   document.querySelectorAll('video').forEach(v => {
     const n = v.cloneNode(true); n.removeAttribute('autoplay'); n.removeAttribute('loop');
@@ -60,6 +62,7 @@ async (opens) => {
 
 FRAME_JS = r"""
 async (s) => {
+  for (const [sel, c, on] of (s.cls || [])) document.querySelectorAll(sel).forEach(e => e.classList.toggle(c, on));
   window.scrollTo(0, s.y);
   const svg = document.getElementById('ovl'); const ns = 'http://www.w3.org/2000/svg';
   svg.innerHTML = '';
@@ -164,7 +167,14 @@ def state_at(t, P, vdur):
             vids.append([sel, round(((t - play[1]) % d), 2)])
         else:
             vids.append([sel, 0.0])
-    return {"y": round(y), "marks": marks, "spot": spot, "videos": vids}
+    st = {"y": round(y), "marks": marks, "spot": spot, "videos": vids}
+    cls = {}                                       # addclass：某条提示起给元素加类（如揭开答案），之前摘掉
+    for k, q in enumerate(P):
+        for sel, c in q.get("addclass", []):
+            cls[(sel, c)] = cls.get((sel, c), False) or k <= i
+    if cls:
+        st["cls"] = [[a, b, v] for (a, b), v in sorted(cls.items())]
+    return st
 
 
 def shard(args):
@@ -182,7 +192,8 @@ def shard(args):
         pg = b.new_page(viewport={"width": W, "height": H}, device_scale_factor=scale)
         pg.goto("file://" + html)
         pg.wait_for_timeout(1500)
-        pg.evaluate(SETUP_JS, cfg.get("open", []))
+        addcls = [pair for c in cues for pair in c.get("addclass", [])]
+        pg.evaluate(SETUP_JS, [cfg.get("open", []), addcls])
         pg.wait_for_timeout(800)
         plays = set()
         for c in cues:
