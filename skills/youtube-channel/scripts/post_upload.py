@@ -9,6 +9,10 @@ yt.captions().insert(part='snippet', body={'snippet': {'videoId': V, 'language':
 sn = yt.videos().list(part='snippet', id=V).execute()['items'][0]['snippet']
 sn.update(tags=tags, categoryId='27', defaultLanguage='zh-CN', defaultAudioLanguage='zh-CN')
 yt.videos().update(part='snippet', body={'id': V, 'snippet': sn}).execute()
+# Studio 那边的「完成」偶尔没点上，视频停在草稿/私享 —— 这里兜底设成公开（Studio 传的视频 API 可以改公开，只有 videos.insert 传的才被锁）
+st = yt.videos().list(part='status', id=V).execute()['items'][0]['status']
+if st['privacyStatus'] != 'public':
+    st['privacyStatus'] = 'public'; yt.videos().update(part='status', body={'id': V, 'status': st}).execute(); print('set public', V)
 yt.thumbnails().set(videoId=V, media_body=MediaFileUpload(thumb)).execute()
 yt.playlistItems().insert(part='snippet', body={'snippet': {'playlistId': os.environ['YT_PLAYLIST'], 'resourceId': {'kind': 'youtube#video', 'videoId': V}}}).execute()  # 顺序最后统一排
 print('post ok', V)

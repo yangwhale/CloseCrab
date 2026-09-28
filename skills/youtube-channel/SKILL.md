@@ -92,6 +92,9 @@ Shorts 描述里链接不可点，在 Studio 里设「Related video」指向完�
 
 ## 坑
 
+- Studio 上传后视频可能停在**草稿**（「完成」没点上），API 看到的是 `private`，Studio 列表显示 Draft / Edit draft。
+  `post_upload.py` 会检查并用 `videos.update(status.privacyStatus=public)` 兜底设公开（Studio 传的视频 API 能改，只有 `videos.insert` 传的被锁）。
+  改完 API 立刻回读可能还是 private（有延迟），以 Studio 列表的 Public / Pending 为准；处理没完成时显示 Pending，处理完自动公开。
 - 原文件直接交给 Studio 偶发「File unreadable」，**拷一份新文件再传**就好（脚本已内置）。
 - Shorts 的链接形如 `youtube.com/shorts/ID`，不是 `youtu.be/ID`。
 - Studio 上传框里 kids 单选、公开单选都要用 `tp-yt-paper-radio-button[name=...]` 点，`#next-button` 连点三次到可见性页。
