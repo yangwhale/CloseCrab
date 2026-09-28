@@ -25,10 +25,29 @@ description: 运营个人 YouTube 频道：上传长视频（网页 Studio 自�
 ```bash
 export YT_CHANNEL_ID=UC...  YT_PLAYLIST=PL...
 S=~/.claude/skills/youtube-channel/scripts
-python3 $S/make_cover.py cover.png "专题一" "一个 Token 的一生" "副标题" "要点1|要点2|要点3"   # 16:9，4:3 安全区，标题自动缩放
+python3 $S/make_cover_portrait.py cover.png "专题一" "一个 Token|的一生" "钩子1|钩子2"   # 标准人像封面（见下节）；无人像时退回 make_cover.py 纯文字版
+$S/make_intro.sh cover-4k.png full-4k.mp4 full-4k-intro.mp4 3                           # 片头，上传的是带片头这份
 URL=$($S/studio_upload.sh full-4k.mp4 "标题" desc.txt)       # 公开发布，打印 youtu.be 链接
 python3 $S/post_upload.py <videoId> full.srt cover.jpg 0 "标签1,标签2"   # 字幕 + 标签 + 封面 + 进播放列表
 ```
+
+## 封面与片头（频道统一风格）
+
+**标准封面＝人像版**：左边系列名、「免费开源课」红标、专题号、大字题目、两行钩子（黄竖线）；右边蓝圆盘上的作者半身像，右下角白名片「作者 名字 / 头衔 / 一句话专长」。
+
+```bash
+export COVER_PORTRAIT=portrait.png COVER_NAME="名字" COVER_ROLE="头衔" COVER_BIO="一句话专长"
+python3 $S/make_cover_portrait.py b05.png "专题五" "并行策略" "钩子第一行|钩子第二行"      # 标题里 | 换行
+COVER_SCALE=2 python3 $S/make_cover_portrait.py c05.png ...                               # 4K 版给片头用
+$S/make_intro.sh c05.png full-4k.mp4 out.mp4 3     # 封面静帧 3 秒＋轻提示音，接在正片前
+```
+
+- 人像：从作者给的照片/海报抠（`rembg`），腰部以上，底部 140px 渐隐；**海报上的大会 logo、主办方标识、二维码不用**（别人的商标）。
+  人像文件和作者信息不进仓库，放本机品牌目录。
+- **封面 ≠ 片头**：缩略图只在点开前显示（搜索、推荐、外站嵌入），平台不会插到视频开头。要一点播放就看到，得把封面剪进视频做片头 ——
+  **上传前就要带上**，已发布的视频不能在开头加东西（Studio 编辑器只能剪/打码/配乐），补片头＝重传。
+- `make_intro.sh` 按正片参数编片头（x264 crf18 medium、25fps、timescale 12800、48k AAC、声道数跟正片），再 `concat -c copy`，两小时 4K 秒级拼完不重编。
+  加了片头，**章节（首个 0:00 不动）和字幕都要后移同样秒数**。
 
 长课整片：`make_full.py <段目录> <前缀> <字幕目录> "s0=标题|s1=标题|..."` 把各段 4K 拼起来，
 **先把每段音频统一成 48 kHz 双声道**（补录过的段是 24 kHz，直接 concat 声音会坏且不报错），同时生成合并字幕和 `00:00` 章节表。

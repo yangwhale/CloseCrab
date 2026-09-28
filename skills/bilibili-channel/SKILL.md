@@ -38,7 +38,8 @@ $S/progress_chapters.sh BVxxx chapters.txt        # 每行「m:ss 标题」，�
 $S/pin_chapter_comment.sh BVxxx chapters.txt topic-01.html
 ```
 
-封面：16:9 设计、内容放在中间 4:3 安全区（B站 首页推荐用 4:3 裁切），用 youtube-channel 的 `make_cover.py` 即可。
+封面：和 YouTube 同一套人像版（youtube-channel 的 `make_cover_portrait.py`，风格说明见那边「封面与片头」）；16:9 设计，题目和人脸都在中间 4:3 安全区内（B站 首页推荐用 4:3 裁切）。
+投稿文件用带 3 秒封面片头的那份（`make_intro.sh`），章节时间同样后移。
 封面弹窗里「双比例同步改动」要勾上，否则只换了一个比例。
 
 ## 系列 / 播放列表
