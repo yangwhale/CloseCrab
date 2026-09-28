@@ -43,6 +43,16 @@ python3 $S/post_upload.py <videoId> full.srt cover.jpg 0 "标签1,标签2"   # �
 - **tags 作用很小**（官方原话），填几个即可；#话题标签放 3–5 个。
 - 播放列表标题也写搜索词；视频按讲序排好，删掉「Deleted video」残项。
 
+## 高级功能开通后（视频验证通过）必做
+
+- **频道**：`channels.update(part=brandingSettings)` 写简介/关键词/`unsubscribedTrailer`（未订阅访客的预告片＝第 1 讲）；
+  `localizations` 必须**单独一次 update**（和 brandingSettings 同发会 400）。`channelSections.insert` 加「单个播放列表」＋「最新上传」板块。
+- **置顶评论**：`commentThreads.insert` 发（课件链接＋整套播放列表＋下一讲），再 `scripts/pin_comment.sh <视频ID> <评论ID>` 在观看页置顶（API 不能置顶）。
+- **片尾画面**：`scripts/end_screen.sh <视频ID> "第N+1讲"` —— 模板「1 视频＋1 播放列表＋订阅」，视频指向下一讲，最后一讲留 Best for viewer。
+  坐标按 2200 宽本机 Chrome 标定；已有片尾的视频会跳过模板页（脚本报 still open，点 Discard 关掉即可）。
+- **Shorts**：Studio 详情页「Related video」选完整版，存盘。
+- 之后：Test & compare 做 2–3 版封面、抽查自动英文配音。
+
 ## Shorts 引流
 
 `make_short.py 全片.mp4 全片.srt out.mp4 "起-止,起-止" "标题行1|标题行2" "结尾引导"`：
