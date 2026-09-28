@@ -32,7 +32,7 @@ $S/progress_chapters.sh BVxxx chapters.txt        # 每行「m:ss 标题」，�
 $S/pin_chapter_comment.sh BVxxx chapters.txt topic-01.html
 ```
 
-**一次只投一稿**，投完看「稿件投递成功」再投下一个。
+多稿**串行**投（同一个浏览器页，一个投完看到「稿件投递成功」再下一个）——这是页面限制，B站 本身不限频率。
 
 封面：和 YouTube 同一套人像版，但加 `COVER_SAFE43=1`（youtube-channel 的 `make_cover_portrait.py`）——
 B站 首页推荐按 4:3 裁切，这个模式把题目、人脸、名片全收进中间 4:3。封面弹窗里「双比例同步改动」保持勾选。
