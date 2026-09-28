@@ -88,7 +88,7 @@ Shorts 描述里链接不可点，在 Studio 里设「Related video」指向完�
 3. **等新视频处理完、变成公开**再做下一步：Studio 选了「公开」，处理期间 API 看到的仍是 `private`，
    这时发评论会 403（insufficient permissions），不是 token 问题。2 小时 4K 要处理较久，用 watch-task 盯 `privacyStatus`。
 4. **删旧视频要在做片尾之前**：`end_screen.sh` 按「第N讲」关键字搜下一讲，新旧同名时会挂到旧的上。
-5. 然后：置顶评论（旧 ID 全部换成新 ID）→ 片尾 → 频道预告片 → 播放列表去掉残项并排序 → 外部网站链接。
+5. 然后：置顶评论（旧 ID 全部换成新 ID）→ 片尾 → 频道预告片 → 播放列表去掉残项并排序 → **Shorts 的 Related video 重选**（指向旧视频的会变成 None）→ 外部网站链接。
 
 ## 坑
 
