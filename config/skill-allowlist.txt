@@ -100,3 +100,5 @@ ios-device-build
 manim-teaching-figures
 lecture-video
 lecture-voice
+youtube-channel
+bilibili-channel
