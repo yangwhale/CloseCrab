@@ -6,6 +6,9 @@ import os, html as H
 #   make_cover_portrait.py 输出.png "专题五" "并行策略" "钩子第一行|钩子第二行"      标题里的 | 换行
 out, num, title, hook = sys.argv[1:5]
 E = lambda k, d="": H.escape(os.environ.get(k, d))
+# COVER_SAFE43=1：B站 版，全部内容收进中间 4:3（x 240–1680），首页推荐按 4:3 裁切也不丢字、不切脸
+S43 = os.environ.get("COVER_SAFE43") == "1"
+L, R, TMAX, MEH, DISC = (290, 250, 980, 880, 860) if S43 else (120, 40, 1040, 1010, 1020)
 img = base64.b64encode(open(os.environ["COVER_PORTRAIT"], 'rb').read()).decode()
 hook = "<br>".join(hook.split("|"))
 num_top = 270 if "|" in title else 290
@@ -13,16 +16,16 @@ hook_top = 930 if "|" in title else 720
 html = f"""<html><head><style>
 body{{margin:0;width:1920px;height:1080px;font-family:'Noto Sans CJK SC','Noto Sans SC',sans-serif;
 background:linear-gradient(135deg,#ffffff 0%,#eef3fd 100%);position:relative;overflow:hidden}}
-.disc{{position:absolute;right:-120px;top:120px;width:1020px;height:1020px;border-radius:50%;
+.disc{{position:absolute;right:{R-160}px;top:{1080-DISC+60}px;width:{DISC}px;height:{DISC}px;border-radius:50%;
 background:radial-gradient(circle at 40% 35%,#8ab4f8 0%,#4285f4 55%,#1a73e8 100%)}}
-.me{{position:absolute;right:40px;bottom:22px;height:1010px}}
-.series{{position:absolute;left:120px;top:90px;font-size:40px;color:#5f6368;font-weight:500;letter-spacing:2px}}
-.badge{{position:absolute;left:120px;top:160px;font-size:44px;color:#fff;background:#ea4335;padding:10px 30px;border-radius:14px;font-weight:800}}
-.num{{position:absolute;left:120px;top:{num_top}px;font-size:96px;color:#1a73e8;font-weight:900}}
-.title{{position:absolute;left:112px;top:{num_top+120}px;font-size:200px;color:#202124;font-weight:900;line-height:1.05;white-space:nowrap;display:inline-block}}
-.hook{{position:absolute;left:120px;top:{hook_top}px;font-size:64px;width:1100px;color:#202124;font-weight:800;line-height:1.35;
+.me{{position:absolute;right:{R}px;bottom:22px;height:{MEH}px}}
+.series{{position:absolute;left:{L}px;top:90px;font-size:40px;color:#5f6368;font-weight:500;letter-spacing:2px}}
+.badge{{position:absolute;left:{L}px;top:160px;font-size:44px;color:#fff;background:#ea4335;padding:10px 30px;border-radius:14px;font-weight:800}}
+.num{{position:absolute;left:{L}px;top:{num_top}px;font-size:96px;color:#1a73e8;font-weight:900}}
+.title{{position:absolute;left:{L-8}px;top:{num_top+120}px;font-size:200px;color:#202124;font-weight:900;line-height:1.05;white-space:nowrap;display:inline-block}}
+.hook{{position:absolute;left:{L}px;top:{hook_top}px;font-size:{50 if S43 else 64}px;white-space:nowrap;color:#202124;font-weight:800;line-height:1.35;
 border-left:14px solid #fbbc04;padding-left:32px}}
-.tag{{position:absolute;right:60px;bottom:70px;background:rgba(255,255,255,.96);border-radius:22px;padding:22px 34px;
+.tag{{position:absolute;right:{R+20}px;bottom:70px;background:rgba(255,255,255,.96);border-radius:22px;padding:22px 34px;
 box-shadow:0 8px 28px rgba(0,0,0,.18);border-left:12px solid #1a73e8}}
 .tag b{{display:block;font-size:58px;color:#202124;font-weight:900;letter-spacing:1px}}
 .tag em{{font-style:normal;font-size:30px;color:#fff;background:#1a73e8;border-radius:10px;padding:4px 14px;margin-right:18px;vertical-align:middle;position:relative;top:-6px}}
@@ -36,5 +39,5 @@ box-shadow:0 8px 28px rgba(0,0,0,.18);border-left:12px solid #1a73e8}}
 with sync_playwright() as p:
     b = p.chromium.launch(); pg = b.new_page(viewport={"width": 1920, "height": 1080}, device_scale_factor=float(__import__("os").environ.get("COVER_SCALE", "1"))); pg.set_content(html); pg.wait_for_timeout(400)
     # 标题不压到人像：右边界 1200，超了就缩
-    pg.evaluate("()=>{const t=document.querySelector('.title');let f=200;while(t.getBoundingClientRect().right>1040&&f>90){f-=6;t.style.fontSize=f+'px'};if(t.querySelector('br')&&f>150){t.style.fontSize='150px'};const h=document.querySelector('.hook');h.style.top=(t.getBoundingClientRect().bottom+40)+'px'}")
+    pg.evaluate("()=>{const t=document.querySelector('.title');let f=200;while(t.getBoundingClientRect().right>"+str(TMAX)+"&&f>90){f-=6;t.style.fontSize=f+'px'};if(t.querySelector('br')&&f>150){t.style.fontSize='150px'};const h=document.querySelector('.hook');h.style.top=(t.getBoundingClientRect().bottom+40)+'px'}")
     pg.screenshot(path=out); b.close()

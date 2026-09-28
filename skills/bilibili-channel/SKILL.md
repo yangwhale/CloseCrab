@@ -10,7 +10,7 @@ description: 运营个人 B站账号：用 biliup-rs 接口投稿长视频（网
 | 做什么 | 走哪条 |
 |---|---|
 | **投稿视频** | **biliup-rs**（`scripts/biliup_upload.sh`）。接口直传几十 MB/s，秒级提交 |
-| 改标题 / 声明 / 换封面 | 网页编辑页（`?type=edit&bvid=`），标题用 `set_title.sh`，提交用 `submit_click.sh` |
+| 改标题 / 标签 / 声明 / 换封面 | 网页编辑页（`?type=edit&bvid=`），标题 `set_title.sh`，标签和创作声明 `set_tags_decl.sh`，提交 `submit_click.sh` |
 | 进度条分段章节 | `progress_chapters.sh`（播放器 iframe 里的「章节文本编辑器」） |
 | 置顶章节评论 | `pin_chapter_comment.sh`（评论接口 + 置顶接口） |
 | 公告 / 置顶 / 代表作 / 系列列表 | `space_setup.sh` |
@@ -63,7 +63,11 @@ $S/pin_chapter_comment.sh BVxxx chapters.txt topic-01.html
 ## 坑
 
 - 标题框：上传完成那一刻会被**文件名覆盖**；改标题必须 click→Ctrl+A→Delete→type→Tab，**看字数计数器变了**才写进了表单模型，直接改 value 无效。
-- 提交按钮用鼠标坐标点（`submit_click.sh`），DOM `.click()` 偶尔不生效。
+- 提交按钮用快照 ref 点（`submit_click.sh`）；坐标点击在编辑页会静默不生效，DOM `.click()` 也不稳。
+- 标签框、创作声明下拉不认 ab 的键盘/点击：用 JS 派发 input＋Enter 键事件、在关闭图标上派发鼠标事件（`set_tags_decl.sh`）。
+- **投稿频率限制**：连投第二稿起报 21566「投稿过于频繁」，每稿间隔 10 分钟（带重试）。
+- 脚本拼标题/标签时**别用 `read T G` 拆一行**：标题里有空格，半截标题会跑进标签（踩过：标题被截、多出一个「KV cache 账较劲 人工智能」标签）。
+- biliup 投的稿默认声明是「内容为自制」，AI 配音要在编辑页改成「含AI生成内容」。
 - 删稿要短信验证码＋滑块人机验证：**不要自动破解滑块**，请账号主人在 App 里删。
 - 章节提交后要审核，播放器接口 `x/player/v2` 的 `view_points` 过审后才有值。
 - 发动态：富文本框要逐行 `insertText` + `insertLineBreak`，整段插入会把第一行挪到最后；点「发布」后还有一次「确认并发送」。
