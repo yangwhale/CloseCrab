@@ -9,15 +9,17 @@ description: 运营个人 B站账号：用 biliup-rs 接口投稿长视频（网
 
 | 做什么 | 走哪条 |
 |---|---|
-| **投稿视频** | **biliup-rs**（`scripts/biliup_upload.sh`）。接口直传几十 MB/s，秒级提交 |
+| **投稿视频** | **biliup-rs**（`scripts/biliup_upload.sh`）。接口直传几十 MB/s，秒级提交。**被风控（21566）后只能走网页投稿**，见下 |
 | 改标题 / 标签 / 声明 / 换封面 | 网页编辑页（`?type=edit&bvid=`），标题 `set_title.sh`，标签和创作声明 `set_tags_decl.sh`，提交 `submit_click.sh` |
 | 进度条分段章节 | `progress_chapters.sh`（播放器 iframe 里的「章节文本编辑器」） |
 | 置顶章节评论 | `pin_chapter_comment.sh`（评论接口 + 置顶接口） |
 | 公告 / 置顶 / 代表作 / 系列列表 | `space_setup.sh` |
 | 发动态 | 网页 t.bilibili.com（见下） |
 
-⛔ **别用网页上传器传新视频**：新文件一传页面就冻死（CDP 全部超时，只能杀 Chrome 重启）；
-点到会弹系统文件框的区域（「更换视频」、上传封面区）也会冻住。只用 `input[type=file]` 设文件，从不点上传区。
+⚠️ **网页投稿（21566 后的唯一出路）**：`input[type=file]` 设完视频后，页面要整段读文件算哈希，**这期间任何 CDP 调用都会超时**，
+一探测就像「冻死」。正确做法是设完文件**闭嘴等 ~200 秒**（770 MB 实测）再看「上传完成」；真冻死了用 browser-cli 的 `local-chrome.sh` 重启（杀主进程 PID，别 pkill）。
+点到会弹系统文件框的区域（「更换视频」、上传封面区）会冻住。封面走「添加封面」弹窗里的 `input[accept^=image]`。
+新投稿页默认标签是「生活记录/记录/新人」，要删掉；标签逐个加、每个之间 sleep 0.8，否则只进第一个。
 
 ## 前置（一次性）
 
@@ -65,7 +67,7 @@ $S/pin_chapter_comment.sh BVxxx chapters.txt topic-01.html
 - 标题框：上传完成那一刻会被**文件名覆盖**；改标题必须 click→Ctrl+A→Delete→type→Tab，**看字数计数器变了**才写进了表单模型，直接改 value 无效。
 - 提交按钮用快照 ref 点（`submit_click.sh`）；坐标点击在编辑页会静默不生效，DOM `.click()` 也不稳。
 - 标签框、创作声明下拉不认 ab 的键盘/点击：用 JS 派发 input＋Enter 键事件、在关闭图标上派发鼠标事件（`set_tags_decl.sh`）。
-- **投稿频率限制**：连投第二稿起报 21566「投稿过于频繁」，每稿间隔 10 分钟（带重试）。
+- **21566「投稿过于频繁」＝第三方接口投稿被风控**，不是频率：client/app/web 三种 `--submit` 全拒，隔 10 分钟重试 3 次、GitHub 上有人冷却 18 小时都没用；官方网页/App 投稿不受影响 → 改网页投稿。
 - 脚本拼标题/标签时**别用 `read T G` 拆一行**：标题里有空格，半截标题会跑进标签（踩过：标题被截、多出一个「KV cache 账较劲 人工智能」标签）。
 - biliup 投的稿默认声明是「内容为自制」，AI 配音要在编辑页改成「含AI生成内容」。
 - 删稿要短信验证码＋滑块人机验证：**不要自动破解滑块**，请账号主人在 App 里删。
