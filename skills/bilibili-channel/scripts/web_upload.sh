@@ -4,7 +4,9 @@
 # 前提：本机 Chrome（browser-cli 的 ab.local）已登录账号。文件名用纯 ASCII。
 set -uo pipefail
 A="timeout 40 $HOME/.claude/skills/browser-cli/scripts/ab.local"; D=$(dirname "$0")
-V="$1" C="$2" T="$3" DESC="$4" TAGS="$5" DECL="${6:-含AI生成内容}"
+# ⛔ 文件一律转绝对路径：ab 的 upload 按它自己的工作目录解析相对路径，封面给相对路径会让页面卡死
+V=$(realpath "$1") C=$(realpath "$2") T="$3" DESC=$(realpath "$4") TAGS="$5" DECL="${6:-含AI生成内容}"
+for f in "$V" "$C" "$DESC"; do [ -f "$f" ] || { echo "找不到文件：$f"; exit 1; }; done
 J(){ python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"; }
 $A open "https://member.bilibili.com/platform/upload/video/frame" >/dev/null; sleep 8
 $A upload "input[type=file]" "$V" >/dev/null
