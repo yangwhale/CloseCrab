@@ -220,7 +220,9 @@ def shard(args):
 
 
 def main():
-    cues_path, out = sys.argv[1], sys.argv[2]
+    # out 必须转绝对路径：分片清单 list.txt 放在 <out>-parts/ 里，ffmpeg concat 按清单文件所在目录解析相对路径，
+    #   传相对路径时目录会拼两遍（xx-parts/xx-parts/p00.mp4），拼接失败（2026-09-29 两条课程主线各撞一次）
+    cues_path, out = sys.argv[1], os.path.abspath(sys.argv[2])
     shards = int(sys.argv[sys.argv.index("--shards") + 1]) if "--shards" in sys.argv else 8
     fps = int(sys.argv[sys.argv.index("--fps") + 1]) if "--fps" in sys.argv else FPS
     scale = int(sys.argv[sys.argv.index("--scale") + 1]) if "--scale" in sys.argv else 1

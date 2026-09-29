@@ -15,7 +15,7 @@
 | 字段 | 含义 |
 |---|---|
 | `at` | 台词开头几个字（去标点匹配）；resolve 后变成 `t`（秒）。一条提示从它的 `t` 管到下一条的 `t` |
-| `target` | CSS 选择器；优先用图的 `id`、标题的 `id` |
+| `target` | CSS 选择器；优先用图的 `id`、标题的 `id`。**写完在真浏览器里 `querySelector` 验一遍**（表格常包在 `div.tbl` 里，`标题 ~ table` 选不中） |
 | `sub` | 子区域 `[x0,y0,x1,y1]`，按 target 宽高的比例；在 inspect 截的 PNG 上量 |
 | `kind` | `box` 红框（默认）／`circle` 手绘圈／`under` 下划线／`none` 只滚动不标 |
 | `color` | 默认 `#EA4335`；「先放着、后面讲」的块用灰 `#9AA0A6` |
