@@ -92,6 +92,13 @@ Shorts 描述里链接不可点，在 Studio 里设「Related video」指向完�
 
 ## 坑
 
+- **上传完成后 Studio 不再写「Upload complete」**（2026-09-29 实测）：文件传完直接进版权检查，框里显示
+  `Checking N% ... X minutes left`。老脚本只认 `Upload…complete`，会一直空等到超时（最长一小时）。
+  现在的判据是「拿到视频链接且不再显示 Uploading」就发布 —— 检查期间点发布是允许的，检查完自动公开。
+  发布后弹出的「Video published」要关掉，否则连传多条时下一条的上传框打不开。
+- **连传多条时，第 2 条起常停在草稿**（同日：6 条里 4 条 Draft）。传完一律用 API 回读 `privacyStatus`，
+  不是 public 的 `videos.update` 改掉；**改完立刻回读可能还是 private，隔十几秒再读**。
+
 - Studio 上传后视频可能停在**草稿**（「完成」没点上），API 看到的是 `private`，Studio 列表显示 Draft / Edit draft。
   `post_upload.py` 会检查并用 `videos.update(status.privacyStatus=public)` 兜底设公开（Studio 传的视频 API 能改，只有 `videos.insert` 传的被锁）。
   改完 API 立刻回读可能还是 private（有延迟），以 Studio 列表的 Public / Pending 为准；处理没完成时显示 Pending，处理完自动公开。
