@@ -3,7 +3,7 @@
 # 用法：save_take.sh <输出.mp3> [开头剪掉秒数]
 # 开头若有跟上课无关的交代（「上一节录音已放好」之类），先跑一次看 STT 打印的开头，再带剪掉秒数重跑。
 set -euo pipefail
-OUT="$1"; SKIP="${2:-0}"
+OUT="$(realpath -m "$1")"; SKIP="${2:-0}"
 PCM=$(find /tmp/jarvis-tts-buf -name '*.pcm' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2)  # ls|head 在 pipefail 下会 SIGPIPE 静默退出
 echo "取：$PCM（$(stat -c %y "$PCM" | cut -c1-19)）"
 ffmpeg -y -loglevel error -f s16le -ar 48000 -ac 2 -ss "$SKIP" -i "$PCM" -ac 1 -b:a 64k "$OUT"
