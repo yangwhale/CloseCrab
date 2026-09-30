@@ -96,7 +96,7 @@ Shorts 描述里链接不可点，在 Studio 里设「Related video」指向完�
   `Checking N% ... X minutes left`。老脚本只认 `Upload…complete`，会一直空等到超时（最长一小时）。
   现在的判据是「拿到视频链接且不再显示 Uploading」就发布 —— 检查期间点发布是允许的，检查完自动公开。
   发布后弹出的「Video published」要关掉，否则连传多条时下一条的上传框打不开。
-- **连传多条时，第 2 条起常停在草稿**（同日：6 条里 4 条 Draft）。传完一律用 API 回读 `privacyStatus`，
+- **连传多条时基本都会停在草稿**（09-29：6 条里 4 条 Draft；09-30 修好等待判据后 6 条里 6 条 Draft）—— 说明「发布」按钮在检查期间点了也不生效，**API 改公开是必做步骤，不是兜底**。传完一律用 API 回读 `privacyStatus`，
   不是 public 的 `videos.update` 改掉；**改完立刻回读可能还是 private，隔十几秒再读**。
 
 - Studio 上传后视频可能停在**草稿**（「完成」没点上），API 看到的是 `private`，Studio 列表显示 Draft / Edit draft。
