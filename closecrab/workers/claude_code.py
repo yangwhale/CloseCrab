@@ -271,17 +271,24 @@ class ClaudeCodeWorker(Worker):
 
     @staticmethod
     def _is_task_notification_content(d: dict) -> bool:
-        """检测事件是否为后台任务通知（task-notification）相关内容。"""
-        if d.get("type") == "user":
-            msg = d.get("message", {})
-            content = msg.get("content", "")
-            if isinstance(content, str) and "task-notification" in content:
-                return True
-            if isinstance(content, list):
-                for block in content:
-                    text = block.get("text", "") if isinstance(block, dict) else str(block)
-                    if "task-notification" in text:
-                        return True
+        """检测事件是否为后台任务通知（task-notification）相关内容。
+
+        只认 CLI 注入的那条 user 文本（以 `<task-notification>` 开头的标签）。
+        ⛔ 不能对 tool_result 做子串匹配：tool_result 也是 type=user 的事件，
+        只要命令输出里碰巧带 "task-notification" 这串字（比如 grep 本文件），
+        就会被当成通知，紧接着的真回复被吞掉、send() 空等到超时。
+        2026-10-05 实测：一条语音回复就这样丢了，用户收到的是 [Timeout]。
+        """
+        if d.get("type") != "user":
+            return False
+        content = d.get("message", {}).get("content", "")
+        if isinstance(content, str):
+            return "<task-notification>" in content
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "text"
+                        and "<task-notification>" in block.get("text", "")):
+                    return True
         return False
 
     _STALE_DISMISS_KEYWORDS = ("旧通知", "忽略", "old notification", "stale notification")
@@ -915,14 +922,29 @@ class ClaudeCodeWorker(Worker):
                 _send_prompt(text)
 
                 saw_task_notification = False
+                # 被当成通知回复吞掉的 result。通知若是在本轮中途注入的，CLI 会把它
+                # 并进当前 turn，只出一个 result —— 那就是给用户的真回复，后面不会
+                # 再有。所以吞掉后只等一个短宽限期，没有新事件就把它交出去，
+                # 而不是空等 self._timeout。
+                suppressed_result = None
+                _SUPPRESS_GRACE_S = 20
 
                 while True:
+                    _wait = _SUPPRESS_GRACE_S if suppressed_result else self._timeout
                     try:
                         d = await asyncio.wait_for(
-                            self._event_queue.get(), timeout=self._timeout
+                            self._event_queue.get(), timeout=_wait
                         )
                     except asyncio.TimeoutError:
+                        if suppressed_result:
+                            log.info(f"No further result {_SUPPRESS_GRACE_S}s after suppression "
+                                     f"-- delivering suppressed result ({len(suppressed_result)}c)")
+                            return suppressed_result
                         return f"[Timeout] Claude Code idle for {self._timeout}s (no output)"
+                    if d.get("type") not in ("result",):
+                        # 有新事件 = 后面还有一轮，被吞的那条确实是通知回复
+                        if suppressed_result and d.get("type") == "assistant":
+                            suppressed_result = None
 
                     # Sentinel: reader task 退出或 interrupt()
                     if d.get("type") in ("_eof", "_interrupted"):
@@ -967,6 +989,9 @@ class ClaudeCodeWorker(Worker):
                             saw_task_notification = False
                             log.info(f"Suppressed task-notification dismiss result "
                                      f"({len(result_text)}c): {result_text[:80]}")
+                            if not self._is_stale_dismiss_result(result_text):
+                                self._session_id = d.get("session_id", self._session_id)
+                                suppressed_result = result_text
                             continue
                         self._session_id = d.get("session_id", self._session_id)
                         self._usage["turns"] += 1
