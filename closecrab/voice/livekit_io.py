@@ -143,10 +143,12 @@ def extract_speech_text(text: str) -> str:
 
 
 def strip_voice_summary_and_file(text: str) -> str:
-    """剥掉 <voice-summary> 和 <voice-file> 标签（飞书才用，voice 别念）。"""
+    """剥掉 <voice-summary> 和 <voice-file> 标签（飞书才用，voice 别念），
+    以及举手标记 <ask-user…>（BotCore 已统一剥过，这里兜底，正则只有 utils/ask_user 一份）。"""
+    from ..utils.ask_user import strip_ask_user
     text = re.sub(r"<voice-summary>.*?</voice-summary>", "", text, flags=re.DOTALL)
     text = re.sub(r"<voice-file>.*?</voice-file>", "", text)
-    return text.strip()
+    return strip_ask_user(text).strip()
 
 
 # voice 模式情绪标签 — 匹配 Gemini 3.1 Flash TTS 的 inline audio tag 全集

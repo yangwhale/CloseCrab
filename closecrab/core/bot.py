@@ -423,7 +423,9 @@ class BotCore:
                                 and not _voice_open_state["text_pushed"]
                                 and not _voice_open_state["tool_use_seen"]
                                 and not _voice_open_state["pending_opening"]):
-                            text = (block.get("text", "") or "").strip()
+                            # 举手标记一般在回复末尾，但开场白也剥一遍 —— 这段会直接进 TTS。
+                            from closecrab.utils.ask_user import strip_ask_user
+                            text = strip_ask_user((block.get("text", "") or "")).strip()
                             if text:
                                 _voice_open_state["pending_opening"] = text
                     elif bt == "tool_use":
@@ -485,6 +487,8 @@ class BotCore:
                     log.debug(f"Live step update failed: {e}")
 
         result = ""
+        #: bot 在回复里举手了（`<ask-user/>`）⇒ 摘要；没举手 ⇒ None。见 `utils/ask_user.py`。
+        _ask: str | None = None
         try:
             result = await worker.send(content, on_event=on_progress,
                                        on_input_needed=on_input_needed,
@@ -527,6 +531,15 @@ class BotCore:
             except Exception as e:
                 # Never let fallback machinery break the main path.
                 log.debug(f"Usage Policy fallback hook failed: {e}")
+
+            # ⭐ 举手标记的统一剥离点。**所有 channel 的最终回复都从这里返回**，
+            #    所以飞书 / Discord / 钉钉 / web / voice 都拿到干净的文本，
+            #    Firestore 日志、session 索引、摘要也都是干净的。置位在下面 finally 里
+            #    （要排在 end_turn 之后，end_turn 会清 waiting_for）。
+            from closecrab.utils.ask_user import extract_ask_user
+            result, _ask = extract_ask_user(result or "")
+            if _ask:
+                log.info("bot 举手等用户: %s", _ask)
         except Exception:
             raise
         finally:
@@ -540,6 +553,10 @@ class BotCore:
                     # 模型，为一行状态不值），第一句通常就是结论。
                     _first = (result or "").strip().split("\n")[0].strip()
                     agent_state.end_turn(summary=_first)
+                # 举手 ⇒ 「等你回话」。用户下一条消息进来时 `begin_turn` 会清掉
+                # （每个 turn 一个新的 AgentState，开头就发一份 wait 为空的快照）。
+                if _ask:
+                    agent_state.waiting_for = _ask
                 _publish_bot_state()
             except Exception:
                 log.debug("收尾发 bot 状态失败", exc_info=True)
@@ -848,6 +865,33 @@ class BotCore:
             return f"重连失败: {e}"
         return f"✅ 已发起重连 MCP server `{name}`，用 /mcp 查最新状态。"
 
+    async def _deliver_bg_result(self, user_key: str, text: str) -> None:
+        """后台回复（task-notification 触发、不经 handle_message）的出口。
+
+        跟主路径一样剥掉举手标记；举了手就发一份「等你回话」的状态。
+        ⚠️ 这时候如果这个用户正有一轮在跑（lock 被占着），**不发状态** ——
+        那一轮自己的快照才是对的，这里新建的空状态会把「在跑」盖成「没在跑」。
+        """
+        from closecrab.utils.ask_user import extract_ask_user
+        text, ask = extract_ask_user(text or "")
+        if self._channel and text.strip():
+            await self._channel.send_to_user(user_key, text)
+        if not ask:
+            return
+        lock = self._user_task_locks.get(user_key)
+        if lock is not None and lock.locked():
+            log.info("后台回复举手了但这一轮还在跑，不覆盖状态: %s", ask)
+            return
+        try:
+            from closecrab.core.agent_state import AgentState
+            from closecrab.voice import livekit_out
+            st = AgentState()
+            st.waiting_for = ask
+            livekit_out.publish_state(st.snapshot())
+            log.info("后台回复举手等用户: %s", ask)
+        except Exception:
+            log.debug("后台回复发「等你」状态失败", exc_info=True)
+
     async def switch_session(self, user_key: str, target_session_id: str) -> str:
         """切换用户到指定 session。"""
         # 归档当前 session
@@ -864,8 +908,7 @@ class BotCore:
         worker = self._create_worker(session_id=target_session_id)
         if self._channel:
             async def _bg_cb(text, uk=user_key):
-                if text.strip():
-                    await self._channel.send_to_user(uk, text)
+                await self._deliver_bg_result(uk, text)
             worker.set_bg_result_callback(_bg_cb)
         await worker.start()
         self._workers[user_key] = worker
@@ -1030,8 +1073,7 @@ class BotCore:
             worker = self._create_worker(session_id=session_id)
             if self._channel and hasattr(worker, "set_bg_result_callback"):
                 async def _bg_cb(text, uk=user_key):
-                    if self._channel and text.strip():
-                        await self._channel.send_to_user(uk, text)
+                    await self._deliver_bg_result(uk, text)
                 worker.set_bg_result_callback(_bg_cb)
             await worker.start()
             self._workers[user_key] = worker

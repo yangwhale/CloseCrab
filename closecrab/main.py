@@ -290,6 +290,15 @@ def build_system_prompt(
             "voice-summary 和 voice-file 可同一消息共存。"
         )
 
+    # 举手标记: BotCore 统一剥掉并把 bot 状态置成「等你回话」(iOS 锁屏提醒 / 快捷回复靠它)。
+    # 所有 channel 都加 —— 剥离在 BotCore, 不分 channel。写短: 每个 bot 冷启动都付这几十 token。
+    prompt += (
+        "\n\n## `<ask-user/>` 举手标记\n"
+        "**只有**需要用户做决定或回答才能往下走时, 在回复最末尾加 `<ask-user/>`, "
+        "可带一句≤40字摘要: `<ask-user>要不要先压高度？</ask-user>`。"
+        "陈述、汇报、自问自答、客套的「有问题再说」不加。voice 模式也照加(会被剥掉, 不会念出来)。"
+    )
+
     # Firestore Inbox 使用说明
     prompt += (
         "\n\n## Firestore Inbox (Bot 间通信)\n"
