@@ -57,4 +57,10 @@ def shorten_model_name(raw: str) -> str:
         base, suffix = base[: -len("-preview")], "-prev"
     base = re.sub(r"-\d{8}$", "", base)          # dated pins: -20251001
     hit = _MAP.get(base)
-    return (hit + suffix) if hit else name
+    if hit:
+        return hit + suffix
+    # 表里还没收录的 Claude 新版本按规则缩写：claude-opus-6-1 → Opus 6.1
+    m = re.fullmatch(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?", base)
+    if m:
+        return f"{m.group(1).capitalize()} {m.group(2)}.{m.group(3) or 0}{suffix}"
+    return name
