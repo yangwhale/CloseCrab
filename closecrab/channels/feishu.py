@@ -6055,12 +6055,27 @@ class FeishuChannel(Channel):
         await self._send_long(target, text)
 
     async def send_to_user(self, user_key: str, text: str):
-        """发送消息给用户 (BotCore bg callback 用)。"""
+        """发送消息给用户 (BotCore bg callback 用)。
+
+        后台任务通知（task-notification）触发的回复走这里而不是主回复路径，
+        所以语音处理要在这里再做一遍，规则与主路径一致：voice mode 整段念，
+        否则只念 <voice-summary>。早先这里只发文字 —— 后台回复永远没有声音，
+        标签还原样露在卡片里。
+        """
         chat_id = self._user_chats.get(user_key)
-        if chat_id:
-            await self._send_long(chat_id, text)
-        else:
+        if not chat_id:
             log.warning(f"send_to_user: no known chat for {user_key}")
+            return
+        text, voice_file = self._extract_voice_file(text)
+        text, voice_text = self._extract_voice_summary(text)
+        if text:
+            await self._send_long(chat_id, text)
+        if voice_file:
+            asyncio.create_task(self._send_voice_file(chat_id, voice_file))
+        if user_key in self._text_voice_mode_users and text:
+            asyncio.create_task(self._send_voice_summary(chat_id, text))
+        elif voice_text:
+            asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
 
     @property
     def restart_requested(self) -> bool:
