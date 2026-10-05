@@ -1798,11 +1798,17 @@ class FeishuChannel(Channel):
 
         await self._handle_message_async(synthetic_event)
 
-    async def inject_synthetic_text(self, open_id: str, chat_id: str, text: str):
-        """外部注入一条文字消息到消息处理流程（Zello STT 等外部语音通道用）。"""
+    async def inject_synthetic_text(self, open_id: str, chat_id: str, text: str,
+                                    source: str = "zello-stt"):
+        """外部注入一条文字消息到消息处理流程，当作 open_id 在 chat_id 里发的一条私聊。
+
+        通用接口，调用方有 Zello PTT（`zello_voice_sidecar`）和 CloseCrab App 的文字消息
+        （`livekit_out`，LiveKit `lk.chat`）。`source` 只用来拼合成消息 id 和打日志，
+        方便在日志里分清是谁注入的；默认值保持 Zello 原来的 `zello-stt-<毫秒>`。
+        """
         import time as _t
         _t0 = _t.monotonic()
-        synthetic_id = f"zello-stt-{int(_t.time() * 1000)}"
+        synthetic_id = f"{source}-{int(_t.time() * 1000)}"
         fake_data = {
             "schema": "2.0",
             "header": {
@@ -1834,10 +1840,10 @@ class FeishuChannel(Channel):
         except Exception as e:
             log.warning(f"inject_synthetic_text construct failed: {e}")
             return
-        log.info("[Zello inject] event 构造: %.0fms, 进入 _handle_message_async",
-                 (_t.monotonic() - _t0) * 1000)
+        log.info("[%s inject] event 构造: %.0fms, 进入 _handle_message_async",
+                 source, (_t.monotonic() - _t0) * 1000)
         await self._handle_message_async(synthetic_event)
-        log.info("[Zello inject] _handle_message_async 完成: %.0fms",
+        log.info("[%s inject] _handle_message_async 完成: %.0fms", source,
                  (_t.monotonic() - _t0) * 1000)
 
     def _on_bot_menu_clicked(self, data) -> None:

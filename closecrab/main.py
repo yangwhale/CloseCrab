@@ -882,6 +882,25 @@ def main():
     except Exception as e:
         log.warning(f"Zello sidecar 启动失败 (non-fatal): {e}")
 
+    # App 文字消息 (LiveKit `lk.chat`) → bot 自己的对话。livekit_out 以 `<bot>-speaker`
+    # 收到 app 发的字, 经这座桥用飞书频道的 inject_synthetic_text 注入一条主人私聊消息。
+    # 单独一座桥, 不借 Zello / Discord 那几个全局变量。值在每条消息到达时现取:
+    # 飞书的 loop 在 channel.run() 里才建, 主人的私聊 chat_id 也可能是启动后才第一次出现。
+    # 主人 / 私聊的认法跟 FeishuChannel.run() 里注册语音桥那段一致:
+    # allowed_open_ids 里第一个, 没有就退回最近活跃的那位; chat_id 取他最近一次的会话。
+    if channel_type in ("feishu", "lark"):
+        def _feishu_chat_target(ch=channel):
+            chats = getattr(ch, "_user_chats", None) or {}
+            open_id = next(iter(getattr(ch, "_allowed_open_ids", None) or ()), "")
+            if not open_id and chats:
+                open_id = list(chats.keys())[-1]
+            return ch, getattr(ch, "_loop", None), open_id, chats.get(open_id, "") if open_id else ""
+        try:
+            from .voice.livekit_out import set_chat_bridge
+            set_chat_bridge(_feishu_chat_target)
+        except Exception as e:
+            log.warning(f"接 App 文字消息桥失败 (non-fatal): {e}")
+
     # LiveKit 输出旁路 (发送方向: TTS → LiveKit 房间)。跟 Discord / Zello 并联,
     # 由 /lkon /lkoff 控制, 开关状态在 channels.livekit.enabled, 这里按它自启。
     try:

@@ -40,6 +40,7 @@ import asyncio
 import audioop
 import json as _json
 import logging
+import re
 import threading
 import time
 
@@ -646,6 +647,173 @@ def _register_playback_rpc(room) -> None:  # noqa: ANN001
     log.info("播放控制 RPC 已注册: %s", ", ".join(_RPC_PREFIX + n for n in handlers))
 
 
+# ── App 的文字消息（LiveKit `lk.chat`）→ bot 自己的对话 ─────────────────
+#
+# 2026-10-05 Chris 定的分工：**文字直接交给 bot（bunny / jarvis），语音照旧走语音助手。**
+#
+# app 的文字聊天（`ChatInputView` 里 `session.send(text:)`）走的是 LiveKit 文本流，
+# topic `lk.chat`，不指定收件人 ⇒ 房间里每个参与者都收得到。原来是语音助手 agent
+# （livekit-agents 的 RoomIO 默认 `text_input` 开着）接走了；现在那边关掉，这边接。
+# 锁屏实时活动上的「好，继续」「先别」也走这同一条（app 端复用 `session.send`）。
+#
+# 进来之后不在这里另起一套对话，而是用飞书频道的通用注入接口
+# `inject_synthetic_text()` 合成一条主人身份的私聊消息 —— 路由、worker、回复发回飞书
+# 私聊（含语音双推）全部原样复用。桥由 `main.py` 接（`set_chat_bridge`）。
+#
+# ## 为什么要验发送方
+#
+# 注入的是**主人的身份**，等于替他给 bot 下指令。房间里除了 app 用户，还有 bot
+# 自己这张嘴（`<bot>-speaker`）和语音助手 agent（它会往 `lk.transcription` 写字，
+# 将来也可能往 `lk.chat` 写）—— 这些都不该能替主人说话。判据精确匹配 token 服务
+# 给人签的 identity，见 `_APP_IDENTITY_RE`。
+
+_CHAT_TOPIC = "lk.chat"
+#: 去空白后的字数上限（Python 字符数）。超了整条丢掉并记 warning，不截断 ——
+#: 截半句话交给 bot 比不交更糟。
+_CHAT_MAX_CHARS = 2000
+#: 按 stream id 去重的窗口。SDK 重连可能把同一条流再送一遍。
+_CHAT_DEDUP_TTL = 600.0
+
+#: token 服务（livekit-frontend `app/api/token/route.ts`）给浏览器和原生 app 签的 identity：
+#: `voice_assistant_user_${crypto.randomUUID()}` —— randomUUID 输出小写 v4 UUID。
+#: ⚠️ 那边改了 identity 规则，这里必须跟着改，否则 app 发的字全被丢掉（会打 warning）。
+_APP_IDENTITY_RE = re.compile(
+    r"^voice_assistant_user_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+#: `main.py` 注入：调用时返回 `(feishu_channel, feishu_loop, open_id, chat_id)`，
+#: 不是飞书频道时为 None。**是个函数不是四个值**：飞书的 loop 在 `channel.run()` 里才建，
+#: 主人的私聊 chat_id 也可能是 bot 启动之后才第一次出现 —— 每条消息到的时候现取。
+_chat_bridge = None
+_chat_seen = None           # _SeenIds，懒建
+_chat_tasks: set = set()    # 读流的 task，留强引用防被 GC
+
+
+def set_chat_bridge(resolve) -> None:  # noqa: ANN001
+    """【main.py 调】接上「App 文字 → bot 对话」的桥。传 None 拆掉。"""
+    global _chat_bridge
+    _chat_bridge = resolve
+    log.info("App 文字消息桥%s", "已接上（lk.chat → bot 对话）" if resolve else "已拆除")
+
+
+def _app_sender_ok(identity) -> bool:  # noqa: ANN001
+    """发送方是不是 app / 浏览器里的真人。bot 的嘴（`*-speaker`）、语音助手（`agent-*`）、
+    别的 bot 都天然不匹配 —— 精确匹配比「排除这几种」更紧，以后多一种机器参与者也进不来。"""
+    return isinstance(identity, str) and _APP_IDENTITY_RE.fullmatch(identity) is not None
+
+
+class _SeenIds:
+    """TTL 内同一个 id 只放行一次。只在 livekit 线程的 loop 里用，不加锁。"""
+
+    def __init__(self, ttl: float = _CHAT_DEDUP_TTL):
+        self.ttl = ttl
+        self._seen: dict[str, float] = {}
+
+    def admit(self, key: str, now: float) -> bool:
+        # 顺手清过期的（时钟往回拨的也清掉，别让一个「未来」时刻永久挡住）。
+        for k in [k for k, t in self._seen.items() if now - t >= self.ttl or now < t]:
+            del self._seen[k]
+        if key in self._seen:
+            return False
+        self._seen[key] = now
+        return True
+
+    def forget(self, key: str) -> None:
+        self._seen.pop(key, None)
+
+
+def _hkt_now() -> str:
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
+
+
+def _chat_content(text: str, now_hkt: str) -> str:
+    """注入给 bot 的那条消息。头三行跟 Zello 那条同一种格式，bot 的 prompt 认得。"""
+    return f"[channel: text]\n[当前时间: {now_hkt}]\n[from: CloseCrab App]\n{text}"
+
+
+async def _deliver_chat(reader, sender: str) -> bool:  # noqa: ANN001
+    """读完一条 `lk.chat` 文本流，过滤后注入 bot 的对话。返回是否注入了。
+
+    **先读完再判**：不读的话 SDK 那边这条流的 reader 一直挂着收块。
+    nonce 式的去重（stream id）放在最后，被拒的不占 id。
+    """
+    global _chat_seen
+    try:
+        text = await reader.read_all()
+    except Exception as e:      # noqa: BLE001
+        log.warning("读 App 文字流失败 (from=%s): %s", sender, e)
+        return False
+    if not _app_sender_ok(sender):
+        # 语音助手 / 别的 bot 也可能往这个 topic 写，不是错误，只留 debug。
+        log.debug("lk.chat 丢弃：发送方 %r 不是 app 用户", sender)
+        return False
+    text = (text or "").strip()
+    if not text:
+        return False
+    if len(text) > _CHAT_MAX_CHARS:
+        log.warning("App 文字消息 %d 字超过上限 %d，丢弃", len(text), _CHAT_MAX_CHARS)
+        return False
+
+    target = None
+    if _chat_bridge is not None:
+        try:
+            target = _chat_bridge()
+        except Exception as e:  # noqa: BLE001
+            log.warning("取飞书桥失败: %s", e)
+    feishu, f_loop, open_id, chat_id = target or (None, None, "", "")
+    if feishu is None or f_loop is None or not open_id or not chat_id:
+        log.warning("收到 App 文字消息但这个 bot 不是飞书频道（或飞书还没就绪 / 没有主人的私聊），丢弃: %s",
+                    text[:60])
+        return False
+
+    sid = str(getattr(getattr(reader, "info", None), "stream_id", "") or "")
+    if _chat_seen is None:
+        _chat_seen = _SeenIds()
+    if sid and not _chat_seen.admit(sid, time.monotonic()):
+        log.info("App 文字消息 stream id 重复，忽略: %s", sid[:16])
+        return False
+
+    coro = feishu.inject_synthetic_text(open_id, chat_id, _chat_content(text, _hkt_now()),
+                                        source="closecrab-app")
+    try:
+        fut = asyncio.run_coroutine_threadsafe(coro, f_loop)
+    except Exception as e:      # noqa: BLE001  —— 飞书 loop 已关等
+        coro.close()            # 没投递出去的协程要关掉，否则 "never awaited"
+        if sid:
+            _chat_seen.forget(sid)
+        log.warning("App 文字消息投递到 bot 失败: %s", e)
+        return False
+
+    def _done(f) -> None:  # noqa: ANN001
+        # 不等它跑完（一个回合可能几分钟）；只在异常时留一笔，别让异常静默消失。
+        try:
+            exc = f.exception()
+        except Exception:       # noqa: BLE001  —— cancelled
+            return
+        if exc is not None:
+            log.warning("App 文字消息注入后处理异常: %s", exc)
+
+    fut.add_done_callback(_done)
+    log.info("App 文字 → bot 对话 (from=…%s): %s", sender[-8:], text[:60])
+    return True
+
+
+def _on_chat_stream(reader, participant_identity: str) -> None:  # noqa: ANN001
+    """`register_text_stream_handler` 的回调：同步的，在本模块的 loop 里被调。读流要另起 task。"""
+    task = asyncio.ensure_future(_deliver_chat(reader, participant_identity))
+    _chat_tasks.add(task)
+    task.add_done_callback(_chat_tasks.discard)
+
+
+def _register_chat_stream(room) -> None:  # noqa: ANN001
+    try:
+        room.register_text_stream_handler(_CHAT_TOPIC, _on_chat_stream)
+        log.info("App 文字消息处理器已注册: topic=%s", _CHAT_TOPIC)
+    except Exception:
+        log.exception("注册文本流处理器失败: %s", _CHAT_TOPIC)
+
+
 async def _session(cfg: dict, identity: str) -> None:
     """连一次房间，推到断为止。断开就正常返回，由 `_run` 决定要不要再连。"""
     global _room, _source, _track, _connected
@@ -673,6 +841,7 @@ async def _session(cfg: dict, identity: str) -> None:
     )
 
     _register_playback_rpc(room)
+    _register_chat_stream(room)
     # 数字人：读客户端开关 → 要开就派一个进来，并把 TTS 音频改道给它。
     #
     # 2026-09-18 定的归属：数字人挂**这一路**，不挂语音助手。理由是日常

@@ -77,6 +77,27 @@
 |---|---|---|---|
 | `cc.bot.step` | `<房间名>-speaker` | 客户端 | 一条一条的过程轨迹 |
 
+## 3b. 文本流（LiveKit data stream，带 topic）
+
+| topic | 谁发 | 谁收 | 含义 |
+|---|---|---|---|
+| `lk.chat` | 客户端（聊天框、锁屏实时活动快捷回复，都是 `session.send(text:)`） | **`<房间名>-speaker`（bot 本体）**；语音助手**不接** | app 发给 bot 的文字 |
+
+⚠️ **2026-10-05 起：文字给 bot，语音给语音助手。** 之前 `lk.chat` 是语音助手接的
+（livekit-agents 的 RoomIO 默认 `text_input` 开着）；现在语音助手那边
+`RoomOptions(text_input=False)` 关掉了，由 bot 进程里的 `livekit_out`
+（`_register_chat_stream`）接收，用飞书频道的 `inject_synthetic_text` 注入一条
+**主人身份的私聊消息**（头部 `[from: CloseCrab App]`），回复照常发回飞书私聊（含语音双推）。
+
+- 只收 token 服务给人签的 identity `voice_assistant_user_<小写 UUID>`
+  （`livekit-frontend` 的 `app/api/token/route.ts`）。**那边改规则这边 `_APP_IDENTITY_RE`
+  必须跟着改**，否则 app 的字全被丢（bot.log 里有 warning）。
+- 去空白后 1–2000 字，超了整条丢（不截断）；按 stream id 10 分钟去重。
+- bot 不是飞书频道 ⇒ 记 warning 丢弃。**客户端拿不到失败回执**（文本流是单向的）——
+  需要回执的话得改成 RPC。
+- 两边都开着（语音助手没重启、还在接 `lk.chat`）时，**同一句话会被两边各处理一次**。
+  部署顺序：先重启语音助手关掉它那边，再重启 bot。
+
 ---
 
 ## 怎么选：RPC / 属性 / 数据消息
