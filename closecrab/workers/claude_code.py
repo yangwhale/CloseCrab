@@ -322,8 +322,11 @@ class ClaudeCodeWorker(Worker):
             return
         if d.get("type") == "result":
             text = d.get("result", "")
-            if self._saw_bg_task_notification or self._is_stale_dismiss_result(text):
-                self._saw_bg_task_notification = False
+            # 只吞「旧通知，忽略」这类空话。通知触发的正经汇报（后台 agent 做完
+            # 的结论）正是用户要看的 —— 以前凡是跟在通知后面的 result 一律丢掉，
+            # 后台任务的汇报就永远到不了用户那里。
+            self._saw_bg_task_notification = False
+            if self._is_stale_dismiss_result(text):
                 log.debug(f"Background: suppressed dismiss/notification result ({len(text)}c)")
                 return
             if text.strip() and self._bg_result_callback:
