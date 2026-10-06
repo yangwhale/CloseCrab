@@ -65,7 +65,7 @@
 
 | 键 | 谁写 | 谁读 | 含义 |
 |---|---|---|---|
-| `cc.bot.state` | `<房间名>-speaker` | 客户端 | bot 在忙什么（任务/步骤/耗时） |
+| `cc.bot.state` | `<房间名>-speaker` | 客户端 | bot 在忙什么（任务/步骤/耗时）；`wait` ＝在等你回话的那句、`opts` ＝ bot 推荐的 0~2 个答案（2026-10-06 加，客户端缺省当空） |
 | `lk.agent.state` | 语音助手 agent | 客户端 | `listening` / `thinking` / `speaking` |
 | `cc.avatar.want` | 客户端 | agent | 用户想不想要数字人 |
 | `cc.avatar.state` | agent | 客户端 | 数字人实际起没起来 |

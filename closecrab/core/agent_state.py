@@ -130,6 +130,10 @@ class AgentState:
     turn_ended_at: Optional[float] = None
     #: 在等人点确认（批准工具 / 选方案 / 回答问题）。等的是什么放这里。
     waiting_for: str = ""
+    #: bot 举手时给的推荐答案（`<ask-user>摘要|答案一|答案二</ask-user>`），0~2 个。
+    #: 只在 `waiting_for` 非空时有意义 —— 快照里也只在那时带出去，
+    #: 所以各处清 `waiting_for` 时不用记得顺手清它。
+    wait_options: list = field(default_factory=list)
     #: 主 agent 此刻在干啥（最后一个**不带父 ID** 的工具调用）
     main_activity: str = ""
     tasks: dict[str, TaskView] = field(default_factory=dict)
@@ -306,6 +310,8 @@ class AgentState:
             "v": 1,
             "on": self.turn_active,
             "wait": self.waiting_for,
+            # 推荐答案：app 用它替换那两颗固定的快捷回复（没有就照旧显示固定的）。
+            "opts": list(self.wait_options) if self.waiting_for else [],
             "act": self.main_activity,
             # 主 turn 的任务和摘要。**跟子 agent 那两格是同一个语义** ——
             # 跑着的时候看「被派去干什么」，干完了看「做成了什么」。

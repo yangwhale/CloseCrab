@@ -222,3 +222,60 @@ def test_prompt_has_rule():
     assert "`<ask-user/>` 举手标记" in src
     m = re.search(r'"\\n\\n## `<ask-user/>` 举手标记\\n"(.*?)\n    \)', src, re.S)
     assert m and len(m.group(1)) < 400, "规则要写短（每个 bot 冷启动都付这些 token）"
+
+
+# ── 推荐答案（Chris 2026-10-06：「带两个最推荐的选项，推到屏幕上去选」）──────────
+
+from closecrab.utils.ask_user import (  # noqa: E402
+    ASK_USER_OPTION_MAX, ASK_USER_OPTIONS_MAX, parse_ask_user,
+)
+
+
+def test_options_parsed():
+    a = parse_ask_user("两条路。\n<ask-user>先修哪个？|先修麦克风|先做切房间</ask-user>")
+    assert a.text == "两条路。"
+    assert a.summary == "先修哪个？"
+    assert a.options == ["先修麦克风", "先做切房间"]
+
+
+def test_old_interface_ignores_options():
+    # extract_ask_user 的老调用方拿到的摘要里不能混进竖线和答案
+    assert extract_ask_user("x<ask-user>先修哪个？|A|B</ask-user>") == ("x", "先修哪个？")
+
+
+def test_no_options_is_empty_list():
+    assert parse_ask_user("x<ask-user>要继续吗？</ask-user>").options == []
+    assert parse_ask_user("x<ask-user/>").options == []
+    assert parse_ask_user("没标记").options == []
+
+
+def test_options_trimmed_deduped_capped():
+    a = parse_ask_user("<ask-user>选？| A | |A|B|C</ask-user>")
+    assert a.options == ["A", "B"]
+    assert len(a.options) <= ASK_USER_OPTIONS_MAX == 2
+
+
+def test_option_truncated():
+    a = parse_ask_user(f"<ask-user>选？|{'长' * 50}</ask-user>")
+    assert len(a.options[0]) == ASK_USER_OPTION_MAX and a.options[0].endswith("…")
+
+
+def test_empty_summary_with_options():
+    a = parse_ask_user("<ask-user>|好|不好</ask-user>")
+    assert a.summary == ASK_USER_DEFAULT and a.options == ["好", "不好"]
+
+
+def test_only_pipes_is_like_empty():
+    a = parse_ask_user("好了吗？<ask-user> | | </ask-user>")
+    assert a == type(a)("好了吗？", ASK_USER_DEFAULT, [])
+
+
+def test_snapshot_carries_options_only_while_waiting():
+    from closecrab.core.agent_state import AgentState
+    s = AgentState()
+    s.wait_options = ["A", "B"]
+    assert s.snapshot()["opts"] == []          # 没在等 ⇒ 不带（各处清 waiting_for 不必顺手清它）
+    s.waiting_for = "选哪个？"
+    assert s.snapshot()["opts"] == ["A", "B"]
+    s.begin_turn(task="新一轮")
+    assert s.snapshot()["opts"] == []

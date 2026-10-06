@@ -489,6 +489,7 @@ class BotCore:
         result = ""
         #: bot 在回复里举手了（`<ask-user/>`）⇒ 摘要；没举手 ⇒ None。见 `utils/ask_user.py`。
         _ask: str | None = None
+        _ask_opts: list[str] = []
         try:
             result = await worker.send(content, on_event=on_progress,
                                        on_input_needed=on_input_needed,
@@ -536,10 +537,11 @@ class BotCore:
             #    所以飞书 / Discord / 钉钉 / web / voice 都拿到干净的文本，
             #    Firestore 日志、session 索引、摘要也都是干净的。置位在下面 finally 里
             #    （要排在 end_turn 之后，end_turn 会清 waiting_for）。
-            from closecrab.utils.ask_user import extract_ask_user
-            result, _ask = extract_ask_user(result or "")
+            from closecrab.utils.ask_user import parse_ask_user
+            _parsed = parse_ask_user(result or "")
+            result, _ask, _ask_opts = _parsed.text, _parsed.summary, _parsed.options
             if _ask:
-                log.info("bot 举手等用户: %s", _ask)
+                log.info("bot 举手等用户: %s %s", _ask, _ask_opts or "")
         except Exception:
             raise
         finally:
@@ -557,6 +559,7 @@ class BotCore:
                 # （每个 turn 一个新的 AgentState，开头就发一份 wait 为空的快照）。
                 if _ask:
                     agent_state.waiting_for = _ask
+                    agent_state.wait_options = list(_ask_opts)
                 _publish_bot_state()
             except Exception:
                 log.debug("收尾发 bot 状态失败", exc_info=True)
@@ -872,8 +875,9 @@ class BotCore:
         ⚠️ 这时候如果这个用户正有一轮在跑（lock 被占着），**不发状态** ——
         那一轮自己的快照才是对的，这里新建的空状态会把「在跑」盖成「没在跑」。
         """
-        from closecrab.utils.ask_user import extract_ask_user
-        text, ask = extract_ask_user(text or "")
+        from closecrab.utils.ask_user import parse_ask_user
+        _parsed = parse_ask_user(text or "")
+        text, ask = _parsed.text, _parsed.summary
         if self._channel and text.strip():
             await self._channel.send_to_user(user_key, text)
         if not ask:
@@ -887,6 +891,7 @@ class BotCore:
             from closecrab.voice import livekit_out
             st = AgentState()
             st.waiting_for = ask
+            st.wait_options = list(_parsed.options)
             livekit_out.publish_state(st.snapshot())
             log.info("后台回复举手等用户: %s", ask)
         except Exception:
