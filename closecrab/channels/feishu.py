@@ -6091,6 +6091,9 @@ class FeishuChannel(Channel):
                     answer=full,
                     expected_user_open_id=user_key,
                     expected_chat_id=chat_id,
+                    # 默认有效期太短：人常常过半小时才回来点（2026-10-06 点的时候已「卡片已过期」）。
+                    # 给一天 —— 过时的选择题由 bot 自己判断（回答原样作为新消息进来，bot 看得懂上下文）。
+                    expires_in_ms=24 * 3600 * 1000,
                 ),
             })
         card = {
