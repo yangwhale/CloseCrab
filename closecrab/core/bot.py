@@ -490,6 +490,7 @@ class BotCore:
         #: bot 在回复里举手了（`<ask-user/>`）⇒ 摘要；没举手 ⇒ None。见 `utils/ask_user.py`。
         _ask: str | None = None
         _ask_opts: list[str] = []
+        _ask_labels: list[str] = []
         try:
             result = await worker.send(content, on_event=on_progress,
                                        on_input_needed=on_input_needed,
@@ -539,7 +540,8 @@ class BotCore:
             #    （要排在 end_turn 之后，end_turn 会清 waiting_for）。
             from closecrab.utils.ask_user import parse_ask_user
             _parsed = parse_ask_user(result or "")
-            result, _ask, _ask_opts = _parsed.text, _parsed.summary, _parsed.options
+            result, _ask, _ask_opts, _ask_labels = (
+                _parsed.text, _parsed.summary, _parsed.options, _parsed.labels)
             if _ask:
                 log.info("bot 举手等用户: %s %s", _ask, _ask_opts or "")
         except Exception:
@@ -560,6 +562,7 @@ class BotCore:
                 if _ask:
                     agent_state.waiting_for = _ask
                     agent_state.wait_options = list(_ask_opts)
+                    agent_state.wait_labels = list(_ask_labels)
                 _publish_bot_state()
             except Exception:
                 log.debug("收尾发 bot 状态失败", exc_info=True)
@@ -892,6 +895,7 @@ class BotCore:
             st = AgentState()
             st.waiting_for = ask
             st.wait_options = list(_parsed.options)
+            st.wait_labels = list(_parsed.labels)
             livekit_out.publish_state(st.snapshot())
             log.info("后台回复举手等用户: %s", ask)
         except Exception:

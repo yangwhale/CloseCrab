@@ -256,7 +256,7 @@ def test_options_trimmed_deduped_capped():
 
 
 def test_option_truncated():
-    a = parse_ask_user(f"<ask-user>选？|{'长' * 50}</ask-user>")
+    a = parse_ask_user(f"<ask-user>选？|{'长' * 200}</ask-user>")
     assert len(a.options[0]) == ASK_USER_OPTION_MAX and a.options[0].endswith("…")
 
 
@@ -279,3 +279,51 @@ def test_snapshot_carries_options_only_while_waiting():
     assert s.snapshot()["opts"] == ["A", "B"]
     s.begin_turn(task="新一轮")
     assert s.snapshot()["opts"] == []
+
+
+# ── 按钮短标签（Chris 2026-10-06：「每个答案再给一个简短的 summary，显示在按钮上」）──
+
+from closecrab.utils.ask_user import ASK_USER_LABEL_MAX  # noqa: E402
+
+
+def test_labels_parsed():
+    a = parse_ask_user("<ask-user>先修哪个？|修麦克风::先修启动时麦克风闪烁|切房间::先做锁屏切房间</ask-user>")
+    assert a.options == ["先修启动时麦克风闪烁", "先做锁屏切房间"]
+    assert a.labels == ["修麦克风", "切房间"]
+    assert a.summary == "先修哪个？"
+
+
+def test_label_missing_falls_back_to_full():
+    a = parse_ask_user("<ask-user>选？|好|短::完整的那一句</ask-user>")
+    assert a.options == ["好", "完整的那一句"] and a.labels == ["好", "短"]
+
+
+def test_label_without_full_uses_label():
+    a = parse_ask_user("<ask-user>选？|继续::</ask-user>")
+    assert a.options == ["继续"] and a.labels == ["继续"]
+
+
+def test_labels_aligned_with_options_after_dedupe():
+    a = parse_ask_user("<ask-user>选？|甲::A|乙::A|丙::B|丁::C</ask-user>")
+    assert a.options == ["A", "B"] and a.labels == ["甲", "丙"]
+    assert len(a.labels) == len(a.options)
+
+
+def test_label_truncated():
+    a = parse_ask_user(f"<ask-user>选？|{'长' * 30}::完整</ask-user>")
+    assert len(a.labels[0]) == ASK_USER_LABEL_MAX and a.labels[0].endswith("…")
+
+
+def test_only_first_double_colon_splits():
+    a = parse_ask_user("<ask-user>选？|调用::用 std::move 那个</ask-user>")
+    assert a.labels == ["调用"] and a.options == ["用 std::move 那个"]
+
+
+def test_snapshot_carries_labels():
+    from closecrab.core.agent_state import AgentState
+    s = AgentState()
+    s.wait_options, s.wait_labels = ["先修麦克风闪烁"], ["修麦克风"]
+    assert s.snapshot()["optl"] == []
+    s.waiting_for = "先修哪个？"
+    snap = s.snapshot()
+    assert snap["opts"] == ["先修麦克风闪烁"] and snap["optl"] == ["修麦克风"]

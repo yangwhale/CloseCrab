@@ -134,6 +134,8 @@ class AgentState:
     #: 只在 `waiting_for` 非空时有意义 —— 快照里也只在那时带出去，
     #: 所以各处清 `waiting_for` 时不用记得顺手清它。
     wait_options: list = field(default_factory=list)
+    #: 跟 `wait_options` 一一对应的按钮短标签。
+    wait_labels: list = field(default_factory=list)
     #: 主 agent 此刻在干啥（最后一个**不带父 ID** 的工具调用）
     main_activity: str = ""
     tasks: dict[str, TaskView] = field(default_factory=dict)
@@ -312,6 +314,9 @@ class AgentState:
             "wait": self.waiting_for,
             # 推荐答案：app 用它替换那两颗固定的快捷回复（没有就照旧显示固定的）。
             "opts": list(self.wait_options) if self.waiting_for else [],
+            # 按钮上的短标签，跟 opts 一一对应。**另开一个键而不是把 opts 改成对象数组** ——
+            # 已经装出去的 app 把 opts 解成字符串数组，改类型会让整份快照解不出来。
+            "optl": list(self.wait_labels) if self.waiting_for else [],
             "act": self.main_activity,
             # 主 turn 的任务和摘要。**跟子 agent 那两格是同一个语义** ——
             # 跑着的时候看「被派去干什么」，干完了看「做成了什么」。

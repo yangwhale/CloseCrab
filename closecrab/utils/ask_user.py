@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 
 __all__ = ["ASK_USER_DEFAULT", "ASK_USER_SUMMARY_MAX", "ASK_USER_OPTION_MAX", "ASK_USER_OPTIONS_MAX",
+           "ASK_USER_LABEL_MAX",
            "AskUser", "parse_ask_user", "extract_ask_user", "strip_ask_user"]
 
 #: 标记没带摘要时，状态里写的那句。
@@ -27,9 +28,13 @@ ASK_USER_DEFAULT = "等你决定"
 ASK_USER_SUMMARY_MAX = 40
 #: 推荐答案最多几个（app 主界面和锁屏卡片都只放得下两颗按钮）。
 ASK_USER_OPTIONS_MAX = 2
-#: 每个推荐答案最多几个字符。点下去**原样发给 bot**，所以截断的那句也就是用户的回答 ——
-#: 写长了 bot 自己吃亏，提示词里要求写短。
-ASK_USER_OPTION_MAX = 24
+#: 每个推荐答案（完整那句）最多几个字符。点下去**原样发给 bot**，截断的那句也就是用户的回答。
+#: 按钮上显示的是另给的短标签，所以这句可以写完整。
+ASK_USER_OPTION_MAX = 80
+#: 按钮上的短标签最多几个字符（两颗按钮并排，一颗约放得下 8 个汉字）。
+ASK_USER_LABEL_MAX = 10
+#: 短标签和完整答案之间的分隔：`短标签::完整答案`。双冒号在自然语言答案里几乎不会出现。
+_LABEL_SEP = "::"
 
 # 成对的：<ask-user>摘要</ask-user>（摘要可空、可跨行）
 _PAIRED = re.compile(r"<\s*ask-user\s*>(.*?)<\s*/\s*ask-user\s*>", re.IGNORECASE | re.DOTALL)
@@ -50,15 +55,20 @@ class AskUser:
     text: str
     #: None ⇒ 没举手（**不置位**）
     summary: str | None
-    #: bot 推荐的答案，0~2 个。点了就把这句原样发回给 bot。
+    #: bot 推荐的答案（完整那句），0~2 个。点了就把这句原样发回给 bot。
     options: list[str] = field(default_factory=list)
+    #: 跟 `options` 一一对应的按钮短标签。bot 没给短标签的那个 ⇒ 用完整答案本身。
+    labels: list[str] = field(default_factory=list)
 
 
 def parse_ask_user(text: str) -> AskUser:
     """剥掉所有 ask-user 标记，取出摘要和推荐答案。
 
-    标记写法：`<ask-user>摘要|答案一|答案二</ask-user>` —— 竖线分隔，答案可省。
-    Chris 2026-10-06：「除了带问题，还要带推荐的答案，给两个最推荐的，推到屏幕上去选。」
+    标记写法：`<ask-user>摘要|短标签::完整答案|短标签::完整答案</ask-user>` ——
+    竖线分隔答案，每个答案里 `::` 前是按钮上的短标签、后是点了发回给 bot 的完整那句。
+    答案可省；`::` 可省（省了按钮上就显示完整答案）。
+    Chris 2026-10-06：「除了带问题，还要带推荐的答案，给两个最推荐的，推到屏幕上去选」；
+    同日补：「每个答案再给一个简短的 summary，显示在按钮上」。
 
     - 没有标记 ⇒ summary 是 None
     - 有标记 ⇒ 取第一个非空的那个标记：摘要截到 40 字符，都没写就是「等你决定」；
@@ -92,12 +102,22 @@ def parse_ask_user(text: str) -> AskUser:
     if bodies:
         head, *rest = [p.strip() for p in bodies[0].split("|")]
         summary = _clip(head)
+        labels: list[str] = []
         for o in rest:
-            o = _clip(o, ASK_USER_OPTION_MAX)
-            if o and o not in options:
-                options.append(o)
+            label, sep, full = o.partition(_LABEL_SEP)
+            if not sep:                      # 没给短标签：完整答案兼当标签
+                label, full = o, o
+            full = _clip(full, ASK_USER_OPTION_MAX)
+            label = _clip(label, ASK_USER_LABEL_MAX)
+            if not full:                     # `短标签::` 后面没写 ⇒ 拿标签当答案
+                full = _clip(label, ASK_USER_OPTION_MAX)
+            if full and full not in options:
+                options.append(full)
+                labels.append(label or _clip(full, ASK_USER_LABEL_MAX))
         options = options[:ASK_USER_OPTIONS_MAX]
-    return AskUser(out, summary or ASK_USER_DEFAULT, options)
+        labels = labels[:ASK_USER_OPTIONS_MAX]
+        return AskUser(out, summary or ASK_USER_DEFAULT, options, labels)
+    return AskUser(out, ASK_USER_DEFAULT)
 
 
 def extract_ask_user(text: str) -> tuple[str, str | None]:
