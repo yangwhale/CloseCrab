@@ -701,6 +701,8 @@ class FeishuChannel(Channel):
         self._pending_input: dict[str, asyncio.Future] = {}
         # 缓存最近的审批/问题卡片（按钮点击后用于保留内容）
         self._last_interactive_card: dict[str, dict] = {}
+        #: user_key -> (message_id, card)：还挂着按钮的推荐答案卡（`_send_ask_options_card`）。
+        self._open_ask_cards: dict = {}
         # 语音控制卡片: fid -> card message_id（重播进度条 patch 用）
         self._voice_cards: dict[str, str] = {}
         # bot 自身的 open_id（on_ready 时获取）
@@ -2114,6 +2116,7 @@ class FeishuChannel(Channel):
 
                 # 从缓存取原卡片 elements，去掉 action 按钮，加结果 note
                 cached = self._last_interactive_card.pop(open_id, None)
+                self._open_ask_cards.pop(open_id, None)   # 点的就是这张，回调直接改卡，不用再收
                 if cached and "elements" in cached:
                     # 保留非 action 的 elements（方案内容、分割线等）
                     kept = [e for e in cached["elements"] if e.get("tag") != "action"]
@@ -4071,6 +4074,8 @@ class FeishuChannel(Channel):
                 reply=reply_fn,
                 metadata=metadata,
             )
+            # 用户开口了：之前还挂着的推荐答案卡收起按钮（从 app / 通知 / 打字回答都走到这里）。
+            await self._close_ask_card(user_key, content)
 
             # ── 统一卡片更新循环（动画 + 进度合并为单一出口）──
             _anim_frame = [0]
@@ -6086,7 +6091,7 @@ class FeishuChannel(Channel):
         actions = []
         for i, full in enumerate(options):
             label = (labels[i] if i < len(labels) else "") or full
-            lines.append(f"`{i + 1}.` **{label}**" + (f" — {full}" if full != label else ""))
+            lines.append(f"{i + 1}. **{label}**" + (f" — {full}" if full != label else ""))
             actions.append({
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": f"{i + 1}. {label}"[:20]},
@@ -6116,9 +6121,39 @@ class FeishuChannel(Channel):
         # 点完之后 `_on_card_action` 从这里取原卡片，去掉按钮、加「已选择」。
         self._last_interactive_card[user_key] = card
         try:
-            await self._async_send_card(chat_id, card)
+            mid = await self._async_send_card_with_id(chat_id, card)
         except Exception as e:
             log.warning(f"推荐答案按钮卡发送失败: {e}")
+            return
+        if mid:
+            # 记下来：用户从别处（app 按钮 / 通知 / 直接打字）回答了，这张卡也要收起按钮（`_close_ask_card`）。
+            self._open_ask_cards[user_key] = (mid, card)
+
+    async def _close_ask_card(self, user_key: str, content) -> None:
+        """用户已经开口了（任何渠道）⇒ 把还挂着的推荐答案卡收起按钮、标上回了什么。
+
+        Chris 2026-10-06：「我在手机 app 上点了回答之后，飞书这边的按钮会消失吗？」—— 原来不会，
+        卡片一直挂着两颗能点的按钮，像是还在等。点卡片本身的按钮由 `_on_card_action` 收起；
+        这里管的是**从别处回答**：app 快捷回复、通知按钮、直接打字/说话（都会走到 `_handle_message_async`）。
+        """
+        entry = self._open_ask_cards.pop(user_key, None)
+        if not entry:
+            return
+        mid, card = entry
+        self._last_interactive_card.pop(user_key, None)
+        text = content if isinstance(content, str) else ""
+        # 去掉 channel / 时间 / 来源那几行方括号头，只留用户说的话。
+        said = " ".join(ln.strip() for ln in text.splitlines()
+                        if ln.strip() and not ln.strip().startswith("[")).strip()
+        note = f"✅ 已回复：{said[:40]}" if said else "✅ 已回复"
+        kept = [e for e in card.get("elements", []) if e.get("tag") not in ("action", "note")]
+        kept.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
+        done = dict(card, elements=kept,
+                    header={"title": card["header"]["title"], "template": "green"})
+        try:
+            await self._async_update_card(mid, done)
+        except Exception as e:
+            log.debug(f"收起推荐答案卡失败: {e}")
 
     async def send_message(self, target: str, text: str):
         """发送消息到指定 chat。"""

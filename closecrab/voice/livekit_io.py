@@ -447,6 +447,11 @@ class _CloseCrabStream(llm.LLMStream):
             _push_voice_chunk(text)
 
         async def _do_feishu_side() -> str:
+            # 用户在语音里开口了：飞书里还挂着的推荐答案卡收起按钮（跟文字路径同一个 helper）。
+            try:
+                await feishu._close_ask_card(open_id, combined)
+            except Exception as e:
+                log.debug(f"收起推荐答案卡失败: {e}")
             try:
                 result = await feishu._run_voice_message_with_card(
                     chat_id=chat_id,

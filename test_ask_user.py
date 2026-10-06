@@ -345,8 +345,16 @@ def test_feishu_ask_options_card():
 
     async def send(chat_id, card):
         sent.append((chat_id, card))
+        return "om_1"
 
-    fake = types.SimpleNamespace(_core=Core(), _last_interactive_card={}, _async_send_card=send)
+    updated = []
+
+    async def update(mid, card):
+        updated.append((mid, card))
+        return True
+
+    fake = types.SimpleNamespace(_core=Core(), _last_interactive_card={}, _open_ask_cards={},
+                                 _async_send_card_with_id=send, _async_update_card=update)
     asyncio.run(FeishuChannel._send_ask_options_card(fake, "oc_1", "ou_x"))
     assert len(sent) == 1
     chat, card = sent[0]
@@ -358,3 +366,12 @@ def test_feishu_ask_options_card():
     # 取一次就没了：再调不发
     asyncio.run(FeishuChannel._send_ask_options_card(fake, "oc_1", "ou_x"))
     assert len(sent) == 1
+    # 用户从别处回答了（app / 打字）⇒ 卡片收起按钮、标「已回复」
+    asyncio.run(FeishuChannel._close_ask_card(fake, "ou_x", "[channel: text]\n[from: CloseCrab App]\n没问题，请继续"))
+    assert len(updated) == 1 and updated[0][0] == "om_1"
+    done = updated[0][1]
+    assert not [e for e in done["elements"] if e["tag"] == "action"]
+    assert done["elements"][-1]["elements"][0]["content"] == "✅ 已回复：没问题，请继续"
+    assert done["header"]["template"] == "green" and "ou_x" not in fake._open_ask_cards
+    asyncio.run(FeishuChannel._close_ask_card(fake, "ou_x", "再说一句"))
+    assert len(updated) == 1                       # 已经收过了，不再改
