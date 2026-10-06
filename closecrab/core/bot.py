@@ -95,7 +95,7 @@ class BotCore:
         # no longer imported here; safe to delete in a future cleanup PR.
         self._workers: dict[str, Worker] = {}
         #: user_key -> (摘要, 推荐答案, 按钮字)。这一轮 bot 举手且带了推荐答案时记下，
-        #: 让 channel 在发完正文之后补一张带按钮的卡（飞书，`pop_pending_ask`）。下一轮开头清掉。
+        #: 让 channel 在发完正文之后补一张带按钮的卡（飞书，`pop_pending_ask`）。每轮结尾覆盖。
         self._pending_ask: dict[str, tuple[str, list[str], list[str]]] = {}
         # user_key -> asyncio.Lock (防并发 get_or_create)
         self._locks: dict[str, asyncio.Lock] = {}
@@ -183,8 +183,6 @@ class BotCore:
         on_tui_step,
     ) -> str:
         worker = await self._get_or_create_worker(user_key)
-        # 上一轮没被 channel 取走的推荐答案作废（用户已经开口了，按钮就过时了）。
-        self._pending_ask.pop(user_key, None)
         # Track turn duration for finalize-time persistence to firestore.
         _turn_start = asyncio.get_event_loop().time()
 
@@ -568,8 +566,13 @@ class BotCore:
                     agent_state.waiting_for = _ask
                     agent_state.wait_options = list(_ask_opts)
                     agent_state.wait_labels = list(_ask_labels)
-                    if _ask_opts:
-                        self._pending_ask[user_key] = (_ask, list(_ask_opts), list(_ask_labels))
+                # ⚠️ 不在下一轮**开头**清：channel 发完正文才来取，而这期间同一个 user_key 的下一轮
+                #    （例如别的 bot 的 inbox 回执）可能已经拿到锁开跑 —— 开头一清，按钮卡就被吞了
+                #    （2026-10-06 实测：卡片没出来）。改成每轮**结尾**覆盖：有就记、没有就清。
+                if _ask and _ask_opts:
+                    self._pending_ask[user_key] = (_ask, list(_ask_opts), list(_ask_labels))
+                else:
+                    self._pending_ask.pop(user_key, None)
                 _publish_bot_state()
             except Exception:
                 log.debug("收尾发 bot 状态失败", exc_info=True)

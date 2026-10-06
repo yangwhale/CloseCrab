@@ -6076,6 +6076,7 @@ class FeishuChannel(Channel):
         if not pending:
             return
         summary, options, labels = pending
+        log.info("推荐答案按钮卡 → %s：%s %s", chat_id[-8:], summary, labels or options)
         lines = []
         actions = []
         for i, full in enumerate(options):
