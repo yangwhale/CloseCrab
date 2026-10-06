@@ -3254,7 +3254,12 @@ class FeishuChannel(Channel):
                 await self._send_long(chat_id, result)
                 if voice_file:
                     asyncio.create_task(self._send_voice_file(chat_id, voice_file))
-                if voice_text:
+                # 语音模式的用户点卡片按钮回答，回复也要整段念出来 —— 跟文字主路径同一条规则。
+                # 原来这里只念 <voice-summary>，语音模式下回复里没有这个标签，于是点完按钮就没声音了
+                # （Chris 2026-10-06：「为啥不输出音频呢」）。
+                if open_id in self._text_voice_mode_users and result:
+                    asyncio.create_task(self._send_voice_summary(chat_id, result))
+                elif voice_text:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
                 await self._send_ask_options_card(chat_id, open_id)
 
