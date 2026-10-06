@@ -94,6 +94,9 @@ class BotCore:
         # Note: workers/gemini_cli.py exists in the tree but is dead code —
         # no longer imported here; safe to delete in a future cleanup PR.
         self._workers: dict[str, Worker] = {}
+        #: user_key -> (摘要, 推荐答案, 按钮字)。这一轮 bot 举手且带了推荐答案时记下，
+        #: 让 channel 在发完正文之后补一张带按钮的卡（飞书，`pop_pending_ask`）。下一轮开头清掉。
+        self._pending_ask: dict[str, tuple[str, list[str], list[str]]] = {}
         # user_key -> asyncio.Lock (防并发 get_or_create)
         self._locks: dict[str, asyncio.Lock] = {}
         # user_key -> asyncio.Lock (整个 handle_message turn 串行化)
@@ -180,6 +183,8 @@ class BotCore:
         on_tui_step,
     ) -> str:
         worker = await self._get_or_create_worker(user_key)
+        # 上一轮没被 channel 取走的推荐答案作废（用户已经开口了，按钮就过时了）。
+        self._pending_ask.pop(user_key, None)
         # Track turn duration for finalize-time persistence to firestore.
         _turn_start = asyncio.get_event_loop().time()
 
@@ -563,6 +568,8 @@ class BotCore:
                     agent_state.waiting_for = _ask
                     agent_state.wait_options = list(_ask_opts)
                     agent_state.wait_labels = list(_ask_labels)
+                    if _ask_opts:
+                        self._pending_ask[user_key] = (_ask, list(_ask_opts), list(_ask_labels))
                 _publish_bot_state()
             except Exception:
                 log.debug("收尾发 bot 状态失败", exc_info=True)
@@ -900,6 +907,14 @@ class BotCore:
             log.info("后台回复举手等用户: %s", ask)
         except Exception:
             log.debug("后台回复发「等你」状态失败", exc_info=True)
+
+    def pop_pending_ask(self, user_key: str) -> tuple[str, list[str], list[str]] | None:
+        """取走这一轮的推荐答案（摘要, 完整答案, 按钮字），没有就 None。取一次就没了。
+
+        给 channel 在发完正文之后补一张按钮卡用（飞书，Chris 2026-10-06：「app 上那个选标签回复，
+        飞书上也加一个」）。正文里的 `<ask-user>` 标记已经被剥掉，channel 拿不到选项，只能从这里取。
+        """
+        return self._pending_ask.pop(user_key, None)
 
     async def switch_session(self, user_key: str, target_session_id: str) -> str:
         """切换用户到指定 session。"""

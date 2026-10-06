@@ -3225,7 +3225,7 @@ class FeishuChannel(Channel):
                 current_action="🧠 思考中...",
                 history=[],
                 elapsed=0,
-                usage=self._core.get_context_usage(user_key) or {},
+                usage=self._core.get_context_usage(open_id) or {},
             )
             _card_id[0] = await self._async_send_card_with_id(chat_id, init_card)
 
@@ -3256,6 +3256,7 @@ class FeishuChannel(Channel):
                     asyncio.create_task(self._send_voice_file(chat_id, voice_file))
                 if voice_text:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
+                await self._send_ask_options_card(chat_id, open_id)
 
         asyncio.run_coroutine_threadsafe(_handle(), self._loop)
 
@@ -4208,6 +4209,8 @@ class FeishuChannel(Channel):
                     asyncio.create_task(self._send_voice_summary(chat_id, result))
                 elif voice_text and user_key not in self._text_voice_mode_users:
                     asyncio.create_task(self._send_voice_summary(chat_id, voice_text))
+                # bot 举手且带了推荐答案：正文后面补一张按钮卡。
+                await self._send_ask_options_card(chat_id, user_key)
             else:
                 # 空 result：删 progress card（无内容可保留）
                 await self._finalize_progress_card(
@@ -6055,6 +6058,58 @@ class FeishuChannel(Channel):
                 await _d.close()
             except Exception as e:
                 log.debug(f"{_name}.close error (ignored): {e}")
+
+    async def _send_ask_options_card(self, chat_id: str, user_key: str) -> None:
+        """bot 举手且带了推荐答案 ⇒ 正文发完之后补一张带按钮的卡。
+
+        Chris 2026-10-06：「app 上那个选 A/B/C/D 回复的，飞书上也加一个，顺道的事。」
+        点按钮走现成的 `ask_answer` 回调（`_on_card_action`）：把**完整答案**当作这个用户的新消息
+        交给 bot，卡片收起按钮、标「✅ 已选择：…」。按钮上写短的按钮字，完整答案列在卡片正文里。
+        """
+        if not chat_id or self._core is None:
+            return
+        try:
+            pending = self._core.pop_pending_ask(user_key)
+        except Exception:
+            log.debug("取推荐答案失败", exc_info=True)
+            return
+        if not pending:
+            return
+        summary, options, labels = pending
+        lines = []
+        actions = []
+        for i, full in enumerate(options):
+            label = (labels[i] if i < len(labels) else "") or full
+            lines.append(f"`{i + 1}.` **{label}**" + (f" — {full}" if full != label else ""))
+            actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"{i + 1}. {label}"[:20]},
+                "type": "primary" if i == 0 else "default",
+                "value": _create_feishu_card_envelope(
+                    "ask_answer",
+                    answer=full,
+                    expected_user_open_id=user_key,
+                    expected_chat_id=chat_id,
+                ),
+            })
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": f"❓ {summary}"[:60]},
+                "template": "orange",
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+                {"tag": "action", "actions": actions},
+                {"tag": "note", "elements": [{"tag": "plain_text", "content": "点按钮回答，或者直接回复文字"}]},
+            ],
+        }
+        # 点完之后 `_on_card_action` 从这里取原卡片，去掉按钮、加「已选择」。
+        self._last_interactive_card[user_key] = card
+        try:
+            await self._async_send_card(chat_id, card)
+        except Exception as e:
+            log.warning(f"推荐答案按钮卡发送失败: {e}")
 
     async def send_message(self, target: str, text: str):
         """发送消息到指定 chat。"""

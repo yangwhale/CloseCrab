@@ -130,6 +130,7 @@ def make_core(monkeypatch, reply, published):
     core._recall_seen = {}
     core._user_task_locks = {}
     core._workers = {}
+    core._pending_ask = {}
     core._save_active_sessions = lambda: None
 
     import pathlib
@@ -327,3 +328,33 @@ def test_snapshot_carries_labels():
     s.waiting_for = "先修哪个？"
     snap = s.snapshot()
     assert snap["opts"] == ["先修麦克风闪烁"] and snap["optl"] == ["修麦克风"]
+
+
+# ── 飞书按钮卡（Chris 2026-10-06：「app 上选标签回复，飞书上也加一个」）──────────
+
+def test_feishu_ask_options_card():
+    from closecrab.channels.feishu import FeishuChannel
+    sent = []
+
+    class Core:
+        def __init__(self):
+            self.p = {"ou_x": ("先修哪个？", ["先修启动时麦克风闪烁", "先做锁屏切房间"], ["修麦克风", ""])}
+
+        def pop_pending_ask(self, k):
+            return self.p.pop(k, None)
+
+    async def send(chat_id, card):
+        sent.append((chat_id, card))
+
+    fake = types.SimpleNamespace(_core=Core(), _last_interactive_card={}, _async_send_card=send)
+    asyncio.run(FeishuChannel._send_ask_options_card(fake, "oc_1", "ou_x"))
+    assert len(sent) == 1
+    chat, card = sent[0]
+    assert chat == "oc_1" and "先修哪个" in card["header"]["title"]["content"]
+    btns = [e for e in card["elements"] if e["tag"] == "action"][0]["actions"]
+    assert [b["text"]["content"] for b in btns] == ["1. 修麦克风", "2. 先做锁屏切房间"]   # 没按钮字用完整答案
+    assert btns[0]["value"]["a"] == "ask_answer" and btns[0]["value"]["q"] == "先修启动时麦克风闪烁"
+    assert fake._last_interactive_card["ou_x"] is card
+    # 取一次就没了：再调不发
+    asyncio.run(FeishuChannel._send_ask_options_card(fake, "oc_1", "ou_x"))
+    assert len(sent) == 1

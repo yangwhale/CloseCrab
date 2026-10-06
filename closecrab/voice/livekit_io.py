@@ -471,6 +471,12 @@ class _CloseCrabStream(llm.LLMStream):
                     await feishu._send_long(chat_id, text_with_icon)
                 except Exception as e:
                     log.warning(f"Push voice result to feishu failed: {e}")
+            # bot 举手且带了推荐答案：飞书里正文后面补一张按钮卡（跟文字路径同一个 helper）。
+            if chat_id:
+                try:
+                    await feishu._send_ask_options_card(chat_id, open_id)
+                except Exception as e:
+                    log.debug(f"推荐答案按钮卡失败: {e}")
 
             # 💬 回显到 Discord 语音房文字频道 (🎤 path 不走 _stream_speak, 需单独处理)
             try:
