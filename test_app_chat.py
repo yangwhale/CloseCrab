@@ -36,10 +36,20 @@ GOOD = "voice_assistant_user_0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
 class FakeFeishu:
-    def __init__(self):
+    def __init__(self, echo_fails=False):
         self.calls = []
+        self.echoes = []
+        self.order = []
+        self.echo_fails = echo_fails
+
+    async def send_message(self, target, text):
+        self.order.append("echo")
+        if self.echo_fails:
+            raise RuntimeError("飞书发消息失败")
+        self.echoes.append((target, text))
 
     async def inject_synthetic_text(self, open_id, chat_id, text, source="zello-stt"):
+        self.order.append("inject")
         self.calls.append((open_id, chat_id, text, source))
 
 
@@ -347,3 +357,44 @@ def test_contract_doc():
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main(["-q", __file__]))
+
+
+# ── 回显（Chris 2026-10-06：飞书里看不见自己在 App 里回了啥）──────────────
+
+def test_echo_to_feishu_before_inject():
+    reset()
+    b = Bridge()
+    try:
+        ok, _ = deliver("没问题，请继续")
+        assert ok and b.wait(1)
+        assert b.feishu.echoes == [("oc_p2p", "📱 App 回复：没问题，请继续")]
+        assert b.feishu.order == ["echo", "inject"]       # 先回显再处理，聊天记录里顺序对
+    finally:
+        b.close()
+        reset()
+
+
+def test_echo_failure_does_not_block_inject():
+    reset()
+    b = Bridge()
+    b.feishu.echo_fails = True
+    try:
+        ok, _ = deliver("按照你的想法来")
+        assert ok and b.wait(1)
+        assert b.feishu.calls and b.feishu.calls[0][3] == "closecrab-app"
+    finally:
+        b.close()
+        reset()
+
+
+def test_rejected_message_not_echoed():
+    reset()
+    b = Bridge()
+    try:
+        ok, _ = deliver("冒充", sender="bunny-speaker")
+        assert not ok
+        time.sleep(0.1)
+        assert b.feishu.echoes == [] and b.feishu.calls == []
+    finally:
+        b.close()
+        reset()
