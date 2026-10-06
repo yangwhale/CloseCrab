@@ -780,7 +780,7 @@ async def _deliver_chat(reader, sender: str) -> bool:  # noqa: ANN001
         # 看不见自己回了啥 —— 合成消息不会出现在聊天记录里（它不是真的从飞书发出来的）。
         # 回显只走文字（send_message → _send_long），不进语音；失败不挡注入。
         try:
-            await feishu.send_message(chat_id, f"📱 App 回复：{text}")
+            await feishu.send_message(chat_id, f"📱 CloseCrab App：{text}")
         except Exception as e:  # noqa: BLE001
             log.warning("App 文字回显到飞书失败（不影响注入）: %s", e)
         await feishu.inject_synthetic_text(open_id, chat_id, _chat_content(text, _hkt_now()),
