@@ -367,7 +367,7 @@ def test_echo_to_feishu_before_inject():
     try:
         ok, _ = deliver("没问题，请继续")
         assert ok and b.wait(1)
-        assert b.feishu.echoes == [("oc_p2p", "📱 CloseCrab App：没问题，请继续")]
+        assert b.feishu.echoes == [("oc_p2p", "📱 CloseCrab：没问题，请继续")]
         assert b.feishu.order == ["echo", "inject"]       # 先回显再处理，聊天记录里顺序对
     finally:
         b.close()
