@@ -130,7 +130,7 @@ class AgentState:
     turn_ended_at: Optional[float] = None
     #: 在等人点确认（批准工具 / 选方案 / 回答问题）。等的是什么放这里。
     waiting_for: str = ""
-    #: bot 举手时给的推荐答案（`<ask-user>摘要|答案一|答案二</ask-user>`），0~2 个。
+    #: bot 举手时给的推荐答案（`<ask-user>摘要|答案一|答案二</ask-user>`），0~4 个。
     #: 只在 `waiting_for` 非空时有意义 —— 快照里也只在那时带出去，
     #: 所以各处清 `waiting_for` 时不用记得顺手清它。
     wait_options: list = field(default_factory=list)

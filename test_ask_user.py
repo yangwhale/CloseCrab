@@ -250,9 +250,9 @@ def test_no_options_is_empty_list():
 
 
 def test_options_trimmed_deduped_capped():
-    a = parse_ask_user("<ask-user>选？| A | |A|B|C</ask-user>")
-    assert a.options == ["A", "B"]
-    assert len(a.options) <= ASK_USER_OPTIONS_MAX == 2
+    a = parse_ask_user("<ask-user>选？| A | |A|B|C|D|E</ask-user>")
+    assert a.options == ["A", "B", "C", "D"]
+    assert len(a.options) <= ASK_USER_OPTIONS_MAX == 4
 
 
 def test_option_truncated():
@@ -304,8 +304,8 @@ def test_label_without_full_uses_label():
 
 
 def test_labels_aligned_with_options_after_dedupe():
-    a = parse_ask_user("<ask-user>选？|甲::A|乙::A|丙::B|丁::C</ask-user>")
-    assert a.options == ["A", "B"] and a.labels == ["甲", "丙"]
+    a = parse_ask_user("<ask-user>选？|甲::A|乙::A|丙::B|丁::C|戊::D|己::E</ask-user>")
+    assert a.options == ["A", "B", "C", "D"] and a.labels == ["甲", "丙", "丁", "戊"]
     assert len(a.labels) == len(a.options)
 
 

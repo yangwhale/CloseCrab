@@ -26,12 +26,13 @@ __all__ = ["ASK_USER_DEFAULT", "ASK_USER_SUMMARY_MAX", "ASK_USER_OPTION_MAX", "A
 ASK_USER_DEFAULT = "等你决定"
 #: 摘要最多几个字符（超了截断，末尾一个「…」占一位）。要塞进参与者属性和锁屏一行。
 ASK_USER_SUMMARY_MAX = 40
-#: 推荐答案最多几个（app 主界面和锁屏卡片都只放得下两颗按钮）。
-ASK_USER_OPTIONS_MAX = 2
+#: 推荐答案最多几个。Chris 2026-10-06：「可以动态的，2、3、4 个」——
+#: app 主界面和锁屏卡片都排成**一行**，四颗是一行放得下的上限（每颗约 4 个汉字）。
+ASK_USER_OPTIONS_MAX = 4
 #: 每个推荐答案（完整那句）最多几个字符。点下去**原样发给 bot**，截断的那句也就是用户的回答。
 #: 按钮上显示的是另给的短标签，所以这句可以写完整。
 ASK_USER_OPTION_MAX = 80
-#: 按钮上的短标签最多几个字符（两颗按钮并排，一颗约放得下 8 个汉字）。
+#: 按钮上的短标签最多几个字符（硬截断线；提示词要求 ≤4 字 —— 四颗并排时一颗约放 4 个汉字）。
 ASK_USER_LABEL_MAX = 10
 #: 短标签和完整答案之间的分隔：`短标签::完整答案`。双冒号在自然语言答案里几乎不会出现。
 _LABEL_SEP = "::"
@@ -55,7 +56,7 @@ class AskUser:
     text: str
     #: None ⇒ 没举手（**不置位**）
     summary: str | None
-    #: bot 推荐的答案（完整那句），0~2 个。点了就把这句原样发回给 bot。
+    #: bot 推荐的答案（完整那句），0~4 个。点了就把这句原样发回给 bot。
     options: list[str] = field(default_factory=list)
     #: 跟 `options` 一一对应的按钮短标签。bot 没给短标签的那个 ⇒ 用完整答案本身。
     labels: list[str] = field(default_factory=list)
@@ -72,7 +73,7 @@ def parse_ask_user(text: str) -> AskUser:
 
     - 没有标记 ⇒ summary 是 None
     - 有标记 ⇒ 取第一个非空的那个标记：摘要截到 40 字符，都没写就是「等你决定」；
-      答案去空、去重、最多 2 个、每个截到 24 字符
+      答案去空、去重、最多 4 个；完整答案截到 80 字符、按钮标签截到 10 字符
     - 摘要为空但带了答案（`<ask-user>|好|不好</ask-user>`）⇒ 摘要用默认那句，答案照取
     - 标记剥掉后留下的行尾空白 / 多余空行顺手收掉，文本首尾 strip
     """
