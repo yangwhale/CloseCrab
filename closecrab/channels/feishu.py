@@ -3189,6 +3189,7 @@ class FeishuChannel(Channel):
                     current_action=formatted,
                     history=_prog_history,
                     elapsed=now - _start,
+                    usage=self._core.get_context_usage(open_id) or {},
                 )
                 if _card_id[0]:
                     try:
