@@ -98,10 +98,13 @@ case "$MODE" in
     echo "Synced memory files to $DST"
     _require_git_repo
     git add claude-code/memory/
-    if git diff --cached --quiet; then
+    # 只看、只提交 memory 目录：这个仓库别人也在用，暂存区里常有别的改动（改名、课件），
+    # 不带路径的 commit 会把它们一起提交成「sync」（2026-10-26 连着两次把课件改名吞进去）。
+    # `git commit -- <path>` 只提交这个路径，暂存区其余部分原样留给它的主人。
+    if git diff --cached --quiet -- claude-code/memory/; then
         echo "No changes to commit"
     else
-        if ! git commit -m "sync: update CC auto memory $(date '+%Y-%m-%d %H:%M')"; then
+        if ! git commit -m "sync: update CC auto memory $(date '+%Y-%m-%d %H:%M')" -- claude-code/memory/; then
             echo "ERROR: git commit failed" >&2
             exit 1
         fi
