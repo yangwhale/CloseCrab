@@ -102,3 +102,6 @@ lecture-video
 lecture-voice
 youtube-channel
 bilibili-channel
+
+# 私有 skill，内容在 PRIVATE_SKILLS_DIR，不在本仓库（2026-10-26 加）
+xprof-reading
