@@ -1137,7 +1137,23 @@ class ClaudeCodeWorker(Worker):
                         # 流式恢复路径要读的——inbox / voice / 其他不传 on_text_chunk
                         # 的调用方也必须能让 fallback 看到累积内容。
                         turn_text_parts = []
-                        for block in d.get("message", {}).get("content", []):
+                        # ⛔ 不是本轮模型说的话，不能当回复，更不能拿去念：
+                        #   - model="<synthetic>"：CLI 自己合成的消息。后台 agent 的通知被
+                        #     「absorbed_mid_turn」并进当前轮时，它的 <result> 全文会以这种
+                        #     合成 assistant 事件出现在流里
+                        #   - parent_tool_use_id 非空：子 agent 的消息
+                        #   2026-11-06 实测：一个子 agent 5504 字的评审报告就这样被当成回复
+                        #   开头，TTS 念了 16 分半钟。
+                        _is_foreign_text = (
+                            d.get("message", {}).get("model") == "<synthetic>"
+                            or bool(d.get("parent_tool_use_id"))
+                        )
+                        if _is_foreign_text:
+                            log.info("Skipping non-reply assistant text "
+                                     f"(model={d.get('message', {}).get('model')}, "
+                                     f"parent_tool_use_id={d.get('parent_tool_use_id')})")
+                        for block in ([] if _is_foreign_text
+                                      else d.get("message", {}).get("content", [])):
                             if block.get("type") == "text":
                                 t_text = block.get("text", "")
                                 if t_text:

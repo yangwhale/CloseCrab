@@ -4050,6 +4050,13 @@ class FeishuChannel(Channel):
             async def on_voice_opening_text(text: str):
                 if not in_voice_mode:
                     return
+                # 兜底：中途开场白是「先说一句我在干嘛」，不会有几千字。超长的多半
+                # 是混进流里的非回复文本（后台 agent 的报告），念出来就是十几分钟
+                # 噪音（2026-11-06：5504 字念了 16 分半）。不念，留给最终回复。
+                if len(text) > 2000:
+                    log.warning(f"text-voice broadcast opening skipped: {len(text)}c "
+                                f"too long for an opener: {text[:60]!r}")
+                    return
                 log.info(f"text-voice broadcast opening: {text[:60]!r}")
                 _broadcast_intermediate(text, is_opener=True)
 
