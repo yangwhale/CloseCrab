@@ -891,6 +891,10 @@ class BotCore:
         from closecrab.utils.ask_user import parse_ask_user
         _parsed = parse_ask_user(text or "")
         text, ask = _parsed.text, _parsed.summary
+        if ask and _parsed.options:
+            # 先记下推荐答案，channel 发完正文立刻 pop 出来补按钮卡（飞书）。
+            # 早先后台回复只把按钮推给 app，飞书上看不到按钮（2026-11-09）。
+            self._pending_ask[user_key] = (ask, list(_parsed.options), list(_parsed.labels))
         if self._channel and text.strip():
             await self._channel.send_to_user(user_key, text)
         if not ask:

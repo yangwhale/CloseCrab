@@ -6183,6 +6183,7 @@ class FeishuChannel(Channel):
         text, voice_text = self._extract_voice_summary(text)
         if text:
             await self._send_long(chat_id, text)
+            await self._send_ask_options_card(chat_id, user_key)
         if voice_file:
             asyncio.create_task(self._send_voice_file(chat_id, voice_file))
         if user_key in self._text_voice_mode_users and text:
